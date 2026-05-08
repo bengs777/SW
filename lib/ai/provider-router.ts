@@ -1,9 +1,10 @@
+import { assertAgentRouterReady, AGENTROUTER_PROVIDER } from "@/lib/ai/agentrouter-config"
 import { assertOpenRouterReady, OPENROUTER_MODEL_ID, OPENROUTER_PROVIDER } from "@/lib/ai/openrouter-config"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
 import type { PromptAttachment } from "@/lib/types"
 import { env } from "@/lib/env"
 
-export type ProviderName = typeof OPENROUTER_PROVIDER
+export type ProviderName = typeof OPENROUTER_PROVIDER | typeof AGENTROUTER_PROVIDER
 
 type ProviderRequest = {
   provider: ProviderName
@@ -28,8 +29,8 @@ type ProviderMessage = {
 }
 
 class ProviderTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`OpenRouter request timed out after ${Math.round(timeoutMs / 1000)} seconds`)
+  constructor(timeoutMs: number, providerLabel = "Provider") {
+    super(`${providerLabel} request timed out after ${Math.round(timeoutMs / 1000)} seconds`)
     this.name = "ProviderTimeoutError"
   }
 }
@@ -82,54 +83,110 @@ export class ProviderRouter {
     promptLanguage = "id",
     temperatureOverride,
   }: ProviderRequest): Promise<ProviderResponse> {
-    if (provider !== OPENROUTER_PROVIDER) {
+    if (provider !== OPENROUTER_PROVIDER && provider !== AGENTROUTER_PROVIDER) {
       throw new Error(`Unsupported AI provider: ${provider}`)
     }
 
-    if (modelName !== OPENROUTER_MODEL_ID) {
+    if (provider === OPENROUTER_PROVIDER && modelName !== OPENROUTER_MODEL_ID) {
       throw new Error(`Unsupported AI model: ${modelName}`)
     }
 
-    const result = await this.callOpenRouter(prompt, mode, promptLanguage, temperatureOverride)
+    const result =
+      provider === AGENTROUTER_PROVIDER
+        ? await this.callAgentRouter(modelName, prompt, mode, promptLanguage, temperatureOverride)
+        : await this.callOpenRouter(modelName, prompt, mode, promptLanguage, temperatureOverride)
 
     return {
       message: result.message,
-      providerUsed: OPENROUTER_PROVIDER,
-      modelUsed: OPENROUTER_MODEL_ID,
+      providerUsed: provider,
+      modelUsed: modelName,
       usedFallback: false,
     }
   }
 
   private static async callOpenRouter(
+    modelName: string,
     prompt: string,
     mode: "chat" | "files" | "inspect",
     promptLanguage: PromptLanguage = "id",
     temperatureOverride?: number
   ): Promise<ProviderMessage> {
     const config = assertOpenRouterReady()
+    return this.callChatCompletions({
+      providerLabel: "OpenRouter",
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      modelName,
+      prompt,
+      mode,
+      promptLanguage,
+      temperatureOverride,
+    })
+  }
+
+  private static async callAgentRouter(
+    modelName: string,
+    prompt: string,
+    mode: "chat" | "files" | "inspect",
+    promptLanguage: PromptLanguage = "id",
+    temperatureOverride?: number
+  ): Promise<ProviderMessage> {
+    const config = assertAgentRouterReady()
+    return this.callChatCompletions({
+      providerLabel: "AgentRouter",
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      modelName,
+      prompt,
+      mode,
+      promptLanguage,
+      temperatureOverride,
+    })
+  }
+
+  private static async callChatCompletions({
+    providerLabel,
+    apiKey,
+    baseUrl,
+    modelName,
+    prompt,
+    mode,
+    promptLanguage,
+    temperatureOverride,
+  }: {
+    providerLabel: string
+    apiKey: string
+    baseUrl: string
+    modelName: string
+    prompt: string
+    mode: "chat" | "files" | "inspect"
+    promptLanguage: PromptLanguage
+    temperatureOverride?: number
+  }): Promise<ProviderMessage> {
     let lastError: Error | null = null
     const maxAttempts = this.getMaxAttempts(mode)
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         const response = await this.fetchWithTimeout(
-          `${config.baseUrl}/chat/completions`,
+          `${baseUrl}/chat/completions`,
           {
             method: "POST",
-            headers: this.buildOpenRouterHeaders(config.apiKey),
-            body: JSON.stringify(this.buildOpenRouterPayload(prompt, mode, promptLanguage, temperatureOverride)),
+            headers: this.buildProviderHeaders(apiKey),
+            body: JSON.stringify(this.buildProviderPayload(modelName, prompt, mode, promptLanguage, temperatureOverride)),
           },
-          this.getTimeoutMs(mode)
+          this.getTimeoutMs(mode),
+          providerLabel
         )
 
         if (response.ok) {
           const data = await response.json()
           return {
-            message: data.choices?.[0]?.message?.content || "No response returned by OpenRouter.",
+            message: data.choices?.[0]?.message?.content || `No response returned by ${providerLabel}.`,
           }
         }
 
-        lastError = new Error(await this.extractError(response))
+        lastError = new Error(await this.extractError(response, providerLabel))
 
         const shouldRetrySameModel = response.status === 408 || response.status === 429 || response.status >= 500
         if (!shouldRetrySameModel || attempt === maxAttempts - 1) {
@@ -150,17 +207,18 @@ export class ProviderRouter {
       }
     }
 
-    throw lastError || new Error("OpenRouter request failed.")
+    throw lastError || new Error(`${providerLabel} request failed.`)
   }
 
-  private static buildOpenRouterPayload(
+  private static buildProviderPayload(
+    modelName: string,
     prompt: string,
     mode: "chat" | "files" | "inspect",
     promptLanguage: PromptLanguage = "id",
     temperatureOverride?: number
   ) {
     const payload: Record<string, unknown> = {
-      model: OPENROUTER_MODEL_ID,
+      model: modelName,
       messages: this.buildMessages(prompt, mode, promptLanguage),
       temperature: this.getTemperature(mode, temperatureOverride),
       top_p: 0.9,
@@ -176,7 +234,7 @@ export class ProviderRouter {
     return payload
   }
 
-  private static buildOpenRouterHeaders(apiKey: string) {
+  private static buildProviderHeaders(apiKey: string) {
     return {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
@@ -261,7 +319,8 @@ export class ProviderRouter {
   private static async fetchWithTimeout(
     url: string,
     init: RequestInit,
-    timeoutMs: number
+    timeoutMs: number,
+    providerLabel?: string
   ) {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -273,7 +332,7 @@ export class ProviderRouter {
       })
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        throw new ProviderTimeoutError(timeoutMs)
+        throw new ProviderTimeoutError(timeoutMs, providerLabel)
       }
 
       throw error
@@ -282,7 +341,7 @@ export class ProviderRouter {
     }
   }
 
-  private static async extractError(response: Response) {
+  private static async extractError(response: Response, providerLabel: string) {
     const text = await response.text()
 
     try {
@@ -293,9 +352,9 @@ export class ProviderRouter {
           ? parsed.error.metadata.raw
           : ""
       const detail = metadataRaw ? ` ${metadataRaw}` : ""
-      return `OpenRouter API error (${response.status}): ${baseMessage}${detail}`.trim()
+      return `${providerLabel} API error (${response.status}): ${baseMessage}${detail}`.trim()
     } catch {
-      return `OpenRouter API error (${response.status}): ${text}`
+      return `${providerLabel} API error (${response.status}): ${text}`
     }
   }
 

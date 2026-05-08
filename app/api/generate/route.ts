@@ -22,6 +22,9 @@ import { z } from "zod"
 import ts from "typescript"
 import { orchestrateGeneration } from "@/lib/ai/orchestrator"
 import { log } from "@/lib/logging"
+import { calculateModelRequestPrice } from "@/lib/ai/pricing"
+import { AGENTROUTER_PROVIDER, AGENTROUTER_PUBLIC_NAME } from "@/lib/ai/agentrouter-config"
+import { OPENROUTER_PROVIDER } from "@/lib/ai/openrouter-config"
 
 export const runtime = "nodejs"
 
@@ -76,7 +79,7 @@ const PROJECT_STRUCTURE_CONTEXT_CHAR_LIMIT = 14000
 const PREVIEW_EXECUTABLE_FILE_PATTERN = /\.(tsx|ts|jsx|js|mjs|cjs)$/i
 const PREVIEW_JSON_FILE_PATTERN = /\.json$/i
 const PREVIEW_ASSET_FILE_PATTERN = /\.(css|scss|sass|less|md|env|prisma|html|txt|csv|yml|yaml|svg|png|jpe?g|gif|webp|avif|ico|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|otf|lock|toml|ini|xml|pdf|webmanifest|manifest|d\.ts|d\.mts|d\.cts)$/i
-const SUPPORTED_PROVIDERS: ProviderName[] = ["openrouter"]
+const SUPPORTED_PROVIDERS: ProviderName[] = [OPENROUTER_PROVIDER, AGENTROUTER_PROVIDER]
 const COLLABORATION_MODES = ["build", "edit", "fix", "review", "ask"] as const
 
 type CollaborationMode = (typeof COLLABORATION_MODES)[number]
@@ -108,8 +111,8 @@ const GenerateSchema = z.object({
   ).max(MAX_ATTACHMENTS).optional().default([]),
 })
 
-function getProviderDisplayName(_provider: string) {
-  return SWIFT_AI_DISPLAY_NAME
+function getProviderDisplayName(provider: string) {
+  return provider === AGENTROUTER_PROVIDER ? AGENTROUTER_PUBLIC_NAME : SWIFT_AI_DISPLAY_NAME
 }
 
 function normalizeSupportedProvider(provider: string): ProviderName | null {
@@ -448,7 +451,8 @@ function getFriendlyProviderErrorMessage(errorMessage: string, provider: string)
     normalized.includes("api error (401)") ||
     normalized.includes("api error (403)")
   ) {
-    return `Akses ${providerName} ditolak. Periksa OPENROUTER_API_KEY, izin model, dan endpoint OpenRouter. Saldo kamu sudah otomatis direfund.`
+    const envName = provider === AGENTROUTER_PROVIDER ? "AGENTROUTER_API_KEY" : "OPENROUTER_API_KEY"
+    return `Akses ${providerName} ditolak. Periksa ${envName}, izin model, dan endpoint provider. Saldo kamu sudah otomatis direfund.`
   }
 
   if (
@@ -562,10 +566,6 @@ async function recordGenerationRequestLog(input: {
       error: error instanceof Error ? error.message : String(error),
     })
   }
-}
-
-function estimateRequestTokens(prompt: string) {
-  return Math.max(64, Math.ceil(prompt.length / 4) + 120)
 }
 
 function buildRecoveryRetryPrompt(userPrompt: string, contextualPrompt: string) {
@@ -854,9 +854,15 @@ async function resolveGenerationModel(selectedModel: string) {
     }
   }
 
-  if (!env.openRouterApiKey) {
+  if (provider === OPENROUTER_PROVIDER && !env.openRouterApiKey) {
     return {
       error: NextResponse.json({ error: "OPENROUTER_API_KEY is not configured." }, { status: 503 }),
+    }
+  }
+
+  if (provider === AGENTROUTER_PROVIDER && !env.agentRouterApiKey) {
+    return {
+      error: NextResponse.json({ error: "AGENTROUTER_API_KEY is not configured." }, { status: 503 }),
     }
   }
 
@@ -1039,6 +1045,12 @@ export async function POST(request: NextRequest) {
     }
 
     const { modelConfig, provider } = generationModel
+    const requestPricing = calculateModelRequestPrice({
+      modelKey: modelConfig.key,
+      modelName: modelConfig.modelName,
+      prompt: promptWithPreviewContext,
+    })
+    const requestCost = requestPricing.estimatedCost
 
     // Idempotency check: if client provided an idempotencyKey, return previous result
     if (idempotencyKey) {
@@ -1074,7 +1086,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (user.balance < modelConfig.price) {
+    if (user.balance < requestCost) {
       return NextResponse.json({ error: "Insufficient balance" }, { status: 402 })
     }
 
@@ -1084,10 +1096,10 @@ export async function POST(request: NextRequest) {
       SWIFT_AI_DISPLAY_NAME,
       SWIFT_AI_DISPLAY_NAME,
       promptWithPreviewContext,
-      modelConfig.price
+      requestCost
     )
     const requestStartedAt = Date.now()
-    const estimatedTokens = estimateRequestTokens(promptWithPreviewContext)
+    const estimatedTokens = requestPricing.estimatedTokens
     let providerMessagePreview: string | null = null
     let providerParseMode: string | null = null
     let recoveryRetryUsed = false
@@ -1139,8 +1151,8 @@ export async function POST(request: NextRequest) {
             provider: SWIFT_AI_DISPLAY_NAME,
             billedModel: SWIFT_AI_DISPLAY_NAME,
             billedProvider: SWIFT_AI_DISPLAY_NAME,
-            cost: modelConfig.price,
-            remainingBalance: user.balance - modelConfig.price,
+            cost: requestCost,
+            remainingBalance: user.balance - requestCost,
           },
         })
       }
@@ -1189,8 +1201,8 @@ export async function POST(request: NextRequest) {
             provider: SWIFT_AI_DISPLAY_NAME,
             billedModel: SWIFT_AI_DISPLAY_NAME,
             billedProvider: SWIFT_AI_DISPLAY_NAME,
-            cost: modelConfig.price,
-            remainingBalance: user.balance - modelConfig.price,
+            cost: requestCost,
+            remainingBalance: user.balance - requestCost,
           },
         })
       }
@@ -1251,7 +1263,7 @@ export async function POST(request: NextRequest) {
         await BillingService.refundReservation(
           usageLog.id,
           user.id,
-          modelConfig.price,
+          requestCost,
           "Idempotent request reused existing generation."
         )
 
@@ -1431,7 +1443,7 @@ export async function POST(request: NextRequest) {
 
       const savedGeneration = await ProjectFilePersistenceService.saveGenerationSnapshot(project.id, promptWithPreviewContext, generatedFiles, {
         idempotencyKey,
-        cost: modelConfig.price,
+        cost: requestCost,
         projectMemoryJson,
       })
       const historyId = savedGeneration.historyId
@@ -1488,8 +1500,8 @@ export async function POST(request: NextRequest) {
           provider: SWIFT_AI_DISPLAY_NAME,
           billedModel: SWIFT_AI_DISPLAY_NAME,
           billedProvider: SWIFT_AI_DISPLAY_NAME,
-          cost: modelConfig.price,
-          remainingBalance: user.balance - modelConfig.price,
+          cost: requestCost,
+          remainingBalance: user.balance - requestCost,
         },
       })
     } catch (error) {
@@ -1512,7 +1524,7 @@ export async function POST(request: NextRequest) {
       await BillingService.refundReservation(
         usageLog.id,
         user.id,
-        modelConfig.price,
+        requestCost,
         errorMessage
       )
 

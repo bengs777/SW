@@ -198,7 +198,7 @@ export interface Message {
 export interface ModelOption {
   key: string
   label: string
-  provider: "openrouter"
+  provider: "openrouter" | "agentrouter"
   modelName: string
   price: number
   isActive: boolean

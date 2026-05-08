@@ -85,6 +85,8 @@ export const env = {
   v0ApiKey: getEnv("V0_API_KEY"),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterApiUrl: "https://openrouter.ai/api/v1",
+  agentRouterApiKey: getEnv("AGENTROUTER_API_KEY", "AGENT_ROUTER_API_KEY", "AGENTROUTER_TOKEN", "AGENT_ROUTER_TOKEN"),
+  agentRouterApiUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL", "AGENT_ROUTER_BASE_URL") || "https://agentrouter.org/api/v1"),
   devOwnerEmail: DEV_OWNER_EMAIL,
   supabaseServiceRoleKey,
   supabasePublicAnonKey,
@@ -123,7 +125,9 @@ export function getMissingProductionEnvVars() {
   if (!env.supabaseServiceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY")
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
 
-  if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
+  if (!env.openRouterApiKey && !env.agentRouterApiKey) {
+    missing.push("OPENROUTER_API_KEY or AGENTROUTER_API_KEY")
+  }
 
   return missing
 }

@@ -43,5 +43,9 @@ export function ProviderBadge({ provider }: { provider: string }) {
     return <Badge variant="outline">Swift AI</Badge>
   }
 
+  if (provider === "agentrouter") {
+    return <Badge variant="outline">AgentRouter</Badge>
+  }
+
   return <Badge variant="outline">{provider}</Badge>
 }

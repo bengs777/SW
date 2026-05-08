@@ -24,6 +24,7 @@ function check(key: string, label: string, value: unknown, severity: ReadinessCh
 }
 
 export function getProductionReadiness() {
+  const hasAiProvider = Boolean(env.openRouterApiKey || env.agentRouterApiKey)
   const checks: ReadinessCheck[] = [
     check("DATABASE_URL", "Prisma datasource URL", env.databaseUrl, "required"),
     check("TURSO_DATABASE_URL", "Turso/libSQL database URL", env.tursoDatabaseUrl, "required"),
@@ -32,8 +33,10 @@ export function getProductionReadiness() {
     check("NEXT_PUBLIC_APP_URL", "Public app URL", env.appUrl, "required"),
     check("GOOGLE_CLIENT_ID", "Google OAuth client ID", env.googleClientId, "required"),
     check("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", env.googleClientSecret, "required"),
-    check("OPENROUTER_API_KEY", "Swift AI OpenRouter key", env.openRouterApiKey, "required", "Swift AI is locked to OpenRouter."),
-    check("OPENROUTER_BASE_URL", "Swift AI OpenRouter base URL", env.openRouterApiUrl === "https://openrouter.ai/api/v1", "required"),
+    check("AI_PROVIDER_KEY", "Swift AI provider key", hasAiProvider, "required", "Set OPENROUTER_API_KEY or AGENTROUTER_API_KEY."),
+    check("OPENROUTER_API_KEY", "Swift AI OpenRouter key", env.openRouterApiKey, "recommended"),
+    check("AGENTROUTER_API_KEY", "Swift AI AgentRouter key", env.agentRouterApiKey, "recommended"),
+    check("AGENTROUTER_BASE_URL", "Swift AI AgentRouter base URL", env.agentRouterApiUrl === "https://agentrouter.org/api/v1", "recommended"),
     check("PAKASIR_SLUG", "Pakasir merchant slug", env.pakasirSlug, "recommended"),
     check("PAKASIR_API_KEY", "Pakasir API key", env.pakasirApiKey, "recommended"),
     check("SUPABASE_STORAGE_BUCKET", "Asset storage bucket", env.supabaseStorageBucket, "recommended"),

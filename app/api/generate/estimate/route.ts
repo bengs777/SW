@@ -3,6 +3,7 @@ import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import type { PromptAttachment } from "@/lib/types"
+import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { z } from "zod"
 
 const MAX_PROMPT_LENGTH = 12000
@@ -31,11 +32,6 @@ const EstimateSchema = z.object({
     }).passthrough()
   ).max(MAX_ATTACHMENTS).optional().default([]),
 })
-
-function estimateTokens(prompt: string) {
-  // Lightweight heuristic: 1 token ~= 4 chars plus small system overhead.
-  return Math.max(64, Math.ceil(prompt.length / 4) + 120)
-}
 
 export async function POST(request: NextRequest) {
   const session = await auth()
@@ -80,15 +76,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Authenticated user not found" }, { status: 404 })
     }
 
-    const estimatedTokens = estimateTokens(promptWithAttachments)
-    const estimatedCost = modelConfig.price
+    const pricing = calculateModelRequestPrice({
+      modelKey: modelConfig.key,
+      modelName: modelConfig.modelName,
+      prompt: promptWithAttachments,
+    })
+    const estimatedTokens = pricing.estimatedTokens
+    const estimatedCost = pricing.estimatedCost
     const remainingBalance = user.balance - estimatedCost
 
     return NextResponse.json({
       model: modelConfig.key,
       provider: modelConfig.provider,
       estimatedTokens,
+      estimatedInputTokens: pricing.estimatedInputTokens,
+      estimatedOutputTokens: pricing.estimatedOutputTokens,
       estimatedCost,
+      minimumCharge: pricing.minimumCharge,
+      pricingMode: pricing.pricingMode,
       currentBalance: user.balance,
       remainingBalance,
       canAfford: remainingBalance >= 0,
