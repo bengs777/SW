@@ -23,6 +23,7 @@ import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, Promp
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
+const GENERATE_CLIENT_TIMEOUT_MS = 55_000
 const COLLABORATION_MODE_INSTRUCTIONS: Record<PromptLanguage, Record<CollaborationMode, string>> = {
   id: {
     build:
@@ -109,6 +110,24 @@ export type ProviderStatus = {
   checkedAt?: string
 }
 
+export type GenerationProgress = {
+  stage:
+    | "context"
+    | "request"
+    | "provider"
+    | "parse"
+    | "validate"
+    | "save"
+    | "preview"
+    | "timeout"
+    | "error"
+  label: string
+  startedAt: Date
+  timeoutMs: number
+  modelKey?: string
+  prompt?: string
+}
+
 type ErrorLogEntry = {
   id: string
   source: "project" | "provider" | "generate" | "preview" | "save" | "export" | "deploy"
@@ -127,6 +146,7 @@ export default function EditorPage() {
   const [currentVersion, setCurrentVersion] = useState(0)
   const [activeFileIndex, setActiveFileIndex] = useState(0)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null)
   const [isSavingFiles, setIsSavingFiles] = useState(false)
   const [isLoadingProject, setIsLoadingProject] = useState(true)
   const [projectError, setProjectError] = useState<string | null>(null)
@@ -531,6 +551,14 @@ export default function EditorPage() {
     setMessages((prev) => [...prev, userMessage])
     setIsGenerating(true)
     setProviderStatus(null)
+    setGenerationProgress({
+      stage: "context",
+      label: "Membaca konteks project",
+      startedAt: new Date(),
+      timeoutMs: GENERATE_CLIENT_TIMEOUT_MS,
+      modelKey,
+      prompt: trimmedContent,
+    })
     const activeFile = generatedFiles[activeFileIndex] || null
     const previewContext = buildPreviewContextPacket({
       source: "editor",
@@ -566,22 +594,47 @@ export default function EditorPage() {
     setMessages((prev) => [...prev, assistantMessage])
 
     try {
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "request",
+              label: "Mengirim prompt ke DeepSeek V4 Flash",
+            }
+          : current
+      )
+      const controller = new AbortController()
+      const timeout = window.setTimeout(() => controller.abort(), GENERATE_CLIENT_TIMEOUT_MS)
+
       // Call AI API
       const response = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: promptForGeneration,
-          attachments,
-          projectId,
-          history: messages,
-          selectedModel: modelKey,
-          promptLanguage,
-          idempotencyKey: createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext),
-          previewContext,
-          collaborationMode,
-        }),
-      })
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: promptForGeneration,
+            attachments,
+            projectId,
+            history: messages,
+            selectedModel: modelKey,
+            promptLanguage,
+            idempotencyKey: createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext),
+            previewContext,
+            collaborationMode,
+          }),
+          signal: controller.signal,
+        }).finally(() => {
+          window.clearTimeout(timeout)
+        })
+
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "parse",
+              label: "Parsing output provider",
+            }
+          : current
+      )
 
       const contentType = response.headers.get("content-type") || ""
       const responseText = await response.text()
@@ -604,6 +657,15 @@ export default function EditorPage() {
       }
 
       const data = JSON.parse(responseText)
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "validate",
+              label: "Validasi output full-stack",
+            }
+          : current
+      )
 
       if (data.warning) {
         pushErrorLog("provider", String(data.warning))
@@ -639,6 +701,15 @@ export default function EditorPage() {
       }
 
       // Update assistant message with response
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "save",
+              label: "Menyimpan file project",
+            }
+          : current
+      )
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantId
@@ -701,14 +772,43 @@ export default function EditorPage() {
       } else {
         setPreviewFiles(null)
       }
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "preview",
+              label: "Menyiapkan preview",
+            }
+          : current
+      )
     } catch (error) {
       const message =
-        error instanceof Error
-          ? error.message
-          : "Sorry, I encountered an error while generating. Please try again."
+        error instanceof DOMException && error.name === "AbortError"
+          ? "Provider timeout. Request dihentikan otomatis agar tidak menunggu terus. Saldo akan mengikuti status refund dari server jika request sempat diproses."
+          : error instanceof Error
+            ? error.message
+            : "Sorry, I encountered an error while generating. Please try again."
 
-      pushErrorLog("generate", message)
-      setProviderStatus(buildProviderStatusFromError(message))
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: error instanceof DOMException && error.name === "AbortError" ? "timeout" : "error",
+              label:
+                error instanceof DOMException && error.name === "AbortError"
+                  ? "Provider timeout"
+                  : "Generate gagal",
+            }
+          : current
+      )
+
+      const finalMessage =
+        error instanceof Error
+          ? message
+          : message
+
+      pushErrorLog("generate", finalMessage)
+      setProviderStatus(buildProviderStatusFromError(finalMessage))
 
       // Update with error message
       setMessages((prev) =>
@@ -716,7 +816,7 @@ export default function EditorPage() {
           msg.id === assistantId
             ? {
                 ...msg,
-                content: message,
+                content: finalMessage,
                 isGenerating: false,
               }
             : msg
@@ -724,6 +824,9 @@ export default function EditorPage() {
       )
     } finally {
       setIsGenerating(false)
+      window.setTimeout(() => {
+        setGenerationProgress(null)
+      }, 1200)
     }
   }, [
     activeFileIndex,
@@ -1053,6 +1156,7 @@ export default function EditorPage() {
                 }}
                 providerStatus={providerStatus}
                 previewErrorContext={latestPreviewError}
+                generationProgress={generationProgress}
               />
             ) : (
               <PreviewPanel
@@ -1070,6 +1174,8 @@ export default function EditorPage() {
                 activeTab={activePreviewTab}
                 onTabChange={setActivePreviewTab}
                 onPreviewErrorChange={handlePreviewErrorChange}
+                isGenerating={isGenerating}
+                generationProgress={generationProgress}
               />
             )}
           </div>
@@ -1127,6 +1233,7 @@ export default function EditorPage() {
                 onViewCode={() => setActivePreviewTab("code")}
                 providerStatus={providerStatus}
                 previewErrorContext={latestPreviewError}
+                generationProgress={generationProgress}
               />
             </ResizablePanel>
             <ResizableHandle withHandle />
@@ -1146,6 +1253,8 @@ export default function EditorPage() {
                 activeTab={activePreviewTab}
                 onTabChange={setActivePreviewTab}
                 onPreviewErrorChange={handlePreviewErrorChange}
+                isGenerating={isGenerating}
+                generationProgress={generationProgress}
               />
             </ResizablePanel>
             {showLogsPanel && (

@@ -24,6 +24,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { GeneratedFile } from "@/lib/types"
+import type { GenerationProgress } from "@/app/dashboard/project/[id]/page"
 import { buildBrowserPreviewFiles } from "@/lib/preview/sanitizer"
 
 type ViewportSize = "mobile" | "tablet" | "desktop"
@@ -43,6 +44,8 @@ interface PreviewPanelProps {
   activeTab?: "preview" | "code" | "explorer"
   onTabChange?: (tab: "preview" | "code" | "explorer") => void
   onPreviewErrorChange?: (error: string | null) => void
+  isGenerating?: boolean
+  generationProgress?: GenerationProgress | null
 }
 
 export function PreviewPanel({
@@ -60,6 +63,8 @@ export function PreviewPanel({
   activeTab: activeTabProp,
   onTabChange,
   onPreviewErrorChange,
+  isGenerating = false,
+  generationProgress = null,
 }: PreviewPanelProps) {
   const [internalActiveTab, setInternalActiveTab] = useState<"preview" | "code" | "explorer">("preview")
   const [viewport, setViewport] = useState<ViewportSize>("desktop")
@@ -308,6 +313,8 @@ export function PreviewPanel({
                 files={previewFiles ?? buildBrowserPreviewFiles(files)} 
                 onError={handlePreviewError}
               />
+            ) : isGenerating ? (
+              <GeneratingPreview progress={generationProgress} />
             ) : (
               <EmptyPreview />
             )}
@@ -344,6 +351,51 @@ export function PreviewPanel({
             <EmptyExplorer />
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+function GeneratingPreview({ progress }: { progress?: GenerationProgress | null }) {
+  const [elapsedMs, setElapsedMs] = useState(() =>
+    progress ? Date.now() - progress.startedAt.getTime() : 0
+  )
+
+  useEffect(() => {
+    if (!progress) return
+    const interval = window.setInterval(() => {
+      setElapsedMs(Date.now() - progress.startedAt.getTime())
+    }, 1000)
+
+    return () => window.clearInterval(interval)
+  }, [progress])
+
+  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+  const timeoutSeconds = progress ? Math.ceil(progress.timeoutMs / 1000) : 55
+  const percent = progress ? Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100)) : 12
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+      <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-sky-500/30 bg-sky-500/10">
+        <RefreshCw className="h-7 w-7 animate-spin text-sky-500" />
+      </div>
+      <h3 className="font-semibold text-foreground">Swift sedang membangun aplikasi</h3>
+      <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+        {progress?.label || "Menyiapkan request generate..."}
+      </p>
+      <div className="mt-5 w-full max-w-sm">
+        <div className="mb-2 flex justify-between text-xs text-muted-foreground">
+          <span>{progress?.modelKey || "Swift AI"}</span>
+          <span>{elapsedSeconds}s / {timeoutSeconds}s</span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-muted">
+          <div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${percent}%` }} />
+        </div>
+      </div>
+      {progress?.prompt && (
+        <p className="mt-4 line-clamp-2 max-w-md text-xs text-muted-foreground">
+          Prompt: {progress.prompt}
+        </p>
       )}
     </div>
   )

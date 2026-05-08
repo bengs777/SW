@@ -10,6 +10,7 @@ import { Zap, Send, Paperclip, Image as ImageIcon, ShieldAlert, ChevronDown, X }
 import { cn } from "@/lib/utils"
 import type { Message } from "@/app/dashboard/project/[id]/page"
 import type { ProviderStatus } from "@/app/dashboard/project/[id]/page"
+import type { GenerationProgress } from "@/app/dashboard/project/[id]/page"
 import type { ModelOption, PromptAttachment } from "@/lib/types"
 import { analyzePromptIntent } from "@/lib/ai/prompt-intent"
 import { getTemplate, PROMPT_LANGUAGE_LABELS } from "@/lib/ai/prompt-templates"
@@ -59,6 +60,7 @@ interface ChatPanelProps {
   onViewCode?: () => void
   providerStatus?: ProviderStatus | null
   previewErrorContext?: string | null
+  generationProgress?: GenerationProgress | null
 }
 
 type EstimateState = {
@@ -451,6 +453,7 @@ export function ChatPanel({
   onViewCode,
   providerStatus,
   previewErrorContext,
+  generationProgress,
 }: ChatPanelProps) {
   const [input, setInput] = useState("")
   const [templateKey, setTemplateKey] = useState<PromptTemplateKey>("workspace")
@@ -775,7 +778,12 @@ export function ChatPanel({
         ) : (
           <div className="space-y-6">
             {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} onViewCode={onViewCode} />
+              <MessageBubble
+                key={message.id}
+                message={message}
+                onViewCode={onViewCode}
+                generationProgress={generationProgress}
+              />
             ))}
           </div>
         )}
@@ -785,6 +793,9 @@ export function ChatPanel({
       <div className="shrink-0 border-t border-border p-4">
         <div className="max-h-[42vh] space-y-3 overflow-y-auto pr-1">
           <ProviderHealthCard status={providerStatus} />
+          {generationProgress && (
+            <GenerationProgressCard progress={generationProgress} />
+          )}
           <div className="rounded-2xl border border-border bg-card/80 p-3 shadow-sm">
             {previewErrorContext && (
               <div className="mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3">
@@ -821,20 +832,20 @@ export function ChatPanel({
                   {collaborationCopy[collaborationMode].label}
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
+              <div className="grid grid-cols-1 gap-1">
                 {(Object.keys(collaborationCopy) as CollaborationMode[]).map((mode) => (
                   <Button
                     key={mode}
                     type="button"
                     size="sm"
                     variant={collaborationMode === mode ? "default" : "ghost"}
-                    className="h-auto min-h-10 flex-col items-start gap-0.5 px-3 py-2 text-left"
+                    className="h-auto min-h-10 w-full items-start justify-start gap-3 px-3 py-2 text-left"
                     title={collaborationCopy[mode].description}
                     onClick={() => setCollaborationMode(mode)}
                     disabled={isGenerating}
                   >
-                    <span className="text-xs font-semibold">{collaborationCopy[mode].label}</span>
-                    <span className="line-clamp-1 text-[10px] font-normal opacity-75">
+                    <span className="w-16 shrink-0 text-xs font-semibold">{collaborationCopy[mode].label}</span>
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-normal opacity-75">
                       {collaborationCopy[mode].description}
                     </span>
                   </Button>
@@ -1296,6 +1307,53 @@ function ProviderHealthCard({
   )
 }
 
+function GenerationProgressCard({ progress }: { progress: GenerationProgress }) {
+  const [elapsedMs, setElapsedMs] = useState(() => Date.now() - progress.startedAt.getTime())
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setElapsedMs(Date.now() - progress.startedAt.getTime())
+    }, 1000)
+
+    return () => window.clearInterval(interval)
+  }, [progress.startedAt])
+
+  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+  const timeoutSeconds = Math.max(1, Math.ceil(progress.timeoutMs / 1000))
+  const percent = Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
+  const isTerminal = progress.stage === "timeout" || progress.stage === "error"
+
+  return (
+    <div className={cn(
+      "rounded-xl border px-3 py-3 text-xs",
+      isTerminal ? "border-rose-500/30 bg-rose-500/10" : "border-sky-500/30 bg-sky-500/10"
+    )}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">{progress.label}</p>
+          <p className="mt-1 text-muted-foreground">
+            {progress.modelKey || "Swift AI"} · {elapsedSeconds}s / {timeoutSeconds}s
+          </p>
+        </div>
+        <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase text-muted-foreground">
+          {progress.stage}
+        </span>
+      </div>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background">
+        <div
+          className={cn("h-full rounded-full transition-all", isTerminal ? "bg-rose-500" : "bg-sky-500")}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      {progress.prompt && (
+        <p className="mt-2 line-clamp-2 text-muted-foreground">
+          Prompt: {progress.prompt}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function formatCheckedAt(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
@@ -1365,9 +1423,11 @@ function SuggestionChip({ children, onClick }: { children: string; onClick?: () 
 function MessageBubble({
   message,
   onViewCode,
+  generationProgress,
 }: {
   message: Message
   onViewCode?: () => void
+  generationProgress?: GenerationProgress | null
 }) {
   const isUser = message.role === "user"
 
@@ -1387,7 +1447,7 @@ function MessageBubble({
         {message.isGenerating ? (
           <div className="flex items-center gap-2">
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-            <GeneratingStatus startedAt={message.timestamp} />
+            <GeneratingStatus startedAt={message.timestamp} progress={generationProgress} />
           </div>
         ) : (
           <>
@@ -1451,7 +1511,7 @@ function MessageBubble({
   )
 }
 
-function GeneratingStatus({ startedAt }: { startedAt: Date }) {
+function GeneratingStatus({ startedAt, progress }: { startedAt: Date; progress?: GenerationProgress | null }) {
   const [elapsedMs, setElapsedMs] = useState(() => Date.now() - startedAt.getTime())
 
   useEffect(() => {
@@ -1464,19 +1524,27 @@ function GeneratingStatus({ startedAt }: { startedAt: Date }) {
     }
   }, [startedAt])
 
-  let label = "Menghubungi model..."
+  let label = progress?.label || "Menghubungi model..."
 
-  if (elapsedMs >= 4000) {
+  if (!progress && elapsedMs >= 4000) {
     label = "Model sedang menyusun jawaban..."
   }
 
-  if (elapsedMs >= 10000) {
+  if (!progress && elapsedMs >= 10000) {
     label = "Provider sedang lambat, mohon tunggu..."
   }
 
-  if (elapsedMs >= 18000) {
+  if (!progress && elapsedMs >= 18000) {
     label = "Masih menunggu provider. Request akan dihentikan otomatis jika terlalu lama."
   }
 
-  return <span className="text-sm text-muted-foreground">{label}</span>
+  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+  const timeoutSeconds = progress ? Math.ceil(progress.timeoutMs / 1000) : null
+
+  return (
+    <span className="text-sm text-muted-foreground">
+      {label}
+      {timeoutSeconds ? ` (${elapsedSeconds}s / ${timeoutSeconds}s)` : ""}
+    </span>
+  )
 }
