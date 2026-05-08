@@ -27,6 +27,7 @@ import { AGENTROUTER_PROVIDER, AGENTROUTER_PUBLIC_NAME } from "@/lib/ai/agentrou
 import { OPENROUTER_PROVIDER } from "@/lib/ai/openrouter-config"
 
 export const runtime = "nodejs"
+export const maxDuration = 300
 
 class StrictFullStackValidationError extends Error {
   details: {

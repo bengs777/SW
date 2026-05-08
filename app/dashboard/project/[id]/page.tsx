@@ -23,7 +23,7 @@ import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, Promp
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
-const GENERATE_CLIENT_TIMEOUT_MS = 55_000
+const GENERATE_CLIENT_TIMEOUT_MS = 180_000
 const COLLABORATION_MODE_INSTRUCTIONS: Record<PromptLanguage, Record<CollaborationMode, string>> = {
   id: {
     build:
@@ -394,7 +394,7 @@ export default function EditorPage() {
         status: "error",
         issue: "auth",
         reason: "Provider rejected authentication or model access",
-        action: "Periksa OPENROUTER_API_KEY, akses model deepseek/deepseek-v4-flash, dan endpoint OpenRouter.",
+        action: "Periksa OPENROUTER_API_KEY atau AGENTROUTER_API_KEY, akses model, dan endpoint provider.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -459,7 +459,7 @@ export default function EditorPage() {
         status: "slow",
         issue: "latency",
         reason: "Provider request timed out",
-        action: "Coba lagi nanti. Tidak ada fallback otomatis ke model lain.",
+        action: "Coba lagi nanti. Sistem akan mencoba fallback AI yang tersedia di env sebelum request dianggap gagal.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -469,7 +469,7 @@ export default function EditorPage() {
         status: "error",
         issue: "config",
         reason: "Provider configuration is incomplete",
-        action: "Periksa OPENROUTER_API_KEY dan restart dev server.",
+        action: "Periksa OPENROUTER_API_KEY atau AGENTROUTER_API_KEY, lalu restart dev server.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -599,7 +599,7 @@ export default function EditorPage() {
           ? {
               ...current,
               stage: "request",
-              label: "Mengirim prompt ke DeepSeek V4 Flash",
+              label: "Mengirim prompt ke provider AI",
             }
           : current
       )
@@ -784,7 +784,7 @@ export default function EditorPage() {
     } catch (error) {
       const message =
         error instanceof DOMException && error.name === "AbortError"
-          ? "Provider timeout. Request dihentikan otomatis agar tidak menunggu terus. Saldo akan mengikuti status refund dari server jika request sempat diproses."
+          ? "Provider timeout. Request dihentikan otomatis setelah menunggu fallback AI. Saldo akan mengikuti status refund dari server jika request sempat diproses."
           : error instanceof Error
             ? error.message
             : "Sorry, I encountered an error while generating. Please try again."
