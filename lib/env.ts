@@ -65,6 +65,7 @@ const supabasePublicAnonKey = getEnv(
 )
 const supabaseServiceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY")
 const supabaseStorageBucket = getEnv("SUPABASE_STORAGE_BUCKET")
+const isServerRuntime = typeof window === "undefined"
 
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
@@ -108,7 +109,7 @@ export const env = {
   cryptoPaymentConfirmationsRequired: getEnvNumber(2, "CRYPTO_PAYMENT_CONFIRMATIONS_REQUIRED"),
 }
 
-if (env.nodeEnv === "production") {
+export function getMissingProductionEnvVars() {
   const missing: string[] = []
 
   if (!env.databaseUrl && !env.tursoDatabaseUrl) missing.push("DATABASE_URL or TURSO_DATABASE_URL")
@@ -123,6 +124,16 @@ if (env.nodeEnv === "production") {
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
 
   if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
+
+  return missing
+}
+
+export function assertProductionEnvReady() {
+  if (!isServerRuntime || env.nodeEnv !== "production") {
+    return
+  }
+
+  const missing = getMissingProductionEnvVars()
 
   if (missing.length > 0) {
     throw new Error(
