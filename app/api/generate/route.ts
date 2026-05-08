@@ -80,6 +80,7 @@ const SUPPORTED_PROVIDERS: ProviderName[] = ["openrouter"]
 const COLLABORATION_MODES = ["build", "edit", "fix", "review", "ask"] as const
 
 type CollaborationMode = (typeof COLLABORATION_MODES)[number]
+type FinalPromptMode = "generator" | "fix-complex" | "fix-simple" | "sandbox"
 
 const GenerateSchema = z.object({
   prompt: z.string().min(1),
@@ -479,6 +480,50 @@ function getFriendlyProviderErrorMessage(errorMessage: string, provider: string)
   return `${providerName} sedang sibuk atau gagal merespons. Saldo kamu sudah otomatis direfund. File project tidak diubah karena provider belum mengirim output yang valid.`
 }
 
+function inferFinalPromptMode(input: {
+  collaborationMode: CollaborationMode
+  prompt: string
+  errorLogs?: string | null
+  existingFileCount: number
+}) {
+  const normalized = `${input.prompt}\n${input.errorLogs || ""}`.toLowerCase()
+
+  if (
+    /\b(env|environment|dependency|dependencies|package\.json|npm install|module not found|cannot find module|missing required environment|build failed|dev server|run app|jalankan|dependency|dependensi)\b/.test(normalized)
+  ) {
+    return "sandbox" as const
+  }
+
+  if (input.collaborationMode === "fix") {
+    const looksSmall =
+      /\b(import|syntax|typo|rename|className|small|kecil|ui bug)\b/.test(normalized) &&
+      !/\b(api|database|prisma|auth|login|runtime|server|fullstack|backend)\b/.test(normalized)
+
+    return looksSmall ? "fix-simple" as const : "fix-complex" as const
+  }
+
+  if (input.existingFileCount > 0 && /\b(fix|perbaiki|error|bug|crash|gagal)\b/.test(normalized)) {
+    return "fix-complex" as const
+  }
+
+  return "generator" as const
+}
+
+function formatPreviewErrorLogs(previewContext: ReturnType<typeof normalizePreviewContext>) {
+  const previewError = previewContext?.previewError
+  if (!previewError) {
+    return ""
+  }
+
+  return [
+    previewError.message ? `message: ${previewError.message}` : "",
+    previewError.filename ? `file: ${previewError.filename}` : "",
+    typeof previewError.lineno === "number" ? `line: ${previewError.lineno}` : "",
+    typeof previewError.colno === "number" ? `column: ${previewError.colno}` : "",
+    previewError.stack ? `stack:\n${compactText(previewError.stack, 4000)}` : "",
+  ].filter(Boolean).join("\n")
+}
+
 async function recordGenerationRequestLog(input: {
   projectId: string
   taskType: string
@@ -569,16 +614,113 @@ function buildProviderExecutionContext(input: {
   ].join("\n")
 }
 
-function mergePromptWithExecutionContext(basePrompt: string, executionContext: string) {
-  if (!executionContext.trim()) {
-    return basePrompt
-  }
+function buildFinalPrompt({
+  mode,
+  userPrompt,
+  executionContext,
+  errorLogs,
+}: {
+  mode: FinalPromptMode
+  userPrompt: string
+  executionContext?: string
+  errorLogs?: string | null
+}) {
+  const contextPriority = [
+    "CONTEXT PRIORITY:",
+    "1. RUNTIME ERRORS",
+    "2. USER REQUEST",
+    "3. CURRENT FILE",
+    "4. PROJECT MEMORY",
+    "Ignore lower priority context if it conflicts with higher priority context.",
+  ].join("\n")
+
+  const generator = [
+    "You are a production-grade full-stack AI builder.",
+    "",
+    "GOAL:",
+    "Generate a COMPLETE and RUNNABLE Next.js full-stack app or patch.",
+    "",
+    "RULES:",
+    "- Return ONLY JSON.",
+    "- No markdown, no explanation, no TODO, no pseudo code.",
+    "- All imports must resolve.",
+    "- All code must run.",
+    "- Return complete file contents for every changed file.",
+    "",
+    "FULLSTACK:",
+    "- Use Next.js App Router.",
+    "- API routes must be used by frontend.",
+    "- Prisma must be used for persistent data when the user asks for data, auth, CRUD, dashboard, orders, billing, or admin flows.",
+    "- Data must persist; do not make local React state the source of truth for persisted resources.",
+    "",
+    "INTEGRATION:",
+    "- Frontend MUST call API for server data.",
+    "- API MUST use database/service layer for persisted data.",
+    "- No dead code.",
+    "",
+    "OUTPUT:",
+    '{ "message": "short summary", "files": [{ "path": "string", "language": "tsx|ts|css|json|html|prisma|md|env", "content": "complete file content" }], "dependencies": [], "env": {} }',
+  ].join("\n")
+
+  const fixer = [
+    "You are fixing a broken full-stack app.",
+    "",
+    "RULES:",
+    "- Return ONLY JSON.",
+    "- DO NOT rewrite the entire project.",
+    "- ONLY modify broken or directly related files.",
+    "- Keep all existing features.",
+    "",
+    "PRIORITY:",
+    "1. Fix runtime/build errors.",
+    "2. Restore API <-> frontend <-> DB connection.",
+    "3. Ensure app runs.",
+  ].join("\n")
+
+  const simpleFix = [
+    "Fix only small issues:",
+    "- import error",
+    "- syntax error",
+    "- small UI bug",
+    "",
+    "Return ONLY JSON.",
+    "DO NOT modify unrelated files.",
+  ].join("\n")
+
+  const sandbox = [
+    "Fix project so it can run.",
+    "",
+    "Focus:",
+    "- dependency issues",
+    "- env issues",
+    "- runtime crash",
+    "",
+    "Return ONLY JSON.",
+    "Do NOT add new features.",
+  ].join("\n")
+
+  const systemPrompt =
+    mode === "fix-complex"
+      ? fixer
+      : mode === "fix-simple"
+        ? simpleFix
+        : mode === "sandbox"
+          ? sandbox
+          : generator
 
   return [
-    basePrompt,
+    contextPriority,
     "",
-    executionContext,
-  ].join("\n")
+    systemPrompt,
+    "",
+    "USER REQUEST:",
+    userPrompt,
+    "",
+    errorLogs ? `ERROR LOGS:\n${errorLogs}` : "",
+    "",
+    "EXECUTION CONTEXT:",
+    executionContext || "none",
+  ].filter(Boolean).join("\n")
 }
 
 type GenerateRequestContext = {
@@ -1071,7 +1213,14 @@ export async function POST(request: NextRequest) {
         promptEnhancement.projectMemory
       )
 
-      const basePrompt = mergePromptWithExecutionContext(promptEnhancement.prompt, providerExecutionContext)
+      const previewErrorLogs = formatPreviewErrorLogs(previewContextFromClient)
+      const finalPromptMode = inferFinalPromptMode({
+        collaborationMode,
+        prompt,
+        errorLogs: previewErrorLogs,
+        existingFileCount: existingFiles.length,
+      })
+      const basePrompt = promptEnhancement.prompt
       const effectivePrompt =
         existingFiles.length > 0
           ? buildContinuationPrompt({
@@ -1080,7 +1229,14 @@ export async function POST(request: NextRequest) {
               existingFiles,
             })
           : basePrompt
-      const fullStackPrompt = compactProviderPrompt(enforceFullStackRequirement(effectivePrompt))
+      const fullStackPrompt = compactProviderPrompt(
+        buildFinalPrompt({
+          mode: finalPromptMode,
+          userPrompt: enforceFullStackRequirement(effectivePrompt),
+          executionContext: providerExecutionContext,
+          errorLogs: previewErrorLogs,
+        })
+      )
 
       // Use orchestrator which checks idempotency and delegates to ProviderRouter
       const orchestration = await orchestrateGeneration({
@@ -1313,6 +1469,7 @@ export async function POST(request: NextRequest) {
           relevanceScore: relevanceReport.score,
           recoveryRetryUsed,
           recoveryRetrySucceeded,
+          finalPromptMode,
         },
       })
 

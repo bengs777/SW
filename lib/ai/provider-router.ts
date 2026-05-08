@@ -108,8 +108,9 @@ export class ProviderRouter {
   ): Promise<ProviderMessage> {
     const config = assertOpenRouterReady()
     let lastError: Error | null = null
+    const maxAttempts = this.getMaxAttempts(mode)
 
-    for (let attempt = 0; attempt < env.aiMaxRetries; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         const response = await this.fetchWithTimeout(
           `${config.baseUrl}/chat/completions`,
@@ -131,14 +132,18 @@ export class ProviderRouter {
         lastError = new Error(await this.extractError(response))
 
         const shouldRetrySameModel = response.status === 408 || response.status === 429 || response.status >= 500
-        if (!shouldRetrySameModel || attempt === env.aiMaxRetries - 1) {
+        if (!shouldRetrySameModel || attempt === maxAttempts - 1) {
           break
         }
 
         await this.sleep(800 * (attempt + 1))
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt < env.aiMaxRetries - 1) {
+        if (lastError instanceof ProviderTimeoutError) {
+          break
+        }
+
+        if (attempt < maxAttempts - 1) {
           await this.sleep(800 * (attempt + 1))
           continue
         }
@@ -235,7 +240,7 @@ export class ProviderRouter {
 
   private static getTimeoutMs(mode: "chat" | "files" | "inspect") {
     if (mode === "files") {
-      return Math.max(env.aiTimeoutMs, 60_000)
+      return Math.min(Math.max(env.aiTimeoutMs, 30_000), 45_000)
     }
 
     if (mode === "inspect") {
@@ -243,6 +248,14 @@ export class ProviderRouter {
     }
 
     return env.aiTimeoutMs
+  }
+
+  private static getMaxAttempts(mode: "chat" | "files" | "inspect") {
+    if (mode === "files") {
+      return 1
+    }
+
+    return env.aiMaxRetries
   }
 
   private static async fetchWithTimeout(
