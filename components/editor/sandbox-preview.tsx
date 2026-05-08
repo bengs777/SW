@@ -8,9 +8,10 @@ interface SandboxPreviewProps {
   files: GeneratedFile[]
   className?: string
   onError?: (error: string) => void
+  projectId?: string
 }
 
-export function SandboxPreview({ files, className = "", onError }: SandboxPreviewProps) {
+export function SandboxPreview({ files, className = "", onError, projectId }: SandboxPreviewProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -70,6 +71,25 @@ export function SandboxPreview({ files, className = "", onError }: SandboxPrevie
           })
           setError(msg)
           onError?.(msg)
+          // Send preview error to orchestrator backend for AI inspection
+          try {
+            const payload = {
+              message: data.message || null,
+              stack: data.stack || null,
+              file: typeof data.filename === "string" ? data.filename : data.source || null,
+              lineno: typeof data.lineno === "number" ? data.lineno : null,
+              colno: typeof data.colno === "number" ? data.colno : null,
+              projectId: projectId || null,
+            }
+
+            void fetch('/api/orchestrator/preview-error', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            }).catch(() => {})
+          } catch (e) {
+            // swallow
+          }
         }
       } catch (e) {
         // ignore malformed messages
@@ -78,7 +98,7 @@ export function SandboxPreview({ files, className = "", onError }: SandboxPrevie
 
     window.addEventListener("message", handleMessage)
     return () => window.removeEventListener("message", handleMessage)
-  }, [previewHtml, onError])
+  }, [previewHtml, onError, projectId])
 
   return (
     <div className={`relative h-full w-full ${className}`}>
