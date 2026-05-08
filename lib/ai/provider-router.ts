@@ -20,13 +20,23 @@ type ProviderResponse = {
   message: string
   providerUsed: ProviderName
   modelUsed: string
-  usedFallback: false
+  usedFallback: boolean
   primaryError?: string
 }
 
 type ProviderMessage = {
   message: string
 }
+
+const DEFAULT_AGENTROUTER_FALLBACK_MODELS = [
+  "deepseek-v3.2",
+  "deepseek-v3.1",
+  "glm-4.6",
+  "glm-5.1",
+  "claude-haiku-4-5-20251001",
+  "deepseek-r1-0528",
+  "claude-opus-4-6",
+]
 
 class ProviderTimeoutError extends Error {
   constructor(timeoutMs: number, providerLabel = "Provider") {
@@ -91,17 +101,69 @@ export class ProviderRouter {
       throw new Error(`Unsupported AI model: ${modelName}`)
     }
 
-    const result =
-      provider === AGENTROUTER_PROVIDER
-        ? await this.callAgentRouter(modelName, prompt, mode, promptLanguage, temperatureOverride)
-        : await this.callOpenRouter(modelName, prompt, mode, promptLanguage, temperatureOverride)
+    try {
+      const result =
+        provider === AGENTROUTER_PROVIDER
+          ? await this.callAgentRouter(modelName, prompt, mode, promptLanguage, temperatureOverride)
+          : await this.callOpenRouter(modelName, prompt, mode, promptLanguage, temperatureOverride)
 
-    return {
-      message: result.message,
-      providerUsed: provider,
-      modelUsed: modelName,
-      usedFallback: false,
+      return {
+        message: result.message,
+        providerUsed: provider,
+        modelUsed: modelName,
+        usedFallback: false,
+      }
+    } catch (primaryError) {
+      const primaryErrorMessage = primaryError instanceof Error ? primaryError.message : String(primaryError)
+      const fallbackModels = this.getAgentRouterFallbackModels(modelName)
+
+      if (!this.shouldUseAgentRouterFallback(primaryErrorMessage, fallbackModels)) {
+        throw primaryError
+      }
+
+      let lastFallbackError: Error | null = null
+
+      for (const fallbackModel of fallbackModels) {
+        try {
+          const result = await this.callAgentRouter(fallbackModel, prompt, mode, promptLanguage, temperatureOverride)
+          return {
+            message: result.message,
+            providerUsed: AGENTROUTER_PROVIDER,
+            modelUsed: fallbackModel,
+            usedFallback: true,
+            primaryError: primaryErrorMessage,
+          }
+        } catch (fallbackError) {
+          lastFallbackError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError))
+        }
+      }
+
+      throw lastFallbackError || primaryError
     }
+  }
+
+  private static getAgentRouterFallbackModels(primaryModelName: string) {
+    const configuredModels =
+      env.agentRouterFallbackModels.length > 0
+        ? env.agentRouterFallbackModels
+        : DEFAULT_AGENTROUTER_FALLBACK_MODELS
+
+    return Array.from(new Set(configuredModels.map((model) => model.trim()).filter(Boolean))).filter(
+      (model) => model !== primaryModelName
+    )
+  }
+
+  private static shouldUseAgentRouterFallback(primaryErrorMessage: string, fallbackModels: string[]) {
+    if (!env.agentRouterApiKey || fallbackModels.length === 0) {
+      return false
+    }
+
+    const normalized = primaryErrorMessage.toLowerCase()
+    return !(
+      normalized.includes("unsupported ai provider") ||
+      normalized.includes("unsupported ai model") ||
+      normalized.includes("agentrouter_api_key is not configured")
+    )
   }
 
   private static async callOpenRouter(
