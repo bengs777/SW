@@ -1,0 +1,1 @@
+export const OPEN_ALL_FEATURES_DURING_LAUNCH = true

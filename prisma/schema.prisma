@@ -1,0 +1,451 @@
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// User accounts from Google OAuth
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  name          String?
+  image         String?
+  passwordHash  String?
+  balance       Int        @default(0)
+  isDeveloperAccount Boolean @default(false)
+  welcomeBonusGrantedAt DateTime?
+  emailVerified DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // Relations
+  workspaces    Workspace[]
+  memberships   WorkspaceMember[]
+  accounts      Account[]
+  sessions      Session[]
+  usageLogs     UsageLog[]
+  billingTransactions BillingTransaction[]
+  topUpOrders   TopUpOrder[]
+  creditGrantsSent CreditGrant[] @relation("CreditGrantFromUser")
+  creditGrantsReceived CreditGrant[] @relation("CreditGrantToUser")
+  creditGrantsCreated CreditGrant[] @relation("CreditGrantCreatedBy")
+  creditGrantsReversed CreditGrant[] @relation("CreditGrantReversedBy")
+  billingTransactionsAsActor BillingTransaction[] @relation("BillingTransactionActor")
+  billingTransactionsAsCounterparty BillingTransaction[] @relation("BillingTransactionCounterparty")
+  uploadedAssets ProjectAsset[]
+
+  @@index([email])
+  @@index([isDeveloperAccount])
+}
+
+// OAuth accounts
+model Account {
+  id                 String  @id @default(cuid())
+  userId             String
+  type               String
+  provider           String
+  providerAccountId  String
+  refresh_token      String?
+  access_token       String?
+  expires_at         Int?
+  token_type         String?
+  scope              String?
+  id_token           String?
+  session_state      String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// Sessions for NextAuth
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Verification tokens
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Workspaces (organizations in SaaS)
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  image     String?
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  creator   User                @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  members   WorkspaceMember[]
+  projects  Project[]
+  apiKeys   ApiKey[]
+  subscription Subscription?
+
+  @@index([createdBy])
+  @@index([slug])
+}
+
+// Workspace membership with roles
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        String   @default("member") // admin, editor, viewer
+  joinedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+// Projects within workspaces
+model Project {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?
+  framework   String   @default("next")
+  prompt      String?
+  templateId  String?
+  customDomain String?
+  domainVerified Boolean @default(false)
+  memoryJson  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  files     ProjectFile[]
+  history   GenerationHistory[]
+  requestLogs RequestLog[]
+  projectAssets ProjectAsset[]
+
+  @@index([workspaceId])
+  @@index([templateId])
+}
+
+// Generated files per project
+model ProjectFile {
+  id        String   @id @default(cuid())
+  projectId String
+  path      String
+  content   String
+  language  String   @default("typescript")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@unique([projectId, path])
+}
+
+model ProjectAsset {
+  id            String   @id @default(cuid())
+  projectId     String
+  userId        String
+  originalName  String
+  mimeType      String
+  size          Int
+  kind          String
+  storageBucket String
+  storagePath   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([storageBucket, storagePath])
+  @@index([projectId])
+  @@index([userId])
+}
+
+// Track generation history
+model GenerationHistory {
+  id          String   @id @default(cuid())
+  projectId   String
+  prompt      String
+  result      String
+  tokensUsed  Int      @default(0)
+  idempotencyKey String?
+  cost           Decimal  @default(0)
+  createdAt      DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+  @@index([projectId, idempotencyKey])
+}
+
+// Request telemetry and diagnostics for AI operations
+model RequestLog {
+  id            String   @id @default(cuid())
+  projectId     String
+  taskType      String
+  modelConfigId String?
+  modelUsed     String
+  provider      String?
+  latencyMs     Int      @default(0)
+  tokens        Int      @default(0)
+  success       Boolean  @default(false)
+  errorMessage  String?
+  contextJson   String?
+  createdAt     DateTime @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  modelConfig ModelConfig? @relation(fields: [modelConfigId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([taskType])
+  @@index([modelUsed])
+  @@index([provider])
+  @@index([success])
+}
+
+// API Keys for workspace
+model ApiKey {
+  id          String   @id @default(cuid())
+  workspaceId String
+  key         String   @unique
+  name        String
+  lastUsed    DateTime?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([key])
+}
+
+// Subscription/Billing
+model Subscription {
+  id            String   @id @default(cuid())
+  workspaceId   String   @unique
+  plan          String   @default("free") // free, pro, enterprise
+  status        String   @default("active") // active, canceled, past_due
+  tokensLimit   Int      @default(10000)
+  tokensUsed    Int      @default(0)
+  renewalDate   DateTime?
+  canceledAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model BillingTransaction {
+  id                String   @id @default(cuid())
+  userId            String
+  grantId           String?
+  actorUserId       String?
+  counterpartyUserId String?
+  kind              String
+  direction         String
+  amount            Int
+  balanceBefore     Int
+  balanceAfter      Int
+  reference         String?  @unique
+  provider          String?
+  providerReference String?
+  description       String?
+  metadata          String?
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grant CreditGrant? @relation(fields: [grantId], references: [id], onDelete: SetNull)
+  actor User? @relation("BillingTransactionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  counterparty User? @relation("BillingTransactionCounterparty", fields: [counterpartyUserId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([grantId])
+  @@index([actorUserId])
+  @@index([counterpartyUserId])
+  @@index([kind])
+  @@index([provider, providerReference])
+  @@index([createdAt])
+}
+
+model CreditGrant {
+  id                String   @id @default(cuid())
+  reference         String   @unique
+  fromUserId        String
+  toUserId          String
+  amount            Int
+  reason            String
+  note              String?
+  status            String   @default("posted")
+  createdByUserId   String
+  reversedByUserId  String?
+  idempotencyKey    String?  @unique
+  postedAt          DateTime?
+  reversedAt        DateTime?
+  metadata          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  fromUser User @relation("CreditGrantFromUser", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser User @relation("CreditGrantToUser", fields: [toUserId], references: [id], onDelete: Cascade)
+  createdBy User @relation("CreditGrantCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  reversedBy User? @relation("CreditGrantReversedBy", fields: [reversedByUserId], references: [id], onDelete: SetNull)
+  billingTransactions BillingTransaction[]
+
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@index([createdByUserId])
+  @@index([reversedByUserId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model TopUpOrder {
+  id                String   @id @default(cuid())
+  userId            String
+  reference         String   @unique
+  provider          String   @default("pakasir") // "pakasir" or "crypto"
+  providerReference String?  @unique
+  amount            Int
+  status            String   @default("pending")
+  checkoutUrl       String?
+  paymentCode       String?
+  customerName      String?
+  customerEmail     String?
+  payload           String?
+  response          String?
+  paidAt            DateTime?
+  expiresAt         DateTime?
+  
+  // EVM Crypto Fields
+  chainId           Int?
+  walletAddress     String?
+  tokenAmount       String?     // For crypto: in wei/decimal format
+  transactionHash   String?     // Optional until transaction is detected
+  requiresConfirms  Int?        @default(2)
+  confirmCount      Int?        @default(0)
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cryptoPayment CryptoPayment?
+
+  @@index([userId])
+  @@index([status])
+  @@index([provider, reference])
+  @@index([transactionHash])
+  @@index([chainId, walletAddress])
+}
+
+model CryptoPayment {
+  id                String   @id @default(cuid())
+  topUpOrderId      String   @unique
+  chainId           Int      // 56 for BSC, 8453 for Base
+  chainName         String   // "BNB Chain" or "Base"
+  tokenSymbol       String   @default("Native") // "ETH" for Base, "BNB" for BSC
+  amountInUsd       Int      // stored in cents
+  amountInToken     String   // decimal string
+  senderAddress     String
+  recipientAddress  String
+  transactionHash   String?  // Optional until transaction is detected
+  blockNumber       Int?
+  confirmations     Int      @default(0)
+  gasUsed           String?
+  gasPriceInGwei    String?
+  status            String   @default("pending") // pending, confirming, confirmed, failed
+  errorMessage      String?
+  detectedAt        DateTime @default(now())
+  confirmedAt       DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  topUpOrder TopUpOrder @relation(fields: [topUpOrderId], references: [id], onDelete: Cascade)
+
+  @@index([chainId, transactionHash])
+  @@index([senderAddress])
+  @@index([status])
+  @@index([detectedAt])
+}
+
+model ModelConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  provider  String
+  modelName String
+  price     Int
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  usageLogs UsageLog[]
+  requestLogs RequestLog[]
+
+  @@index([provider])
+  @@index([isActive])
+}
+
+// Aggregated model performance scores per task type
+model ModelScore {
+  id          String   @id @default(cuid())
+  modelName   String
+  taskType    String
+  provider    String?
+  successRate Float    @default(0)
+  avgLatency  Int      @default(0)
+  avgRating   Float    @default(0)
+  sampleCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([modelName, taskType])
+  @@index([taskType])
+  @@index([modelName])
+  @@index([provider])
+}
+
+model UsageLog {
+  id           String      @id @default(cuid())
+  userId       String
+  modelConfigId String
+  model        String
+  provider     String
+  cost         Int
+  prompt       String
+  status       String      @default("pending")
+  errorMessage String?
+  refundedAt   DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modelConfig ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([model])
+  @@index([status])
+}
