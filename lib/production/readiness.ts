@@ -36,7 +36,7 @@ export function getProductionReadiness() {
     check("AI_PROVIDER_KEY", "Swift AI provider key", hasAiProvider, "required", "Set OPENROUTER_API_KEY or AGENTROUTER_API_KEY."),
     check("OPENROUTER_API_KEY", "Swift AI OpenRouter key", env.openRouterApiKey, "recommended"),
     check("AGENTROUTER_API_KEY", "Swift AI AgentRouter key", env.agentRouterApiKey, "recommended"),
-    check("AGENTROUTER_BASE_URL", "Swift AI AgentRouter base URL", env.agentRouterApiUrl === "https://agentrouter.org/api/v1", "recommended"),
+    check("AGENTROUTER_BASE_URL", "Swift AI AgentRouter base URL", env.agentRouterApiUrl === "https://agentrouter.org/v1", "recommended"),
     check("PAKASIR_SLUG", "Pakasir merchant slug", env.pakasirSlug, "recommended"),
     check("PAKASIR_API_KEY", "Pakasir API key", env.pakasirApiKey, "recommended"),
     check("SUPABASE_STORAGE_BUCKET", "Asset storage bucket", env.supabaseStorageBucket, "recommended"),

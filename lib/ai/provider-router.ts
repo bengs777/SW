@@ -28,6 +28,11 @@ type ProviderMessage = {
   message: string
 }
 
+type FallbackTarget = {
+  provider: ProviderName
+  modelName: string
+}
+
 const DEFAULT_AGENTROUTER_FALLBACK_MODELS = [
   "deepseek-v3.2",
   "deepseek-v3.1",
@@ -115,31 +120,66 @@ export class ProviderRouter {
       }
     } catch (primaryError) {
       const primaryErrorMessage = primaryError instanceof Error ? primaryError.message : String(primaryError)
-      const fallbackModels = this.getAgentRouterFallbackModels(modelName)
+      const fallbackTargets = this.getFallbackTargets(provider, modelName)
 
-      if (!this.shouldUseAgentRouterFallback(primaryErrorMessage, fallbackModels)) {
+      if (!this.shouldUseFallback(primaryErrorMessage, fallbackTargets)) {
         throw primaryError
       }
 
       let lastFallbackError: Error | null = null
 
-      for (const fallbackModel of fallbackModels) {
+      for (const fallbackTarget of fallbackTargets) {
         try {
-          const result = await this.callAgentRouter(fallbackModel, prompt, mode, promptLanguage, temperatureOverride)
+          const result =
+            fallbackTarget.provider === AGENTROUTER_PROVIDER
+              ? await this.callAgentRouter(fallbackTarget.modelName, prompt, mode, promptLanguage, temperatureOverride)
+              : await this.callOpenRouter(fallbackTarget.modelName, prompt, mode, promptLanguage, temperatureOverride)
+
           return {
             message: result.message,
-            providerUsed: AGENTROUTER_PROVIDER,
-            modelUsed: fallbackModel,
+            providerUsed: fallbackTarget.provider,
+            modelUsed: fallbackTarget.modelName,
             usedFallback: true,
             primaryError: primaryErrorMessage,
           }
         } catch (fallbackError) {
           lastFallbackError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError))
+          if (this.isAuthenticationError(lastFallbackError.message)) {
+            continue
+          }
         }
       }
 
       throw lastFallbackError || primaryError
     }
+  }
+
+  private static getFallbackTargets(primaryProvider: ProviderName, primaryModelName: string): FallbackTarget[] {
+    const targets: FallbackTarget[] = []
+
+    if (env.agentRouterApiKey) {
+      targets.push(
+        ...this.getAgentRouterFallbackModels(primaryModelName).map((modelName) => ({
+          provider: AGENTROUTER_PROVIDER,
+          modelName,
+        }) satisfies FallbackTarget)
+      )
+    }
+
+    if (env.openRouterApiKey && (primaryProvider !== OPENROUTER_PROVIDER || primaryModelName !== OPENROUTER_MODEL_ID)) {
+      targets.push({
+        provider: OPENROUTER_PROVIDER,
+        modelName: OPENROUTER_MODEL_ID,
+      })
+    }
+
+    const seen = new Set<string>()
+    return targets.filter((target) => {
+      const key = `${target.provider}:${target.modelName}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
   }
 
   private static getAgentRouterFallbackModels(primaryModelName: string) {
@@ -153,8 +193,8 @@ export class ProviderRouter {
     )
   }
 
-  private static shouldUseAgentRouterFallback(primaryErrorMessage: string, fallbackModels: string[]) {
-    if (!env.agentRouterApiKey || fallbackModels.length === 0) {
+  private static shouldUseFallback(primaryErrorMessage: string, fallbackTargets: FallbackTarget[]) {
+    if (fallbackTargets.length === 0) {
       return false
     }
 
@@ -163,6 +203,17 @@ export class ProviderRouter {
       normalized.includes("unsupported ai provider") ||
       normalized.includes("unsupported ai model") ||
       normalized.includes("agentrouter_api_key is not configured")
+    )
+  }
+
+  private static isAuthenticationError(message: string) {
+    const normalized = message.toLowerCase()
+    return (
+      normalized.includes("api error (401)") ||
+      normalized.includes("api error (403)") ||
+      normalized.includes("unauthorized") ||
+      normalized.includes("forbidden") ||
+      normalized.includes("invalid api key")
     )
   }
 
@@ -360,7 +411,7 @@ export class ProviderRouter {
 
   private static getTimeoutMs(mode: "chat" | "files" | "inspect") {
     if (mode === "files") {
-      return Math.min(Math.max(env.aiTimeoutMs, 30_000), 45_000)
+      return Math.min(Math.max(env.aiTimeoutMs, 60_000), 120_000)
     }
 
     if (mode === "inspect") {

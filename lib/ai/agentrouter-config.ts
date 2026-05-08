@@ -1,6 +1,6 @@
 import { env } from "@/lib/env"
 
-export const AGENTROUTER_BASE_URL = "https://agentrouter.org/api/v1"
+export const AGENTROUTER_BASE_URL = "https://agentrouter.org/v1"
 export const AGENTROUTER_PROVIDER = "agentrouter"
 export const AGENTROUTER_PUBLIC_NAME = "AgentRouter"
 

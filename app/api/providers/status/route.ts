@@ -98,10 +98,41 @@ async function checkModelAndFallbackStatus(provider: string, modelName: string):
     }
   }
 
+  const openRouterFallbackStatus = await checkOpenRouterFallbackStatus(provider, modelName)
+  if (openRouterFallbackStatus) {
+    return {
+      ...openRouterFallbackStatus,
+      usedFallback: true,
+      reason: `Primary provider failed: ${primaryStatus.reason}. Fallback ${openRouterFallbackStatus.provider}/${openRouterFallbackStatus.modelName} responded.`,
+      action: "Fallback OpenRouter siap. Generate akan otomatis memakai provider yang ready di env.",
+    }
+  }
+
   return {
     ...primaryStatus,
     action: `${primaryStatus.action} Tidak ada fallback AgentRouter yang siap dari env saat pengecekan ini.`,
   }
+}
+
+async function checkOpenRouterFallbackStatus(provider: string, modelName: string) {
+  if (provider === OPENROUTER_PROVIDER && modelName === OPENROUTER_MODEL_ID) {
+    return null
+  }
+
+  const config = getOpenRouterConfig()
+  if (!config.apiKey) {
+    return null
+  }
+
+  const status = await checkSingleSource({
+    provider: OPENROUTER_PROVIDER,
+    label: "OpenRouter",
+    url: `${OPENROUTER_BASE_URL}/chat/completions`,
+    modelName: OPENROUTER_MODEL_ID,
+    apiKey: config.apiKey,
+  })
+
+  return status.status === "connected" || status.status === "slow" ? status : null
 }
 
 async function checkProviderStatus(provider: string, modelName: string): Promise<ProviderStatus> {

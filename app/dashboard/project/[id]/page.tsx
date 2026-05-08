@@ -477,8 +477,8 @@ export default function EditorPage() {
     return {
       status: "error",
       issue: "unknown",
-      reason: "Provider request failed",
-      action: "Periksa koneksi server dan konfigurasi provider.",
+      reason: "Semua provider AI gagal merespons",
+      action: "Swift akan memakai provider yang ready dari env. Pastikan minimal OPENROUTER_API_KEY valid; jika AGENTROUTER_API_KEY 401, ganti token AgentRouter di dashboard provider.",
       checkedAt: new Date().toISOString(),
     }
   }, [])

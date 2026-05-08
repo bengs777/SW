@@ -86,7 +86,7 @@ export const env = {
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterApiUrl: "https://openrouter.ai/api/v1",
   agentRouterApiKey: getEnv("AGENTROUTER_API_KEY", "AGENT_ROUTER_API_KEY", "AGENTROUTER_TOKEN", "AGENT_ROUTER_TOKEN"),
-  agentRouterApiUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL", "AGENT_ROUTER_BASE_URL") || "https://agentrouter.org/api/v1"),
+  agentRouterApiUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL", "AGENT_ROUTER_BASE_URL") || "https://agentrouter.org/v1"),
   agentRouterFallbackModels: getEnvList("AGENTROUTER_FALLBACK_MODELS", "AGENT_ROUTER_FALLBACK_MODELS"),
   devOwnerEmail: DEV_OWNER_EMAIL,
   supabaseServiceRoleKey,
