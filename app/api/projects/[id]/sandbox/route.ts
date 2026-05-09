@@ -7,6 +7,10 @@ import type { GeneratedFile } from "@/lib/types"
 export const runtime = "nodejs"
 export const maxDuration = 300
 
+const SANDBOX_SERVICE_URL = process.env.SANDBOX_SERVICE_URL?.replace(/\/+$/, "") || ""
+const SANDBOX_SERVICE_TOKEN = process.env.SANDBOX_SERVICE_TOKEN || ""
+const IS_VERCEL = Boolean(process.env.VERCEL)
+
 async function assertProjectAccess(projectId: string, userId: string) {
   const project = await prisma.project.findFirst({
     where: {
@@ -41,6 +45,55 @@ function normalizeLanguage(path: string, language?: string): GeneratedFile["lang
   return "ts"
 }
 
+function sandboxDisabledResponse() {
+  return NextResponse.json(
+    {
+      status: "disabled",
+      previewUrl: null,
+      logs: [],
+      error:
+        "Live sandbox is disabled on Vercel until SANDBOX_SERVICE_URL points to a dedicated sandbox runtime service.",
+    },
+    { status: 501 }
+  )
+}
+
+async function proxySandboxRequest(input: {
+  method: "GET" | "POST" | "DELETE"
+  projectId: string
+  body?: unknown
+}) {
+  const headers: HeadersInit = {
+    Accept: "application/json",
+  }
+
+  let body: string | undefined
+  if (input.body !== undefined) {
+    headers["Content-Type"] = "application/json"
+    body = JSON.stringify(input.body)
+  }
+
+  if (SANDBOX_SERVICE_TOKEN) {
+    headers.Authorization = `Bearer ${SANDBOX_SERVICE_TOKEN}`
+  }
+
+  const response = await fetch(`${SANDBOX_SERVICE_URL}/sandbox/${encodeURIComponent(input.projectId)}`, {
+    method: input.method,
+    headers,
+    body,
+    cache: "no-store",
+  })
+
+  const data = await response.json().catch(() => ({
+    status: "error",
+    previewUrl: null,
+    logs: [],
+    error: `Sandbox service returned non-JSON response (${response.status})`,
+  }))
+
+  return NextResponse.json(data, { status: response.status })
+}
+
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -54,6 +107,14 @@ export async function GET(
   const project = await assertProjectAccess(id, session.user.id)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
+  }
+
+  if (SANDBOX_SERVICE_URL) {
+    return proxySandboxRequest({ method: "GET", projectId: id })
+  }
+
+  if (IS_VERCEL) {
+    return sandboxDisabledResponse()
   }
 
   return NextResponse.json(getRuntimeSandbox(id))
@@ -103,6 +164,14 @@ export async function POST(
     )
   }
 
+  if (SANDBOX_SERVICE_URL) {
+    return proxySandboxRequest({ method: "POST", projectId: id, body: { files } })
+  }
+
+  if (IS_VERCEL) {
+    return sandboxDisabledResponse()
+  }
+
   const result = await startRuntimeSandbox(id, files)
   return NextResponse.json(result, { status: result.error ? 500 : 200 })
 }
@@ -120,6 +189,14 @@ export async function DELETE(
   const project = await assertProjectAccess(id, session.user.id)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
+  }
+
+  if (SANDBOX_SERVICE_URL) {
+    return proxySandboxRequest({ method: "DELETE", projectId: id })
+  }
+
+  if (IS_VERCEL) {
+    return sandboxDisabledResponse()
   }
 
   await resetRuntimeSandbox(id)

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process"
 import { createHash } from "crypto"
 import { mkdir, readFile, rm, stat, writeFile } from "fs/promises"
+import { tmpdir } from "os"
 import path from "path"
 import type { GeneratedFile } from "@/lib/types"
 
@@ -24,7 +25,9 @@ type StartSandboxResult = {
   error: string | null
 }
 
-const SANDBOX_ROOT = path.join(process.cwd(), ".swift-sandboxes")
+const SANDBOX_ROOT =
+  process.env.SWIFT_SANDBOX_ROOT ||
+  path.join(process.env.VERCEL ? tmpdir() : process.cwd(), ".swift-sandboxes")
 const BASE_PORT = Number(process.env.SWIFT_SANDBOX_BASE_PORT || 4300)
 const MAX_LOG_LINES = 500
 
