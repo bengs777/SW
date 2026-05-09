@@ -30,6 +30,10 @@ const SANDBOX_ROOT =
   path.join(process.env.VERCEL ? tmpdir() : process.cwd(), ".swift-sandboxes")
 const BASE_PORT = Number(process.env.SWIFT_SANDBOX_BASE_PORT || 4300)
 const MAX_LOG_LINES = 500
+const sandboxDatabaseUrl = () =>
+  process.env.SWIFT_SANDBOX_DATABASE_URL ||
+  process.env.TURSO_DATABASE_URL ||
+  "file:./prisma/dev.db"
 
 const globalForSandbox = globalThis as unknown as {
   swiftSandboxStates?: Map<string, SandboxState>
@@ -127,7 +131,9 @@ function runCommand(
       cwd: state.rootDir,
       env: {
         ...process.env,
-        DATABASE_URL: process.env.SWIFT_SANDBOX_DATABASE_URL || "file:./prisma/dev.db",
+        DATABASE_URL: sandboxDatabaseUrl(),
+        TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL || "",
+        TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN || "",
         NEXTAUTH_URL: `http://localhost:${state.port}`,
         NEXT_PUBLIC_APP_URL: `http://localhost:${state.port}`,
         PORT: String(state.port),
@@ -300,7 +306,9 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
     await writeFile(
       envPath,
       [
-        "DATABASE_URL=file:./prisma/dev.db",
+        `DATABASE_URL=${sandboxDatabaseUrl()}`,
+        `TURSO_DATABASE_URL=${process.env.TURSO_DATABASE_URL || ""}`,
+        `TURSO_AUTH_TOKEN=${process.env.TURSO_AUTH_TOKEN || ""}`,
         "NEXTAUTH_SECRET=swift-sandbox-local-secret",
         `NEXTAUTH_URL=http://localhost:${state.port}`,
         `NEXT_PUBLIC_APP_URL=http://localhost:${state.port}`,
@@ -346,7 +354,9 @@ function startDevServer(state: SandboxState) {
     cwd: state.rootDir,
     env: {
       ...process.env,
-      DATABASE_URL: process.env.SWIFT_SANDBOX_DATABASE_URL || "file:./prisma/dev.db",
+      DATABASE_URL: sandboxDatabaseUrl(),
+      TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL || "",
+      TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN || "",
       NEXTAUTH_URL: `http://localhost:${state.port}`,
       NEXT_PUBLIC_APP_URL: `http://localhost:${state.port}`,
       PORT: String(state.port),

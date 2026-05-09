@@ -65,6 +65,8 @@ const supabasePublicAnonKey = getEnv(
 )
 const supabaseServiceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY")
 const supabaseStorageBucket = getEnv("SUPABASE_STORAGE_BUCKET")
+const sandboxServiceUrl = normalizeUrl(getEnv("SANDBOX_SERVICE_URL"))
+const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
 const isServerRuntime = typeof window === "undefined"
 
 export const env = {
@@ -95,6 +97,13 @@ export const env = {
   supabaseUrl,
   supabaseStorageBucket,
   supabaseBucket: supabaseStorageBucket,
+  redisUrl: getEnv("REDIS_URL", "UPSTASH_REDIS_URL"),
+  sandboxServiceUrl,
+  sandboxServiceToken,
+  sandboxPublicBaseUrl: normalizeUrl(getEnv("SANDBOX_PUBLIC_BASE_URL")),
+  sandboxRoot: getEnv("SWIFT_SANDBOX_ROOT"),
+  sandboxBasePort: getEnvNumber(4300, "SWIFT_SANDBOX_BASE_PORT"),
+  sandboxDatabaseUrl: getEnv("SWIFT_SANDBOX_DATABASE_URL"),
   appUrl: normalizeAppUrl(getEnv("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL") || "http://localhost:3000"),
   pakasirSlug: getEnv("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID"),
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
@@ -115,7 +124,8 @@ export const env = {
 export function getMissingProductionEnvVars() {
   const missing: string[] = []
 
-  if (!env.databaseUrl && !env.tursoDatabaseUrl) missing.push("DATABASE_URL or TURSO_DATABASE_URL")
+  if (!env.tursoDatabaseUrl) missing.push("TURSO_DATABASE_URL")
+  if (!env.tursoAuthToken) missing.push("TURSO_AUTH_TOKEN")
   if (!env.nextAuthSecret) missing.push("NEXTAUTH_SECRET")
   if (!env.googleClientId) missing.push("GOOGLE_CLIENT_ID")
   if (!env.googleClientSecret) missing.push("GOOGLE_CLIENT_SECRET")
@@ -125,6 +135,9 @@ export function getMissingProductionEnvVars() {
   }
   if (!env.supabaseServiceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY")
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
+  if (!env.redisUrl) missing.push("REDIS_URL")
+  if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
+  if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
 
   if (!env.openRouterApiKey && !env.agentRouterApiKey) {
     missing.push("OPENROUTER_API_KEY or AGENTROUTER_API_KEY")

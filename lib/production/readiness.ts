@@ -26,8 +26,8 @@ function check(key: string, label: string, value: unknown, severity: ReadinessCh
 export function getProductionReadiness() {
   const hasAiProvider = Boolean(env.openRouterApiKey || env.agentRouterApiKey)
   const checks: ReadinessCheck[] = [
-    check("DATABASE_URL", "Prisma datasource URL", env.databaseUrl, "required"),
     check("TURSO_DATABASE_URL", "Turso/libSQL database URL", env.tursoDatabaseUrl, "required"),
+    check("TURSO_AUTH_TOKEN", "Turso auth token", env.tursoAuthToken, "required"),
     check("NEXTAUTH_SECRET", "NextAuth secret", env.nextAuthSecret, "required"),
     check("NEXTAUTH_URL", "NextAuth canonical URL", env.nextAuthUrl, "required"),
     check("NEXT_PUBLIC_APP_URL", "Public app URL", env.appUrl, "required"),
@@ -37,10 +37,16 @@ export function getProductionReadiness() {
     check("OPENROUTER_API_KEY", "Swift AI OpenRouter key", env.openRouterApiKey, "recommended"),
     check("AGENTROUTER_API_KEY", "Swift AI AgentRouter key", env.agentRouterApiKey, "recommended"),
     check("AGENTROUTER_BASE_URL", "Swift AI AgentRouter base URL", env.agentRouterApiUrl === "https://agentrouter.org/v1", "recommended"),
+    check("REDIS_URL", "Redis/BullMQ queue URL", env.redisUrl, "required"),
+    check("SANDBOX_SERVICE_URL", "External sandbox runtime service URL", env.sandboxServiceUrl, "required"),
+    check("SANDBOX_SERVICE_TOKEN", "External sandbox runtime bearer token", env.sandboxServiceToken, "required"),
+    check("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", env.supabaseUrl, "required"),
+    check("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "Supabase publishable key", env.supabasePublicAnonKey, "required"),
+    check("SUPABASE_STORAGE_BUCKET", "Supabase asset storage bucket", env.supabaseStorageBucket, "required"),
+    check("SUPABASE_SERVICE_ROLE_KEY", "Supabase asset storage service key", env.supabaseServiceRoleKey, "required"),
     check("PAKASIR_SLUG", "Pakasir merchant slug", env.pakasirSlug, "recommended"),
     check("PAKASIR_API_KEY", "Pakasir API key", env.pakasirApiKey, "recommended"),
-    check("SUPABASE_STORAGE_BUCKET", "Asset storage bucket", env.supabaseStorageBucket, "recommended"),
-    check("SUPABASE_SERVICE_ROLE_KEY", "Asset storage service key", env.supabaseServiceRoleKey, "recommended"),
+    check("VERCEL_ACCESS_TOKEN", "Generated app deploy token", env.vercelAccessToken, "recommended"),
     check("DEV_OWNER_EMAIL", "Developer owner email", env.devOwnerEmail, "required"),
     check("AI_RATE_LIMIT_PER_MINUTE", "AI prompt rate limit per minute", aiRateLimitConfig.perMinute > 0, "required", `${aiRateLimitConfig.perMinute} prompts/minute`),
     check("AI_RATE_LIMIT_PER_DAY", "AI prompt rate limit per day", aiRateLimitConfig.perDay > 0, "required", `${aiRateLimitConfig.perDay} prompts/day`),

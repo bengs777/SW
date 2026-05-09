@@ -9,7 +9,11 @@ export const maxDuration = 300
 
 const SANDBOX_SERVICE_URL = process.env.SANDBOX_SERVICE_URL?.replace(/\/+$/, "") || ""
 const SANDBOX_SERVICE_TOKEN = process.env.SANDBOX_SERVICE_TOKEN || ""
+const IS_PRODUCTION = process.env.NODE_ENV === "production"
 const IS_VERCEL = Boolean(process.env.VERCEL)
+const MAX_SANDBOX_FILES = Number(process.env.SWIFT_SANDBOX_MAX_FILES || 240)
+const MAX_SANDBOX_TOTAL_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_TOTAL_BYTES || 6 * 1024 * 1024)
+const MAX_SANDBOX_FILE_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_FILE_BYTES || 512 * 1024)
 
 async function assertProjectAccess(projectId: string, userId: string) {
   const project = await prisma.project.findFirst({
@@ -45,6 +49,27 @@ function normalizeLanguage(path: string, language?: string): GeneratedFile["lang
   return "ts"
 }
 
+function validateSandboxFiles(files: GeneratedFile[]) {
+  if (files.length > MAX_SANDBOX_FILES) {
+    return `Too many files for live preview. Maximum: ${MAX_SANDBOX_FILES}`
+  }
+
+  let totalBytes = 0
+  for (const file of files) {
+    const size = Buffer.byteLength(String(file.content || ""), "utf8")
+    if (size > MAX_SANDBOX_FILE_BYTES) {
+      return `File ${file.path} exceeds live preview file size limit.`
+    }
+    totalBytes += size
+  }
+
+  if (totalBytes > MAX_SANDBOX_TOTAL_BYTES) {
+    return `Live preview payload exceeds total size limit. Maximum bytes: ${MAX_SANDBOX_TOTAL_BYTES}`
+  }
+
+  return null
+}
+
 function sandboxDisabledResponse() {
   return NextResponse.json(
     {
@@ -55,6 +80,19 @@ function sandboxDisabledResponse() {
         "Live sandbox is disabled on Vercel until SANDBOX_SERVICE_URL points to a dedicated sandbox runtime service.",
     },
     { status: 501 }
+  )
+}
+
+function sandboxMisconfiguredResponse() {
+  return NextResponse.json(
+    {
+      status: "disabled",
+      previewUrl: null,
+      logs: [],
+      error:
+        "Live sandbox is not production-ready until SANDBOX_SERVICE_URL and SANDBOX_SERVICE_TOKEN are both configured.",
+    },
+    { status: 503 }
   )
 }
 
@@ -110,6 +148,9 @@ export async function GET(
   }
 
   if (SANDBOX_SERVICE_URL) {
+    if (IS_PRODUCTION && !SANDBOX_SERVICE_TOKEN) {
+      return sandboxMisconfiguredResponse()
+    }
     return proxySandboxRequest({ method: "GET", projectId: id })
   }
 
@@ -164,7 +205,23 @@ export async function POST(
     )
   }
 
+  const validationError = validateSandboxFiles(files)
+  if (validationError) {
+    return NextResponse.json(
+      {
+        status: "error",
+        previewUrl: null,
+        logs: [],
+        error: validationError,
+      },
+      { status: 413 }
+    )
+  }
+
   if (SANDBOX_SERVICE_URL) {
+    if (IS_PRODUCTION && !SANDBOX_SERVICE_TOKEN) {
+      return sandboxMisconfiguredResponse()
+    }
     return proxySandboxRequest({ method: "POST", projectId: id, body: { files } })
   }
 
@@ -192,6 +249,9 @@ export async function DELETE(
   }
 
   if (SANDBOX_SERVICE_URL) {
+    if (IS_PRODUCTION && !SANDBOX_SERVICE_TOKEN) {
+      return sandboxMisconfiguredResponse()
+    }
     return proxySandboxRequest({ method: "DELETE", projectId: id })
   }
 
