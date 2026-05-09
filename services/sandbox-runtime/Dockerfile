@@ -2,10 +2,10 @@ FROM node:22-bookworm-slim
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY services/sandbox-runtime/package*.json ./
 RUN npm install --omit=dev
 
-COPY server.mjs ./
+COPY services/sandbox-runtime/server.mjs ./
 
 ENV NODE_ENV=production
 ENV PORT=8080
