@@ -127,8 +127,13 @@ export class ProviderRouter {
       }
 
       let lastFallbackError: Error | null = null
+      let authFailedProvider: ProviderName | null = null
 
       for (const fallbackTarget of fallbackTargets) {
+        if (authFailedProvider && fallbackTarget.provider === authFailedProvider) {
+          continue
+        }
+
         try {
           const result =
             fallbackTarget.provider === AGENTROUTER_PROVIDER
@@ -145,6 +150,7 @@ export class ProviderRouter {
         } catch (fallbackError) {
           lastFallbackError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError))
           if (this.isAuthenticationError(lastFallbackError.message)) {
+            authFailedProvider = fallbackTarget.provider
             continue
           }
         }

@@ -183,6 +183,14 @@ async function checkAgentRouterFallbackStatus(primaryModelName: string) {
     if (status.status === "connected" || status.status === "slow") {
       return status
     }
+
+    if (status.issue === "auth") {
+      return {
+        ...status,
+        reason: `AgentRouter authentication failed for all models. API key may be invalid or expired.`,
+        action: "Periksa AGENTROUTER_API_KEY di .env. Jika key sudah tidak valid, kosongkan agar Swift hanya memakai OpenRouter.",
+      }
+    }
   }
 
   return null
