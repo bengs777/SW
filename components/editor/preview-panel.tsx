@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback, useEffect } from "react"
+import dynamic from "next/dynamic"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { SandboxPreview } from "./sandbox-preview"
@@ -25,7 +26,15 @@ import {
 import { cn } from "@/lib/utils"
 import type { GeneratedFile } from "@/lib/types"
 import type { GenerationProgress } from "@/app/dashboard/project/[id]/page"
-import { buildBrowserPreviewFiles } from "@/lib/preview/sanitizer"
+
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+      Loading editor...
+    </div>
+  ),
+})
 
 type ViewportSize = "mobile" | "tablet" | "desktop"
 
@@ -46,6 +55,7 @@ interface PreviewPanelProps {
   onPreviewErrorChange?: (error: string | null) => void
   isGenerating?: boolean
   generationProgress?: GenerationProgress | null
+  projectId?: string
 }
 
 export function PreviewPanel({
@@ -65,6 +75,7 @@ export function PreviewPanel({
   onPreviewErrorChange,
   isGenerating = false,
   generationProgress = null,
+  projectId,
 }: PreviewPanelProps) {
   const [internalActiveTab, setInternalActiveTab] = useState<"preview" | "code" | "explorer">("preview")
   const [viewport, setViewport] = useState<ViewportSize>("desktop")
@@ -310,8 +321,9 @@ export function PreviewPanel({
             {files.length > 0 ? (
               <SandboxPreview 
                 key={previewKey}
-                files={previewFiles ?? buildBrowserPreviewFiles(files)} 
+                files={previewFiles ?? files}
                 onError={handlePreviewError}
+                projectId={projectId}
               />
             ) : isGenerating ? (
               <GeneratingPreview progress={generationProgress} />
@@ -446,19 +458,44 @@ function CodeEditor({
   code: string
   onChange: (value: string) => void
 }) {
+  const language = getMonacoLanguage(filePath)
+
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
         {filePath}
       </div>
-      <textarea
+      <MonacoEditor
+        key={filePath}
         value={code}
-        onChange={(event) => onChange(event.target.value)}
-        spellCheck={false}
-        className="h-full w-full resize-none bg-background p-4 font-mono text-sm leading-relaxed text-foreground outline-none"
+        language={language}
+        theme="vs-dark"
+        onChange={(value) => onChange(value || "")}
+        options={{
+          automaticLayout: true,
+          minimap: { enabled: false },
+          fontSize: 13,
+          lineNumbersMinChars: 3,
+          scrollBeyondLastLine: false,
+          wordWrap: "on",
+          tabSize: 2,
+          padding: { top: 14, bottom: 14 },
+        }}
       />
     </div>
   )
+}
+
+function getMonacoLanguage(path: string) {
+  if (path.endsWith(".tsx") || path.endsWith(".jsx")) return "typescript"
+  if (path.endsWith(".ts") || path.endsWith(".js")) return "typescript"
+  if (path.endsWith(".css")) return "css"
+  if (path.endsWith(".json")) return "json"
+  if (path.endsWith(".html")) return "html"
+  if (path.endsWith(".md")) return "markdown"
+  if (path.endsWith(".prisma")) return "prisma"
+  if (path.includes(".env")) return "shell"
+  return "plaintext"
 }
 
 type TreeNodeData = {

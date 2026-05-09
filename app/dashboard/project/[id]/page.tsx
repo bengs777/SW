@@ -1176,6 +1176,7 @@ export default function EditorPage() {
                 onPreviewErrorChange={handlePreviewErrorChange}
                 isGenerating={isGenerating}
                 generationProgress={generationProgress}
+                projectId={projectId}
               />
             )}
           </div>
@@ -1255,6 +1256,7 @@ export default function EditorPage() {
                 onPreviewErrorChange={handlePreviewErrorChange}
                 isGenerating={isGenerating}
                 generationProgress={generationProgress}
+                projectId={projectId}
               />
             </ResizablePanel>
             {showLogsPanel && (

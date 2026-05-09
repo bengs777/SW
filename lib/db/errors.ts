@@ -30,3 +30,42 @@ export function isMissingRequiredTableError(error: unknown) {
 export function shouldSoftFailMissingTable() {
   return process.env.NODE_ENV !== "production"
 }
+
+function isSqliteBusyError(error: unknown) {
+  const message =
+    error instanceof Prisma.PrismaClientKnownRequestError
+      ? `${error.message} ${error.meta ? JSON.stringify(error.meta) : ""}`
+      : error instanceof Error
+        ? error.message
+        : String(error)
+
+  return /SQLITE_BUSY|database is locked/i.test(message)
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export async function withSqliteBusyRetry<T>(
+  operation: () => Promise<T>,
+  options: { attempts?: number; baseDelayMs?: number } = {}
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? 6)
+  const baseDelayMs = Math.max(25, options.baseDelayMs ?? 120)
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (!isSqliteBusyError(error) || attempt === attempts - 1) {
+        throw error
+      }
+
+      await sleep(baseDelayMs * (attempt + 1))
+    }
+  }
+
+  throw lastError
+}

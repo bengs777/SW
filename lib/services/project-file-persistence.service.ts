@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client"
 import { prisma } from "@/lib/db/client"
+import { withSqliteBusyRetry } from "@/lib/db/errors"
 import type { GeneratedFile } from "@/lib/types"
 
 type PersistProjectFilesOptions = {
@@ -141,7 +142,7 @@ export class ProjectFilePersistenceService {
   ) {
     const normalizedFiles = dedupeFilesByPath(files)
 
-    return prisma.$transaction(async (tx) => {
+    return withSqliteBusyRetry(() => prisma.$transaction(async (tx) => {
       const createdHistory = await tx.generationHistory.create({
         data: {
           projectId,
@@ -168,6 +169,6 @@ export class ProjectFilePersistenceService {
         files: normalizedFiles,
         fileDiff,
       }
-    })
+    }))
   }
 }

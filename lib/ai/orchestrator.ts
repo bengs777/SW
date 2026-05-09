@@ -1,7 +1,8 @@
 import { prisma } from '@/lib/db/client'
-import { ProviderRouter } from './provider-router'
 import type { ProviderName } from './provider-router'
 import type { GeneratedFile } from '@/lib/types'
+import buildPlan from '@/lib/orchestrator/planner'
+import { executePlan } from '@/lib/orchestrator/agent-loop'
 
 type OrchestratorOpts = {
   projectId: string
@@ -29,7 +30,7 @@ type OrchestratorNew = {
 }
 
 export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<OrchestratorExisting | OrchestratorNew> {
-  const { projectId, idempotencyKey } = opts
+  const { projectId, idempotencyKey, prompt } = opts
 
   if (idempotencyKey) {
     const existing = await prisma.generationHistory.findFirst({
@@ -53,21 +54,31 @@ export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<Orc
     }
   }
 
-  // Delegate to ProviderRouter which handles primary+fallback providers
-  const providerResult = await ProviderRouter.generate({
-    provider: opts.provider,
-    modelName: opts.modelName,
-    prompt: opts.prompt,
-  })
+  // Build a local plan (no external AI calls) and run it via the agent loop
+  const plan = await buildPlan(prompt, { projectId })
+  const result = await executePlan(plan, { projectId, idempotencyKey })
+
+  if (!result.success) {
+    return {
+      alreadyExists: false,
+      providerResult: {
+        message: result.error || 'Orchestrator failed',
+        providerUsed: result.providerResult?.providerUsed || '',
+        modelUsed: result.providerResult?.modelUsed || '',
+        usedFallback: result.providerResult?.usedFallback || false,
+        primaryError: result.error || result.providerResult?.primaryError || null,
+      },
+    }
+  }
 
   return {
     alreadyExists: false,
     providerResult: {
-      message: providerResult.message,
-      providerUsed: providerResult.providerUsed,
-      modelUsed: providerResult.modelUsed,
-      usedFallback: providerResult.usedFallback,
-      primaryError: providerResult.primaryError ?? null,
+      message: 'Orchestrator completed',
+      providerUsed: result.providerResult?.providerUsed || '',
+      modelUsed: result.providerResult?.modelUsed || '',
+      usedFallback: result.providerResult?.usedFallback || false,
+      primaryError: null,
     },
   }
 }
