@@ -1,8 +1,10 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, RefreshCw, TerminalSquare } from "lucide-react"
 import type { GeneratedFile } from "@/lib/types"
+
+const USE_LOCAL_PREVIEW = true
 
 type SandboxStatus = {
   status: "idle" | "installing" | "building" | "running" | "error"
@@ -28,6 +30,7 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
   const [isBooting, setIsBooting] = useState(false)
   const [iframeKey, setIframeKey] = useState(0)
   const [fallbackDoc, setFallbackDoc] = useState<string | null>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fileFingerprint = useMemo(() => {
     return files
@@ -36,7 +39,7 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
   }, [files])
 
   const refreshStatus = useCallback(async () => {
-    if (!projectId) return
+    if (USE_LOCAL_PREVIEW || !projectId) return
     const response = await fetch(`/api/projects/${projectId}/sandbox`, { cache: "no-store" })
     if (!response.ok) return
     const data = (await response.json()) as SandboxStatus
@@ -45,6 +48,11 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
   }, [onError, projectId])
 
   const startRuntime = useCallback(async () => {
+    if (USE_LOCAL_PREVIEW) {
+      setFallbackDoc(buildFallbackSrcDoc(files))
+      setStatus({ status: "running", previewUrl: null, logs: [], error: null })
+      return
+    }
     if (!projectId || files.length === 0) {
       return
     }
@@ -90,13 +98,29 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
     }
   }, [files, onError, projectId])
 
+// Local preview: debounced rebuild when files change
   useEffect(() => {
+    if (!USE_LOCAL_PREVIEW) return
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      setFallbackDoc(buildFallbackSrcDoc(files))
+      setStatus({ status: "running", previewUrl: null, logs: [], error: null })
+    }, 400)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [fileFingerprint, files])
+
+  useEffect(() => {
+    if (USE_LOCAL_PREVIEW) {
+      return
+    }
     setFallbackDoc(null)
     void startRuntime()
   }, [fileFingerprint, startRuntime])
 
   useEffect(() => {
-    if (!projectId) return
+    if (USE_LOCAL_PREVIEW || !projectId) return
     const interval = window.setInterval(() => {
       void refreshStatus()
     }, status.status === "running" ? 5000 : 1500)
@@ -104,11 +128,11 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
     return () => window.clearInterval(interval)
   }, [projectId, refreshStatus, status.status])
 
-  if (!projectId) {
+  if (!USE_LOCAL_PREVIEW && !projectId) {
     return (
       <div className={`flex h-full w-full items-center justify-center bg-background p-6 text-center ${className}`}>
         <div className="max-w-sm text-sm text-muted-foreground">
-          Runtime preview needs a project id before it can start the sandbox.
+          Runtime preview requires a project id to start the sandbox runtime.
         </div>
       </div>
     )
@@ -153,7 +177,7 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
         </div>
       )}
 
-      {status.error && (
+      {status.error && !fallbackDoc && (
         <div className="absolute bottom-3 left-3 right-3 z-20 rounded-md border border-destructive/30 bg-background/95 p-3 text-xs shadow-lg backdrop-blur">
           <div className="mb-2 flex items-center gap-2 font-medium text-destructive">
             <AlertCircle className="h-4 w-4" />
@@ -169,7 +193,7 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
 function buildFallbackSrcDoc(files: GeneratedFile[]) {
   const pageFile = files.find((file) => file.path.toLowerCase().replace(/\\\\/g, "/").endsWith("app/page.tsx"))
   if (pageFile?.content) {
-    return buildTsxPreviewSrcDoc(pageFile.content)
+    return buildTsxPreviewSrcDoc(pageFile.content, files)
   }
 
   const htmlFile = files.find((file) => file.path.toLowerCase().endsWith(".html"))
@@ -206,54 +230,178 @@ function buildFallbackSrcDoc(files: GeneratedFile[]) {
 </html>`
 }
 
-function buildTsxPreviewSrcDoc(tsxContent: string) {
-  const serializedTsx = JSON.stringify(tsxContent)
-  
+function buildTsxPreviewSrcDoc(pageContent: string, allFiles: GeneratedFile[]) {
+  // Build file map: normalized path → content
+  const fileMap: Record<string, string> = {}
+  for (const file of allFiles) {
+    const normalized = file.path.replace(/\\/g, "/").replace(/^\.\//, "")
+    fileMap[normalized] = file.content
+  }
+  // Ensure entry exists at app/page.tsx
+  fileMap["app/page.tsx"] = pageContent
+
+  const serializedFiles = JSON.stringify(fileMap)
+    .replace(/<\/script>/gi, "<\\/script>")
+    .replace(/<!--/g, "<\\!--")
+
   const head = `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Local TSX Preview</title>
-    <link rel="stylesheet" href="data:text/css,body{margin:0;font-family:system-ui, sans-serif;background:#fff;color:#111;}#root{min-height:100vh;} .error{padding:24px;color:#a00;background:#fee;font-family:ui-monospace,monospace;}" />
+    <title>Preview</title>
+    <style>
+      * { margin:0; padding:0; box-sizing:border-box; }
+      body { font-family:system-ui,sans-serif; background:#fff; color:#111; min-height:100vh; }
+      #root { min-height:100vh; }
+      .loading { display:flex; align-items:center; justify-content:center; height:100vh; flex-direction:column; gap:12px; color:#888; font-size:14px; }
+      .loading .spinner { width:28px; height:28px; border:3px solid #e5e7eb; border-top-color:#3b82f6; border-radius:50%; animation:spin .6s linear infinite; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+      .error-block { display:none; padding:32px; font-family:ui-monospace,monospace; font-size:13px; line-height:1.5; color:#a00; white-space:pre-wrap; }
+      .error-title { font-weight:600; color:#d00; margin-bottom:8px; font-size:14px; }
+      .error-stack { color:#555; margin-top:4px; font-size:12px; }
+      body.running .loading { display:none; }
+      body.running .error-block { display:none; }
+      body.error .loading { display:none; }
+      body.error #root { display:none; }
+      body.error .error-block { display:block; }
+      body.compiling .loading { display:flex; }
+      body.compiling #root { display:none; }
+      body.compiling .error-block { display:none; }
+    </style>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   </head>
-  <body>
+  <body class="compiling">
+    <div class="loading">
+      <div class="spinner"></div>
+      <span>Compiling preview...</span>
+    </div>
     <div id="root"></div>
-    <div id="error" class="error" style="display:none;"></div>
+    <div id="error" class="error-block"></div>
     <script>`
 
   const script = `
-      const rawCode = ${serializedTsx};
-      const sanitizedCode = rawCode.replace(/\\n/g, "\\n").replace(/\\r/g, "\\r");
-      const setupCode = sanitizedCode.replace(/import\\s+React.*from\\s+["']react["'];?/g, "").replace(/export\\s+default\\s+/g, "const __PreviewComponent = ").replace(/export\\s+const\\s+(\\w+)/g, "const $1 = ").replace(/export\\s+\\{([^}]+)\\}/g, "const {$1} = {};");
-      try {
-        const transformed = Babel.transform(setupCode, {
-          presets: [["react", { runtime: "automatic" }], "typescript"],
-          sourceType: "script",
-        }).code;
-        const fnBody = transformed + "\\n return typeof __PreviewComponent !== 'undefined' ? __PreviewComponent : typeof App !== 'undefined' ? App : null;";
-        const fn = new Function("React", "ReactDOM", fnBody);
-        const Component = fn(window.React, window.ReactDOM);
-        if (!Component) {
-          throw new Error("No default React component export found in app/page.tsx.");
-        }
-        const root = ReactDOM.createRoot(document.getElementById("root"));
-        root.render(React.createElement(Component));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const errorEl = document.getElementById("error");
-        if (errorEl) {
-          errorEl.style.display = "block";
-          errorEl.textContent = "Local preview compile failed: " + message;
-        }
-      }
-    `
+(function() {
+  'use strict';
 
-  const tail = `
-    </script>
+  var __files = ${serializedFiles};
+  var __cache = {};
+  var __exts = ['', '.tsx', '.ts', '.jsx', '.js', '/index.tsx', '/index.ts', '/index.js'];
+
+  function __tryExt(p) {
+    for (var i = 0; i < __exts.length; i++) {
+      var k = p + __exts[i];
+      if (__files[k] !== undefined) return k;
+    }
+    return p + '.tsx';
+  }
+
+  function __resolve(base, source) {
+    if (source.startsWith('@/')) return __tryExt(source.slice(2));
+    if (source.startsWith('./') || source.startsWith('../')) {
+      var dir = base.lastIndexOf('/');
+      var dirPath = dir >= 0 ? base.slice(0, dir + 1) : '';
+      var parts = dirPath.split('/').filter(Boolean);
+      var segs = source.split('/');
+      for (var j = 0; j < segs.length; j++) {
+        if (segs[j] === '..') parts.pop();
+        else if (segs[j] !== '.') parts.push(segs[j]);
+      }
+      return __tryExt(parts.join('/'));
+    }
+    return source;
+  }
+
+  function __require(base, source) {
+    var resolved = __resolve(base, source);
+    if (__cache[resolved]) return __cache[resolved];
+
+    var content = __files[resolved];
+    if (!content) {
+      console.warn('[preview] Module "' + source + '" not found at "' + resolved + '"');
+      return {};
+    }
+
+    // Pre-process: rewrite import paths to resolved absolute paths
+    var processed = content.replace(
+      /(?:import|export)\\b[\\s\\S]*?(?:from\\s+)?['"]([^'"]+)['"]|import\\s+['"]([^'"]+)['"]/g,
+      function(match, from1, from2) {
+        var src = from1 || from2;
+        if (!src) return match;
+        if (src.startsWith('@/') || src.startsWith('./') || src.startsWith('../')) {
+          return match.replace(src, __resolve(resolved, src));
+        }
+        return match;
+      }
+    );
+
+    var transformed;
+    try {
+      var result = Babel.transform(processed, {
+        filename: resolved,
+        presets: [
+          ['react', { runtime: 'automatic' }],
+          ['typescript', { isTSX: true, allExtensions: true }],
+          ['env', { modules: 'commonjs' }]
+        ],
+        sourceType: 'module',
+        parserOpts: { allowImportExportEverywhere: true, plugins: ['jsx', 'typescript'] }
+      });
+      transformed = result.code;
+    } catch (e) {
+      throw new Error('Compile error in ' + resolved + ': ' + e.message);
+    }
+
+    var exports = {};
+    var module = { exports: exports };
+
+    try {
+      var fn = new Function('require', 'exports', 'module', '__dirname', transformed);
+      fn(
+        function(req) { return __require(resolved, req); },
+        exports, module,
+        resolved.substring(0, resolved.lastIndexOf('/') + 1)
+      );
+    } catch (e) {
+      throw new Error('Runtime error in ' + resolved + ': ' + e.message);
+    }
+
+    __cache[resolved] = module.exports;
+    return module.exports;
+  }
+
+  var timer = setTimeout(function() {
+    var el = document.getElementById('error');
+    if (el) {
+      document.body.className = 'error';
+      el.innerHTML = '<div class="error-title">Preview compilation timed out</div><div class="error-stack">Check for circular dependencies or large files.</div>';
+    }
+  }, 15000);
+
+  try {
+    document.body.className = 'compiling';
+    var entry = __require('', 'app/page.tsx');
+    var Component = entry.default || entry;
+    if (!Component) throw new Error('No default React component found in app/page.tsx.');
+    clearTimeout(timer);
+    document.body.className = 'running';
+    var root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(Component));
+  } catch (e) {
+    clearTimeout(timer);
+    document.body.className = 'error';
+    var el = document.getElementById('error');
+    if (el) {
+      var msg = (e.stack || e.message || String(e))
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      el.innerHTML = '<div class="error-title">Preview Error</div><div class="error-stack">' + msg.replace(/\\n/g, '<br>') + '</div>';
+    }
+  }
+})();`
+
+  const tail = `</script>
   </body>
 </html>`
 

@@ -11,6 +11,8 @@ const SANDBOX_SERVICE_URL = process.env.SANDBOX_SERVICE_URL?.replace(/\/+$/, "")
 const SANDBOX_SERVICE_TOKEN = process.env.SANDBOX_SERVICE_TOKEN || ""
 const IS_PRODUCTION = process.env.NODE_ENV === "production"
 const IS_VERCEL = Boolean(process.env.VERCEL)
+const ALLOW_LOCAL_SANDBOX = process.env.SWIFT_ALLOW_LOCAL_SANDBOX !== "0"
+
 const MAX_SANDBOX_FILES = Number(process.env.SWIFT_SANDBOX_MAX_FILES || 240)
 const MAX_SANDBOX_TOTAL_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_TOTAL_BYTES || 6 * 1024 * 1024)
 const MAX_SANDBOX_FILE_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_FILE_BYTES || 512 * 1024)
