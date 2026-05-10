@@ -27,6 +27,7 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
   })
   const [isBooting, setIsBooting] = useState(false)
   const [iframeKey, setIframeKey] = useState(0)
+  const [fallbackDoc, setFallbackDoc] = useState<string | null>(null)
 
   const fileFingerprint = useMemo(() => {
     return files
@@ -63,21 +64,26 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
       })
       const data = (await response.json().catch(() => ({}))) as Partial<SandboxStatus> & { error?: string }
 
+      const previewUrl = data.previewUrl || null
+      const error = data.error || null
+
       setStatus({
         status: data.status || (response.ok ? "running" : "error"),
-        previewUrl: data.previewUrl || null,
+        previewUrl,
         logs: Array.isArray(data.logs) ? data.logs : [],
-        error: data.error || null,
+        error,
       })
 
-      if (!response.ok || data.error) {
-        onError?.(data.error || `Runtime sandbox failed (${response.status})`)
+      if (!response.ok || error) {
+        onError?.(error || `Runtime sandbox failed (${response.status})`)
+        setFallbackDoc(buildFallbackSrcDoc(files))
       } else {
         setIframeKey((current) => current + 1)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to start runtime sandbox"
       setStatus((current) => ({ ...current, status: "error", error: message }))
+      setFallbackDoc(buildFallbackSrcDoc(files))
       onError?.(message)
     } finally {
       setIsBooting(false)
@@ -85,6 +91,7 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
   }, [files, onError, projectId])
 
   useEffect(() => {
+    setFallbackDoc(null)
     void startRuntime()
   }, [fileFingerprint, startRuntime])
 
@@ -107,17 +114,18 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
     )
   }
 
-  const showOverlay = isBooting || status.status === "installing" || status.status === "building" || !status.previewUrl
+  const showOverlay = isBooting || status.status === "installing" || status.status === "building" || (!status.previewUrl && !fallbackDoc)
   const latestLogs = status.logs.slice(-10)
 
   return (
     <div className={`relative h-full w-full bg-background ${className}`}>
-      {status.previewUrl && (
+      {(status.previewUrl || fallbackDoc) && (
         <iframe
-          key={iframeKey}
+          key={`${iframeKey}-${fallbackDoc ? "fallback" : "live"}`}
           className="h-full w-full border-0 bg-background"
           title="Live runtime preview"
-          src={status.previewUrl}
+          src={status.previewUrl ?? undefined}
+          srcDoc={fallbackDoc ?? undefined}
           sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
         />
       )}
@@ -156,6 +164,50 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
       )}
     </div>
   )
+}
+
+function buildFallbackSrcDoc(files: GeneratedFile[]) {
+  const htmlFile = files.find((file) => file.path.toLowerCase().endsWith(".html"))
+  if (htmlFile?.content) {
+    return htmlFile.content
+  }
+
+  const fileSections = files.slice(0, 5).map((file) => {
+    const content = escapeHtml(file.content)
+    return `
+      <section style="margin-bottom:24px;">
+        <h2 style="font-size:18px;margin:0 0 8px 0;color:#111">${escapeHtml(file.path)}</h2>
+        <pre style="background:#111;color:#f8f8f2;padding:12px;border-radius:8px;overflow:auto;max-height:240px;">${content}</pre>
+      </section>`
+  }).join("")
+
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Preview fallback</title>
+    <style>
+      body { margin:0; font-family:system-ui, sans-serif; background:#f5f7fb; color:#111; padding:24px; }
+      h1 { margin:0 0 12px; font-size:24px; }
+      p { margin:0 0 18px; color:#555; }
+      pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:13px; }
+    </style>
+  </head>
+  <body>
+    <h1>Local preview fallback</h1>
+    <p>Runtime sandbox is unavailable. Showing a local snapshot of your project files.</p>
+    ${fileSections}
+  </body>
+</html>`
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
 }
 
 function RuntimeLogView({ logs }: { logs: string[] }) {
