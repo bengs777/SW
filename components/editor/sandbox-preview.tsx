@@ -208,7 +208,8 @@ function buildFallbackSrcDoc(files: GeneratedFile[]) {
 
 function buildTsxPreviewSrcDoc(tsxContent: string) {
   const serializedTsx = JSON.stringify(tsxContent)
-  return `<!DOCTYPE html>
+  
+  const head = `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -222,33 +223,41 @@ function buildTsxPreviewSrcDoc(tsxContent: string) {
   <body>
     <div id="root"></div>
     <div id="error" class="error" style="display:none;"></div>
-    <script>
-      const rawCode = ${serializedTsx}
-      const sanitizedCode = rawCode.replace(/\\n/g, "\\n").replace(/\\r/g, "\\r")
-      const setupCode = sanitizedCode.replace(/import\\s+React.*from\\s+[\"']react[\"'];?/g, "").replace(/export\\s+default\\s+/g, "const __PreviewComponent = ").replace(/export\\s+const\\s+(\\w+)/g, "const $1 = ").replace(/export\\s+\{([^}]+)\}/g, "const {$1} = {};")
+    <script>`
+
+  const script = `
+      const rawCode = ${serializedTsx};
+      const sanitizedCode = rawCode.replace(/\\n/g, "\\n").replace(/\\r/g, "\\r");
+      const setupCode = sanitizedCode.replace(/import\\s+React.*from\\s+["']react["'];?/g, "").replace(/export\\s+default\\s+/g, "const __PreviewComponent = ").replace(/export\\s+const\\s+(\\w+)/g, "const $1 = ").replace(/export\\s+\\{([^}]+)\\}/g, "const {$1} = {};");
       try {
         const transformed = Babel.transform(setupCode, {
           presets: [["react", { runtime: "automatic" }], "typescript"],
           sourceType: "script",
-        }).code
-        const fn = new Function("React", "ReactDOM", `${transformed} \n return typeof __PreviewComponent !== 'undefined' ? __PreviewComponent : typeof App !== 'undefined' ? App : null;`)
-        const Component = fn(window.React, window.ReactDOM)
+        }).code;
+        const fnBody = transformed + "\\n return typeof __PreviewComponent !== 'undefined' ? __PreviewComponent : typeof App !== 'undefined' ? App : null;";
+        const fn = new Function("React", "ReactDOM", fnBody);
+        const Component = fn(window.React, window.ReactDOM);
         if (!Component) {
-          throw new Error("No default React component export found in app/page.tsx.")
+          throw new Error("No default React component export found in app/page.tsx.");
         }
-        const root = ReactDOM.createRoot(document.getElementById("root"))
-        root.render(React.createElement(Component))
+        const root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(React.createElement(Component));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        const errorEl = document.getElementById("error")
+        const message = error instanceof Error ? error.message : String(error);
+        const errorEl = document.getElementById("error");
         if (errorEl) {
-          errorEl.style.display = "block"
-          errorEl.textContent = `Local preview compile failed: ${message}`
+          errorEl.style.display = "block";
+          errorEl.textContent = "Local preview compile failed: " + message;
         }
       }
+    `
+
+  const tail = `
     </script>
   </body>
 </html>`
+
+  return head + script + tail
 }
 
 function escapeJs(value: string) {
