@@ -154,7 +154,7 @@ export async function GET(
     return proxySandboxRequest({ method: "GET", projectId: id })
   }
 
-  if (IS_VERCEL) {
+  if (IS_VERCEL && IS_PRODUCTION) {
     return sandboxDisabledResponse()
   }
 
@@ -225,7 +225,7 @@ export async function POST(
     return proxySandboxRequest({ method: "POST", projectId: id, body: { files } })
   }
 
-  if (IS_VERCEL) {
+  if (IS_VERCEL && IS_PRODUCTION) {
     return sandboxDisabledResponse()
   }
 
@@ -255,7 +255,7 @@ export async function DELETE(
     return proxySandboxRequest({ method: "DELETE", projectId: id })
   }
 
-  if (IS_VERCEL) {
+  if (IS_VERCEL && IS_PRODUCTION) {
     return sandboxDisabledResponse()
   }
 
