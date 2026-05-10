@@ -124,6 +124,7 @@ export const env = {
 export function getMissingProductionEnvVars() {
   const missing: string[] = []
 
+  if (!env.databaseUrl) missing.push("DATABASE_URL")
   if (!env.tursoDatabaseUrl) missing.push("TURSO_DATABASE_URL")
   if (!env.tursoAuthToken) missing.push("TURSO_AUTH_TOKEN")
   if (!env.nextAuthSecret) missing.push("NEXTAUTH_SECRET")

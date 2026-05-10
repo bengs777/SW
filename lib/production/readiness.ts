@@ -26,7 +26,8 @@ function check(key: string, label: string, value: unknown, severity: ReadinessCh
 export function getProductionReadiness() {
   const hasAiProvider = Boolean(env.openRouterApiKey || env.agentRouterApiKey)
   const checks: ReadinessCheck[] = [
-    check("TURSO_DATABASE_URL", "Turso/libSQL database URL", env.tursoDatabaseUrl, "required"),
+    check("DATABASE_URL", "Prisma/libSQL database URL", env.databaseUrl, "required"),
+    check("TURSO_DATABASE_URL", "Turso/libSQL runtime database URL", env.tursoDatabaseUrl, "required"),
     check("TURSO_AUTH_TOKEN", "Turso auth token", env.tursoAuthToken, "required"),
     check("NEXTAUTH_SECRET", "NextAuth secret", env.nextAuthSecret, "required"),
     check("NEXTAUTH_URL", "NextAuth canonical URL", env.nextAuthUrl, "required"),

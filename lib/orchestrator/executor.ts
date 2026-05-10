@@ -2,6 +2,8 @@ import type { GeneratedFile } from "@/lib/types"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 
+type ApplyFilesResult = Awaited<ReturnType<typeof ProjectFilePersistenceService.saveGenerationSnapshot>>
+
 async function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms))
 }
@@ -30,7 +32,7 @@ export async function applyFiles(
   projectId: string,
   prompt: string,
   files: GeneratedFile[]
-): Promise<{ historyId: string; files: GeneratedFile[]; fileDiff: any }> {
+): Promise<ApplyFilesResult> {
   const op = () => ProjectFilePersistenceService.saveGenerationSnapshot(projectId, prompt, files)
   // Save with retry to mitigate SQLITE_BUSY on local dev
   return runWithSqliteRetry(op)

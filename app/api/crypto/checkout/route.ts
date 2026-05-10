@@ -1,19 +1,79 @@
 import { NextRequest, NextResponse } from "next/server"
 import { env } from "@/lib/env"
 
+const REFERENCE_PATTERN = /^[A-Za-z0-9_-]{1,120}$/
+const EVM_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/
+const SUPPORTED_CHAINS = new Set(["56", "8453"])
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+function toSafeScriptJson(value: unknown) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029")
+}
+
+function normalizeAmount(value: string | null) {
+  if (!value || value.length > 64) {
+    return null
+  }
+
+  if (!/^(?:\d+|\d+\.\d+|\.\d+)$/.test(value)) {
+    return null
+  }
+
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null
+  }
+
+  return parsed.toLocaleString("en-US", {
+    useGrouping: false,
+    maximumFractionDigits: 18,
+  })
+}
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const ref = searchParams.get("ref")
   const chain = searchParams.get("chain")
-  const amount = searchParams.get("amount")
+  const amount = normalizeAmount(searchParams.get("amount"))
   const recipient = searchParams.get("recipient")
 
-  if (!ref || !chain || !amount || !recipient) {
-    return new NextResponse("Missing parameters", { status: 400 })
+  if (
+    !ref ||
+    !REFERENCE_PATTERN.test(ref) ||
+    !chain ||
+    !SUPPORTED_CHAINS.has(chain) ||
+    !amount ||
+    !recipient ||
+    !EVM_ADDRESS_PATTERN.test(recipient)
+  ) {
+    return new NextResponse("Invalid payment parameters", { status: 400 })
   }
 
   const chainName = chain === "56" ? "BNB Chain" : chain === "8453" ? "Base" : "Unknown"
   const tokenSymbol = chain === "56" ? "BNB" : chain === "8453" ? "ETH" : "Native"
+  const safeRef = escapeHtml(ref)
+  const safeAmount = escapeHtml(amount)
+  const safeRecipient = escapeHtml(recipient)
+  const safeChainName = escapeHtml(chainName)
+  const safeTokenSymbol = escapeHtml(tokenSymbol)
+  const paymentDataJson = toSafeScriptJson({
+    ref,
+    recipient,
+    appUrl: env.appUrl,
+  })
 
   const html = `
 <!DOCTYPE html>
@@ -247,20 +307,20 @@ export async function GET(request: NextRequest) {
     <div class="payment-details">
       <div class="detail-row">
         <span class="detail-label">Reference ID:</span>
-        <span class="detail-value">${ref}</span>
+        <span class="detail-value">${safeRef}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Amount to send:</span>
-        <span class="detail-value amount-highlight">${amount} ${tokenSymbol}</span>
+        <span class="detail-value amount-highlight">${safeAmount} ${safeTokenSymbol}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Network:</span>
-        <span class="detail-value">${chainName}</span>
+        <span class="detail-value">${safeChainName}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Send to:</span>
-        <span class="detail-value">${recipient}
-          <button class="copy-button" onclick="copyToClipboard('${recipient}')">Copy</button>
+        <span class="detail-value">${safeRecipient}
+          <button class="copy-button" type="button" id="copyRecipientButton">Copy</button>
         </span>
       </div>
     </div>
@@ -270,8 +330,8 @@ export async function GET(request: NextRequest) {
       <ol>
         <li>Copy the recipient address above</li>
         <li>Open your wallet (MetaMask, Phantom, Trust Wallet, etc.)</li>
-        <li>Switch to ${chainName}</li>
-        <li>Send exactly <strong>${amount} ${tokenSymbol}</strong> to the recipient address</li>
+        <li>Switch to ${safeChainName}</li>
+        <li>Send exactly <strong>${safeAmount} ${safeTokenSymbol}</strong> to the recipient address</li>
         <li>Paste your transaction hash below</li>
         <li>Click "Verify Payment"</li>
       </ol>
@@ -298,12 +358,18 @@ export async function GET(request: NextRequest) {
   </div>
 
   <script>
+    const paymentData = ${paymentDataJson};
+
     function copyToClipboard(text) {
       navigator.clipboard.writeText(text).then(() => {
         alert('Address copied to clipboard!');
       });
     }
-    
+
+    document.getElementById('copyRecipientButton').addEventListener('click', () => {
+      copyToClipboard(paymentData.recipient);
+    });
+
     async function verifyPayment(e) {
       e.preventDefault();
       const txHash = document.getElementById('txHash').value;
@@ -312,14 +378,14 @@ export async function GET(request: NextRequest) {
       
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>Verifying...';
-      msgDiv.innerHTML = '';
+      msgDiv.textContent = '';
       
       try {
         const response = await fetch('/api/billing/crypto/verify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            topUpOrderId: '${ref}',
+            topUpOrderId: paymentData.ref,
             transactionHash: txHash,
           }),
         });
@@ -328,19 +394,19 @@ export async function GET(request: NextRequest) {
         
         if (response.ok && data.success) {
           msgDiv.className = 'message success';
-          msgDiv.innerHTML = '✅ Payment verified! Your balance will be updated shortly.';
+          msgDiv.textContent = '✅ Payment verified! Your balance will be updated shortly.';
           setTimeout(() => {
-            window.location.href = '${env.appUrl}/dashboard/settings?tab=billing';
+            window.location.href = paymentData.appUrl + '/dashboard/settings?tab=billing';
           }, 2000);
         } else {
           msgDiv.className = 'message error';
-          msgDiv.innerHTML = '⏳ Payment received! Waiting for confirmations...';
+          msgDiv.textContent = '⏳ Payment received! Waiting for confirmations...';
           btn.disabled = false;
           btn.innerHTML = 'Verify Payment';
         }
       } catch (err) {
         msgDiv.className = 'message error';
-        msgDiv.innerHTML = '❌ Error: ' + (err.message || 'Unknown error');
+        msgDiv.textContent = '❌ Error: ' + (err.message || 'Unknown error');
         btn.disabled = false;
         btn.innerHTML = 'Verify Payment';
       }

@@ -4,7 +4,7 @@ import type { GeneratedFile } from "@/lib/types"
 export type OrchestratorTask = {
   id: string
   type: string
-  payload?: any
+  payload?: Record<string, unknown>
   requiresConfirmation?: boolean
 }
 
@@ -12,7 +12,7 @@ export type OrchestratorPlan = {
   id: string
   prompt: string
   tasks: OrchestratorTask[]
-  meta?: any
+  meta?: Record<string, unknown>
 }
 
 export async function buildPlan(

@@ -1,10 +1,15 @@
 const { execSync } = require("child_process")
 const fs = require("fs")
 const path = require("path")
+const { loadEnvConfig } = require("@next/env")
 
+loadEnvConfig(process.cwd())
 const env = { ...process.env }
 env.NODE_ENV = "production"
-env.DATABASE_URL = process.env.DATABASE_URL || process.env.TURSO_DATABASE_URL || "file:./dev.db"
+if (!process.env.DATABASE_URL || !process.env.DATABASE_URL.trim()) {
+  throw new Error("[vercel-build] DATABASE_URL is required for production builds.")
+}
+env.DATABASE_URL = process.env.DATABASE_URL
 
 const isWindows = process.platform === "win32"
 const MAX_PRISMA_GENERATE_ATTEMPTS = 3

@@ -19,6 +19,7 @@ interface PreviewError {
 interface SandboxPreviewProps {
   files: GeneratedFile[]
   className?: string
+  projectId?: string
   onError?: (error: string) => void
 }
 
@@ -276,12 +277,13 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
     <div className={cn("relative h-full w-full bg-background", className)}>
       {/* Iframe */}
       {hasContent ? (
+        // Keep preview on an opaque origin; generated code loses same-origin APIs but cannot read app cookies.
         <iframe
           ref={iframeRef}
           srcDoc={srcDoc}
           className="h-full w-full border-0"
           title="AI Preview"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
           onError={handleIframeError}
           onLoad={handleIframeLoad}
         />
@@ -427,6 +429,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://unpkg.com https://esm.sh blob:; connect-src https://esm.sh https://unpkg.com blob: data:; img-src data: blob: https:; style-src 'unsafe-inline'; font-src data: https:; worker-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
 <title>Preview</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}

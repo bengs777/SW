@@ -1,31 +1,127 @@
 import { NextRequest, NextResponse } from "next/server"
+import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { chooseModelForTask } from "@/lib/ai/model-router"
 import { buildContextForTask } from "@/lib/ai/context-builder"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import type { ProviderName } from "@/lib/ai/provider-router"
 import { extractGeneratedFilesFromProviderMessage } from "@/lib/ai/provider-output"
+import { enforceUserRateLimit } from "@/lib/security/rate-limit"
+import { log } from "@/lib/logging"
 import * as Executor from "@/lib/orchestrator/executor"
 
 export const runtime = "nodejs"
 
-async function safeJsonParse(body: any) {
-  try {
-    return JSON.parse(String(body))
-  } catch {
-    return body
+type RepairAttempt = {
+  attempt: number
+  ok: boolean
+  error?: string
+  reason?: string
+  parseMode?: string
+  applied?: string[]
+}
+
+const MAX_MESSAGE_LENGTH = 4000
+const MAX_STACK_LENGTH = 12000
+const MAX_FILE_LENGTH = 260
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function cleanString(value: unknown, maxLength: number) {
+  return typeof value === "string" ? value.slice(0, maxLength) : ""
+}
+
+async function resolveSessionUserId() {
+  const session = await auth()
+  const userId = session?.user?.id
+
+  if (userId) {
+    return { session, userId }
   }
+
+  const email = session?.user?.email?.trim().toLowerCase()
+  if (!email) {
+    return { session, userId: null }
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true },
+  })
+
+  return { session, userId: user?.id ?? null }
+}
+
+async function requireProjectMember(projectId: string, userId: string) {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: {
+      id: true,
+      workspace: {
+        select: {
+          members: {
+            where: { userId },
+            select: { role: true },
+            take: 1,
+          },
+        },
+      },
+    },
+  })
+
+  if (!project) {
+    return { ok: false as const, status: 404, error: "Project not found" }
+  }
+
+  if (project.workspace.members.length === 0) {
+    return { ok: false as const, status: 403, error: "Forbidden" }
+  }
+
+  return { ok: true as const, projectId: project.id, role: project.workspace.members[0]?.role ?? "member" }
 }
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now()
+  const { session, userId } = await resolveSessionUserId()
+
+  if (!session?.user || !userId) {
+    log("warn", "preview-error denied", { reason: "unauthorized" })
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    enforceUserRateLimit(`preview-error:${userId}`)
+  } catch (error) {
+    log("warn", "preview-error rate limited", { userId })
+    return NextResponse.json({ error: getErrorMessage(error) }, { status: 429 })
+  }
+
   try {
     const payload = await req.json()
-    const message = payload.message || ""
-    const stack = payload.stack || ""
-    const file = payload.file || null
+    const message = cleanString(payload.message, MAX_MESSAGE_LENGTH)
+    const stack = cleanString(payload.stack, MAX_STACK_LENGTH)
+    const file = cleanString(payload.file, MAX_FILE_LENGTH) || null
     const lineno = payload.lineno ?? null
     const colno = payload.colno ?? null
-    const projectId = payload.projectId || null
+    const projectId = cleanString(payload.projectId, 160) || null
+
+    if (!projectId) {
+      log("info", "preview-error ignored", { userId, reason: "missing_project_id" })
+      return NextResponse.json({ success: true, note: "no projectId provided" })
+    }
+
+    const access = await requireProjectMember(projectId, userId)
+    if (!access.ok) {
+      log("warn", "preview-error denied", {
+        userId,
+        projectId,
+        reason: access.error,
+        status: access.status,
+      })
+      return NextResponse.json({ error: access.error }, { status: access.status })
+    }
 
     // Persist a request log entry
     try {
@@ -42,12 +138,8 @@ export async function POST(req: NextRequest) {
           contextJson: JSON.stringify({ message, stack, file, lineno, colno }),
         },
       })
-    } catch (e) {
+    } catch {
       // ignore logging errors
-    }
-
-    if (!projectId) {
-      return NextResponse.json({ success: true, note: "no projectId provided" })
     }
 
     // Load a small set of relevant files for context
@@ -62,7 +154,7 @@ export async function POST(req: NextRequest) {
     const inspectContext = buildContextForTask({ prompt: message + "\n\nStack:\n" + stack, files: contextFiles, activeFile })
 
     // Agent loop: try up to 3 inspect attempts
-    const attempts = [] as any[]
+    const attempts: RepairAttempt[] = []
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const modelChoice = chooseModelForTask("inspect")
 
@@ -78,8 +170,8 @@ export async function POST(req: NextRequest) {
           prompt: fullPrompt,
           mode: "inspect",
         })
-      } catch (err: any) {
-        attempts.push({ attempt, ok: false, error: String(err?.message || err) })
+      } catch (err: unknown) {
+        attempts.push({ attempt, ok: false, error: getErrorMessage(err) })
         break
       }
 
@@ -92,8 +184,8 @@ export async function POST(req: NextRequest) {
       try {
         await Executor.applyFiles(projectId, `preview-inspect:${attempt}`, parsed.files)
         attempts.push({ attempt, ok: true, applied: parsed.files.map((f) => f.path) })
-      } catch (err: any) {
-        attempts.push({ attempt, ok: false, error: String(err?.message || err) })
+      } catch (err: unknown) {
+        attempts.push({ attempt, ok: false, error: getErrorMessage(err) })
         break
       }
 
@@ -101,12 +193,27 @@ export async function POST(req: NextRequest) {
       // Continue loop to allow up to 3 sequential repair attempts without client involvement.
     }
 
+    log("info", "preview-error repair completed", {
+      userId,
+      projectId,
+      role: access.role,
+      attempts: attempts.length,
+      appliedFiles: attempts.flatMap((attempt) => attempt.applied ?? []).length,
+      latencyMs: Date.now() - startedAt,
+    })
+
     return NextResponse.json({ success: true, attempts })
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: String(err?.message || err) }, { status: 500 })
+  } catch (err: unknown) {
+    log("error", "preview-error failed", { userId, error: getErrorMessage(err) })
+    return NextResponse.json({ success: false, error: getErrorMessage(err) }, { status: 500 })
   }
 }
 
-export const GET = () => {
+export const GET = async () => {
+  const { userId } = await resolveSessionUserId()
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
   return NextResponse.json({ ok: true })
 }

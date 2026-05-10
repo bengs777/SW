@@ -7,23 +7,29 @@ import * as Executor from "@/lib/orchestrator/executor"
 import type { GeneratedFile } from "@/lib/types"
 import type { OrchestratorPlan } from "@/lib/orchestrator/planner"
 
+type ProviderResult = Awaited<ReturnType<typeof ProviderRouter.generate>>
+
+function payloadPrompt(task: { payload?: Record<string, unknown> }, fallback: string) {
+  return typeof task.payload?.prompt === "string" ? task.payload.prompt : fallback
+}
+
 export async function executePlan(
   plan: OrchestratorPlan,
   opts: { projectId: string; idempotencyKey?: string; files?: GeneratedFile[] }
-): Promise<{ success: boolean; files?: GeneratedFile[]; providerResult?: any; error?: string }> {
+): Promise<{ success: boolean; files?: GeneratedFile[]; providerResult?: ProviderResult | null; error?: string }> {
   const projectId = opts.projectId
   let contextFiles: GeneratedFile[] = opts.files || []
-  let lastProviderResult: any = null
+  let lastProviderResult: ProviderResult | null = null
 
   for (const task of plan.tasks || []) {
     let taskSucceeded = false
-    let lastError: any = null
+    let lastError: unknown = null
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         if (task.type === "ai:generate") {
           const model = chooseModelForTask("generate")
-          const ctx = buildContextForTask({ prompt: task.payload?.prompt || plan.prompt, files: contextFiles, maxFiles: 8 })
+          const ctx = buildContextForTask({ prompt: payloadPrompt(task, plan.prompt), files: contextFiles, maxFiles: 8 })
 
           const providerResp = await ProviderRouter.generate({
             provider: model.provider as ProviderName,
@@ -74,7 +80,7 @@ export async function executePlan(
         }
 
         if (task.type === "file:apply") {
-          await Executor.applyFiles(projectId, task.payload?.prompt || plan.prompt, contextFiles)
+          await Executor.applyFiles(projectId, payloadPrompt(task, plan.prompt), contextFiles)
           taskSucceeded = true
           break
         }
@@ -97,7 +103,8 @@ export async function executePlan(
     }
 
     if (!taskSucceeded) {
-      return { success: false, error: `Task ${task.id} failed: ${String(lastError?.message || lastError)}`, providerResult: lastProviderResult }
+      const message = lastError instanceof Error ? lastError.message : String(lastError)
+      return { success: false, error: `Task ${task.id} failed: ${message}`, providerResult: lastProviderResult }
     }
   }
 

@@ -17,6 +17,7 @@ export const proxy = auth((req) => {
     "/dashboard",
     "/api/projects",
     "/api/generate",
+    "/api/orchestrator",
     "/api/workspaces",
     "/api/api-keys",
   ]

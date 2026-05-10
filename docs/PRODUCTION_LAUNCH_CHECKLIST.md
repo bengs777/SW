@@ -14,6 +14,7 @@ Swift is production-launchable only when the dashboard app and sandbox runtime a
 
 Dashboard app:
 
+- `DATABASE_URL`
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN`
 - `NEXTAUTH_SECRET`
