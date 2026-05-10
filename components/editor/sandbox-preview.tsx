@@ -207,7 +207,7 @@ function buildFallbackSrcDoc(files: GeneratedFile[]) {
 }
 
 function buildTsxPreviewSrcDoc(tsxContent: string) {
-  const escapedTsx = escapeJs(tsxContent)
+  const serializedTsx = JSON.stringify(tsxContent)
   return `<!DOCTYPE html>
 <html>
   <head>
@@ -223,7 +223,7 @@ function buildTsxPreviewSrcDoc(tsxContent: string) {
     <div id="root"></div>
     <div id="error" class="error" style="display:none;"></div>
     <script>
-      const rawCode = `${escapedTsx}`
+      const rawCode = ${serializedTsx}
       const sanitizedCode = rawCode.replace(/\\n/g, "\\n").replace(/\\r/g, "\\r")
       const setupCode = sanitizedCode.replace(/import\\s+React.*from\\s+[\"']react[\"'];?/g, "").replace(/export\\s+default\\s+/g, "const __PreviewComponent = ").replace(/export\\s+const\\s+(\\w+)/g, "const $1 = ").replace(/export\\s+\{([^}]+)\}/g, "const {$1} = {};")
       try {
