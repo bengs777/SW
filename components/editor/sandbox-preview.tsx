@@ -167,6 +167,11 @@ export function SandboxPreview({ files, className = "", onError, projectId }: Sa
 }
 
 function buildFallbackSrcDoc(files: GeneratedFile[]) {
+  const pageFile = files.find((file) => file.path.toLowerCase().replace(/\\\\/g, "/").endsWith("app/page.tsx"))
+  if (pageFile?.content) {
+    return buildTsxPreviewSrcDoc(pageFile.content)
+  }
+
   const htmlFile = files.find((file) => file.path.toLowerCase().endsWith(".html"))
   if (htmlFile?.content) {
     return htmlFile.content
@@ -199,6 +204,60 @@ function buildFallbackSrcDoc(files: GeneratedFile[]) {
     ${fileSections}
   </body>
 </html>`
+}
+
+function buildTsxPreviewSrcDoc(tsxContent: string) {
+  const escapedTsx = escapeJs(tsxContent)
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local TSX Preview</title>
+    <link rel="stylesheet" href="data:text/css,body{margin:0;font-family:system-ui, sans-serif;background:#fff;color:#111;}#root{min-height:100vh;} .error{padding:24px;color:#a00;background:#fee;font-family:ui-monospace,monospace;}" />
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="error" class="error" style="display:none;"></div>
+    <script>
+      const rawCode = `${escapedTsx}`
+      const sanitizedCode = rawCode.replace(/\\n/g, "\\n").replace(/\\r/g, "\\r")
+      const setupCode = sanitizedCode.replace(/import\\s+React.*from\\s+[\"']react[\"'];?/g, "").replace(/export\\s+default\\s+/g, "const __PreviewComponent = ").replace(/export\\s+const\\s+(\\w+)/g, "const $1 = ").replace(/export\\s+\{([^}]+)\}/g, "const {$1} = {};")
+      try {
+        const transformed = Babel.transform(setupCode, {
+          presets: [["react", { runtime: "automatic" }], "typescript"],
+          sourceType: "script",
+        }).code
+        const fn = new Function("React", "ReactDOM", `${transformed} \n return typeof __PreviewComponent !== 'undefined' ? __PreviewComponent : typeof App !== 'undefined' ? App : null;`)
+        const Component = fn(window.React, window.ReactDOM)
+        if (!Component) {
+          throw new Error("No default React component export found in app/page.tsx.")
+        }
+        const root = ReactDOM.createRoot(document.getElementById("root"))
+        root.render(React.createElement(Component))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const errorEl = document.getElementById("error")
+        if (errorEl) {
+          errorEl.style.display = "block"
+          errorEl.textContent = `Local preview compile failed: ${message}`
+        }
+      }
+    </script>
+  </body>
+</html>`
+}
+
+function escapeJs(value: string) {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\$/g, "\\$")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
 }
 
 function escapeHtml(value: string) {
