@@ -15,12 +15,11 @@ import type { ModelOption, PromptAttachment } from "@/lib/types"
 import { analyzePromptIntent } from "@/lib/ai/prompt-intent"
 import { getTemplate, PROMPT_LANGUAGE_LABELS } from "@/lib/ai/prompt-templates"
 import type { PromptLanguage, PromptTemplateKey, TemplateVariant } from "@/lib/ai/prompt-templates"
-import { SWIFT_AI_MODEL_KEY } from "@/lib/ai/models"
-import { ProviderBadge } from "@/components/editor/v0-model-badge"
+import { SWIFT_PRO_MODEL_KEY } from "@/lib/ai/models"
 
 const MAX_PROMPT_LENGTH = 12000
 const MAX_ATTACHMENTS = 5
-const VISION_CAPABLE_MODEL_KEYS = new Set([SWIFT_AI_MODEL_KEY])
+const VISION_CAPABLE_MODEL_KEYS = new Set([SWIFT_PRO_MODEL_KEY])
 const MAX_FILE_SIZE_BYTES = 3 * 1024 * 1024
 const MAX_TEXT_FILE_CHARS = 18000
 const MAX_IMAGE_DATA_URL_CHARS = 18000
@@ -473,7 +472,7 @@ export function ChatPanel({
     ? sanitizeModelDisplayName(selectedModelInfo.label)
     : "Pilih AI"
   const selectedModelDescription =
-    selectedModelInfo?.description || selectedModelInfo?.note || "OpenRouter"
+    selectedModelInfo?.description || selectedModelInfo?.note || "Swift AI"
   const promptCopy = PROMPT_PANEL_COPY[promptLanguage]
   const collaborationCopy = COLLABORATION_MODES[promptLanguage]
   const promptIntent = analyzePromptIntent(input, promptLanguage)
@@ -1059,19 +1058,19 @@ export function ChatPanel({
                     <p>Estimating request cost...</p>
                   ) : estimate.error ? (
                     <p>
-                      Estimation unavailable ({estimate.error}). Flat model price: Rp {(
+                      Estimation unavailable ({estimate.error}). Flat model price: {(
                         selectedModelInfo?.price || 0
-                      ).toLocaleString("id-ID")}.
+                      ).toLocaleString("id-ID")} credits.
                     </p>
                   ) : (
                     <div className="flex flex-wrap items-center gap-3">
                       <span>Est. tokens: {(estimate.estimatedTokens || 0).toLocaleString("id-ID")}</span>
-                      <span>Est. cost: Rp {(estimate.estimatedCost || selectedModelInfo?.price || 0).toLocaleString("id-ID")}</span>
+                      <span>Est. cost: {(estimate.estimatedCost || selectedModelInfo?.price || 0).toLocaleString("id-ID")} credits</span>
                       {typeof estimate.currentBalance === "number" && (
-                        <span>Balance: Rp {estimate.currentBalance.toLocaleString("id-ID")}</span>
+                        <span>Balance: {estimate.currentBalance.toLocaleString("id-ID")} credits</span>
                       )}
                       {typeof estimate.remainingBalance === "number" && (
-                        <span>After request: Rp {estimate.remainingBalance.toLocaleString("id-ID")}</span>
+                        <span>After request: {estimate.remainingBalance.toLocaleString("id-ID")} credits</span>
                       )}
                       {estimate.canAfford === false && (
                         <span className="font-medium">Insufficient balance for this request.</span>
@@ -1088,8 +1087,8 @@ export function ChatPanel({
           {hasImageAttachments && !selectedModelSupportsVision && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               {promptLanguage === "id"
-                ? "Model yang dipilih tidak mendukung input gambar. Gambar akan dikirim sebagai referensi nama file saja. Pilih Swift AI Vision untuk mendukung image input."
-                : "The selected model does not support image input. Images will be sent as filename references only. Select Swift AI Vision for image input support."}
+                ? "Model yang dipilih tidak mendukung input gambar. Gambar akan dikirim sebagai referensi nama file saja. Pilih Swift 3 untuk dukungan konteks visual."
+                : "The selected model does not support image input. Images will be sent as filename references only. Select Swift 3 for visual context support."}
             </div>
           )}
           {attachments.length > 0 && (
@@ -1146,7 +1145,7 @@ export function ChatPanel({
                   <span className="truncate text-xs text-muted-foreground">{selectedModelDescription}</span>
                 </div>
                 <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
-                  Rp {(selectedModelInfo?.price ?? 0).toLocaleString("id-ID")}/request
+                  {(selectedModelInfo?.price ?? 0).toLocaleString("id-ID")} credits
                 </span>
               </SelectTrigger>
               <SelectContent className="w-[360px] p-2">
@@ -1162,9 +1161,8 @@ export function ChatPanel({
                     <div className="grid gap-0.5 text-left">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-foreground">{sanitizeModelDisplayName(model.label)}</span>
-                        <ProviderBadge provider={model.provider} />
                         <span className="text-[11px] text-muted-foreground">
-                          Rp {(typeof model.price === "number" ? model.price : 0).toLocaleString("id-ID")}/request
+                          {(typeof model.price === "number" ? model.price : 0).toLocaleString("id-ID")} credits/request
                         </span>
                       </div>
                       <p className="text-xs text-muted-foreground">

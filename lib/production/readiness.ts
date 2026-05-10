@@ -1,5 +1,6 @@
 import { env } from "@/lib/env"
 import { aiRateLimitConfig } from "@/lib/security/rate-limit"
+import { hasAnyPrimaryProviderKey } from "@/lib/ai/model-tiers"
 
 type ReadinessCheck = {
   key: string
@@ -24,7 +25,7 @@ function check(key: string, label: string, value: unknown, severity: ReadinessCh
 }
 
 export function getProductionReadiness() {
-  const hasAiProvider = Boolean(env.openRouterApiKey || env.agentRouterApiKey)
+  const hasPrimaryProvider = hasAnyPrimaryProviderKey()
   const checks: ReadinessCheck[] = [
     check("DATABASE_URL", "Prisma/libSQL database URL", env.databaseUrl, "required"),
     check("TURSO_DATABASE_URL", "Turso/libSQL runtime database URL", env.tursoDatabaseUrl, "required"),
@@ -34,10 +35,12 @@ export function getProductionReadiness() {
     check("NEXT_PUBLIC_APP_URL", "Public app URL", env.appUrl, "required"),
     check("GOOGLE_CLIENT_ID", "Google OAuth client ID", env.googleClientId, "required"),
     check("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", env.googleClientSecret, "required"),
-    check("AI_PROVIDER_KEY", "Swift AI provider key", hasAiProvider, "required", "Set OPENROUTER_API_KEY or AGENTROUTER_API_KEY."),
+    check("AI_PROVIDER_KEY", "Swift AI provider key", hasPrimaryProvider, "required", "Set OPENROUTER_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY."),
     check("OPENROUTER_API_KEY", "Swift AI OpenRouter key", env.openRouterApiKey, "recommended"),
-    check("AGENTROUTER_API_KEY", "Swift AI AgentRouter key", env.agentRouterApiKey, "recommended"),
-    check("AGENTROUTER_BASE_URL", "Swift AI AgentRouter base URL", env.agentRouterApiUrl === "https://agentrouter.org/v1", "recommended"),
+    check("GEMINI_API_KEY", "Swift AI Gemini key", env.geminiApiKey, "recommended"),
+    check("DEEPSEEK_API_KEY", "Swift AI DeepSeek key", env.deepSeekApiKey, "recommended"),
+    check("OPENAI_API_KEY", "Swift AI OpenAI key", env.openAiApiKey, "recommended"),
+    check("AGENTROUTER_API_KEY", "Legacy AgentRouter key", env.agentRouterApiKey, "recommended"),
     check("REDIS_URL", "Redis/BullMQ queue URL", env.redisUrl, "required"),
     check("SANDBOX_SERVICE_URL", "External sandbox runtime service URL", env.sandboxServiceUrl, "required"),
     check("SANDBOX_SERVICE_TOKEN", "External sandbox runtime bearer token", env.sandboxServiceToken, "required"),

@@ -13,7 +13,7 @@ export function V0ModelBadge({ showCost = true, size = "md" }: V0ModelBadgeProps
     return (
       <Badge variant="secondary" className="gap-1">
         <Coins className="h-3 w-3" />
-        <span>2000/req</span>
+        <span>1-15 credits</span>
       </Badge>
     )
   }
@@ -26,7 +26,7 @@ export function V0ModelBadge({ showCost = true, size = "md" }: V0ModelBadgeProps
           <div className="text-xs font-medium text-muted-foreground">Swift AI</div>
           {showCost && (
             <div className="text-sm font-semibold text-foreground">
-              2.000 IDR / generasi
+              1-15 credits / generasi
             </div>
           )}
         </div>
@@ -39,13 +39,5 @@ export function V0ModelBadge({ showCost = true, size = "md" }: V0ModelBadgeProps
  * Provider badge component untuk display di model selector
  */
 export function ProviderBadge({ provider }: { provider: string }) {
-  if (provider === "openrouter") {
-    return <Badge variant="outline">Swift AI</Badge>
-  }
-
-  if (provider === "agentrouter") {
-    return <Badge variant="outline">AgentRouter</Badge>
-  }
-
-  return <Badge variant="outline">{provider}</Badge>
+  return <Badge variant="outline">{provider === "swift" ? "Swift AI" : "Swift AI"}</Badge>
 }

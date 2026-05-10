@@ -136,7 +136,7 @@ export default function SettingsPage() {
               <CardContent>
                 <FieldGroup>
                   <Field>
-                    <FieldLabel>OpenRouter API Key</FieldLabel>
+                    <FieldLabel>Swift AI Provider Key</FieldLabel>
                     <div className="flex gap-2">
                       <Input 
                         type="password" 
@@ -146,10 +146,7 @@ export default function SettingsPage() {
                       <Button variant="outline">Save</Button>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Your OpenRouter API key for AI generation. Get one at{" "}
-                      <a href="https://openrouter.ai/settings/keys" className="text-foreground underline" target="_blank" rel="noopener noreferrer">
-                        openrouter.ai/settings/keys
-                      </a>
+                      Optional BYOK slot for managed AI generation. Provider names are handled internally by Swift.
                     </p>
                   </Field>
                 </FieldGroup>

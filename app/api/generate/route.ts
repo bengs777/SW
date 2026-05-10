@@ -5,15 +5,13 @@ import { BillingService } from "@/lib/services/billing.service"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
-import { env } from "@/lib/env"
 import { buildModuleStatusReport, buildProjectFiles } from "@/lib/ai/project-scaffold"
 import { extractGeneratedFilesFromProviderMessage, mergeGeneratedFiles } from "@/lib/ai/provider-output"
 import { enhancePromptWithAgentRouter } from "@/lib/ai/prompt-enhancer"
 import { appendPreviewContextToPrompt, buildPreviewContextPacket, buildPreviewInspectionPrompt, normalizePreviewContext } from "@/lib/ai/preview-context"
 import { appendAIContextToPrompt, buildAIContextSnapshot } from "@/lib/ai/context-engine"
 import { autoRepairFullStackFiles, validateFullStackFiles } from "@/lib/ai/fullstack-validator"
-import { ProviderRouter } from "@/lib/ai/provider-router"
-import type { ProviderName } from "@/lib/ai/provider-router"
+import { ProviderRouter, SwiftProviderFailureError } from "@/lib/ai/provider-router"
 import { SWIFT_AI_DISPLAY_NAME, isSupportedSwiftModelKey, isVisionCapableModel } from "@/lib/ai/models"
 import { analyzePromptIntent, buildClarifyingPrompt } from "@/lib/ai/prompt-intent"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
@@ -23,8 +21,7 @@ import ts from "typescript"
 import { orchestrateGeneration } from "@/lib/ai/orchestrator"
 import { log } from "@/lib/logging"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
-import { AGENTROUTER_PROVIDER, AGENTROUTER_PUBLIC_NAME } from "@/lib/ai/agentrouter-config"
-import { OPENROUTER_PROVIDER } from "@/lib/ai/openrouter-config"
+import { USER_FRIENDLY_AI_ENGINE_ERROR } from "@/lib/ai/model-tiers"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -80,11 +77,13 @@ const PROJECT_STRUCTURE_CONTEXT_CHAR_LIMIT = 14000
 const PREVIEW_EXECUTABLE_FILE_PATTERN = /\.(tsx|ts|jsx|js|mjs|cjs)$/i
 const PREVIEW_JSON_FILE_PATTERN = /\.json$/i
 const PREVIEW_ASSET_FILE_PATTERN = /\.(css|scss|sass|less|md|env|prisma|html|txt|csv|yml|yaml|svg|png|jpe?g|gif|webp|avif|ico|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|otf|lock|toml|ini|xml|pdf|webmanifest|manifest|d\.ts|d\.mts|d\.cts)$/i
-const SUPPORTED_PROVIDERS: ProviderName[] = [OPENROUTER_PROVIDER, AGENTROUTER_PROVIDER]
 const COLLABORATION_MODES = ["build", "edit", "fix", "review", "ask"] as const
+const MAX_CONCURRENT_GENERATIONS_PER_USER = Math.max(1, Number(process.env.AI_MAX_CONCURRENT_GENERATIONS || 2))
 
 type CollaborationMode = (typeof COLLABORATION_MODES)[number]
 type FinalPromptMode = "generator" | "fix-complex" | "fix-simple" | "sandbox"
+const activeGenerationsByUser = new Map<string, number>()
+const inFlightGenerationKeys = new Set<string>()
 
 const GenerateSchema = z.object({
   prompt: z.string().min(1),
@@ -111,14 +110,6 @@ const GenerateSchema = z.object({
     }).passthrough()
   ).max(MAX_ATTACHMENTS).optional().default([]),
 })
-
-function getProviderDisplayName(provider: string) {
-  return provider === AGENTROUTER_PROVIDER ? AGENTROUTER_PUBLIC_NAME : SWIFT_AI_DISPLAY_NAME
-}
-
-function normalizeSupportedProvider(provider: string): ProviderName | null {
-  return SUPPORTED_PROVIDERS.includes(provider as ProviderName) ? (provider as ProviderName) : null
-}
 
 function compactText(value: string | null | undefined, limit: number) {
   const text = String(value || "").replace(/\r\n/g, "\n").trim()
@@ -442,47 +433,66 @@ function applyCollaborationModeToIntent(
   return intent
 }
 
-function getFriendlyProviderErrorMessage(errorMessage: string, provider: string) {
+function getFriendlyProviderErrorMessage(errorMessage: string) {
   const normalized = errorMessage.toLowerCase()
-  const providerName = getProviderDisplayName(provider)
-
-  if (
-    normalized.includes("unauthorized client") ||
-    normalized.includes("unauthenticated") ||
-    normalized.includes("api error (401)") ||
-    normalized.includes("api error (403)")
-  ) {
-    const envName = provider === AGENTROUTER_PROVIDER ? "AGENTROUTER_API_KEY" : "OPENROUTER_API_KEY"
-    return `Akses ${providerName} ditolak. Periksa ${envName}, izin model, dan endpoint provider. Saldo kamu sudah otomatis direfund.`
-  }
-
-  if (
-    normalized.includes("insufficient_user_quota") ||
-    normalized.includes("quota") ||
-    normalized.includes("额度不足") ||
-    normalized.includes("temporarily rate-limited") ||
-    normalized.includes("rate-limited upstream")
-  ) {
-    return `Kuota/rate limit ${providerName} sedang penuh. Saldo kamu sudah otomatis direfund. Coba lagi beberapa menit, ganti model lain yang masih aktif, atau pakai provider key sendiri (BYOK) agar limit lebih longgar.`
-  }
-
-  if (
-    normalized.includes("no endpoints found") ||
-    normalized.includes("model not found") ||
-    normalized.includes("unknown model")
-  ) {
-    return `Model yang dipilih saat ini tidak tersedia di ${providerName}. Saldo kamu sudah otomatis direfund. Silakan pilih model lain yang masih aktif.`
-  }
-
-  if (normalized.includes("timed out")) {
-    return `${providerName} terlalu lama merespons. Saldo kamu sudah otomatis direfund. File project tidak diubah karena provider belum mengirim output yang valid.`
-  }
 
   if (normalized.includes("ai_output_has_no_files")) {
-    return `${providerName} merespons, tetapi output-nya tidak berisi file terstruktur yang bisa disimpan ke Explorer. Saldo kamu sudah otomatis direfund dan file project tidak diubah.`
+    return "Swift berhasil menerima respons AI, tetapi output belum berisi file valid. Credit kamu otomatis dikembalikan dan file project tidak diubah."
   }
 
-  return `${providerName} sedang sibuk atau gagal merespons. Saldo kamu sudah otomatis direfund. File project tidak diubah karena provider belum mengirim output yang valid.`
+  return USER_FRIENDLY_AI_ENGINE_ERROR
+}
+
+function createGenerationGuard(input: {
+  userId: string
+  projectId: string
+  selectedModel: string
+  prompt: string
+  idempotencyKey?: string
+}) {
+  const activeCount = activeGenerationsByUser.get(input.userId) || 0
+  if (activeCount >= MAX_CONCURRENT_GENERATIONS_PER_USER) {
+    return {
+      error: NextResponse.json(
+        {
+          error: "Swift masih memproses generate sebelumnya. Tunggu proses selesai sebelum mengirim request baru.",
+          code: "GENERATION_CONCURRENCY_LIMIT",
+        },
+        { status: 429 }
+      ),
+    }
+  }
+
+  const requestKey = input.idempotencyKey
+    ? `idem:${input.projectId}:${input.idempotencyKey}`
+    : `live:${input.userId}:${input.projectId}:${input.selectedModel}:${input.prompt.trim().toLowerCase().slice(0, 500)}`
+
+  if (inFlightGenerationKeys.has(requestKey)) {
+    return {
+      error: NextResponse.json(
+        {
+          error: "Request yang sama sedang diproses. Swift membatalkan duplikasi agar credit tidak terpakai dua kali.",
+          code: "DUPLICATE_GENERATION_IN_FLIGHT",
+        },
+        { status: 409 }
+      ),
+    }
+  }
+
+  activeGenerationsByUser.set(input.userId, activeCount + 1)
+  inFlightGenerationKeys.add(requestKey)
+
+  return {
+    release() {
+      const nextCount = Math.max(0, (activeGenerationsByUser.get(input.userId) || 1) - 1)
+      if (nextCount === 0) {
+        activeGenerationsByUser.delete(input.userId)
+      } else {
+        activeGenerationsByUser.set(input.userId, nextCount)
+      }
+      inFlightGenerationKeys.delete(requestKey)
+    },
+  }
 }
 
 function inferFinalPromptMode(input: {
@@ -848,26 +858,7 @@ async function resolveGenerationModel(selectedModel: string) {
     }
   }
 
-  const provider = normalizeSupportedProvider(modelConfig.provider)
-  if (!provider) {
-    return {
-      error: NextResponse.json({ error: "Selected model provider is not supported" }, { status: 403 }),
-    }
-  }
-
-  if (provider === OPENROUTER_PROVIDER && !env.openRouterApiKey) {
-    return {
-      error: NextResponse.json({ error: "OPENROUTER_API_KEY is not configured." }, { status: 503 }),
-    }
-  }
-
-  if (provider === AGENTROUTER_PROVIDER && !env.agentRouterApiKey) {
-    return {
-      error: NextResponse.json({ error: "AGENTROUTER_API_KEY is not configured." }, { status: 503 }),
-    }
-  }
-
-  return { modelConfig, provider }
+  return { modelConfig, provider: "swift" as const }
 }
 
 function buildPromptExecutionContext(input: {
@@ -995,6 +986,7 @@ type GeneratePromptExecutionContext = {
 export async function POST(request: NextRequest) {
   const session = await auth()
   const email = session?.user?.email
+  let releaseGeneration: (() => void) | null = null
 
   if (!email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
@@ -1091,6 +1083,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Insufficient balance" }, { status: 402 })
     }
 
+    const generationGuard = createGenerationGuard({
+      userId: user.id,
+      projectId,
+      selectedModel: modelConfig.key,
+      prompt,
+      idempotencyKey,
+    })
+    if ("error" in generationGuard) {
+      return generationGuard.error
+    }
+    releaseGeneration = generationGuard.release
+
     const usageLog = await BillingService.reserveBalance(
       user.id,
       modelConfig.id,
@@ -1135,6 +1139,11 @@ export async function POST(request: NextRequest) {
           success: true,
           context: {
             usageLogId: usageLog.id,
+            userId: user.id,
+            selectedTier: modelConfig.key,
+            providerUsed: chatResult.providerUsed,
+            providerModelUsed: chatResult.modelUsed,
+            creditStatus: "captured",
             collaborationMode,
             promptLength: promptWithAttachments.length,
             contextualPromptLength: promptWithPreviewContext.length,
@@ -1184,6 +1193,11 @@ export async function POST(request: NextRequest) {
           success: true,
           context: {
             usageLogId: usageLog.id,
+            userId: user.id,
+            selectedTier: modelConfig.key,
+            providerUsed: clarificationResult.providerUsed,
+            providerModelUsed: clarificationResult.modelUsed,
+            creditStatus: "captured",
             collaborationMode,
             promptLength: promptWithAttachments.length,
             contextualPromptLength: promptWithPreviewContext.length,
@@ -1279,6 +1293,9 @@ export async function POST(request: NextRequest) {
           success: true,
           context: {
             usageLogId: usageLog.id,
+            userId: user.id,
+            selectedTier: modelConfig.key,
+            creditStatus: "refunded",
             idempotencyKey,
             collaborationMode,
             reusedHistoryId: orchestration.historyId,
@@ -1469,6 +1486,11 @@ export async function POST(request: NextRequest) {
         success: true,
         context: {
           usageLogId: usageLog.id,
+          userId: user.id,
+          selectedTier: modelConfig.key,
+          providerUsed: result.providerUsed,
+          providerModelUsed: result.modelUsed,
+          creditStatus: "captured",
           historyId,
           collaborationMode,
           idempotencyKey,
@@ -1509,6 +1531,10 @@ export async function POST(request: NextRequest) {
       const isStrictFullStackError = error instanceof StrictFullStackValidationError
       const isRelevanceError = error instanceof RelevanceValidationError
       const errorMessage = error instanceof Error ? error.message : "AI request failed"
+      const providerFailure = error instanceof SwiftProviderFailureError ? error : null
+      const lastFailedAttempt = providerFailure
+        ? [...providerFailure.attempts].reverse().find((attempt) => attempt.status === "failed")
+        : null
       const moduleStatus = buildModuleStatusReport({
         projectName: project.name,
         prompt: promptWithPreviewContext,
@@ -1520,7 +1546,9 @@ export async function POST(request: NextRequest) {
         ? buildStrictFailSafeMessage((error as StrictFullStackValidationError).details)
         : isRelevanceError
           ? buildRelevanceFailSafeMessage((error as RelevanceValidationError).details)
-        : getFriendlyProviderErrorMessage(errorMessage, modelConfig.provider)
+        : providerFailure
+          ? providerFailure.userMessage
+        : getFriendlyProviderErrorMessage(errorMessage)
 
       await BillingService.refundReservation(
         usageLog.id,
@@ -1541,6 +1569,11 @@ export async function POST(request: NextRequest) {
         errorMessage,
         context: {
           usageLogId: usageLog.id,
+          userId: user.id,
+          selectedTier: modelConfig.key,
+          providerUsed: lastFailedAttempt?.provider || null,
+          failureReason: lastFailedAttempt?.failureReason || null,
+          creditStatus: "refunded",
           collaborationMode,
           idempotencyKey,
           refunded: true,
@@ -1579,7 +1612,7 @@ export async function POST(request: NextRequest) {
           remainingBalance: user.balance,
         },
         refunded: true,
-        warning: errorMessage,
+        warning: friendlyMessage,
         ...(isStrictFullStackError
           ? {
               failSafe: {
@@ -1609,6 +1642,8 @@ export async function POST(request: NextRequest) {
       },
       { status }
     )
+  } finally {
+    releaseGeneration?.()
   }
 }
 

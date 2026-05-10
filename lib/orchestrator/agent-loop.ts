@@ -25,7 +25,7 @@ export async function executePlan(
     let taskSucceeded = false
     let lastError: unknown = null
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         if (task.type === "ai:generate") {
           const model = chooseModelForTask("generate")

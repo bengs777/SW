@@ -1,8 +1,3 @@
-import {
-  BASIC_PROMPT_FEE_IDR,
-  BUILD_PROMPT_FEE_IDR,
-  PRO_PROMPT_FEE_IDR,
-} from "@/lib/ai/openrouter-config"
 import { DEFAULT_MODEL_KEY, SWIFT_BASIC_MODEL_KEY, SWIFT_BUILD_MODEL_KEY, SWIFT_PRO_MODEL_KEY } from "@/lib/ai/models"
 
 type TokenPricing = {
@@ -21,9 +16,9 @@ type PricingResult = {
 }
 
 const FIXED_MODEL_PRICES: Record<string, number> = {
-  [SWIFT_BASIC_MODEL_KEY]: BASIC_PROMPT_FEE_IDR,
-  [SWIFT_BUILD_MODEL_KEY]: BUILD_PROMPT_FEE_IDR,
-  [SWIFT_PRO_MODEL_KEY]: PRO_PROMPT_FEE_IDR,
+  [SWIFT_BASIC_MODEL_KEY]: 1,
+  [SWIFT_BUILD_MODEL_KEY]: 5,
+  [SWIFT_PRO_MODEL_KEY]: 15,
 }
 
 const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
@@ -82,8 +77,8 @@ export function calculateModelRequestPrice({
       estimatedInputTokens,
       estimatedOutputTokens,
       estimatedTokens,
-      estimatedCost: BUILD_PROMPT_FEE_IDR,
-      minimumCharge: BUILD_PROMPT_FEE_IDR,
+      estimatedCost: 5,
+      minimumCharge: 5,
       pricingMode: "fixed",
     }
   }

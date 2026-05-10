@@ -1,12 +1,12 @@
-import { OPENROUTER_BASE_URL, OPENROUTER_MODEL_ID, OPENROUTER_PROVIDER } from "@/lib/ai/openrouter-config"
 import { env } from "@/lib/env"
+import { SWIFT_2_MODEL_KEY, SWIFT_PROVIDER } from "@/lib/ai/model-tiers"
 
-// Central AI configuration. All provider calls must use this OpenRouter setup.
+// Central AI configuration. Provider-specific routing lives behind Swift tiers.
 
 export const AI_CONFIG = {
-  provider: OPENROUTER_PROVIDER,
-  model: OPENROUTER_MODEL_ID,
-  baseUrl: OPENROUTER_BASE_URL,
+  provider: SWIFT_PROVIDER,
+  model: SWIFT_2_MODEL_KEY,
+  baseUrl: "/api/generate",
   temperature: 0.7,
   maxTokens: env.aiMaxOutputTokens,
   topP: 0.95,

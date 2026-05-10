@@ -393,8 +393,8 @@ export default function EditorPage() {
       return {
         status: "error",
         issue: "auth",
-        reason: "Provider rejected authentication or model access",
-        action: "Periksa OPENROUTER_API_KEY atau AGENTROUTER_API_KEY, akses model, dan endpoint provider.",
+        reason: "Swift AI engine rejected authentication or model access",
+        action: "Hubungi admin atau cek konfigurasi provider internal di dashboard production.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -413,11 +413,11 @@ export default function EditorPage() {
         status: "error",
         issue: "quota",
         reason: normalized.includes("fewer max_tokens") || normalized.includes("can only afford")
-          ? "Credit OpenRouter tidak cukup untuk batas output request saat ini"
-          : "Provider quota atau upstream rate limit sedang penuh",
+          ? "Credit provider internal tidak cukup untuk batas output request saat ini"
+          : "Swift AI engine sedang rate-limited",
         action: normalized.includes("fewer max_tokens") || normalized.includes("can only afford")
-          ? "Turunkan OPENROUTER_MAX_TOKENS di .env lalu restart dev server, atau isi ulang credit OpenRouter."
-          : "Coba lagi beberapa menit, ganti model, atau gunakan key provider sendiri (BYOK).",
+          ? "Turunkan batas output tier atau isi ulang credit provider internal."
+          : "Coba lagi beberapa menit atau pilih Swift 1 untuk mode lebih cepat.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -448,8 +448,8 @@ export default function EditorPage() {
       return {
         status: "error",
         issue: "config",
-        reason: "Model yang dipilih sedang tidak tersedia di provider",
-        action: "Pastikan model deepseek/deepseek-v4-flash tersedia di OpenRouter.",
+        reason: "Tier Swift yang dipilih sedang tidak tersedia",
+        action: "Coba pilih Swift 1/2/3 lain atau cek konfigurasi provider internal.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -458,8 +458,8 @@ export default function EditorPage() {
       return {
         status: "slow",
         issue: "latency",
-        reason: "Provider request timed out",
-        action: "Coba lagi nanti. Sistem akan mencoba fallback AI yang tersedia di env sebelum request dianggap gagal.",
+        reason: "Swift AI engine timeout",
+        action: "Coba lagi nanti. Sistem otomatis mencoba fallback internal sebelum request dianggap gagal.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -468,8 +468,8 @@ export default function EditorPage() {
       return {
         status: "error",
         issue: "config",
-        reason: "Provider configuration is incomplete",
-        action: "Periksa OPENROUTER_API_KEY atau AGENTROUTER_API_KEY, lalu restart dev server.",
+        reason: "Swift AI configuration is incomplete",
+        action: "Pastikan minimal satu provider internal aktif, lalu restart server.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -477,8 +477,8 @@ export default function EditorPage() {
     return {
       status: "error",
       issue: "unknown",
-      reason: "Semua provider AI gagal merespons",
-      action: "Swift akan memakai provider yang ready dari env. Pastikan minimal OPENROUTER_API_KEY valid; jika AGENTROUTER_API_KEY 401, ganti token AgentRouter di dashboard provider.",
+      reason: "Swift AI engine sedang mengalami gangguan sementara",
+      action: "Credit otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi atau pilih Swift 1.",
       checkedAt: new Date().toISOString(),
     }
   }, [])
@@ -784,7 +784,7 @@ export default function EditorPage() {
     } catch (error) {
       const message =
         error instanceof DOMException && error.name === "AbortError"
-          ? "Provider timeout. Request dihentikan otomatis setelah menunggu fallback AI. Saldo akan mengikuti status refund dari server jika request sempat diproses."
+          ? "Swift AI engine timeout. Request dihentikan otomatis setelah fallback internal. Credit akan otomatis dikembalikan jika request gagal."
           : error instanceof Error
             ? error.message
             : "Sorry, I encountered an error while generating. Please try again."

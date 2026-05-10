@@ -20,6 +20,7 @@ export const proxy = auth((req) => {
     "/api/orchestrator",
     "/api/workspaces",
     "/api/api-keys",
+    "/api/ai",
   ]
 
   const isProtectedRoute = protectedRoutes.some((route) =>

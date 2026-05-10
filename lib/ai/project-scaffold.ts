@@ -171,9 +171,9 @@ export async function GET() {
 export async function GET() {
   return NextResponse.json({
     models: [
-      { key: "swift-basic", label: "Swift Basic", provider: "openrouter", price: 2000 },
-      { key: "swift-build", label: "Swift Build", provider: "openrouter", price: 5000 },
-      { key: "swift-pro", label: "Swift Pro Repair", provider: "openrouter", price: 15000 },
+      { key: "swift-1", label: "Swift 1 — Fast", provider: "swift", price: 1 },
+      { key: "swift-2", label: "Swift 2 — Builder", provider: "swift", price: 5 },
+      { key: "swift-3", label: "Swift 3 — Engineer", provider: "swift", price: 15 },
     ],
   })
 }
@@ -374,9 +374,9 @@ export const appStore: AppState = {
       path: "lib/ai/config.ts",
       language: "ts",
       content: `export const AI_CONFIG = {
-  provider: "openrouter",
-  model: "deepseek/deepseek-v4-flash",
-  baseUrl: "https://openrouter.ai/api/v1",
+  provider: "swift",
+  model: "swift-2",
+  baseUrl: "/api/generate",
   timeoutMs: Number(process.env.AI_TIMEOUT_MS || 60000),
 }
 `,
