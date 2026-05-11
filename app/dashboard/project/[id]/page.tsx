@@ -85,6 +85,32 @@ function buildClientWorkPlan(prompt: string, mode: CollaborationMode, language: 
   ]
 }
 
+function mapJobStageToProgressStage(
+  stage: string,
+  status: string
+): GenerationProgress["stage"] {
+  if (status === "completed") return "preview"
+  if (status === "failed") return "error"
+  if (status === "cancelled" || status === "cancelling") return "cancelled"
+
+  if (
+    stage === "context" ||
+    stage === "request" ||
+    stage === "provider" ||
+    stage === "parse" ||
+    stage === "validate" ||
+    stage === "save" ||
+    stage === "preview" ||
+    stage === "timeout" ||
+    stage === "cancelled" ||
+    stage === "error"
+  ) {
+    return stage
+  }
+
+  return "context"
+}
+
 const SUPPORTED_LANGUAGES: GeneratedFile["language"][] = [
   "tsx",
   "ts",
@@ -147,6 +173,8 @@ export type GenerationProgress = {
   modelKey?: string
   prompt?: string
   workPlan?: string[]
+  jobId?: string
+  progressPercent?: number
 }
 
 type ErrorLogEntry = {
@@ -198,6 +226,73 @@ export default function EditorPage() {
   const activeGenerateControllerRef = useRef<AbortController | null>(null)
   const activeGenerateTimeoutRef = useRef<number | null>(null)
   const activeGenerateWasCancelledRef = useRef(false)
+  const activeGenerationJobIdRef = useRef<string | null>(null)
+  const activeGenerationStreamRef = useRef<EventSource | null>(null)
+
+  const closeGenerationStream = useCallback(() => {
+    activeGenerationStreamRef.current?.close()
+    activeGenerationStreamRef.current = null
+  }, [])
+
+  const applyJobProgress = useCallback((job: {
+    id: string
+    stage: string
+    status: string
+    label: string
+    progress: number
+    prompt?: string
+    model?: string
+    plan?: string[]
+    createdAt?: string
+  }) => {
+    const mappedStage = mapJobStageToProgressStage(job.stage, job.status)
+    setGenerationProgress((current) => ({
+      stage: mappedStage,
+      label: job.label || current?.label || "Swift sedang bekerja",
+      startedAt: current?.startedAt || (job.createdAt ? new Date(job.createdAt) : new Date()),
+      timeoutMs: current?.timeoutMs || GENERATE_CLIENT_TIMEOUT_MS,
+      modelKey: job.model || current?.modelKey,
+      prompt: job.prompt || current?.prompt,
+      workPlan: Array.isArray(job.plan) && job.plan.length > 0 ? job.plan : current?.workPlan,
+      jobId: job.id,
+      progressPercent: job.progress,
+    }))
+  }, [])
+
+  const startGenerationStream = useCallback((jobId: string) => {
+    closeGenerationStream()
+    const stream = new EventSource(`/api/generate/jobs/${jobId}/stream`)
+    activeGenerationStreamRef.current = stream
+
+    stream.addEventListener("job", (event) => {
+      try {
+        const job = JSON.parse((event as MessageEvent).data)
+        applyJobProgress(job)
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          stream.close()
+          if (activeGenerationStreamRef.current === stream) {
+            activeGenerationStreamRef.current = null
+          }
+        }
+      } catch {
+        // Ignore malformed progress events and keep the existing client-side state.
+      }
+    })
+
+    stream.onerror = () => {
+      stream.close()
+      if (activeGenerationStreamRef.current === stream) {
+        activeGenerationStreamRef.current = null
+      }
+    }
+  }, [applyJobProgress, closeGenerationStream])
+
+  useEffect(() => {
+    return () => {
+      closeGenerationStream()
+      activeGenerateControllerRef.current?.abort()
+    }
+  }, [closeGenerationStream])
 
   useEffect(() => {
     if (generatedFiles.length === 0) {
@@ -571,6 +666,7 @@ export default function EditorPage() {
         mode: collaborationMode,
       },
     }
+    const workPlan = buildClientWorkPlan(trimmedContent, collaborationMode, promptLanguage)
 
     setMessages((prev) => [...prev, userMessage])
     setIsGenerating(true)
@@ -583,7 +679,8 @@ export default function EditorPage() {
       timeoutMs: GENERATE_CLIENT_TIMEOUT_MS,
       modelKey,
       prompt: trimmedContent,
-      workPlan: buildClientWorkPlan(trimmedContent, collaborationMode, promptLanguage),
+      workPlan,
+      progressPercent: 4,
     })
     const activeFile = generatedFiles[activeFileIndex] || null
     const previewContext = buildPreviewContextPacket({
@@ -620,12 +717,35 @@ export default function EditorPage() {
     setMessages((prev) => [...prev, assistantMessage])
 
     try {
+      const jobResponse = await fetch("/api/generate/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          prompt: trimmedContent,
+          model: modelKey,
+          provider: "swift",
+          plan: workPlan,
+        }),
+      })
+      const jobData = await jobResponse.json().catch(() => null)
+      if (!jobResponse.ok || !jobData?.job?.id) {
+        throw new Error(jobData?.error || "Failed to create generation job")
+      }
+
+      const jobId = String(jobData.job.id)
+      activeGenerationJobIdRef.current = jobId
+      applyJobProgress(jobData.job)
+      startGenerationStream(jobId)
+
       setGenerationProgress((current) =>
         current
           ? {
               ...current,
               stage: "request",
               label: "Mengirim prompt dan menyiapkan rencana kerja",
+              jobId,
+              progressPercent: Math.max(current.progressPercent || 0, 10),
             }
           : current
       )
@@ -678,6 +798,7 @@ export default function EditorPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             prompt: promptForGeneration,
+            jobId,
             attachments,
             projectId,
             history: messages,
@@ -908,6 +1029,9 @@ export default function EditorPage() {
         )
       )
     } finally {
+      if (activeGenerationJobIdRef.current) {
+        activeGenerationJobIdRef.current = null
+      }
       if (activeGenerateTimeoutRef.current !== null) {
         window.clearTimeout(activeGenerateTimeoutRef.current)
         activeGenerateTimeoutRef.current = null
@@ -917,6 +1041,7 @@ export default function EditorPage() {
       setIsGenerating(false)
       window.setTimeout(() => {
         setGenerationProgress(null)
+        closeGenerationStream()
       }, 1200)
     }
   }, [
@@ -934,23 +1059,30 @@ export default function EditorPage() {
     projectName,
     projectTemplateId,
     pushErrorLog,
+    applyJobProgress,
+    startGenerationStream,
+    closeGenerationStream,
   ])
 
   const handleCancelGeneration = useCallback(() => {
     const controller = activeGenerateControllerRef.current
-    if (!controller) return
+    const jobId = activeGenerationJobIdRef.current
 
     activeGenerateWasCancelledRef.current = true
+    if (jobId) {
+      void fetch(`/api/generate/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => null)
+    }
     setGenerationProgress((current) =>
       current
         ? {
             ...current,
             stage: "cancelled",
             label: "Menghentikan generate...",
+            progressPercent: 100,
           }
         : current
     )
-    controller.abort()
+    controller?.abort()
   }, [])
 
   useEffect(() => {

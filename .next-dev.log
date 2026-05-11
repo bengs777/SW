@@ -1,0 +1,23 @@
+
+> swift@0.1.0 dev
+> node scripts/dev-start.js
+
+Environment variables loaded from .env
+Prisma schema loaded from prisma\schema.prisma
+Datasource "db": SQLite database "dev.db" at "file:./dev.db"
+
+The database is already in sync with the Prisma schema.
+
+▲ Next.js 16.2.4 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.100.10:3000
+- Environments: .env
+✓ Ready in 1761ms
+Creating turbopack project {
+  dir: 'C:\\Users\\ibnua\\Desktop\\SOSIAL MEDIA\\SWIFT AI\\v0\\swift-main\\swift-main',
+  testMode: true
+}
+
+ GET / 200 in 2.4s (next.js: 263ms, proxy.ts: 989ms, application-code: 1180ms)
+ GET /login?callbackUrl=%2Fapi%2Fgenerate%2Fjobs%2Ftest%2Fstream 200 in 2.1s (next.js: 1798ms, proxy.ts: 100ms, application-code: 241ms)
+ POST /login?callbackUrl=%2Fapi%2Fgenerate%2Fjobs 200 in 2.1s (next.js: 1836ms, proxy.ts: 66ms, application-code: 195ms)

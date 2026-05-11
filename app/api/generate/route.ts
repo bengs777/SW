@@ -23,6 +23,8 @@ import { log } from "@/lib/logging"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { USER_FRIENDLY_AI_ENGINE_ERROR, getSwiftTierConfig } from "@/lib/ai/model-tiers"
 import { SwiftQueueError, acquireSwiftQueueSlot } from "@/lib/ai/queue"
+import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
+import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -123,6 +125,7 @@ const GenerateSchema = z.object({
   promptLanguage: z.enum(["id", "en"]).optional().default("id"),
   collaborationMode: z.enum(COLLABORATION_MODES).optional().default("build"),
   idempotencyKey: z.string().optional(),
+  jobId: z.string().optional(),
   previewContext: z.unknown().optional(),
   attachments: z.array(
     z.object({
@@ -798,6 +801,7 @@ type GenerateRequestContext = {
   collaborationMode: CollaborationMode
   projectId: string
   idempotencyKey?: string
+  jobId?: string
   previewContextFromClient: ReturnType<typeof normalizePreviewContext>
   attachments: PromptAttachment[]
   promptWithAttachments: string
@@ -812,6 +816,7 @@ async function parseGenerateRequest(request: NextRequest): Promise<GenerateReque
   const collaborationMode = body.collaborationMode as CollaborationMode
   const projectId = body.projectId.trim()
   const idempotencyKey = body.idempotencyKey?.trim()
+  const jobId = body.jobId?.trim()
   const previewContextFromClient = normalizePreviewContext(body.previewContext)
   const attachments = normalizeAttachments(body.attachments)
   const promptWithAttachments = appendAttachmentsToPrompt(prompt, attachments)
@@ -851,6 +856,7 @@ async function parseGenerateRequest(request: NextRequest): Promise<GenerateReque
     collaborationMode,
     projectId,
     idempotencyKey,
+    jobId,
     previewContextFromClient,
     attachments,
     promptWithAttachments,
@@ -1045,6 +1051,9 @@ export async function POST(request: NextRequest) {
   const email = session?.user?.email
   let releaseGeneration: (() => void) | null = null
   let releaseQueue: (() => Promise<void>) | null = null
+  let releaseJobAbortController: (() => void) | null = null
+  let cleanupLinkedAbortListener: (() => void) | null = null
+  let activeJobId: string | undefined
 
   if (!email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
@@ -1063,9 +1072,11 @@ export async function POST(request: NextRequest) {
       collaborationMode,
       projectId,
       idempotencyKey,
+      jobId,
       previewContextFromClient,
       promptWithAttachments,
     } = parsedRequest
+    activeJobId = jobId
 
     const subject = await loadGenerationSubject(email, projectId)
     if ("error" in subject) {
@@ -1073,6 +1084,19 @@ export async function POST(request: NextRequest) {
     }
 
     const { user, project } = subject
+    const linkedAbortController = new AbortController()
+    const abortLinkedRequest = () => linkedAbortController.abort()
+    if (request.signal.aborted) {
+      linkedAbortController.abort()
+    } else {
+      request.signal.addEventListener("abort", abortLinkedRequest, { once: true })
+      cleanupLinkedAbortListener = () => request.signal.removeEventListener("abort", abortLinkedRequest)
+    }
+    if (jobId) {
+      releaseJobAbortController = registerGenerationAbortController(jobId, linkedAbortController)
+      await GenerationJobService.markRunning(jobId)
+      await GenerationJobService.assertNotCancelled(jobId)
+    }
 
     const executionContext = buildPromptExecutionContext({
       prompt,
@@ -1092,6 +1116,7 @@ export async function POST(request: NextRequest) {
 
     const generationModel = await resolveGenerationModel(selectedModel)
     if ("error" in generationModel) {
+      await GenerationJobService.markFailed(jobId, "Selected model is not available")
       return generationModel.error
     }
 
@@ -1138,11 +1163,13 @@ export async function POST(request: NextRequest) {
     }
 
     if (user.balance < requestCost) {
+      await GenerationJobService.markFailed(jobId, "Saldo Rupiah tidak cukup untuk menjalankan generasi ini.")
       return NextResponse.json({ error: "Saldo Rupiah tidak cukup untuk menjalankan generasi ini." }, { status: 402 })
     }
 
     const tierConfig = getSwiftTierConfig(modelConfig.key)
     if (!tierConfig) {
+      await GenerationJobService.markFailed(jobId, "Selected Swift tier is not available")
       return NextResponse.json({ error: "Selected Swift tier is not available" }, { status: 403 })
     }
 
@@ -1166,6 +1193,7 @@ export async function POST(request: NextRequest) {
       idempotencyKey,
     })
     if ("error" in generationGuard) {
+      await GenerationJobService.markFailed(jobId, "Swift masih memproses generate sebelumnya.")
       return generationGuard.error
     }
     releaseGeneration = generationGuard.release
@@ -1189,14 +1217,27 @@ export async function POST(request: NextRequest) {
     let promptEnhancement: Awaited<ReturnType<typeof enhancePromptForSwift>> | null = null
 
     try {
+      await GenerationJobService.update(jobId, {
+        status: "running",
+        stage: "request",
+        label: "Mengirim prompt ke Swift engine",
+        progress: 14,
+      })
+      await GenerationJobService.assertNotCancelled(jobId)
+
       if (promptIntent.mode === "chat" || promptIntent.mode === "inspect") {
+        await GenerationJobService.update(jobId, {
+          stage: "provider",
+          label: promptIntent.mode === "inspect" ? "Swift membaca error preview" : "Swift menyiapkan jawaban",
+          progress: 35,
+        })
         const chatResult = await ProviderRouter.generate({
           provider,
           modelName: modelConfig.modelName,
           prompt: promptIntent.mode === "inspect" ? promptWithPreviewContext : promptWithAttachments,
           mode: promptIntent.mode === "inspect" ? "inspect" : "chat",
           promptLanguage,
-          signal: request.signal,
+          signal: linkedAbortController.signal,
         })
 
         await BillingService.markCompleted(usageLog.id, {
@@ -1229,6 +1270,7 @@ export async function POST(request: NextRequest) {
             contextualPromptLength: promptWithPreviewContext.length,
           },
         })
+        await GenerationJobService.markCompleted(jobId)
 
         return NextResponse.json({
           mode: promptIntent.mode === "inspect" ? "inspect" : "chat",
@@ -1248,13 +1290,18 @@ export async function POST(request: NextRequest) {
       }
 
       if (promptIntent.needsClarification) {
+        await GenerationJobService.update(jobId, {
+          stage: "provider",
+          label: "Swift menyiapkan pertanyaan klarifikasi",
+          progress: 35,
+        })
         const clarificationResult = await ProviderRouter.generate({
           provider,
           modelName: modelConfig.modelName,
           prompt: buildClarifyingPrompt(promptWithAttachments, promptLanguage),
           mode: "chat",
           promptLanguage,
-          signal: request.signal,
+          signal: linkedAbortController.signal,
         })
 
         await BillingService.markCompleted(usageLog.id, {
@@ -1287,6 +1334,7 @@ export async function POST(request: NextRequest) {
             contextualPromptLength: promptWithPreviewContext.length,
           },
         })
+        await GenerationJobService.markCompleted(jobId)
 
         return NextResponse.json({
           mode: "clarify",
@@ -1308,10 +1356,24 @@ export async function POST(request: NextRequest) {
 
       const promptMode = inferPromptMode(prompt)
 
+      await GenerationJobService.update(jobId, {
+        stage: "request",
+        label: "Menyusun rencana dan konteks kerja",
+        progress: 20,
+      })
+      await GenerationJobService.assertNotCancelled(jobId)
+
       promptEnhancement = await enhancePromptForSwift({
         prompt: promptWithAttachments,
         modelName: modelConfig.modelName,
       })
+      await GenerationJobService.update(jobId, {
+        stage: "provider",
+        label: "Swift mulai menulis file project",
+        progress: 38,
+        plan: promptEnhancement.plan,
+      })
+      await GenerationJobService.assertNotCancelled(jobId)
       const providerExecutionContext = buildProviderExecutionContext({
         promptWithAttachments,
         promptWithPreviewContext,
@@ -1378,8 +1440,9 @@ export async function POST(request: NextRequest) {
         provider,
         modelName: modelConfig.modelName,
         idempotencyKey,
-        signal: request.signal,
+        signal: linkedAbortController.signal,
       })
+      await GenerationJobService.assertNotCancelled(jobId)
 
       if (orchestration.alreadyExists) {
         await BillingService.refundReservation(
@@ -1412,6 +1475,7 @@ export async function POST(request: NextRequest) {
             reusedHistoryId: orchestration.historyId,
           },
         })
+        await GenerationJobService.markCompleted(jobId, orchestration.historyId)
 
         return NextResponse.json({
           message: 'Idempotent response: returning previous generation result',
@@ -1432,6 +1496,11 @@ export async function POST(request: NextRequest) {
       }
 
       let result = orchestration.providerResult
+      await GenerationJobService.update(jobId, {
+        stage: "parse",
+        label: "Membaca output Swift",
+        progress: 62,
+      })
       let providerParsed = extractGeneratedFilesFromProviderMessage(result.message)
 
       if (providerParsed.files.length === 0 && process.env.AI_ENABLE_RECOVERY_RETRY === "1") {
@@ -1460,7 +1529,7 @@ export async function POST(request: NextRequest) {
           mode: "files",
           promptLanguage,
           temperatureOverride: 0,
-          signal: request.signal,
+          signal: linkedAbortController.signal,
         })
 
         const recoveredFiles = extractGeneratedFilesFromProviderMessage(recoveryResult.message)
@@ -1473,6 +1542,12 @@ export async function POST(request: NextRequest) {
 
       providerMessagePreview = result.message.slice(0, 1200)
       providerParseMode = providerParsed.parseMode
+      await GenerationJobService.update(jobId, {
+        stage: "validate",
+        label: "Mengecek struktur, relevansi, dan keamanan preview",
+        progress: 74,
+      })
+      await GenerationJobService.assertNotCancelled(jobId)
       let generatedFiles: GeneratedFile[] = []
       let providerAssemblyMessage = ""
       const providerUpdatedEntry = hasPrimaryEntryUpdate(providerParsed.files)
@@ -1609,6 +1684,11 @@ export async function POST(request: NextRequest) {
         cost: requestCost,
         projectMemoryJson,
       })
+      await GenerationJobService.update(jobId, {
+        stage: "save",
+        label: "Menyimpan file project",
+        progress: 90,
+      })
       const historyId = savedGeneration.historyId
       generatedFiles = savedGeneration.files
 
@@ -1659,6 +1739,12 @@ export async function POST(request: NextRequest) {
           finalPromptMode,
         },
       })
+      await GenerationJobService.update(jobId, {
+        stage: "preview",
+        label: "Menyiapkan preview",
+        progress: 96,
+      })
+      await GenerationJobService.markCompleted(jobId, historyId)
 
       return NextResponse.json({
         mode: "build",
@@ -1683,6 +1769,10 @@ export async function POST(request: NextRequest) {
       const isStrictFullStackError = error instanceof StrictFullStackValidationError
       const isRelevanceError = error instanceof RelevanceValidationError
       const isQualityGateError = error instanceof GenerationQualityGateError
+      const isCancelledError =
+        error instanceof GenerationJobCancelledError ||
+        (error instanceof SwiftProviderFailureError &&
+          error.attempts.some((attempt) => attempt.failureReason === "cancelled"))
       const errorMessage = error instanceof Error ? error.message : "AI request failed"
       const providerFailure = error instanceof SwiftProviderFailureError ? error : null
       const lastFailedAttempt = providerFailure
@@ -1701,9 +1791,17 @@ export async function POST(request: NextRequest) {
           ? buildGenerationQualityGateMessage((error as GenerationQualityGateError).details)
         : isRelevanceError
           ? buildRelevanceFailSafeMessage((error as RelevanceValidationError).details)
+        : isCancelledError
+          ? "Generate dihentikan. Perubahan belum diterapkan dan file project terakhir tetap dipertahankan."
         : providerFailure
           ? providerFailure.userMessage
         : getFriendlyProviderErrorMessage(errorMessage)
+
+      if (isCancelledError) {
+        await GenerationJobService.markCancelled(jobId, "Generate dihentikan")
+      } else {
+        await GenerationJobService.markFailed(jobId, friendlyMessage)
+      }
 
       await BillingService.refundReservation(
         usageLog.id,
@@ -1780,6 +1878,8 @@ export async function POST(request: NextRequest) {
             ? "PROJECT_SAFETY_VALIDATION_FAILED"
             : isRelevanceError
               ? "PROJECT_RELEVANCE_VALIDATION_FAILED"
+              : isCancelledError
+                ? "GENERATION_CANCELLED"
               : "GENERATION_FAILED",
         ...(isStrictFullStackError
           ? {
@@ -1811,6 +1911,13 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to process request"
     const status = message.toLowerCase().includes("rate limit") ? 429 : 500
+    if (activeJobId) {
+      if (error instanceof GenerationJobCancelledError) {
+        await GenerationJobService.markCancelled(activeJobId, "Generate dihentikan")
+      } else {
+        await GenerationJobService.markFailed(activeJobId, message)
+      }
+    }
     if (error instanceof SwiftQueueError) {
       return NextResponse.json(
         {
@@ -1828,6 +1935,8 @@ export async function POST(request: NextRequest) {
       { status }
     )
   } finally {
+    cleanupLinkedAbortListener?.()
+    releaseJobAbortController?.()
     releaseGeneration?.()
     await releaseQueue?.()
   }

@@ -37,6 +37,7 @@ model User {
   billingTransactionsAsActor BillingTransaction[] @relation("BillingTransactionActor")
   billingTransactionsAsCounterparty BillingTransaction[] @relation("BillingTransactionCounterparty")
   uploadedAssets ProjectAsset[]
+  generationJobs GenerationJob[]
 
   @@index([email])
   @@index([isDeveloperAccount])
@@ -143,6 +144,7 @@ model Project {
   history   GenerationHistory[]
   requestLogs RequestLog[]
   projectAssets ProjectAsset[]
+  generationJobs GenerationJob[]
 
   @@index([workspaceId])
   @@index([templateId])
@@ -201,6 +203,39 @@ model GenerationHistory {
   @@index([projectId])
   @@index([createdAt])
   @@index([projectId, idempotencyKey])
+}
+
+model GenerationJob {
+  id              String   @id @default(cuid())
+  userId          String
+  projectId       String
+  prompt          String
+  model           String
+  provider        String   @default("swift")
+  status          String   @default("queued")
+  stage           String   @default("queued")
+  label           String   @default("Prompt diterima")
+  progress        Int      @default(0)
+  planJson        String?
+  error           String?
+  resultHistoryId String?
+  cancelRequested Boolean  @default(false)
+  cancelReason    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  failedAt        DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@index([stage])
+  @@index([cancelRequested])
 }
 
 // Request telemetry and diagnostics for AI operations

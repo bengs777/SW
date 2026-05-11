@@ -393,7 +393,11 @@ function GeneratingPreview({
 
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = progress ? Math.ceil(progress.timeoutMs / 1000) : 55
-  const percent = progress ? Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100)) : 12
+  const percent = progress
+    ? typeof progress.progressPercent === "number"
+      ? Math.max(0, Math.min(100, progress.progressPercent))
+      : Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
+    : 12
 
   return (
     <div className="flex h-full flex-col items-center justify-center p-8 text-center">

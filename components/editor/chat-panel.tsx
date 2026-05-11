@@ -1334,7 +1334,10 @@ function GenerationProgressCard({
 
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = Math.max(1, Math.ceil(progress.timeoutMs / 1000))
-  const percent = Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
+  const percent =
+    typeof progress.progressPercent === "number"
+      ? Math.max(0, Math.min(100, progress.progressPercent))
+      : Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
   const isTerminal = progress.stage === "timeout" || progress.stage === "error" || progress.stage === "cancelled"
   const steps = getGenerationSteps(progress.stage)
 
