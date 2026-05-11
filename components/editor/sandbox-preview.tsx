@@ -392,7 +392,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
   var __executionTimeout = setTimeout(function(){
     showError('Preview execution timed out. Check for an infinite render loop or a long-running module.');
-  }, 12000);
+  }, 15000);
 
   emitTelemetry('runtime.boot', {
     moduleCount: Object.keys(__compiledModules).length
@@ -470,6 +470,19 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     }
   }
 
+  function assertNoRawAliasAfterRepair(path, code, phase){
+    assertNoUnresolvedAlias(path, code, phase || 'post-repair');
+  }
+
+  function injectVirtualModuleImport(code, namedImport, virtualPath){
+    var source = String(code || '');
+    var importStatement = 'import { ' + namedImport + ' } from "' + virtualPath + '";\\n';
+    if(source.indexOf(virtualPath) >= 0){
+      return source;
+    }
+    return importStatement + source;
+  }
+
   function hasStaleErrorBoundary(code){
     var source = String(code || '');
     return (
@@ -487,7 +500,8 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     emitTelemetry('runtime.stale_error_boundary_repair', {
       path: path,
       phase: phase || 'runtime-repair',
-      action: 'rewrite-to-swift-safe-boundary'
+      action: 'rewrite-to-swift-safe-boundary',
+      repair_source: 'runtime'
     });
     var source = String(code || '');
     source = source.replace(/^\\s*import\\s+[\\s\\S]*?\\bErrorBoundary\\b[\\s\\S]*?from\\s+["'][^"']+["'];?\\s*$/gm, "");
@@ -496,9 +510,14 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     source = source.replace(/^\\s*export\\s+\\*?\\s*from\\s+["'][^"']*error-boundary[^"']*["'];?\\s*$/gim, "");
     source = source.replace(/\\bErrorBoundary\\b/g, "SwiftSafeErrorBoundary");
     source = source.replace(/SwiftSafeSwiftSafeErrorBoundary/g, "SwiftSafeErrorBoundary");
-    if(source.indexOf('SwiftSafeErrorBoundary') >= 0 && source.indexOf('@/components/swift-safe-error-boundary') < 0){
-      source = 'import { SwiftSafeErrorBoundary } from "@/components/swift-safe-error-boundary";\\n' + source;
+    if(source.indexOf('SwiftSafeErrorBoundary') >= 0 && source.indexOf('/@preview/components/swift-safe-error-boundary.tsx') < 0){
+      source = injectVirtualModuleImport(
+        source,
+        'SwiftSafeErrorBoundary',
+        '/@preview/components/swift-safe-error-boundary.tsx'
+      );
     }
+    assertNoRawAliasAfterRepair(path, source, (phase || 'runtime-repair') + ':post-repair');
     return source;
   }
 
@@ -602,21 +621,25 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     var paths = Object.keys(__compiledModules);
     for(var i=0;i<paths.length;i++){
       assertNoUnresolvedAlias(paths[i], __compiledModules[paths[i]], 'pre-transform');
+      assertNoRawAliasAfterRepair(paths[i], __compiledModules[paths[i]], 'pre-runtime');
       if(hasStaleErrorBoundary(__compiledModules[paths[i]])){
         emitTelemetry('runtime.stale_error_boundary_warning', {
           path: paths[i],
           phase: 'pre-transform',
-          action: 'will-attempt-rewrite'
+          action: 'will-attempt-rewrite',
+          repair_source: 'runtime'
         });
       }
     }
     for(var shim in __shimModules){
       assertNoUnresolvedAlias('shim:' + shim, __shimModules[shim], 'pre-transform');
+      assertNoRawAliasAfterRepair('shim:' + shim, __shimModules[shim], 'pre-runtime');
       if(hasStaleErrorBoundary(__shimModules[shim])){
         emitTelemetry('runtime.stale_error_boundary_warning', {
           path: 'shim:' + shim,
           phase: 'pre-transform',
-          action: 'will-attempt-rewrite'
+          action: 'will-attempt-rewrite',
+          repair_source: 'runtime'
         });
       }
     }

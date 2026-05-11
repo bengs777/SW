@@ -31,6 +31,23 @@ type ImportRecord = {
   isTypeOnly: boolean
 }
 
+type AstNodeRecord = Record<string, unknown> & {
+  type?: string
+  source?: AstNodeRecord
+  callee?: AstNodeRecord
+  arguments?: AstNodeRecord[]
+  importKind?: string
+  exportKind?: string
+  value?: string
+  start?: number | null
+  end?: number | null
+}
+
+type ImportSourceNode = AstNodeRecord & {
+  type: "StringLiteral"
+  value: string
+}
+
 type ResolveResult =
   | { kind: "local"; path: string; specifier: string; isStyle: boolean }
   | { kind: "external"; packageName: string; specifier: string }
@@ -566,32 +583,32 @@ function parseImports(code: string, filePath: string): ImportRecord[] {
   const imports: ImportRecord[] = []
 
   traverseAst(ast, (node) => {
-    if (node.type === "ImportDeclaration" && node.source?.type === "StringLiteral") {
+    if (node.type === "ImportDeclaration" && isStringLiteralNode(node.source)) {
       imports.push(readImportRecord(node.source, node, node.importKind === "type"))
       return
     }
 
     if (
       (node.type === "ExportNamedDeclaration" || node.type === "ExportAllDeclaration") &&
-      node.source?.type === "StringLiteral"
+      isStringLiteralNode(node.source)
     ) {
       imports.push(readImportRecord(node.source, node, node.exportKind === "type"))
       return
     }
 
-    if (node.type === "ImportExpression" && node.source?.type === "StringLiteral") {
+    if (node.type === "ImportExpression" && isStringLiteralNode(node.source)) {
       imports.push(readImportRecord(node.source, node, false))
       return
     }
 
-    if (node.type === "ImportExpression" && node.source && node.source.type !== "StringLiteral") {
+    if (node.type === "ImportExpression" && node.source && !isStringLiteralNode(node.source)) {
       throw new Error(`Dynamic import in ${filePath} must use a static string literal.`)
     }
 
     if (
       node.type === "CallExpression" &&
       node.callee?.type === "Import" &&
-      node.arguments?.[0]?.type === "StringLiteral"
+      isStringLiteralNode(node.arguments?.[0])
     ) {
       imports.push(readImportRecord(node.arguments[0], node, false))
       return
@@ -605,11 +622,7 @@ function parseImports(code: string, filePath: string): ImportRecord[] {
   return imports.filter((item) => item.start >= 0 && item.end > item.start && item.source.trim())
 }
 
-function readImportRecord(
-  sourceNode: { value: string; start?: number | null; end?: number | null },
-  statementNode: { start?: number | null; end?: number | null },
-  isTypeOnly: boolean
-) {
+function readImportRecord(sourceNode: ImportSourceNode, statementNode: AstNodeRecord, isTypeOnly: boolean) {
   return {
     source: sourceNode.value,
     start: typeof sourceNode.start === "number" ? sourceNode.start : -1,
@@ -620,10 +633,16 @@ function readImportRecord(
   }
 }
 
-function traverseAst(node: unknown, visit: (node: any) => void) {
+function isStringLiteralNode(node: unknown): node is ImportSourceNode {
+  if (!node || typeof node !== "object") return false
+  const candidate = node as AstNodeRecord
+  return candidate.type === "StringLiteral" && typeof candidate.value === "string"
+}
+
+function traverseAst(node: unknown, visit: (node: AstNodeRecord) => void) {
   if (!node || typeof node !== "object") return
 
-  const current = node as Record<string, unknown>
+  const current = node as AstNodeRecord
   if (typeof current.type === "string") {
     visit(current)
   }
