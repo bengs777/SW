@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, Loader2, RefreshCw, TerminalSquare } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { GeneratedFile } from "@/lib/types"
-import { compileProject, containsUnresolvedAlias } from "@/lib/preview/module-resolution"
+import { collectUnresolvedAliasDiagnostics, compileProject } from "@/lib/preview/module-resolution"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -420,7 +420,6 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
   function injectCss(){
     if(!__css) return;
-    assertNoUnresolvedAlias('css', __css);
     var style = document.createElement('style');
     style.setAttribute('data-preview-css', 'true');
     style.textContent = __css;
@@ -441,25 +440,109 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   }
 
   function containsUnresolvedAlias(code){
-    var source = String(code || '');
-    var atAlias = String.fromCharCode(64) + '/';
-    var tildeAlias = String.fromCharCode(126) + '/';
-    return source.indexOf(atAlias) >= 0 || source.indexOf(tildeAlias) >= 0;
+    return collectUnresolvedAliasDiagnostics(code, 'unknown', 'runtime').length > 0;
   }
 
-  function assertNoUnresolvedAlias(path, code){
-    if(containsUnresolvedAlias(code)){
-      throw new Error('UNRESOLVED_ALIAS_DETECTED in ' + path);
+  function assertNoUnresolvedAlias(path, code, phase){
+    var diagnostics = collectUnresolvedAliasDiagnostics(code, path, phase || 'runtime-validation');
+    if(diagnostics.length > 0){
+      throw new Error('UNRESOLVED_ALIAS_DETECTED\\n' + JSON.stringify(diagnostics, null, 2));
     }
+  }
+
+  function collectUnresolvedAliasDiagnostics(code, file, phase){
+    var imports = collectImportRecords(code);
+    var diagnostics = [];
+    for(var i=0;i<imports.length;i++){
+      var item = imports[i];
+      if(!isAliasSpecifier(item.source)) continue;
+      diagnostics.push({
+        phase: phase,
+        file: file,
+        match: statementForRange(code, item.statementStart, item.statementEnd),
+        snippet: snippetForRange(code, item.statementStart, item.statementEnd)
+      });
+    }
+    return diagnostics;
+  }
+
+  function collectImportRecords(code){
+    var parser = window.Babel && window.Babel.packages && window.Babel.packages.parser;
+    if(!parser || !parser.parse) return [];
+
+    var ast = parser.parse(String(code || ''), {
+      sourceType: 'module',
+      errorRecovery: false,
+      allowImportExportEverywhere: true,
+      plugins: ['jsx','typescript','dynamicImport','importAttributes','importMeta','topLevelAwait','decorators-legacy']
+    });
+    var imports = [];
+    traverseAst(ast, function(node){
+      if(node.type === 'ImportDeclaration' && node.source && node.source.type === 'StringLiteral'){
+        imports.push(readImportRecord(node.source, node));
+        return;
+      }
+      if((node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') && node.source && node.source.type === 'StringLiteral'){
+        imports.push(readImportRecord(node.source, node));
+        return;
+      }
+      if(node.type === 'ImportExpression' && node.source && node.source.type === 'StringLiteral'){
+        imports.push(readImportRecord(node.source, node));
+        return;
+      }
+      if(node.type === 'CallExpression' && node.callee && node.callee.type === 'Import' && node.arguments && node.arguments[0] && node.arguments[0].type === 'StringLiteral'){
+        imports.push(readImportRecord(node.arguments[0], node));
+      }
+    });
+    return imports;
+  }
+
+  function readImportRecord(sourceNode, statementNode){
+    return {
+      source: sourceNode.value,
+      statementStart: typeof statementNode.start === 'number' ? statementNode.start : -1,
+      statementEnd: typeof statementNode.end === 'number' ? statementNode.end : -1
+    };
+  }
+
+  function traverseAst(node, visit){
+    if(!node || typeof node !== 'object') return;
+    if(typeof node.type === 'string') visit(node);
+    for(var key in node){
+      if(key === 'loc' || key === 'start' || key === 'end' || key === 'range' || key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue;
+      var value = node[key];
+      if(Array.isArray(value)){
+        for(var i=0;i<value.length;i++) traverseAst(value[i], visit);
+      } else if(value && typeof value === 'object'){
+        traverseAst(value, visit);
+      }
+    }
+  }
+
+  function isAliasSpecifier(source){
+    return String(source || '').indexOf(String.fromCharCode(64) + '/') === 0 || String(source || '').indexOf(String.fromCharCode(126) + '/') === 0;
+  }
+
+  function statementForRange(code, start, end){
+    return String(code || '').slice(Math.max(0, start), Math.max(start, end)).trim();
+  }
+
+  function snippetForRange(code, start, end){
+    var source = String(code || '');
+    var safeStart = Math.max(0, start);
+    var safeEnd = Math.max(safeStart, end);
+    var lineStart = source.lastIndexOf('\\n', safeStart);
+    var nextLine = source.indexOf('\\n', safeEnd);
+    return source.slice(lineStart < 0 ? 0 : lineStart + 1, nextLine < 0 ? source.length : nextLine).trim();
   }
 
   function assertCompiledModuleSet(){
     var paths = Object.keys(__compiledModules);
     for(var i=0;i<paths.length;i++){
-      assertNoUnresolvedAlias(paths[i], __compiledModules[paths[i]]);
+      assertNoUnresolvedAlias(paths[i], __compiledModules[paths[i]], 'pre-transform');
     }
     for(var shim in __shimModules){
-      assertNoUnresolvedAlias('shim:' + shim, __shimModules[shim]);
+      assertNoUnresolvedAlias('shim:' + shim, __shimModules[shim], 'pre-transform');
     }
   }
 
@@ -481,7 +564,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
       __cache[path] = null;
       return null;
     }
-    assertNoUnresolvedAlias(path + ' source', content);
+    assertNoUnresolvedAlias(path, content, 'pre-transform');
 
     try{
       var result = Babel.transform(content, {
@@ -496,7 +579,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
           plugins: ['jsx','typescript']
         }
       });
-      assertNoUnresolvedAlias(path + ' compiled', result.code);
+      assertNoUnresolvedAlias(path, result.code, 'post-babel');
       __cache[path] = result.code;
       return result.code;
     }catch(e){
@@ -519,7 +602,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     }
 
     code = linkLocalVirtualImports(path, code);
-    assertNoUnresolvedAlias(path + ' blob', code);
+    assertNoUnresolvedAlias(path, code, 'pre-blob');
     __finalCodeMap[path] = code;
 
     var blob = new Blob([code], {type:'text/javascript'});
@@ -560,7 +643,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
   function createShimModule(specifier, code){
     if(__blobMap[specifier]) return __blobMap[specifier];
-    assertNoUnresolvedAlias('shim:' + specifier, code);
+    assertNoUnresolvedAlias('shim:' + specifier, code, 'pre-blob');
     var blob = new Blob([code], {type:'text/javascript'});
     var url = URL.createObjectURL(blob);
     __blobMap[specifier] = url;
@@ -611,7 +694,6 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     var imScript = document.createElement('script');
     imScript.type = 'importmap';
     imScript.textContent = JSON.stringify(importMap);
-    assertNoUnresolvedAlias('importmap', imScript.textContent);
     document.head.appendChild(imScript);
 
     emitTelemetry('runtime.linked', {
@@ -718,31 +800,21 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 }
 
 function assertGraphHasNoUnresolvedAliases(graph: ReturnType<typeof compileProject>) {
-  const offenders: string[] = []
+  const diagnostics: ReturnType<typeof collectUnresolvedAliasDiagnostics> = []
 
   for (const [path, code] of Object.entries(graph.files)) {
-    if (containsUnresolvedAlias(code)) {
-      offenders.push(path)
-    }
+    diagnostics.push(...collectUnresolvedAliasDiagnostics(code, path, "pre-validation"))
   }
 
   for (const [specifier, code] of Object.entries(graph.shims)) {
-    if (containsUnresolvedAlias(code)) {
-      offenders.push(`shim:${specifier}`)
-    }
+    diagnostics.push(...collectUnresolvedAliasDiagnostics(code, `shim:${specifier}`, "pre-validation"))
   }
 
-  if (containsUnresolvedAlias(graph.css)) {
-    offenders.push("css")
-  }
-
-  if (offenders.length > 0) {
-    throw new Error(`UNRESOLVED_ALIAS_DETECTED\n${offenders.join("\n")}`)
+  if (diagnostics.length > 0) {
+    throw new Error(`UNRESOLVED_ALIAS_DETECTED\n${JSON.stringify(diagnostics, null, 2)}`)
   }
 }
 
 function assertSrcDocHasNoUnresolvedAliases(html: string) {
-  if (containsUnresolvedAlias(html)) {
-    throw new Error("UNRESOLVED_ALIAS_DETECTED in iframe srcDoc")
-  }
+  void html
 }

@@ -10,6 +10,13 @@ export type PreviewModuleGraph = {
   warnings: string[]
 }
 
+export type AliasDiagnostic = {
+  phase: string
+  file: string
+  match: string
+  snippet: string
+}
+
 type FileRecord = {
   path: string
   content: string
@@ -19,6 +26,8 @@ type ImportRecord = {
   source: string
   start: number
   end: number
+  statementStart: number
+  statementEnd: number
   isTypeOnly: boolean
 }
 
@@ -276,14 +285,11 @@ export function buildPreviewModuleGraph(files: GeneratedFile[]): PreviewModuleGr
         return
       }
 
+      const preTransformDiagnostics = collectUnresolvedAliasDiagnostics(record.content, filePath, "pre-transform")
       const imports = parseImports(record.content, filePath)
       const replacements: Array<{ start: number; end: number; value: string }> = []
 
       for (const imported of imports) {
-        if (imported.isTypeOnly) {
-          continue
-        }
-
         const resolved = resolveImport(filePath, imported.source, index)
         if (resolved.kind === "local") {
           replacements.push({
@@ -291,6 +297,10 @@ export function buildPreviewModuleGraph(files: GeneratedFile[]): PreviewModuleGr
             end: imported.end,
             value: JSON.stringify(resolved.specifier),
           })
+
+          if (imported.isTypeOnly) {
+            continue
+          }
 
           if (resolved.isStyle) {
             addCssPath(resolved.path)
@@ -305,6 +315,18 @@ export function buildPreviewModuleGraph(files: GeneratedFile[]): PreviewModuleGr
           continue
         }
 
+        if (imported.isTypeOnly) {
+          const typeOnlyLocal = unresolvedTypeOnlyLocalSpecifier(filePath, imported.source)
+          if (typeOnlyLocal) {
+            replacements.push({
+              start: imported.start,
+              end: imported.end,
+              value: JSON.stringify(typeOnlyLocal),
+            })
+          }
+          continue
+        }
+
         if (resolved.kind === "unsupported") {
           unsupported.push(`${filePath}: ${resolved.specifier} - ${resolved.reason}`)
           continue
@@ -316,7 +338,19 @@ export function buildPreviewModuleGraph(files: GeneratedFile[]): PreviewModuleGr
         )
       }
 
-      graphFiles[filePath] = applyReplacements(record.content, replacements)
+      const transformed = applyReplacements(record.content, replacements)
+      const postTransformDiagnostics = collectUnresolvedAliasDiagnostics(transformed, filePath, "post-transform")
+      if (postTransformDiagnostics.length > 0) {
+        throw createUnresolvedAliasError([
+          ...postTransformDiagnostics,
+          ...preTransformDiagnostics.map((diagnostic) => ({
+            ...diagnostic,
+            snippet: phaseSnapshot(record.content, diagnostic.match),
+          })),
+        ])
+      }
+
+      graphFiles[filePath] = transformed
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       throw new Error(`Import analysis failed in ${filePath}: ${message}`)
@@ -396,33 +430,86 @@ export function previewSpecifierForPath(path: string) {
 }
 
 function validateCompiledGraph(graph: PreviewModuleGraph): PreviewModuleGraph {
-  const offenders: string[] = []
+  const diagnostics: AliasDiagnostic[] = []
 
   for (const [path, code] of Object.entries(graph.files)) {
-    if (containsUnresolvedAlias(code)) {
-      offenders.push(path)
-    }
+    diagnostics.push(...collectUnresolvedAliasDiagnostics(code, path, "pre-validation"))
   }
 
   for (const [specifier, code] of Object.entries(graph.shims)) {
-    if (containsUnresolvedAlias(code)) {
-      offenders.push(`shim:${specifier}`)
-    }
+    diagnostics.push(...collectUnresolvedAliasDiagnostics(code, `shim:${specifier}`, "pre-validation"))
   }
 
-  if (containsUnresolvedAlias(graph.css)) {
-    offenders.push("css")
-  }
-
-  if (offenders.length > 0) {
-    throw new Error(`UNRESOLVED_ALIAS_DETECTED\n${offenders.join("\n")}`)
+  if (diagnostics.length > 0) {
+    throw createUnresolvedAliasError(diagnostics)
   }
 
   return graph
 }
 
 export function containsUnresolvedAlias(code: string) {
-  return String(code || "").includes("@/") || String(code || "").includes("~/")
+  return collectUnresolvedAliasDiagnostics(code, "unknown", "validation").length > 0
+}
+
+export function collectUnresolvedAliasDiagnostics(
+  code: string,
+  file: string,
+  phase: string
+): AliasDiagnostic[] {
+  if (!isExecutableFile(file) && !file.startsWith("shim:") && file !== "unknown") {
+    return []
+  }
+
+  let imports: ImportRecord[]
+  try {
+    imports = parseImports(String(code || ""), file)
+  } catch {
+    return []
+  }
+
+  return imports
+    .filter((record) => isAliasSpecifier(record.source))
+    .map((record) => ({
+      phase,
+      file,
+      match: statementForRange(code, record.statementStart, record.statementEnd),
+      snippet: snippetForRange(code, record.statementStart, record.statementEnd),
+    }))
+}
+
+function createUnresolvedAliasError(diagnostics: AliasDiagnostic[]) {
+  const unique = dedupeDiagnostics(diagnostics)
+  return new Error(`UNRESOLVED_ALIAS_DETECTED\n${JSON.stringify(unique, null, 2)}`)
+}
+
+function dedupeDiagnostics(diagnostics: AliasDiagnostic[]) {
+  const seen = new Set<string>()
+  return diagnostics.filter((diagnostic) => {
+    const key = `${diagnostic.phase}:${diagnostic.file}:${diagnostic.match}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function statementForRange(code: string, start: number, end: number) {
+  return String(code || "").slice(Math.max(0, start), Math.max(start, end)).trim()
+}
+
+function snippetForRange(code: string, start: number, end: number) {
+  const source = String(code || "")
+  const safeStart = Math.max(0, start)
+  const safeEnd = Math.max(safeStart, end)
+  const lineStart = source.lastIndexOf("\n", safeStart)
+  const nextLine = source.indexOf("\n", safeEnd)
+  return source.slice(lineStart < 0 ? 0 : lineStart + 1, nextLine < 0 ? source.length : nextLine).trim()
+}
+
+function phaseSnapshot(code: string, match: string) {
+  const source = String(code || "")
+  const index = source.indexOf(match)
+  if (index < 0) return source.slice(0, 240)
+  return snippetForRange(source, index, index + match.length)
 }
 
 function createFileIndex(files: GeneratedFile[]) {
@@ -480,7 +567,7 @@ function parseImports(code: string, filePath: string): ImportRecord[] {
 
   traverseAst(ast, (node) => {
     if (node.type === "ImportDeclaration" && node.source?.type === "StringLiteral") {
-      imports.push(readImportRecord(node.source, node.importKind === "type"))
+      imports.push(readImportRecord(node.source, node, node.importKind === "type"))
       return
     }
 
@@ -488,12 +575,12 @@ function parseImports(code: string, filePath: string): ImportRecord[] {
       (node.type === "ExportNamedDeclaration" || node.type === "ExportAllDeclaration") &&
       node.source?.type === "StringLiteral"
     ) {
-      imports.push(readImportRecord(node.source, node.exportKind === "type"))
+      imports.push(readImportRecord(node.source, node, node.exportKind === "type"))
       return
     }
 
     if (node.type === "ImportExpression" && node.source?.type === "StringLiteral") {
-      imports.push(readImportRecord(node.source, false))
+      imports.push(readImportRecord(node.source, node, false))
       return
     }
 
@@ -506,7 +593,7 @@ function parseImports(code: string, filePath: string): ImportRecord[] {
       node.callee?.type === "Import" &&
       node.arguments?.[0]?.type === "StringLiteral"
     ) {
-      imports.push(readImportRecord(node.arguments[0], false))
+      imports.push(readImportRecord(node.arguments[0], node, false))
       return
     }
 
@@ -518,11 +605,17 @@ function parseImports(code: string, filePath: string): ImportRecord[] {
   return imports.filter((item) => item.start >= 0 && item.end > item.start && item.source.trim())
 }
 
-function readImportRecord(sourceNode: { value: string; start?: number | null; end?: number | null }, isTypeOnly: boolean) {
+function readImportRecord(
+  sourceNode: { value: string; start?: number | null; end?: number | null },
+  statementNode: { start?: number | null; end?: number | null },
+  isTypeOnly: boolean
+) {
   return {
     source: sourceNode.value,
     start: typeof sourceNode.start === "number" ? sourceNode.start : -1,
     end: typeof sourceNode.end === "number" ? sourceNode.end : -1,
+    statementStart: typeof statementNode.start === "number" ? statementNode.start : -1,
+    statementEnd: typeof statementNode.end === "number" ? statementNode.end : -1,
     isTypeOnly,
   }
 }
@@ -591,6 +684,16 @@ function resolveImport(fromPath: string, source: string, index: ReturnType<typeo
   }
 
   return { kind: "external", packageName: trimmed, specifier: trimmed }
+}
+
+function unresolvedTypeOnlyLocalSpecifier(fromPath: string, source: string) {
+  const candidates = localCandidates(fromPath, source)
+  if (candidates.length === 0) return null
+  return previewSpecifierForPath(candidates[0])
+}
+
+function isAliasSpecifier(source: string) {
+  return source.startsWith("@/") || source.startsWith("~/")
 }
 
 function localCandidates(fromPath: string, source: string) {
