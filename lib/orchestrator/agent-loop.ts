@@ -32,7 +32,9 @@ export async function executePlan(
     let taskSucceeded = false
     let lastError: unknown = null
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const maxAttempts = task.type === "ai:generate" ? 1 : 2
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         if (task.type === "ai:generate") {
           const model = opts.provider && opts.modelName

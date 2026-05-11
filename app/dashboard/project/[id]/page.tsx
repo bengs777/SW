@@ -784,7 +784,7 @@ export default function EditorPage() {
     } catch (error) {
       const message =
         error instanceof DOMException && error.name === "AbortError"
-          ? "Swift AI engine timeout. Request dihentikan otomatis setelah fallback internal. Saldo akan otomatis dikembalikan jika request gagal."
+          ? "Swift AI engine timeout. Request dihentikan otomatis. Saldo akan otomatis dikembalikan jika request gagal."
           : error instanceof Error
             ? error.message
             : "Sorry, I encountered an error while generating. Please try again."

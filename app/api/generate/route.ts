@@ -1431,7 +1431,7 @@ export async function POST(request: NextRequest) {
       let result = orchestration.providerResult
       let providerParsed = extractGeneratedFilesFromProviderMessage(result.message)
 
-      if (providerParsed.files.length === 0) {
+      if (providerParsed.files.length === 0 && process.env.AI_ENABLE_RECOVERY_RETRY === "1") {
         recoveryRetryUsed = true
         log("warn", "Parser failed to detect files, running aggressive recovery retry", {
           projectId: project.id,

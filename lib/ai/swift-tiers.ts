@@ -58,7 +58,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       note: "Satu-satunya AI aktif di Swift.",
       priceIdr: 4000,
       price: 4000,
-      timeoutMs: 35_000,
+      timeoutMs: 120_000,
       maxOutputTokens: 8000,
       rank: 1,
       queue: { concurrency: 4, maxQueueDepth: 50 },
