@@ -23,6 +23,8 @@ export type ProviderFailureReason =
 export type SwiftModelTarget = {
   modelId: string
   role: "primary" | "fallback"
+  timeoutMs?: number
+  maxOutputTokens?: number
 }
 
 export type SwiftTierConfig = {
@@ -59,13 +61,13 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       note: "Satu-satunya AI aktif di Swift.",
       priceIdr: 4000,
       price: 4000,
-      timeoutMs: 120_000,
-      maxOutputTokens: 8000,
+      timeoutMs: 95_000,
+      maxOutputTokens: 6000,
       rank: 1,
       queue: { concurrency: 4, maxQueueDepth: 50 },
       targets: [
-        { modelId: DEEPSEEK_V4_FLASH_MODEL_ID, role: "primary" },
-        { modelId: DEEPSEEK_V4_FLASH_NITRO_MODEL_ID, role: "fallback" },
+        { modelId: DEEPSEEK_V4_FLASH_MODEL_ID, role: "primary", timeoutMs: 35_000, maxOutputTokens: 4500 },
+        { modelId: DEEPSEEK_V4_FLASH_NITRO_MODEL_ID, role: "fallback", timeoutMs: 95_000, maxOutputTokens: 6000 },
       ],
     },
   ]

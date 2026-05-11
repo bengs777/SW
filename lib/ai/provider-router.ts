@@ -344,9 +344,9 @@ export class ProviderRouter {
       model: target.modelId,
       messages: this.buildMessages(input.prompt, input.mode, input.promptLanguage),
       temperature: this.getTemperature(input.mode, input.temperatureOverride),
-      maxTokens: input.tier.maxOutputTokens,
+      maxTokens: target.maxOutputTokens || input.tier.maxOutputTokens,
       responseFormat: input.mode === "files" ? "json_object" : undefined,
-      timeoutMs: input.tier.timeoutMs,
+      timeoutMs: target.timeoutMs || input.tier.timeoutMs,
       signal: input.signal,
     })
   }
