@@ -13,7 +13,7 @@ export function V0ModelBadge({ showCost = true, size = "md" }: V0ModelBadgeProps
     return (
       <Badge variant="secondary" className="gap-1">
         <Coins className="h-3 w-3" />
-        <span>1-15 credits</span>
+        <span>Rp2.000-Rp10.000</span>
       </Badge>
     )
   }
@@ -26,7 +26,7 @@ export function V0ModelBadge({ showCost = true, size = "md" }: V0ModelBadgeProps
           <div className="text-xs font-medium text-muted-foreground">Swift AI</div>
           {showCost && (
             <div className="text-sm font-semibold text-foreground">
-              1-15 credits / generasi
+              Rp2.000-Rp10.000 / generasi
             </div>
           )}
         </div>

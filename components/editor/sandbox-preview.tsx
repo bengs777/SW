@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, Loader2, RefreshCw, TerminalSquare } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { GeneratedFile } from "@/lib/types"
+import { compileProject, containsUnresolvedAlias } from "@/lib/preview/module-resolution"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,237 +17,20 @@ interface PreviewError {
   stack?: string
 }
 
+type PreviewTelemetryEvent = {
+  type?: string
+  event?: string
+  stage?: string
+  message?: string
+  stack?: string
+  metrics?: Record<string, unknown>
+}
+
 interface SandboxPreviewProps {
   files: GeneratedFile[]
   className?: string
   projectId?: string
   onError?: (error: string) => void
-}
-
-// ---------------------------------------------------------------------------
-// CDN Import Map — resolves bare specifiers to ESM CDN URLs
-// ---------------------------------------------------------------------------
-
-const CDN_IMPORTS: Record<string, string> = {
-  "react": "https://esm.sh/react@18.3.1",
-  "react-dom": "https://esm.sh/react-dom@18.3.1",
-  "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-  "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-  "react/jsx-dev-runtime": "https://esm.sh/react@18.3.1/jsx-dev-runtime",
-  "react-is": "https://esm.sh/react-is@18",
-  "scheduler": "https://esm.sh/scheduler@0.23",
-  "lucide-react": "https://esm.sh/lucide-react@0.454",
-  "clsx": "https://esm.sh/clsx@2",
-  "tailwind-merge": "https://esm.sh/tailwind-merge@2",
-  "class-variance-authority": "https://esm.sh/class-variance-authority@0.7",
-  "zod": "https://esm.sh/zod@3",
-  "date-fns": "https://esm.sh/date-fns@3",
-  "recharts": "https://esm.sh/recharts@2",
-  "framer-motion": "https://esm.sh/framer-motion@11",
-  "@radix-ui/react-slot": "https://esm.sh/@radix-ui/react-slot@1",
-  "@radix-ui/react-tabs": "https://esm.sh/@radix-ui/react-tabs@1",
-  "@radix-ui/react-dialog": "https://esm.sh/@radix-ui/react-dialog@1",
-  "@radix-ui/react-dropdown-menu": "https://esm.sh/@radix-ui/react-dropdown-menu@2",
-  "@radix-ui/react-select": "https://esm.sh/@radix-ui/react-select@2",
-  "@radix-ui/react-popover": "https://esm.sh/@radix-ui/react-popover@1",
-  "@radix-ui/react-toast": "https://esm.sh/@radix-ui/react-toast@1",
-  "@radix-ui/react-label": "https://esm.sh/@radix-ui/react-label@2",
-  "@radix-ui/react-avatar": "https://esm.sh/@radix-ui/react-avatar@1",
-  "@radix-ui/react-alert-dialog": "https://esm.sh/@radix-ui/react-alert-dialog@1",
-  "@radix-ui/react-checkbox": "https://esm.sh/@radix-ui/react-checkbox@1",
-  "@radix-ui/react-collapsible": "https://esm.sh/@radix-ui/react-collapsible@1",
-  "@radix-ui/react-context-menu": "https://esm.sh/@radix-ui/react-context-menu@2",
-  "@radix-ui/react-hover-card": "https://esm.sh/@radix-ui/react-hover-card@1",
-  "@radix-ui/react-menubar": "https://esm.sh/@radix-ui/react-menubar@1",
-  "@radix-ui/react-navigation-menu": "https://esm.sh/@radix-ui/react-navigation-menu@1",
-  "@radix-ui/react-progress": "https://esm.sh/@radix-ui/react-progress@1",
-  "@radix-ui/react-radio-group": "https://esm.sh/@radix-ui/react-radio-group@1",
-  "@radix-ui/react-scroll-area": "https://esm.sh/@radix-ui/react-scroll-area@1",
-  "@radix-ui/react-separator": "https://esm.sh/@radix-ui/react-separator@1",
-  "@radix-ui/react-slider": "https://esm.sh/@radix-ui/react-slider@1",
-  "@radix-ui/react-switch": "https://esm.sh/@radix-ui/react-switch@1",
-  "@radix-ui/react-toggle": "https://esm.sh/@radix-ui/react-toggle@1",
-  "@radix-ui/react-toggle-group": "https://esm.sh/@radix-ui/react-toggle-group@1",
-  "@radix-ui/react-tooltip": "https://esm.sh/@radix-ui/react-tooltip@1",
-  "@radix-ui/react-popper": "https://esm.sh/@radix-ui/react-popper@1",
-  "@radix-ui/react-portal": "https://esm.sh/@radix-ui/react-portal@1",
-  "@radix-ui/react-primitive": "https://esm.sh/@radix-ui/react-primitive@1",
-  "react-hook-form": "https://esm.sh/react-hook-form@7",
-  "@hookform/resolvers": "https://esm.sh/@hookform/resolvers@3",
-  "@tanstack/react-table": "https://esm.sh/@tanstack/react-table@8",
-  "@tanstack/react-query": "https://esm.sh/@tanstack/react-query@5",
-  "sonner": "https://esm.sh/sonner@1",
-  "embla-carousel-react": "https://esm.sh/embla-carousel-react@8",
-  "embla-carousel": "https://esm.sh/embla-carousel@8",
-  "cmdk": "https://esm.sh/cmdk@1",
-  "vaul": "https://esm.sh/vaul@0.9",
-  "next/link": "https://esm.sh/next@14/link",
-  "next/image": "https://esm.sh/next@14/image",
-  "next/navigation": "https://esm.sh/next@14/navigation",
-}
-
-const CORE_IMPORTS = ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime"]
-const CODE_FILE_RE = /\.(?:tsx?|jsx?)$/i
-const CSS_FILE_RE = /\.css$/i
-const JSON_FILE_RE = /\.json$/i
-const STYLE_IMPORT_RE = /\.css(?:\?|#|$)/i
-
-const SHIM_MODULES: Record<string, string> = {
-  "next/link": `
-    import React from "react";
-    export default function Link(props) {
-      const { href = "#", children, prefetch, replace, scroll, shallow, locale, ...rest } = props || {};
-      const resolvedHref = typeof href === "string" ? href : href && href.pathname ? href.pathname : "#";
-      return React.createElement("a", { ...rest, href: resolvedHref }, children);
-    }
-  `,
-  "next/image": `
-    import React from "react";
-    export default function Image(props) {
-      const { src = "", alt = "", width, height, fill, priority, quality, sizes, loader, ...rest } = props || {};
-      const style = { ...(rest.style || {}) };
-      if (fill) Object.assign(style, { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: rest.objectFit || "cover" });
-      return React.createElement("img", { ...rest, src: typeof src === "string" ? src : src && src.src ? src.src : "", alt, width: fill ? undefined : width, height: fill ? undefined : height, style });
-    }
-  `,
-  "next/navigation": `
-    const noop = function(){};
-    const router = { push: noop, replace: noop, refresh: noop, back: noop, forward: noop, prefetch: noop };
-    export function useRouter(){ return router; }
-    export function usePathname(){ return "/"; }
-    export function useSearchParams(){ return new URLSearchParams(""); }
-    export function useParams(){ return {}; }
-    export function redirect(){ throw new Error("next/navigation redirect() is not available in preview."); }
-    export function notFound(){ throw new Error("next/navigation notFound() is not available in preview."); }
-  `,
-  "next/font/google": `
-    function makeFont() { return { className: "", variable: "", style: {} }; }
-    export const Inter = makeFont;
-    export const Geist = makeFont;
-    export const Roboto = makeFont;
-    export const Poppins = makeFont;
-    export const Montserrat = makeFont;
-    export const Lato = makeFont;
-    export const Open_Sans = makeFont;
-    export const Playfair_Display = makeFont;
-    export const Space_Grotesk = makeFont;
-    export const Manrope = makeFont;
-  `,
-  "@/lib/utils": `
-    function append(out, value) {
-      if (!value) return;
-      if (typeof value === "string" || typeof value === "number") out.push(String(value));
-      else if (Array.isArray(value)) value.forEach(function(item){ append(out, item); });
-      else if (typeof value === "object") Object.keys(value).forEach(function(key){ if (value[key]) out.push(key); });
-    }
-    export function cn() {
-      var out = [];
-      Array.prototype.forEach.call(arguments, function(value){ append(out, value); });
-      return out.join(" ");
-    }
-  `,
-}
-
-// ---------------------------------------------------------------------------
-// Import Analysis
-// ---------------------------------------------------------------------------
-
-function extractImports(content: string): string[] {
-  const imports: string[] = []
-  const re = /(?:import|export)\b[\s\S]*?(?:from\s+)?['"]([^'"]+)['"]|import\s+['"]([^'"]+)['"]/g
-  let match: RegExpExecArray | null
-  while ((match = re.exec(content)) !== null) {
-    const src = match[1] || match[2]
-    if (src) imports.push(src)
-  }
-  return imports
-}
-
-function isExternalPackage(source: string): boolean {
-  const first = source.charAt(0)
-  return first !== "." && first !== "/" && !source.startsWith("@/")
-}
-
-function isCodeFile(path: string): boolean {
-  return CODE_FILE_RE.test(path)
-}
-
-function isCssFile(path: string): boolean {
-  return CSS_FILE_RE.test(path)
-}
-
-function isJsonFile(path: string): boolean {
-  return JSON_FILE_RE.test(path)
-}
-
-function isStyleImport(source: string): boolean {
-  return STYLE_IMPORT_RE.test(source)
-}
-
-// ---------------------------------------------------------------------------
-// Path Resolution
-// ---------------------------------------------------------------------------
-
-const EXTENSIONS = ["", ".tsx", ".ts", ".jsx", ".js", ".json", "/index.tsx", "/index.ts", "/index.jsx", "/index.js"]
-
-function tryExtension(basePath: string, fileMap: Record<string, string>): string | null {
-  for (const ext of EXTENSIONS) {
-    const candidate = basePath + ext
-    if (fileMap[candidate] !== undefined) return candidate
-  }
-  return null
-}
-
-function resolveLocalPath(baseFile: string, importSource: string, fileMap: Record<string, string>): string | null {
-  if (importSource.startsWith("@/")) {
-    const withoutAlias = importSource.slice(2)
-    return tryExtension(withoutAlias, fileMap)
-  }
-  if (importSource.startsWith("/")) {
-    return tryExtension(importSource.replace(/^\/+/, ""), fileMap)
-  }
-  const dir = baseFile.lastIndexOf("/") >= 0 ? baseFile.slice(0, baseFile.lastIndexOf("/") + 1) : ""
-  const parts = dir.split("/").filter(Boolean)
-  const segs = importSource.split("/")
-  for (const seg of segs) {
-    if (seg === "..") parts.pop()
-    else if (seg !== ".") parts.push(seg)
-  }
-  const resolved = parts.join("/")
-  return tryExtension(resolved, fileMap)
-}
-
-// ---------------------------------------------------------------------------
-// Rewrite Imports — replaces local import paths with resolved paths
-// ---------------------------------------------------------------------------
-
-function rewriteImports(code: string, filePath: string, fileMap: Record<string, string>): string {
-  return code.replace(
-    /(?:import|export)\b[\s\S]*?(?:from\s+)?['"]([^'"]+)['"]|import\s+['"]([^'"]+)['"]/g,
-    (match, src1, src2) => {
-      const src = src1 || src2
-      if (!src) return match
-
-      if (isStyleImport(src)) {
-        return ""
-      }
-
-      // External package — keep as-is, import map will resolve
-      if (isExternalPackage(src)) {
-        return match
-      }
-
-      // Local import — resolve to full path with extension
-      const resolved = resolveLocalPath(filePath, src, fileMap)
-      if (resolved) {
-        // Replace the import path with the resolved path
-        const quote = match.includes(`'${src}'`) ? "'" : '"'
-        return match.replace(`${quote}${src}${quote}`, `${quote}${resolved}${quote}`)
-      }
-
-      return match
-    }
-  )
 }
 
 // ---------------------------------------------------------------------------
@@ -257,8 +41,11 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
   const [status, setStatus] = useState<PreviewStatus>("idle")
   const [previewError, setPreviewError] = useState<PreviewError | null>(null)
   const [srcDoc, setSrcDoc] = useState<string | null>(null)
+  const [iframeNonce, setIframeNonce] = useState(0)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bootWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const retryCountRef = useRef(0)
   const mountedRef = useRef(true)
 
   // Stable fingerprint for file changes
@@ -281,7 +68,13 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
     setStatus("compiling")
 
     try {
+      const startedAt = performance.now()
       const html = buildPreviewSrcDoc(files)
+      logPreviewTelemetry("compile.complete", {
+        compileDurationMs: Math.round(performance.now() - startedAt),
+        fileCount: files.length,
+        htmlBytes: html.length,
+      })
       setSrcDoc(html)
       setPreviewError(null)
       setStatus("ready")
@@ -292,6 +85,25 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
       onError?.(message)
     }
   }, [files, onError])
+
+  const recoverPreview = useCallback((message: string, stack?: string) => {
+    if (retryCountRef.current < 1 && files.length > 0) {
+      retryCountRef.current += 1
+      logPreviewTelemetry("runtime.retry", {
+        reason: message,
+        attempt: retryCountRef.current,
+      })
+      setStatus("loading")
+      setPreviewError(null)
+      setIframeNonce((value) => value + 1)
+      buildPreview()
+      return
+    }
+
+    setStatus("error")
+    setPreviewError({ message, stack })
+    onError?.(stack ? `${message}\n\n${stack}` : message)
+  }, [buildPreview, files.length, onError])
 
   // --- Debounced rebuild on file changes ---
   useEffect(() => {
@@ -326,31 +138,69 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
   // --- Reset on fresh file set ---
   useEffect(() => {
     setPreviewError(null)
+    retryCountRef.current = 0
   }, [fileFingerprint])
 
   useEffect(() => {
     function handlePreviewMessage(event: MessageEvent) {
       if (event.source !== iframeRef.current?.contentWindow) return
-      const data = event.data as { type?: string; message?: string; stack?: string } | null
-      if (!data || data.type !== "swift-preview-error") return
+      if (event.origin !== "null") return
+
+      const data = event.data as PreviewTelemetryEvent | null
+      if (!data) return
+
+      if (data.type === "swift-preview-telemetry") {
+        logPreviewTelemetry(data.event || "runtime.event", data.metrics || {})
+        if (data.event === "runtime.ready" && bootWatchdogRef.current) {
+          clearTimeout(bootWatchdogRef.current)
+          bootWatchdogRef.current = null
+        }
+        return
+      }
+
+      if (data.type !== "swift-preview-error") return
 
       const message = data.message || "Unknown preview runtime error"
-      setStatus("error")
-      setPreviewError({ message, stack: data.stack })
-      onError?.(data.stack ? `${message}\n\n${data.stack}` : message)
+      if (bootWatchdogRef.current) {
+        clearTimeout(bootWatchdogRef.current)
+        bootWatchdogRef.current = null
+      }
+      logPreviewTelemetry("runtime.error", { message })
+      recoverPreview(message, data.stack)
     }
 
     window.addEventListener("message", handlePreviewMessage)
     return () => window.removeEventListener("message", handlePreviewMessage)
-  }, [onError])
+  }, [recoverPreview])
+
+  useEffect(() => {
+    if (!srcDoc) return
+
+    if (bootWatchdogRef.current) {
+      clearTimeout(bootWatchdogRef.current)
+    }
+
+    const startedAt = performance.now()
+    bootWatchdogRef.current = setTimeout(() => {
+      logPreviewTelemetry("runtime.boot_timeout", {
+        iframeBootTimeMs: Math.round(performance.now() - startedAt),
+      })
+      recoverPreview("Preview runtime timed out while booting.")
+    }, 12_000)
+
+    return () => {
+      if (bootWatchdogRef.current) {
+        clearTimeout(bootWatchdogRef.current)
+        bootWatchdogRef.current = null
+      }
+    }
+  }, [iframeNonce, recoverPreview, srcDoc])
 
   // --- iframe error handler (runtime errors) ---
   const handleIframeError = useCallback(() => {
-    setStatus("error")
     const msg = "The preview iframe failed to load."
-    setPreviewError({ message: msg })
-    onError?.(msg)
-  }, [onError])
+    recoverPreview(msg)
+  }, [recoverPreview])
 
   const handleIframeLoad = useCallback(() => {
     setStatus("ready")
@@ -371,6 +221,7 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
       {hasContent ? (
         // Keep preview on an opaque origin; generated code loses same-origin APIs but cannot read app cookies.
         <iframe
+          key={`${fileFingerprint}:${iframeNonce}`}
           ref={iframeRef}
           srcDoc={srcDoc}
           className="h-full w-full border-0"
@@ -469,87 +320,27 @@ function escapeScriptContent(str: string): string {
     .replace(/<!--/g, "<\\!--")
 }
 
-function normalizePreviewPath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "")
-}
-
-function buildJsonModule(content: string, path: string): string {
-  try {
-    const parsed = JSON.parse(content)
-    const namedExports =
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? Object.keys(parsed)
-            .filter((key) => /^[A-Za-z_$][\w$]*$/.test(key))
-            .map((key) => `export const ${key} = data[${JSON.stringify(key)}];`)
-            .join("\n")
-        : ""
-
-    return `const data = ${JSON.stringify(parsed)};\n${namedExports}\nexport default data;`
-  } catch {
-    return `throw new Error(${JSON.stringify(`Invalid JSON in ${path}`)});`
-  }
+function logPreviewTelemetry(event: string, metrics: Record<string, unknown> = {}) {
+  console.info("[swift-preview]", {
+    event,
+    metrics,
+    timestamp: new Date().toISOString(),
+  })
 }
 
 function buildPreviewSrcDoc(files: GeneratedFile[]): string {
-  // Build file map with normalized paths
-  const fileMap: Record<string, string> = {}
-  for (const file of files) {
-    const normalized = normalizePreviewPath(file.path)
-    fileMap[normalized] = file.content
-  }
-
-  // Ensure entry exists
-  const entryKey = guessEntryFile(files)
-  if (!entryKey || !fileMap[entryKey]) {
-    throw new Error("No entry file found. Expected app/page.tsx, src/App.tsx, or index.tsx")
-  }
-
-  // Detect all external packages used across all files
-  const allImports = new Set<string>(CORE_IMPORTS)
-  for (const file of files) {
-    const imports = extractImports(file.content)
-    for (const imp of imports) {
-      if (isExternalPackage(imp)) {
-        allImports.add(imp)
-      }
-    }
-  }
-
-  // Build import map for CDN packages
-  const importMap: Record<string, string> = {}
-  for (const pkg of allImports) {
-    if (SHIM_MODULES[pkg]) continue
-    if (CDN_IMPORTS[pkg]) {
-      importMap[pkg] = CDN_IMPORTS[pkg]
-    } else {
-      // Auto-resolve via esm.sh
-      importMap[pkg] = `https://esm.sh/${pkg}`
-    }
-  }
-
-  // Rewrite imports in all files — resolve local import paths
-  const rewrittenFiles: Record<string, string> = {}
-  for (const [path, content] of Object.entries(fileMap)) {
-    if (isCodeFile(path)) {
-      rewrittenFiles[path] = rewriteImports(content, path, fileMap)
-    } else if (isJsonFile(path)) {
-      rewrittenFiles[path] = buildJsonModule(content, path)
-    }
-  }
-
-  const cssFiles = Object.entries(fileMap)
-    .filter(([path]) => isCssFile(path))
-    .map(([path, content]) => `\n/* ${path} */\n${content}`)
-    .join("\n")
+  const graph = compileProject(files)
+  assertGraphHasNoUnresolvedAliases(graph)
 
   // Serialize for iframe
-  const serializedFiles = escapeScriptContent(JSON.stringify(rewrittenFiles))
-  const serializedEntry = JSON.stringify(entryKey)
-  const serializedImportMap = escapeScriptContent(JSON.stringify(importMap))
-  const serializedCss = escapeScriptContent(JSON.stringify(cssFiles))
-  const serializedShims = escapeScriptContent(JSON.stringify(SHIM_MODULES))
+  const serializedFiles = escapeScriptContent(JSON.stringify(graph.files))
+  const serializedEntry = JSON.stringify(graph.entry)
+  const serializedImportMap = escapeScriptContent(JSON.stringify(graph.importMap))
+  const serializedCss = escapeScriptContent(JSON.stringify(graph.css))
+  const serializedShims = escapeScriptContent(JSON.stringify(graph.shims))
+  const serializedWarnings = escapeScriptContent(JSON.stringify(graph.warnings))
 
-  return `<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -585,25 +376,33 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 (function(){
   'use strict';
 
-  var __files = ${serializedFiles};
+  var __compiledModules = ${serializedFiles};
   var __entry = ${serializedEntry};
   var __cdnImportMap = ${serializedImportMap};
   var __css = ${serializedCss};
   var __shimModules = ${serializedShims};
+  var __warnings = ${serializedWarnings};
   var __cache = {};
   var __blobMap = {};
+  var __finalCodeMap = {};
+  var __buildingModules = {};
   var __exts = ['','.tsx','.ts','.jsx','.js','/index.tsx','/index.ts','/index.js'];
+  var __bootStartedAt = performance.now();
 
-  var __transformTimeout = setTimeout(function(){
-    showError('Preview compilation timed out. Check for circular dependencies or large files.');
-  }, 15000);
+  var __executionTimeout = setTimeout(function(){
+    showError('Preview execution timed out. Check for an infinite render loop or a long-running module.');
+  }, 12000);
+
+  emitTelemetry('runtime.boot', {
+    moduleCount: Object.keys(__compiledModules).length
+  });
 
   function escapeHtml(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
   function showError(err){
-    clearTimeout(__transformTimeout);
+    clearTimeout(__executionTimeout);
     document.body.className='error';
     var el=document.getElementById('error');
     if(!el)return;
@@ -614,23 +413,61 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     try {
       window.parent.postMessage({ type: 'swift-preview-error', message: msg }, '*');
     } catch (postMessageError) {}
+    emitTelemetry('runtime.error', { message: msg });
     msg=escapeHtml(msg).replace(/\\n/g,'<br>');
     el.innerHTML='<div class="title">Preview Error</div><div class="stack">'+msg+'</div>';
   }
 
   function injectCss(){
     if(!__css) return;
+    assertNoUnresolvedAlias('css', __css);
     var style = document.createElement('style');
     style.setAttribute('data-preview-css', 'true');
     style.textContent = __css;
     document.head.appendChild(style);
+    emitTelemetry('css.injected', {
+      cssBytes: __css.length
+    });
+  }
+
+  function emitTelemetry(event, metrics){
+    try {
+      window.parent.postMessage({
+        type: 'swift-preview-telemetry',
+        event: event,
+        metrics: metrics || {}
+      }, '*');
+    } catch (postMessageError) {}
+  }
+
+  function containsUnresolvedAlias(code){
+    var source = String(code || '');
+    var atAlias = String.fromCharCode(64) + '/';
+    var tildeAlias = String.fromCharCode(126) + '/';
+    return source.indexOf(atAlias) >= 0 || source.indexOf(tildeAlias) >= 0;
+  }
+
+  function assertNoUnresolvedAlias(path, code){
+    if(containsUnresolvedAlias(code)){
+      throw new Error('UNRESOLVED_ALIAS_DETECTED in ' + path);
+    }
+  }
+
+  function assertCompiledModuleSet(){
+    var paths = Object.keys(__compiledModules);
+    for(var i=0;i<paths.length;i++){
+      assertNoUnresolvedAlias(paths[i], __compiledModules[paths[i]]);
+    }
+    for(var shim in __shimModules){
+      assertNoUnresolvedAlias('shim:' + shim, __shimModules[shim]);
+    }
   }
 
   function getFileContent(path){
-    if(__files[path]!==void 0) return __files[path];
+    if(__compiledModules[path]!==void 0) return __compiledModules[path];
     for(var i=0;i<__exts.length;i++){
       var candidate=path+__exts[i];
-      if(__files[candidate]!==void 0) return __files[candidate];
+      if(__compiledModules[candidate]!==void 0) return __compiledModules[candidate];
     }
     return null;
   }
@@ -640,10 +477,11 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
     var content = getFileContent(path);
     if(!content){
-      console.warn('[preview] File not found: '+path);
+      emitTelemetry('compile.missing_file', { path: path });
       __cache[path] = null;
       return null;
     }
+    assertNoUnresolvedAlias(path + ' source', content);
 
     try{
       var result = Babel.transform(content, {
@@ -658,6 +496,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
           plugins: ['jsx','typescript']
         }
       });
+      assertNoUnresolvedAlias(path + ' compiled', result.code);
       __cache[path] = result.code;
       return result.code;
     }catch(e){
@@ -667,18 +506,61 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
   function executeModule(path){
     if(__blobMap[path]) return __blobMap[path];
+    if(__buildingModules[path]){
+      throw new Error('CIRCULAR_DEPENDENCY_DETECTED in iframe module loader: ' + path);
+    }
+
+    __buildingModules[path] = true;
 
     var code = transformFile(path);
-    if(code === null) return null;
+    if(code === null) {
+      delete __buildingModules[path];
+      return null;
+    }
+
+    code = linkLocalVirtualImports(path, code);
+    assertNoUnresolvedAlias(path + ' blob', code);
+    __finalCodeMap[path] = code;
 
     var blob = new Blob([code], {type:'text/javascript'});
     var url = URL.createObjectURL(blob);
     __blobMap[path] = url;
+    delete __buildingModules[path];
     return url;
+  }
+
+  function linkLocalVirtualImports(path, code){
+    var linked = String(code || '');
+    var modulePaths = Object.keys(__compiledModules);
+
+    for(var i=0;i<modulePaths.length;i++){
+      var depPath = modulePaths[i];
+      var specifier = '/@preview/' + depPath;
+      if(linked.indexOf(specifier) < 0) continue;
+
+      var depUrl = executeModule(depPath);
+      if(!depUrl){
+        throw new Error('Missing Blob URL for virtual module ' + specifier + ' imported by ' + path);
+      }
+
+      linked = replaceAll(linked, JSON.stringify(specifier), JSON.stringify(depUrl));
+      linked = replaceAll(linked, "'" + specifier + "'", JSON.stringify(depUrl));
+    }
+
+    if(linked.indexOf('/@preview/') >= 0){
+      throw new Error('UNRESOLVED_VIRTUAL_MODULE_DETECTED in ' + path);
+    }
+
+    return linked;
+  }
+
+  function replaceAll(value, search, replacement){
+    return String(value).split(search).join(replacement);
   }
 
   function createShimModule(specifier, code){
     if(__blobMap[specifier]) return __blobMap[specifier];
+    assertNoUnresolvedAlias('shim:' + specifier, code);
     var blob = new Blob([code], {type:'text/javascript'});
     var url = URL.createObjectURL(blob);
     __blobMap[specifier] = url;
@@ -686,18 +568,27 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   }
 
   try{
-    clearTimeout(__transformTimeout);
     document.body.className='ready';
+    assertCompiledModuleSet();
     injectCss();
+    for(var warningIndex = 0; warningIndex < __warnings.length; warningIndex++){
+      emitTelemetry('compile.warning', { message: __warnings[warningIndex] });
+    }
 
     // Step 1: Transform all files and create blob URLs
-    var allPaths = Object.keys(__files);
+    var compileStartedAt = performance.now();
+    var allPaths = Object.keys(__compiledModules);
     for(var i=0; i<allPaths.length; i++){
       executeModule(allPaths[i]);
     }
     for(var shim in __shimModules){
       createShimModule(shim, __shimModules[shim]);
     }
+    emitTelemetry('compile.complete', {
+      compileDurationMs: Math.round(performance.now() - compileStartedAt),
+      moduleCount: allPaths.length,
+      shimCount: Object.keys(__shimModules).length
+    });
 
     // Step 2: Build complete import map (CDN + local blob URLs)
     var importMap = { imports: {} };
@@ -705,16 +596,30 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     for(var pkg in __cdnImportMap){
       importMap.imports[pkg] = __cdnImportMap[pkg];
     }
-    // Add local files (resolved path -> blob URL)
+    // Add local files (virtual preview path -> blob URL)
     for(var p in __blobMap){
-      importMap.imports[p] = __blobMap[p];
+      if(p.indexOf('/@preview/') === 0){
+        importMap.imports[p] = __blobMap[p];
+      } else if(__compiledModules[p] !== void 0) {
+        importMap.imports['/@preview/' + p] = __blobMap[p];
+      } else {
+        importMap.imports[p] = __blobMap[p];
+      }
     }
 
     // Step 3: Inject import map
     var imScript = document.createElement('script');
     imScript.type = 'importmap';
     imScript.textContent = JSON.stringify(importMap);
+    assertNoUnresolvedAlias('importmap', imScript.textContent);
     document.head.appendChild(imScript);
+
+    emitTelemetry('runtime.linked', {
+      entry: __entry,
+      moduleCount: Object.keys(__compiledModules).length,
+      blobCount: Object.keys(__blobMap).length,
+      importCount: Object.keys(importMap.imports).length
+    });
 
     // Step 4: Load React, ReactDOM, and entry module
     var entryUrl = __blobMap[__entry];
@@ -751,7 +656,9 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
           this.state = {hasError: false, error: null};
         }
         ErrorBoundary.prototype.componentDidCatch = function(error, info){
-          console.error("[Preview ErrorBoundary]", error, info);
+          emitTelemetry('runtime.error_boundary', {
+            message: error && error.message ? error.message : String(error)
+          });
           try {
             window.parent.postMessage({ type: 'swift-preview-error', message: error && error.message ? error.message : String(error), stack: error && error.stack ? error.stack : "" }, '*');
           } catch (postMessageError) {}
@@ -787,6 +694,12 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
           React.createElement(App)
         )
       );
+      clearTimeout(__executionTimeout);
+      emitTelemetry('runtime.ready', {
+        iframeBootTimeMs: Math.round(performance.now() - __bootStartedAt),
+        moduleCount: Object.keys(__compiledModules).length,
+        blobCount: Object.keys(__blobMap).length
+      });
 
     }).catch(function(err){
       showError(err);
@@ -799,30 +712,37 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 <\/script>
 </body>
 </html>`
+
+  assertSrcDocHasNoUnresolvedAliases(html)
+  return html
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+function assertGraphHasNoUnresolvedAliases(graph: ReturnType<typeof compileProject>) {
+  const offenders: string[] = []
 
-function guessEntryFile(files: GeneratedFile[]): string | null {
-  const normalizedPaths = files.map((file) => normalizePreviewPath(file.path))
-  const priorities = [
-    "app/page.tsx",
-    "app/page.jsx",
-    "src/App.tsx",
-    "src/App.jsx",
-    "pages/index.tsx",
-    "pages/index.jsx",
-    "index.tsx",
-    "index.jsx",
-  ]
-  for (const path of priorities) {
-    if (normalizedPaths.includes(path)) {
-      return path
+  for (const [path, code] of Object.entries(graph.files)) {
+    if (containsUnresolvedAlias(code)) {
+      offenders.push(path)
     }
   }
-  // Fallback: first tsx/jsx file
-  const first = files.find((f) => /\.tsx$|\.jsx$/i.test(f.path))
-  return first ? normalizePreviewPath(first.path) : null
+
+  for (const [specifier, code] of Object.entries(graph.shims)) {
+    if (containsUnresolvedAlias(code)) {
+      offenders.push(`shim:${specifier}`)
+    }
+  }
+
+  if (containsUnresolvedAlias(graph.css)) {
+    offenders.push("css")
+  }
+
+  if (offenders.length > 0) {
+    throw new Error(`UNRESOLVED_ALIAS_DETECTED\n${offenders.join("\n")}`)
+  }
+}
+
+function assertSrcDocHasNoUnresolvedAliases(html: string) {
+  if (containsUnresolvedAlias(html)) {
+    throw new Error("UNRESOLVED_ALIAS_DETECTED in iframe srcDoc")
+  }
 }

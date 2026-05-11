@@ -171,9 +171,9 @@ export async function GET() {
 export async function GET() {
   return NextResponse.json({
     models: [
-      { key: "swift-1", label: "Swift 1 — Fast", provider: "swift", price: 1 },
-      { key: "swift-2", label: "Swift 2 — Builder", provider: "swift", price: 5 },
-      { key: "swift-3", label: "Swift 3 — Engineer", provider: "swift", price: 15 },
+      { key: "swift-1", label: "Swift 1 — Fast", provider: "swift", price: 2000 },
+      { key: "swift-2", label: "Swift 2 — Builder", provider: "swift", price: 4000 },
+      { key: "swift-3", label: "Swift 3 — Engineer", provider: "swift", price: 10000 },
     ],
   })
 }
@@ -448,7 +448,7 @@ model Project {
     TURSO_AUTH_TOKEN="replace-me"
 NEXTAUTH_SECRET="replace-me"
 OPENROUTER_API_KEY="replace-me"
-OPENROUTER_MAX_TOKENS="3000"
+OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 `,
     },
     {
@@ -554,7 +554,8 @@ export default nextConfig
     "incremental": true,
     "plugins": [{ "name": "next" }],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./src/*", "./*"],
+      "~/*": ["./src/*", "./*"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],

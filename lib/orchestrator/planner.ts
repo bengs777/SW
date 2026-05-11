@@ -1,4 +1,4 @@
-import { enhancePromptWithAgentRouter } from "@/lib/ai/prompt-enhancer"
+import { enhancePromptForSwift } from "@/lib/ai/prompt-enhancer"
 import type { GeneratedFile } from "@/lib/types"
 
 export type OrchestratorTask = {
@@ -21,7 +21,7 @@ export async function buildPlan(
 ): Promise<OrchestratorPlan> {
   // Use local heuristic-based prompt enhancer to build a lightweight plan
   // This intentionally does not call external AI providers.
-  const enhanced = await enhancePromptWithAgentRouter({ prompt, modelName: "local" })
+  const enhanced = await enhancePromptForSwift({ prompt, modelName: "local" })
 
   const planId = `plan:${String(Date.now())}`
 

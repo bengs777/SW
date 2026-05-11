@@ -260,14 +260,14 @@ export class UserService {
         await tx.billingTransaction.create({
           data: {
             userId: latestUser.id,
-            kind: "free_credits",
+            kind: "free_balance",
             direction: "credit",
             amount: FREE_CREDITS_AMOUNT,
             balanceBefore,
             balanceAfter,
-            reference: `free-credits:${currentMonthStart.toISOString().slice(0, 7)}:${latestUser.id}`,
+            reference: `free-balance:${currentMonthStart.toISOString().slice(0, 7)}:${latestUser.id}`,
             provider: "internal",
-            description: "Monthly free credits for the Free plan",
+            description: "Monthly free Rupiah balance for the Free plan",
             metadata: JSON.stringify({
               source: "monthly_free_plan",
               amount: FREE_CREDITS_AMOUNT,
@@ -279,7 +279,7 @@ export class UserService {
     } catch (error) {
       if (isMissingRequiredTableError(error)) {
         if (shouldSoftFailMissingTable()) {
-          console.warn("[user] Required database tables are not ready yet; skipping monthly free credits sync.")
+          console.warn("[user] Required database tables are not ready yet; skipping monthly free balance sync.")
           return
         }
       }

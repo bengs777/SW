@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import { ProviderRouter } from "@/lib/ai/provider-router"
+import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
 
 type PublicProviderState = "connected" | "slow" | "timeout"
 
@@ -21,9 +22,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Model not available" }, { status: 404 })
   }
 
-  const providers = await ProviderRouter.getConfiguredProviderHealth({
-    refresh: request.nextUrl.searchParams.get("refresh") === "true",
-  })
+  const providers = request.nextUrl.searchParams.get("refresh") === "true"
+    ? await Promise.all(getConfiguredSwiftModelIds().map((modelId) => ProviderRouter.checkProviderHealth(modelId)))
+    : await ProviderRouter.getConfiguredProviderHealth()
   const hasHealthy = providers.some((provider) => provider.status === "healthy")
   const hasDegraded = providers.some((provider) => provider.status === "degraded")
   const status: PublicProviderState = hasHealthy ? "connected" : hasDegraded ? "slow" : "timeout"
@@ -43,7 +44,7 @@ export async function GET(request: NextRequest) {
       ? "Swift siap dipakai."
       : hasDegraded
         ? "Generate tetap bisa dicoba, atau pilih Swift 1 untuk mode lebih cepat."
-        : "Coba lagi sebentar lagi. Credit akan otomatis dikembalikan jika generate gagal.",
+        : "Coba lagi sebentar lagi. Saldo akan otomatis dikembalikan jika generate gagal.",
     provider: "swift",
     modelName: model.key,
     usedFallback: hasDegraded,

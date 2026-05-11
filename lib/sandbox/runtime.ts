@@ -289,7 +289,10 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
             isolatedModules: true,
             jsx: "preserve",
             incremental: true,
-            paths: { "@/*": ["./*"] },
+            paths: {
+              "@/*": ["./src/*", "./*"],
+              "~/*": ["./src/*", "./*"],
+            },
           },
           include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
           exclude: ["node_modules"],

@@ -16,9 +16,9 @@ type PricingResult = {
 }
 
 const FIXED_MODEL_PRICES: Record<string, number> = {
-  [SWIFT_BASIC_MODEL_KEY]: 1,
-  [SWIFT_BUILD_MODEL_KEY]: 5,
-  [SWIFT_PRO_MODEL_KEY]: 15,
+  [SWIFT_BASIC_MODEL_KEY]: 2000,
+  [SWIFT_BUILD_MODEL_KEY]: 4000,
+  [SWIFT_PRO_MODEL_KEY]: 10000,
 }
 
 const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
@@ -77,8 +77,8 @@ export function calculateModelRequestPrice({
       estimatedInputTokens,
       estimatedOutputTokens,
       estimatedTokens,
-      estimatedCost: 5,
-      minimumCharge: 5,
+      estimatedCost: FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || 4000,
+      minimumCharge: FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || 4000,
       pricingMode: "fixed",
     }
   }

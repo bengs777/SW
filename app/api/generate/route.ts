@@ -7,7 +7,7 @@ import { ProjectFilePersistenceService } from "@/lib/services/project-file-persi
 import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
 import { buildModuleStatusReport, buildProjectFiles } from "@/lib/ai/project-scaffold"
 import { extractGeneratedFilesFromProviderMessage, mergeGeneratedFiles } from "@/lib/ai/provider-output"
-import { enhancePromptWithAgentRouter } from "@/lib/ai/prompt-enhancer"
+import { enhancePromptForSwift } from "@/lib/ai/prompt-enhancer"
 import { appendPreviewContextToPrompt, buildPreviewContextPacket, buildPreviewInspectionPrompt, normalizePreviewContext } from "@/lib/ai/preview-context"
 import { appendAIContextToPrompt, buildAIContextSnapshot } from "@/lib/ai/context-engine"
 import { autoRepairFullStackFiles, validateFullStackFiles } from "@/lib/ai/fullstack-validator"
@@ -21,7 +21,8 @@ import ts from "typescript"
 import { orchestrateGeneration } from "@/lib/ai/orchestrator"
 import { log } from "@/lib/logging"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
-import { USER_FRIENDLY_AI_ENGINE_ERROR } from "@/lib/ai/model-tiers"
+import { USER_FRIENDLY_AI_ENGINE_ERROR, getSwiftTierConfig } from "@/lib/ai/model-tiers"
+import { SwiftQueueError, acquireSwiftQueueSlot } from "@/lib/ai/queue"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -437,7 +438,7 @@ function getFriendlyProviderErrorMessage(errorMessage: string) {
   const normalized = errorMessage.toLowerCase()
 
   if (normalized.includes("ai_output_has_no_files")) {
-    return "Swift berhasil menerima respons AI, tetapi output belum berisi file valid. Credit kamu otomatis dikembalikan dan file project tidak diubah."
+    return "Swift berhasil menerima respons AI, tetapi output belum berisi file valid. Saldo kamu otomatis dikembalikan dan file project tidak diubah."
   }
 
   return USER_FRIENDLY_AI_ENGINE_ERROR
@@ -471,7 +472,7 @@ function createGenerationGuard(input: {
     return {
       error: NextResponse.json(
         {
-          error: "Request yang sama sedang diproses. Swift membatalkan duplikasi agar credit tidak terpakai dua kali.",
+          error: "Request yang sama sedang diproses. Swift membatalkan duplikasi agar saldo tidak terpakai dua kali.",
           code: "DUPLICATE_GENERATION_IN_FLIGHT",
         },
         { status: 409 }
@@ -987,6 +988,7 @@ export async function POST(request: NextRequest) {
   const session = await auth()
   const email = session?.user?.email
   let releaseGeneration: (() => void) | null = null
+  let releaseQueue: (() => Promise<void>) | null = null
 
   if (!email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
@@ -1080,8 +1082,25 @@ export async function POST(request: NextRequest) {
     }
 
     if (user.balance < requestCost) {
-      return NextResponse.json({ error: "Insufficient balance" }, { status: 402 })
+      return NextResponse.json({ error: "Saldo Rupiah tidak cukup untuk menjalankan generasi ini." }, { status: 402 })
     }
+
+    const tierConfig = getSwiftTierConfig(modelConfig.key)
+    if (!tierConfig) {
+      return NextResponse.json({ error: "Selected Swift tier is not available" }, { status: 403 })
+    }
+
+    const duplicateRequestKey = idempotencyKey
+      ? `idem:${projectId}:${idempotencyKey}`
+      : `live:${user.id}:${projectId}:${modelConfig.key}:${prompt.trim().toLowerCase().slice(0, 500)}`
+
+    const queueSlot = await acquireSwiftQueueSlot({
+      userId: user.id,
+      projectId,
+      tierKey: tierConfig.key,
+      requestKey: duplicateRequestKey,
+    })
+    releaseQueue = queueSlot.release
 
     const generationGuard = createGenerationGuard({
       userId: user.id,
@@ -1104,13 +1123,14 @@ export async function POST(request: NextRequest) {
       requestCost
     )
     const requestStartedAt = Date.now()
+    const queueWaitMs = queueSlot.queueWaitMs
     const estimatedTokens = requestPricing.estimatedTokens
     let providerMessagePreview: string | null = null
     let providerParseMode: string | null = null
     let recoveryRetryUsed = false
     let recoveryRetrySucceeded = false
 
-    let promptEnhancement: Awaited<ReturnType<typeof enhancePromptWithAgentRouter>> | null = null
+    let promptEnhancement: Awaited<ReturnType<typeof enhancePromptForSwift>> | null = null
 
     try {
       if (promptIntent.mode === "chat" || promptIntent.mode === "inspect") {
@@ -1123,8 +1143,8 @@ export async function POST(request: NextRequest) {
         })
 
         await BillingService.markCompleted(usageLog.id, {
-          provider: SWIFT_AI_DISPLAY_NAME,
-          model: SWIFT_AI_DISPLAY_NAME,
+          provider: "swift",
+          model: modelConfig.key,
           errorMessage: null,
         })
 
@@ -1132,8 +1152,8 @@ export async function POST(request: NextRequest) {
           projectId: project.id,
           taskType: promptIntent.mode === "inspect" ? "inspect" : "chat",
           modelConfigId: modelConfig.id,
-          modelUsed: SWIFT_AI_DISPLAY_NAME,
-          provider: SWIFT_AI_DISPLAY_NAME,
+          modelUsed: modelConfig.key,
+          provider: "swift",
           latencyMs: Date.now() - requestStartedAt,
           tokens: estimatedTokens,
           success: true,
@@ -1144,6 +1164,9 @@ export async function POST(request: NextRequest) {
             providerUsed: chatResult.providerUsed,
             providerModelUsed: chatResult.modelUsed,
             creditStatus: "captured",
+            billingStatus: "captured",
+            amountIdr: requestCost,
+            queueWaitMs,
             collaborationMode,
             promptLength: promptWithAttachments.length,
             contextualPromptLength: promptWithPreviewContext.length,
@@ -1157,10 +1180,10 @@ export async function POST(request: NextRequest) {
           previewFiles: null,
           code: "",
           usage: {
-            model: SWIFT_AI_DISPLAY_NAME,
-            provider: SWIFT_AI_DISPLAY_NAME,
-            billedModel: SWIFT_AI_DISPLAY_NAME,
-            billedProvider: SWIFT_AI_DISPLAY_NAME,
+            model: modelConfig.key,
+            provider: "swift",
+            billedModel: modelConfig.key,
+            billedProvider: "swift",
             cost: requestCost,
             remainingBalance: user.balance - requestCost,
           },
@@ -1177,8 +1200,8 @@ export async function POST(request: NextRequest) {
         })
 
         await BillingService.markCompleted(usageLog.id, {
-          provider: SWIFT_AI_DISPLAY_NAME,
-          model: SWIFT_AI_DISPLAY_NAME,
+          provider: "swift",
+          model: modelConfig.key,
           errorMessage: null,
         })
 
@@ -1186,8 +1209,8 @@ export async function POST(request: NextRequest) {
           projectId: project.id,
           taskType: "clarify",
           modelConfigId: modelConfig.id,
-          modelUsed: SWIFT_AI_DISPLAY_NAME,
-          provider: SWIFT_AI_DISPLAY_NAME,
+          modelUsed: modelConfig.key,
+          provider: "swift",
           latencyMs: Date.now() - requestStartedAt,
           tokens: estimatedTokens,
           success: true,
@@ -1198,6 +1221,9 @@ export async function POST(request: NextRequest) {
             providerUsed: clarificationResult.providerUsed,
             providerModelUsed: clarificationResult.modelUsed,
             creditStatus: "captured",
+            billingStatus: "captured",
+            amountIdr: requestCost,
+            queueWaitMs,
             collaborationMode,
             promptLength: promptWithAttachments.length,
             contextualPromptLength: promptWithPreviewContext.length,
@@ -1212,10 +1238,10 @@ export async function POST(request: NextRequest) {
           previewFiles: null,
           code: "",
           usage: {
-            model: SWIFT_AI_DISPLAY_NAME,
-            provider: SWIFT_AI_DISPLAY_NAME,
-            billedModel: SWIFT_AI_DISPLAY_NAME,
-            billedProvider: SWIFT_AI_DISPLAY_NAME,
+            model: modelConfig.key,
+            provider: "swift",
+            billedModel: modelConfig.key,
+            billedProvider: "swift",
             cost: requestCost,
             remainingBalance: user.balance - requestCost,
           },
@@ -1224,7 +1250,7 @@ export async function POST(request: NextRequest) {
 
       const promptMode = inferPromptMode(prompt)
 
-      promptEnhancement = await enhancePromptWithAgentRouter({
+      promptEnhancement = await enhancePromptForSwift({
         prompt: promptWithAttachments,
         modelName: modelConfig.modelName,
       })
@@ -1286,8 +1312,8 @@ export async function POST(request: NextRequest) {
           projectId: project.id,
           taskType: "idempotent-build",
           modelConfigId: modelConfig.id,
-          modelUsed: SWIFT_AI_DISPLAY_NAME,
-          provider: SWIFT_AI_DISPLAY_NAME,
+          modelUsed: modelConfig.key,
+          provider: "swift",
           latencyMs: Date.now() - requestStartedAt,
           tokens: estimatedTokens,
           success: true,
@@ -1296,6 +1322,10 @@ export async function POST(request: NextRequest) {
             userId: user.id,
             selectedTier: modelConfig.key,
             creditStatus: "refunded",
+            billingStatus: "refunded",
+            amountIdr: requestCost,
+            refundReason: "idempotent-reuse",
+            queueWaitMs,
             idempotencyKey,
             collaborationMode,
             reusedHistoryId: orchestration.historyId,
@@ -1377,13 +1407,13 @@ export async function POST(request: NextRequest) {
               : existingFiles
           generatedFiles = mergeGeneratedFiles(mergeBase, providerParsed.files)
           providerAssemblyMessage = shouldRebaseFromScaffold
-            ? `Provider menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}). Karena prompt terdeteksi sebagai rebuild namun update halaman utama minim, sistem melakukan rebase dari scaffold terbaru lalu menerapkan output provider menjadi ${generatedFiles.length} file.`
+            ? `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}). Karena prompt terdeteksi sebagai rebuild namun update halaman utama minim, sistem melakukan rebase dari scaffold terbaru lalu menerapkan output Swift menjadi ${generatedFiles.length} file.`
             : promptMode === "rebuild"
-              ? `Provider menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}). Karena prompt terdeteksi sebagai rebuild, sistem mengganti arah project lama dan menerapkan output provider menjadi ${generatedFiles.length} file.`
-            : `Provider menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}) dan sistem menggabungkannya ke project existing (${existingFiles.length} file) menjadi ${generatedFiles.length} file.`
+              ? `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}). Karena prompt terdeteksi sebagai rebuild, sistem mengganti arah project lama dan menerapkan output Swift menjadi ${generatedFiles.length} file.`
+            : `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}) dan sistem menggabungkannya ke project existing (${existingFiles.length} file) menjadi ${generatedFiles.length} file.`
         } else {
           generatedFiles = providerParsed.files
-          providerAssemblyMessage = `Provider menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}) dan sistem menerapkannya sebagai file project baru.`
+          providerAssemblyMessage = `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}) dan sistem menerapkannya sebagai file project baru.`
         }
       } else if (existingFiles.length > 0) {
         throw new Error("AI_OUTPUT_HAS_NO_FILES")
@@ -1468,8 +1498,8 @@ export async function POST(request: NextRequest) {
       generatedFiles = savedGeneration.files
 
       await BillingService.markCompleted(usageLog.id, {
-        provider: SWIFT_AI_DISPLAY_NAME,
-        model: SWIFT_AI_DISPLAY_NAME,
+        provider: "swift",
+        model: modelConfig.key,
         errorMessage: result.usedFallback && result.primaryError
           ? `Primary provider failed: ${result.primaryError}`
           : null,
@@ -1479,8 +1509,8 @@ export async function POST(request: NextRequest) {
         projectId: project.id,
         taskType: "build",
         modelConfigId: modelConfig.id,
-        modelUsed: SWIFT_AI_DISPLAY_NAME,
-        provider: SWIFT_AI_DISPLAY_NAME,
+        modelUsed: modelConfig.key,
+        provider: "swift",
         latencyMs: Date.now() - requestStartedAt,
         tokens: estimatedTokens,
         success: true,
@@ -1491,6 +1521,9 @@ export async function POST(request: NextRequest) {
           providerUsed: result.providerUsed,
           providerModelUsed: result.modelUsed,
           creditStatus: "captured",
+          billingStatus: "captured",
+          amountIdr: requestCost,
+          queueWaitMs,
           historyId,
           collaborationMode,
           idempotencyKey,
@@ -1519,10 +1552,10 @@ export async function POST(request: NextRequest) {
         code: generatedFiles[0]?.content || "",
         historyId,
         usage: {
-          model: SWIFT_AI_DISPLAY_NAME,
-          provider: SWIFT_AI_DISPLAY_NAME,
-          billedModel: SWIFT_AI_DISPLAY_NAME,
-          billedProvider: SWIFT_AI_DISPLAY_NAME,
+          model: modelConfig.key,
+          provider: "swift",
+          billedModel: modelConfig.key,
+          billedProvider: "swift",
           cost: requestCost,
           remainingBalance: user.balance - requestCost,
         },
@@ -1561,8 +1594,8 @@ export async function POST(request: NextRequest) {
         projectId: project.id,
         taskType: promptIntent.mode === "chat" || promptIntent.mode === "inspect" ? promptIntent.mode : "build",
         modelConfigId: modelConfig.id,
-        modelUsed: SWIFT_AI_DISPLAY_NAME,
-        provider: SWIFT_AI_DISPLAY_NAME,
+        modelUsed: modelConfig.key,
+        provider: "swift",
         latencyMs: Date.now() - requestStartedAt,
         tokens: estimatedTokens,
         success: false,
@@ -1574,6 +1607,10 @@ export async function POST(request: NextRequest) {
           providerUsed: lastFailedAttempt?.provider || null,
           failureReason: lastFailedAttempt?.failureReason || null,
           creditStatus: "refunded",
+          billingStatus: "refunded",
+          amountIdr: requestCost,
+          refundReason: errorMessage,
+          queueWaitMs,
           collaborationMode,
           idempotencyKey,
           refunded: true,
@@ -1606,8 +1643,8 @@ export async function POST(request: NextRequest) {
         historyId: null,
         preserveFiles: true,
         usage: {
-          model: SWIFT_AI_DISPLAY_NAME,
-          provider: SWIFT_AI_DISPLAY_NAME,
+          model: modelConfig.key,
+          provider: "swift",
           cost: 0,
           remainingBalance: user.balance,
         },
@@ -1635,6 +1672,15 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to process request"
     const status = message.toLowerCase().includes("rate limit") ? 429 : 500
+    if (error instanceof SwiftQueueError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: `SWIFT_QUEUE_${error.code.toUpperCase()}`,
+        },
+        { status: error.status }
+      )
+    }
 
     return NextResponse.json(
       {
@@ -1644,6 +1690,7 @@ export async function POST(request: NextRequest) {
     )
   } finally {
     releaseGeneration?.()
+    await releaseQueue?.()
   }
 }
 

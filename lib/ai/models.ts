@@ -20,7 +20,6 @@ export const SWIFT_AI_DISPLAY_NAME = "Swift AI"
 export const DEFAULT_MODEL_OPTIONS: ModelOption[] = getSwiftTierOptions() as ModelOption[]
 export const DEFAULT_MODEL_KEY = DEFAULT_SWIFT_TIER_KEY
 export const OPENROUTER_MODEL_KEYS: string[] = []
-export const AGENTROUTER_MODEL_KEYS: string[] = []
 export const SWIFT_MODEL_KEYS = DEFAULT_MODEL_OPTIONS.map((model) => model.key)
 
 export function isVisionCapableModel(modelName: string): boolean {

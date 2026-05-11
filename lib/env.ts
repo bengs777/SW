@@ -86,16 +86,10 @@ export const env = {
   ),
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(2, "AI_MAX_CONCURRENT_GENERATIONS"))),
   aiQueueTimeoutMs: Math.max(10_000, Math.round(getEnvNumber(180_000, "AI_QUEUE_TIMEOUT_MS"))),
-  v0ApiKey: getEnv("V0_API_KEY"),
-  geminiApiKey: getEnv("GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"),
-  deepSeekApiKey: getEnv("DEEPSEEK_API_KEY"),
-  openAiApiKey: getEnv("OPENAI_API_KEY"),
-  openAiApiUrl: normalizeUrl(getEnv("OPENAI_API_URL") || "https://api.openai.com/v1"),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
-  openRouterApiUrl: "https://openrouter.ai/api/v1",
-  agentRouterApiKey: getEnv("AGENTROUTER_API_KEY", "AGENT_ROUTER_API_KEY", "AGENTROUTER_TOKEN", "AGENT_ROUTER_TOKEN"),
-  agentRouterApiUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL", "AGENT_ROUTER_BASE_URL") || "https://agentrouter.org/v1"),
-  agentRouterFallbackModels: getEnvList("AGENTROUTER_FALLBACK_MODELS", "AGENT_ROUTER_FALLBACK_MODELS"),
+  openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || "https://openrouter.ai/api/v1"),
+  openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL") || "https://swift.biz.id"),
+  openRouterAppName: getEnv("OPENROUTER_APP_NAME") || "Swift AI",
   devOwnerEmail: DEV_OWNER_EMAIL,
   supabaseServiceRoleKey,
   supabasePublicAnonKey,
@@ -146,9 +140,7 @@ export function getMissingProductionEnvVars() {
   if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
 
-  if (!env.openRouterApiKey && !env.geminiApiKey && !env.deepSeekApiKey && !env.openAiApiKey) {
-    missing.push("OPENROUTER_API_KEY or GEMINI_API_KEY or DEEPSEEK_API_KEY or OPENAI_API_KEY")
-  }
+  if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
 
   return missing
 }

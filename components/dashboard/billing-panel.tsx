@@ -534,7 +534,7 @@ export function BillingPanel() {
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <InfoPill label="Current plan" value={activePlan.name} />
-                <InfoPill label="Monthly credits" value={`${activePlan.monthlyCredits.toLocaleString("id-ID")} credits`} />
+                <InfoPill label="Saldo bulanan" value={formatCurrency(activePlan.monthlyCredits)} />
                 <InfoPill label="Status" value={activeSubscription?.status || "active"} />
                 <InfoPill
                   label="Renewal"
@@ -602,19 +602,19 @@ export function BillingPanel() {
               </div>
               <Badge variant={freeCreditsGranted ? "secondary" : "outline"} className="shrink-0">
                 {freeCreditsGranted
-                  ? `Free credits bulan ini ${formatCurrency(overview?.welcomeBonusAmount || 5000)}`
-                  : "Free credits bulan ini belum masuk"}
+                  ? `Saldo gratis bulan ini ${formatCurrency(overview?.welcomeBonusAmount || 5000)}`
+                  : "Saldo gratis bulan ini belum masuk"}
               </Badge>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
               <InfoPill label="Minimum top up" value={formatCurrency(topupMinimum)} />
               <InfoPill label="Payment gateway" value="Pakasir + Crypto" />
-              <InfoPill label="Free plan credits" value={formatCurrency(overview?.welcomeBonusAmount || 5000)} />
+              <InfoPill label="Saldo Free plan" value={formatCurrency(overview?.welcomeBonusAmount || 5000)} />
             </div>
 
             <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
-              Akun Free mendapat 5.000 credits per bulan. Bonus awal 5.000 credits diberikan saat pendaftaran. Setelah itu, top up bisa mulai dari Rp 2.000 (Pakasir) atau minimum crypto {cryptoMinimumLabel}.
+              Akun Free mendapat Rp5.000 saldo generasi per bulan. Bonus awal Rp5.000 diberikan saat pendaftaran. Setelah itu, top up bisa mulai dari Rp 2.000 (Pakasir) atau minimum crypto {cryptoMinimumLabel}.
             </div>
           </CardContent>
         </Card>
@@ -884,7 +884,7 @@ export function BillingPanel() {
               Balance ledger
             </CardTitle>
             <CardDescription>
-              Riwayat perubahan saldo untuk bonus awal, credits bulanan, top up, usage, dan refund.
+              Riwayat perubahan saldo untuk bonus awal, saldo bulanan, top up, usage, dan refund.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -993,7 +993,7 @@ function PlanPurchaseCard({
       </div>
 
       <div className="mt-4 grid gap-2 sm:grid-cols-2">
-        <InfoPill label="Credits" value={`${plan.monthlyCredits.toLocaleString("id-ID")} credits`} />
+        <InfoPill label="Saldo" value={formatCurrency(plan.monthlyCredits)} />
         <InfoPill label="Tokens limit" value={plan.tokensLimit.toLocaleString("id-ID")} />
       </div>
 

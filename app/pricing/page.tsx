@@ -33,7 +33,7 @@ const plans = [
     href: "/signup",
     highlighted: false,
     features: [
-      "5.000 credits per bulan",
+      "Rp5.000 saldo generasi per bulan",
       "Maksimal 3 project aktif",
       "Template dasar",
       "Komunitas support",
@@ -43,13 +43,13 @@ const plans = [
     name: "Builder",
     price: "Rp 99.000",
     period: "/bulan",
-    description: "Untuk solo founder yang butuh volume credits lebih besar.",
+    description: "Untuk solo founder yang butuh saldo generasi lebih besar.",
     badge: "Paling populer",
     cta: "Lanjut ke billing",
     href: "/login?callbackUrl=%2Fdashboard%2Fsettings%3Ftab%3Dbilling",
     highlighted: true,
     features: [
-      "50.000 credits per bulan",
+      "Rp50.000 saldo generasi per bulan",
       "Project tanpa batas",
       "Prioritas antrean generate",
       "Export project penuh",
@@ -66,7 +66,7 @@ const plans = [
     href: "/login?callbackUrl=%2Fdashboard%2Fsettings%3Ftab%3Dbilling",
     highlighted: false,
     features: [
-      "250.000 credits per bulan",
+      "Rp250.000 saldo generasi per bulan",
       "Kolaborasi workspace",
       "Priority support",
       "Advanced usage insights",
@@ -77,8 +77,8 @@ const plans = [
 
 const comparisonRows = [
   {
-    label: "Credits bulanan",
-    values: ["5.000", "50.000", "250.000"],
+    label: "Saldo bulanan",
+    values: ["Rp5.000", "Rp50.000", "Rp250.000"],
   },
   {
     label: "Project aktif",
@@ -108,9 +108,9 @@ const comparisonRows = [
 
 const faqItems = [
   {
-    question: "Apa itu credits?",
+    question: "Apa itu saldo generasi?",
     answer:
-      "Credits adalah saldo yang dipakai untuk generate dan menjalankan pekerjaan di Swift. Setiap request akan mengurangi saldo secara transparan, sehingga kamu bisa memantau pemakaian dengan jelas di dashboard.",
+      "Saldo generasi adalah Rupiah yang dipakai untuk generate dan menjalankan pekerjaan di Swift. Setiap request memakai harga tier yang jelas, sehingga kamu bisa memantau pemakaian di dashboard.",
   },
   {
     question: "Apakah saya bisa top up kapan saja?",
@@ -118,9 +118,9 @@ const faqItems = [
       `Bisa. Top up tersedia dari dashboard billing dan bisa dibayar melalui Pakasir atau crypto. Minimum top up saat ini adalah ${TOPUP_MINIMUM_LABEL}.`,
   },
   {
-    question: "Bagaimana dengan credits gratis?",
+    question: "Bagaimana dengan saldo gratis?",
     answer:
-      "Akun Free mendapatkan 5.000 credits per bulan, plus bonus awal saat pendaftaran. Itu cukup untuk mencoba alur kerja sebelum upgrade.",
+      "Akun Free mendapatkan Rp5.000 saldo generasi per bulan, plus bonus awal saat pendaftaran. Itu cukup untuk mencoba alur kerja sebelum upgrade.",
   },
   {
     question: "Apakah plan ini mengunci saya ke satu paket?",
@@ -128,7 +128,7 @@ const faqItems = [
       "Tidak. Kamu bisa mulai dari Free, lalu top up atau upgrade saat butuh volume dan workspace yang lebih besar.",
   },
   {
-    question: "Kalau credits habis, apa yang terjadi?",
+    question: "Kalau saldo habis, apa yang terjadi?",
     answer:
       "Generate akan berhenti sampai saldo ditambah. Dashboard billing membantu kamu melihat riwayat transaksi, top up, dan refund secara langsung.",
   },
@@ -145,17 +145,17 @@ export default function PricingPage() {
             Pricing & billing
           </Badge>
           <h1 className="text-4xl font-semibold tracking-tight text-foreground sm:text-5xl lg:text-6xl">
-            Harga yang jelas, credits yang transparan, dan upgrade tanpa kejutan.
+            Harga Rupiah yang jelas per generasi, tanpa biaya tersembunyi.
           </h1>
           <p className="mx-auto mt-5 max-w-3xl text-base leading-7 text-muted-foreground sm:text-lg">
-            Mulai gratis dengan 5.000 credits, lalu pilih paket yang sesuai saat produk mulai dipakai serius. Semua billing tetap selaras dengan dashboard, top up, dan riwayat penggunaan.
+            Mulai gratis dengan saldo generasi awal, lalu pilih paket yang sesuai saat produk mulai dipakai serius. Semua billing tetap selaras dengan dashboard, top up, dan riwayat penggunaan.
           </p>
 
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <InfoPill icon={ShieldCheck} text={`Top up minimum ${TOPUP_MINIMUM_LABEL}`} />
             <InfoPill icon={CreditCard} text="Pakasir + Crypto" />
             <InfoPill icon={Clock3} text="Billing transparan di dashboard" />
-            <InfoPill icon={Wallet} text="Credits dibaca sebagai balance" />
+            <InfoPill icon={Wallet} text="Saldo Rupiah untuk generasi" />
           </div>
         </section>
 
@@ -186,16 +186,16 @@ export default function PricingPage() {
             </CardHeader>
             <CardContent className="space-y-4 p-6">
               <div className="rounded-3xl border border-border/70 bg-background/70 p-5">
-                <div className="text-sm font-medium text-foreground">Credit-first billing</div>
+                <div className="text-sm font-medium text-foreground">Rupiah-first billing</div>
                 <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  Setiap paket menunjukkan credits yang didapat, lalu user bisa top up tambahan kapan saja dari dashboard billing. Ini menjaga ekspektasi tetap jelas.
+                  Setiap paket menunjukkan saldo Rupiah yang didapat, lalu user bisa top up tambahan kapan saja dari dashboard billing. Ini menjaga ekspektasi tetap jelas.
                 </p>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <MiniStat label="Minimum top up" value={TOPUP_MINIMUM_LABEL} />
                 <MiniStat label="Payment methods" value="Pakasir + Crypto" />
-                <MiniStat label="Free credits" value="5.000 / bulan" />
+                <MiniStat label="Saldo gratis" value="Rp5.000 / bulan" />
                 <MiniStat label="Billing view" value="Dashboard" />
               </div>
 
@@ -207,7 +207,7 @@ export default function PricingPage() {
                 <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
                   <li>• Free plan langsung ke signup, tanpa checkout.</li>
                   <li>• Builder dan Studio dibeli lewat dashboard billing setelah login.</li>
-                  <li>• Top up credits selalu minimal {TOPUP_MINIMUM_LABEL} untuk semua metode pembayaran.</li>
+                  <li>• Top up saldo selalu minimal {TOPUP_MINIMUM_LABEL} untuk semua metode pembayaran.</li>
                 </ul>
               </div>
             </CardContent>
@@ -279,7 +279,7 @@ export default function PricingPage() {
                   Top up sekarang
                 </div>
                 <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  Buka dashboard billing untuk mengisi saldo credits dan melihat riwayat transaksi.
+                  Buka dashboard billing untuk mengisi saldo Rupiah dan melihat riwayat transaksi.
                 </p>
                 <Button asChild className="mt-4 w-full rounded-full">
                   <Link href="/dashboard/settings?tab=billing" className="inline-flex items-center justify-center gap-2">
@@ -332,7 +332,7 @@ export default function PricingPage() {
             <CardContent className="space-y-4 p-6">
               <SummaryLine label="Harga mulai" value="Rp 0" />
               <SummaryLine label="Top up minimum" value={TOPUP_MINIMUM_LABEL} />
-              <SummaryLine label="Free credits" value="5.000 credits / bulan" />
+              <SummaryLine label="Saldo gratis" value="Rp5.000 / bulan" />
               <SummaryLine label="Payment methods" value="Pakasir & Crypto" />
               <SummaryLine label="Target utama" value="Solo builder sampai tim kecil" />
             </CardContent>
@@ -372,7 +372,7 @@ export default function PricingPage() {
                 Mulai gratis, lalu scale saat workflownya sudah terbukti.
               </h2>
               <p className="text-sm leading-6 text-muted-foreground sm:text-base">
-                Pricing page ini harus membuat keputusan mudah: coba gratis, buka billing saat siap, dan tetap punya jalur yang jelas untuk top up credits kapan saja dengan floor {TOPUP_MINIMUM_LABEL}.
+                Pricing page ini harus membuat keputusan mudah: coba gratis, buka billing saat siap, dan tetap punya jalur yang jelas untuk top up saldo kapan saja dengan floor {TOPUP_MINIMUM_LABEL}.
               </p>
             </div>
             <div className="flex flex-wrap gap-3">
@@ -441,7 +441,7 @@ function PlanCard({
           </Button>
           {plan.highlighted && (
             <p className="text-center text-xs text-muted-foreground">
-              Direkomendasikan untuk solo founder yang butuh volume credits lebih besar.
+              Direkomendasikan untuk solo founder yang butuh saldo generasi lebih besar.
             </p>
           )}
         </div>

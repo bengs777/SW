@@ -320,7 +320,7 @@ export class BillingService {
         reference: `usage:${usageLog.id}`,
         provider,
         providerReference: usageLog.id,
-        description: `Reserved prompt credits for ${model}`,
+        description: `Reserved Rupiah balance for ${model}`,
         metadata: JSON.stringify({
           modelConfigId,
           model,

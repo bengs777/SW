@@ -136,7 +136,7 @@ export default function SettingsPage() {
               <CardContent>
                 <FieldGroup>
                   <Field>
-                    <FieldLabel>Swift AI Provider Key</FieldLabel>
+                    <FieldLabel>Swift AI Gateway Key</FieldLabel>
                     <div className="flex gap-2">
                       <Input 
                         type="password" 
@@ -146,7 +146,7 @@ export default function SettingsPage() {
                       <Button variant="outline">Save</Button>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Optional BYOK slot for managed AI generation. Provider names are handled internally by Swift.
+                      Optional internal gateway slot for managed AI generation. Engine routing is handled privately by Swift.
                     </p>
                   </Field>
                 </FieldGroup>

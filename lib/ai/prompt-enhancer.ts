@@ -37,7 +37,7 @@ export type PromptEnhancementResult = {
 
 const MAX_ITEMS_PER_SECTION = 5
 
-export async function enhancePromptWithAgentRouter({
+export async function enhancePromptForSwift({
   prompt,
   modelName,
 }: {
@@ -57,6 +57,7 @@ export async function enhancePromptWithAgentRouter({
     projectMemory,
   }
 }
+
 
 function buildLocalPromptDraft(prompt: string): PromptDraft {
   const compactPrompt = inlineText(prompt)

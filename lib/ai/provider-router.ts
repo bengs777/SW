@@ -1,21 +1,53 @@
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
 import type { PromptAttachment } from "@/lib/types"
-import { env } from "@/lib/env"
 import {
   DEFAULT_SWIFT_TIER_KEY,
   USER_FRIENDLY_AI_ENGINE_ERROR,
   getSwiftTierConfig,
-  hasProviderKey,
-  type InternalProviderName,
+  hasOpenRouterGatewayKey,
   type ProviderFailureReason,
-  type ProviderHealthStatus,
-  type SwiftProviderTarget,
+  type SwiftModelTarget,
   type SwiftTierConfig,
   type SwiftTierKey,
-} from "@/lib/ai/model-tiers"
+  mapModelIdToTierKey,
+} from "@/lib/ai/swift-tiers"
+import { createOpenRouterChatCompletion } from "@/lib/ai/openrouter-client"
+import { SwiftAiError, redactAiSecret } from "@/lib/ai/errors"
+import { getHealthSnapshot, isModelTemporarilyUnavailable, markModelFailure, markModelSuccess } from "@/lib/ai/provider-health"
+import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
 import { log } from "@/lib/logging"
 
-export type ProviderName = "swift" | InternalProviderName | "openrouter" | "agentrouter"
+export type ProviderName = string
+
+type ProviderRegistryEntry = {
+  id: ProviderName
+  label: string
+  enabled: boolean
+}
+
+export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
+  swift: {
+    id: "swift",
+    label: "Swift AI",
+    enabled: true,
+  },
+  openrouter: {
+    id: "openrouter",
+    label: "OpenRouter",
+    enabled: true,
+  },
+}
+
+function validateProvider(provider: ProviderName | undefined): ProviderName {
+  const providerId = provider || "swift"
+  const registered = PROVIDER_REGISTRY[providerId]
+
+  if (!registered || !registered.enabled) {
+    throw new Error(`Unsupported AI provider: ${providerId}`)
+  }
+
+  return registered.id
+}
 
 type ProviderRequest = {
   provider?: ProviderName
@@ -25,10 +57,11 @@ type ProviderRequest = {
   promptLanguage?: PromptLanguage
   temperatureOverride?: number
   attachments?: PromptAttachment[]
+  signal?: AbortSignal
 }
 
 export type ProviderAttemptLog = {
-  provider: InternalProviderName
+  provider: ProviderName
   modelName: string
   status: "success" | "failed" | "skipped"
   failureReason?: ProviderFailureReason
@@ -38,64 +71,18 @@ export type ProviderAttemptLog = {
   errorMessage?: string
 }
 
-type ProviderResponse = {
+export type ProviderResponse = {
   message: string
-  providerUsed: InternalProviderName
-  modelUsed: string
+  providerUsed: ProviderName
+  modelUsed: SwiftTierKey
   selectedTier: SwiftTierKey
   usedFallback: boolean
   primaryError?: string
   attempts: ProviderAttemptLog[]
-}
-
-type ProviderMessage = {
-  message: string
-  requestId?: string | null
-}
-
-type HealthCacheValue = {
-  provider: InternalProviderName
-  status: ProviderHealthStatus
-  failureReason?: ProviderFailureReason
-  statusCode?: number
-  latencyMs: number
-  checkedAt: number
-  message?: string
-}
-
-type ProviderErrorDetails = {
-  provider: InternalProviderName
-  modelName: string
-  statusCode?: number
-  failureReason: ProviderFailureReason
-  requestId?: string | null
-}
-
-class ProviderError extends Error {
-  provider: InternalProviderName
-  modelName: string
-  statusCode?: number
-  failureReason: ProviderFailureReason
-  requestId?: string | null
-
-  constructor(message: string, details: ProviderErrorDetails) {
-    super(message)
-    this.name = "ProviderError"
-    this.provider = details.provider
-    this.modelName = details.modelName
-    this.statusCode = details.statusCode
-    this.failureReason = details.failureReason
-    this.requestId = details.requestId
-  }
-}
-
-class ProviderTimeoutError extends ProviderError {
-  constructor(timeoutMs: number, details: Omit<ProviderErrorDetails, "failureReason">) {
-    super(`Provider request timed out after ${Math.round(timeoutMs / 1000)} seconds`, {
-      ...details,
-      failureReason: "timeout",
-    })
-    this.name = "ProviderTimeoutError"
+  tokenUsage?: {
+    promptTokens?: number
+    completionTokens?: number
+    totalTokens?: number
   }
 }
 
@@ -150,10 +137,6 @@ const CHAT_SYSTEM_PROMPTS: Record<PromptLanguage, string> = {
   ].join(" "),
 }
 
-const healthCache = new Map<InternalProviderName, HealthCacheValue>()
-const MAX_PROVIDER_ATTEMPTS_PER_REQUEST = 4
-const HEALTH_CACHE_TTL_MS = 60_000
-
 export class ProviderRouter {
   static async generate({
     modelName,
@@ -161,36 +144,44 @@ export class ProviderRouter {
     mode = "files",
     promptLanguage = "id",
     temperatureOverride,
+    signal,
+    provider,
   }: ProviderRequest): Promise<ProviderResponse> {
+    validateProvider(provider)
     const tier = this.resolveTier(modelName, mode)
     const attempts: ProviderAttemptLog[] = []
-    const availableTargets = this.getAvailableTargets(tier)
 
-    if (availableTargets.length === 0) {
+    if (!hasOpenRouterGatewayKey()) {
+      attempts.push({
+        provider: "openrouter",
+        modelName: tier.targets[0]?.modelId || tier.key,
+        status: "failed",
+        failureReason: "config",
+        latencyMs: 0,
+        errorMessage: "OPENROUTER_API_KEY is not configured",
+      })
       throw new SwiftProviderFailureError(tier.key, attempts)
     }
 
     let totalAttempts = 0
     let firstError: string | undefined
 
-    for (const target of availableTargets) {
-      const cachedHealth = this.getCachedHealth(target.provider)
-      if (cachedHealth?.status === "offline") {
+    for (const target of tier.targets) {
+      if (isModelTemporarilyUnavailable(target.modelId)) {
         attempts.push({
-          provider: target.provider,
-          modelName: target.modelName,
+          provider: "openrouter",
+          modelName: target.modelId,
           status: "skipped",
-          failureReason: cachedHealth.failureReason || "unknown",
-          statusCode: cachedHealth.statusCode,
+          failureReason: "server_error",
           latencyMs: 0,
-          errorMessage: cachedHealth.message,
+          errorMessage: "Model is cooling down after repeated failures",
         })
         continue
       }
 
-      const maxAttemptsForTarget = 1
-      for (let attempt = 0; attempt <= maxAttemptsForTarget; attempt += 1) {
-        if (totalAttempts >= MAX_PROVIDER_ATTEMPTS_PER_REQUEST) {
+      let retryCount = 0
+      while (true) {
+        if (totalAttempts >= Math.min(MAX_PROVIDER_ATTEMPTS_PER_REQUEST, tier.targets.length * 2)) {
           throw new SwiftProviderFailureError(tier.key, attempts)
         }
 
@@ -198,75 +189,70 @@ export class ProviderRouter {
         const startedAt = Date.now()
 
         try {
-          const result = await this.callTarget(target, {
+          const result = await this.callOpenRouterTarget(target, {
             prompt,
             mode,
             promptLanguage,
             tier,
             temperatureOverride,
+            signal,
           })
           const latencyMs = Date.now() - startedAt
           attempts.push({
-            provider: target.provider,
-            modelName: target.modelName,
+            provider: "swift",
+            modelName: tier.key,
             status: "success",
             latencyMs,
             requestId: result.requestId,
           })
-          this.setCachedHealth(target.provider, {
-            provider: target.provider,
-            status: "healthy",
-            latencyMs,
-            checkedAt: Date.now(),
-          })
+          markModelSuccess(target.modelId, latencyMs)
 
           return {
             message: result.message,
-            providerUsed: target.provider,
-            modelUsed: target.modelName,
+            providerUsed: "swift",
+            modelUsed: tier.key,
             selectedTier: tier.key,
-            usedFallback: attempts.some((item) => item.status === "failed" || item.status === "skipped"),
+            usedFallback: target.role === "fallback" || attempts.some((item) => item.status === "failed" || item.status === "skipped"),
             primaryError: firstError,
             attempts,
+            tokenUsage: result.tokenUsage,
           }
         } catch (error) {
-          const providerError = this.normalizeProviderError(error, target)
+          const normalized = this.normalizeError(error, target)
           const latencyMs = Date.now() - startedAt
-          firstError = firstError || providerError.message
+          firstError = firstError || normalized.message
           attempts.push({
-            provider: target.provider,
-            modelName: target.modelName,
+            provider: "swift",
+            modelName: tier.key,
             status: "failed",
-            failureReason: providerError.failureReason,
-            statusCode: providerError.statusCode,
+            failureReason: normalized.reason,
+            statusCode: normalized.statusCode,
             latencyMs,
-            requestId: providerError.requestId,
-            errorMessage: providerError.message,
+            requestId: normalized.requestId,
+            errorMessage: redactAiSecret(normalized.message),
           })
-          this.setCachedHealth(target.provider, {
-            provider: target.provider,
-            status: this.toHealthStatus(providerError.failureReason),
-            failureReason: providerError.failureReason,
-            statusCode: providerError.statusCode,
+          markModelFailure(target.modelId, {
+            reason: normalized.reason,
             latencyMs,
-            checkedAt: Date.now(),
-            message: providerError.message,
+            statusCode: normalized.statusCode,
+            message: redactAiSecret(normalized.message),
           })
 
-          if (!this.isTransient(providerError.failureReason) || attempt === maxAttemptsForTarget) {
+          if (!shouldRetryModel(normalized.reason, retryCount)) {
             break
           }
 
-          await this.sleep(500)
+          retryCount += 1
+          await sleep(retryDelayMs(retryCount))
         }
       }
     }
 
-    log("warn", "Swift AI provider failover exhausted", {
+    log("warn", "Swift AI OpenRouter failover exhausted", {
       selectedTier: tier.key,
       attempts: attempts.map((attempt) => ({
         provider: attempt.provider,
-        modelName: attempt.modelName,
+        internalModel: attempt.modelName,
         status: attempt.status,
         failureReason: attempt.failureReason,
         statusCode: attempt.statusCode,
@@ -277,77 +263,65 @@ export class ProviderRouter {
     throw new SwiftProviderFailureError(tier.key, attempts)
   }
 
-  static async getConfiguredProviderHealth(options?: { refresh?: boolean }) {
-    const providers: InternalProviderName[] = ["gemini", "deepseek", "openrouter", "openai", "agentrouter"]
-    const results = []
-
-    for (const provider of providers) {
-      if (!hasProviderKey(provider)) {
-        continue
-      }
-
-      const cached = this.getCachedHealth(provider)
-      if (!options?.refresh && cached) {
-        results.push(this.formatHealth(provider, cached, true))
-        continue
-      }
-
-      results.push(await this.checkProviderHealth(provider))
-    }
-
-    return results
+  static async getConfiguredProviderHealth() {
+    return getHealthSnapshot()
   }
 
-  static async checkProviderHealth(provider: InternalProviderName) {
-    const target = this.getHealthTarget(provider)
-    const startedAt = Date.now()
-
-    if (!target || !hasProviderKey(provider)) {
-      const status: HealthCacheValue = {
-        provider,
+  static async checkProviderHealth(modelId?: string) {
+    const targetModelId = modelId || getSwiftTierConfig(DEFAULT_SWIFT_TIER_KEY)?.targets[0]?.modelId
+    if (!targetModelId) {
+      return {
+        provider: "swift",
         status: "offline",
         failureReason: "config",
         latencyMs: 0,
-        checkedAt: Date.now(),
-        message: "Provider key is not configured.",
+        cached: false,
+        message: "No Swift tier model is configured.",
       }
-      return this.formatHealth(provider, status, false)
     }
 
+    const startedAt = Date.now()
     try {
-      const message = await this.callTarget(target, {
-        prompt: "Reply with OK only.",
-        mode: "chat",
-        promptLanguage: "en",
-        tier: {
-          ...this.resolveTier(DEFAULT_SWIFT_TIER_KEY, "chat"),
-          timeoutMs: 8_000,
-          maxOutputTokens: 64,
-        },
+      await createOpenRouterChatCompletion({
+        model: targetModelId,
+        messages: [
+          { role: "system", content: "You are a health probe. Reply with OK only." },
+          { role: "user", content: "OK" },
+        ],
+        maxTokens: 16,
+        timeoutMs: 8_000,
+        temperature: 0,
       })
       const latencyMs = Date.now() - startedAt
-      const status: HealthCacheValue = {
-        provider,
-        status: message.message.trim() ? "healthy" : "degraded",
-        failureReason: message.message.trim() ? undefined : "empty_response",
+      markModelSuccess(targetModelId, latencyMs)
+      return {
+        provider: "swift",
+        modelId: targetModelId,
+        status: "healthy",
         latencyMs,
-        checkedAt: Date.now(),
+        cached: false,
+        checkedAt: new Date().toISOString(),
       }
-      this.setCachedHealth(provider, status)
-      return this.formatHealth(provider, status, false)
-    } catch (error) {
-      const providerError = this.normalizeProviderError(error, target)
-      const status: HealthCacheValue = {
-        provider,
-        status: this.toHealthStatus(providerError.failureReason),
-        failureReason: providerError.failureReason,
-        statusCode: providerError.statusCode,
-        latencyMs: Date.now() - startedAt,
-        checkedAt: Date.now(),
-        message: providerError.message,
+      } catch (error) {
+        const normalized = this.normalizeError(error, { modelId: targetModelId, role: "primary" })
+        const latencyMs = Date.now() - startedAt
+        markModelFailure(targetModelId, {
+          reason: normalized.reason,
+          latencyMs,
+          statusCode: normalized.statusCode,
+          message: redactAiSecret(normalized.message),
+        })
+        return {
+          provider: "swift",
+          modelId: targetModelId,
+        status: normalized.reason === "auth" || normalized.reason === "config" ? "offline" : "degraded",
+        failureReason: normalized.reason,
+        statusCode: normalized.statusCode,
+        latencyMs,
+        cached: false,
+        checkedAt: new Date().toISOString(),
+        message: redactAiSecret(normalized.message),
       }
-      this.setCachedHealth(provider, status)
-      return this.formatHealth(provider, status, false)
     }
   }
 
@@ -356,210 +330,32 @@ export class ProviderRouter {
     return getSwiftTierConfig(modelName) || getSwiftTierConfig(fallbackKey) || getSwiftTierConfig(DEFAULT_SWIFT_TIER_KEY)!
   }
 
-  private static getAvailableTargets(tier: SwiftTierConfig) {
-    const seen = new Set<string>()
-    return tier.targets.filter((target) => {
-      if (!hasProviderKey(target.provider)) return false
-      const key = `${target.provider}:${target.modelName}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
+  private static async callOpenRouterTarget(
+    target: SwiftModelTarget,
+    input: {
+      prompt: string
+      mode: "chat" | "files" | "inspect"
+      promptLanguage: PromptLanguage
+      tier: SwiftTierConfig
+      temperatureOverride?: number
+      signal?: AbortSignal
+    }
+  ) {
+    return createOpenRouterChatCompletion({
+      model: target.modelId,
+      messages: this.buildMessages(input.prompt, input.mode, input.promptLanguage),
+      temperature: this.getTemperature(input.mode, input.temperatureOverride),
+      maxTokens: input.tier.maxOutputTokens,
+      responseFormat: input.mode === "files" ? "json_object" : undefined,
+      timeoutMs: input.tier.timeoutMs,
+      signal: input.signal,
     })
-  }
-
-  private static getHealthTarget(provider: InternalProviderName): SwiftProviderTarget | null {
-    for (const tier of ["swift-1", "swift-2", "swift-3"]) {
-      const target = getSwiftTierConfig(tier)?.targets.find((item) => item.provider === provider)
-      if (target) return target
-    }
-
-    return null
-  }
-
-  private static async callTarget(
-    target: SwiftProviderTarget,
-    input: {
-      prompt: string
-      mode: "chat" | "files" | "inspect"
-      promptLanguage: PromptLanguage
-      tier: SwiftTierConfig
-      temperatureOverride?: number
-    }
-  ): Promise<ProviderMessage> {
-    if (target.provider === "gemini") {
-      return this.callGemini(target, input)
-    }
-
-    return this.callChatCompletions(target, input)
-  }
-
-  private static async callGemini(
-    target: SwiftProviderTarget,
-    input: {
-      prompt: string
-      mode: "chat" | "files" | "inspect"
-      promptLanguage: PromptLanguage
-      tier: SwiftTierConfig
-      temperatureOverride?: number
-    }
-  ): Promise<ProviderMessage> {
-    const apiKey = env.geminiApiKey
-    if (!apiKey) {
-      throw new ProviderError("Provider API key is not configured", {
-        provider: target.provider,
-        modelName: target.modelName,
-        failureReason: "config",
-      })
-    }
-
-    const systemPrompt = this.getSystemPrompt(input.mode, input.promptLanguage)
-    const response = await this.fetchWithTimeout(
-      `https://generativelanguage.googleapis.com/v1beta/models/${target.modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: `${systemPrompt}\n\n${input.prompt}` }],
-            },
-          ],
-          generationConfig: {
-            temperature: this.getTemperature(input.mode, input.temperatureOverride),
-            maxOutputTokens: input.tier.maxOutputTokens,
-          },
-        }),
-      },
-      input.tier.timeoutMs,
-      target
-    )
-
-    if (!response.ok) {
-      throw await this.errorFromResponse(response, target)
-    }
-
-    const data = await response.json()
-    const message = data.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("") || ""
-
-    if (!message.trim()) {
-      throw new ProviderError("Provider returned an empty response", {
-        provider: target.provider,
-        modelName: target.modelName,
-        failureReason: "empty_response",
-      })
-    }
-
-    return {
-      message,
-      requestId: response.headers.get("x-request-id"),
-    }
-  }
-
-  private static async callChatCompletions(
-    target: SwiftProviderTarget,
-    input: {
-      prompt: string
-      mode: "chat" | "files" | "inspect"
-      promptLanguage: PromptLanguage
-      tier: SwiftTierConfig
-      temperatureOverride?: number
-    }
-  ): Promise<ProviderMessage> {
-    const config = this.getChatProviderConfig(target.provider)
-    if (!config.apiKey) {
-      throw new ProviderError("Provider API key is not configured", {
-        provider: target.provider,
-        modelName: target.modelName,
-        failureReason: "config",
-      })
-    }
-
-    const response = await this.fetchWithTimeout(
-      `${config.baseUrl}/chat/completions`,
-      {
-        method: "POST",
-        headers: this.buildProviderHeaders(target.provider, config.apiKey),
-        body: JSON.stringify({
-          model: target.modelName,
-          messages: this.buildMessages(input.prompt, input.mode, input.promptLanguage),
-          temperature: this.getTemperature(input.mode, input.temperatureOverride),
-          top_p: 0.9,
-          max_tokens: input.tier.maxOutputTokens,
-          ...(input.mode === "files" ? { response_format: { type: "json_object" } } : {}),
-        }),
-      },
-      input.tier.timeoutMs,
-      target
-    )
-
-    if (!response.ok) {
-      throw await this.errorFromResponse(response, target)
-    }
-
-    const data = await response.json()
-    const message = data.choices?.[0]?.message?.content || ""
-    if (!message.trim()) {
-      throw new ProviderError("Provider returned an empty response", {
-        provider: target.provider,
-        modelName: target.modelName,
-        failureReason: "empty_response",
-        requestId: response.headers.get("x-request-id"),
-      })
-    }
-
-    return {
-      message,
-      requestId: response.headers.get("x-request-id"),
-    }
-  }
-
-  private static getChatProviderConfig(provider: InternalProviderName) {
-    if (provider === "deepseek") {
-      return {
-        apiKey: env.deepSeekApiKey,
-        baseUrl: process.env.DEEPSEEK_API_URL?.replace(/\/+$/, "") || "https://api.deepseek.com/v1",
-      }
-    }
-
-    if (provider === "openai") {
-      return {
-        apiKey: env.openAiApiKey,
-        baseUrl: env.openAiApiUrl || "https://api.openai.com/v1",
-      }
-    }
-
-    if (provider === "agentrouter") {
-      return {
-        apiKey: env.agentRouterApiKey,
-        baseUrl: env.agentRouterApiUrl || "https://agentrouter.org/v1",
-      }
-    }
-
-    return {
-      apiKey: env.openRouterApiKey,
-      baseUrl: env.openRouterApiUrl || "https://openrouter.ai/api/v1",
-    }
-  }
-
-  private static buildProviderHeaders(provider: InternalProviderName, apiKey: string) {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    }
-
-    if (provider === "openrouter") {
-      headers["HTTP-Referer"] = env.nextAuthUrl || env.appUrl || "http://localhost:3000"
-      headers["X-Title"] = "Swift AI Web Builder"
-    }
-
-    return headers
   }
 
   private static buildMessages(prompt: string, mode: "chat" | "files" | "inspect", promptLanguage: PromptLanguage) {
     return [
-      { role: "system", content: this.getSystemPrompt(mode, promptLanguage) },
-      { role: "user", content: prompt },
+      { role: "system" as const, content: this.getSystemPrompt(mode, promptLanguage) },
+      { role: "user" as const, content: prompt },
     ]
   }
 
@@ -576,112 +372,16 @@ export class ProviderRouter {
     return 0.5
   }
 
-  private static async fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, target: SwiftProviderTarget) {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), timeoutMs)
-
-    try {
-      return await fetch(url, {
-        ...init,
-        signal: controller.signal,
-      })
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new ProviderTimeoutError(timeoutMs, {
-          provider: target.provider,
-          modelName: target.modelName,
-        })
-      }
-
-      throw new ProviderError(error instanceof Error ? error.message : "Network error", {
-        provider: target.provider,
-        modelName: target.modelName,
-        failureReason: "network",
-      })
-    } finally {
-      clearTimeout(timeout)
-    }
-  }
-
-  private static async errorFromResponse(response: Response, target: SwiftProviderTarget) {
-    const text = await response.text().catch(() => "")
-    let message = text
-
-    try {
-      const parsed = JSON.parse(text)
-      message = parsed.error?.message || parsed.message || text
-    } catch {
-      // keep raw text
-    }
-
-    return new ProviderError(`Provider API error (${response.status}): ${message}`.trim(), {
-      provider: target.provider,
-      modelName: target.modelName,
-      statusCode: response.status,
-      failureReason: this.reasonFromStatus(response.status),
-      requestId: response.headers.get("x-request-id"),
-    })
-  }
-
-  private static normalizeProviderError(error: unknown, target: SwiftProviderTarget) {
-    if (error instanceof ProviderError) {
+  private static normalizeError(error: unknown, target: SwiftModelTarget) {
+    if (error instanceof SwiftAiError) {
       return error
     }
 
-    return new ProviderError(error instanceof Error ? error.message : String(error), {
-      provider: target.provider,
-      modelName: target.modelName,
-      failureReason: "unknown",
+    const reason: ProviderFailureReason = error instanceof Error && error.name === "AbortError" ? "cancelled" : "network"
+
+    return new SwiftAiError(error instanceof Error ? error.message : String(error), {
+      reason,
+      internalModelId: target.modelId,
     })
-  }
-
-  private static reasonFromStatus(status: number): ProviderFailureReason {
-    if (status === 401 || status === 403) return "auth"
-    if (status === 408) return "timeout"
-    if (status === 429 || status === 402) return "rate_limit"
-    if (status >= 500) return "server_error"
-    return "unknown"
-  }
-
-  private static isTransient(reason: ProviderFailureReason) {
-    return reason === "timeout" || reason === "network" || reason === "server_error" || reason === "rate_limit"
-  }
-
-  private static toHealthStatus(reason: ProviderFailureReason): ProviderHealthStatus {
-    if (reason === "auth" || reason === "config") return "offline"
-    if (reason === "rate_limit" || reason === "timeout" || reason === "empty_response") return "degraded"
-    return "offline"
-  }
-
-  private static getCachedHealth(provider: InternalProviderName) {
-    const cached = healthCache.get(provider)
-    if (!cached) return null
-    if (Date.now() - cached.checkedAt > HEALTH_CACHE_TTL_MS) return null
-    return cached
-  }
-
-  private static setCachedHealth(provider: InternalProviderName, value: HealthCacheValue) {
-    healthCache.set(provider, value)
-  }
-
-  private static formatHealth(provider: InternalProviderName, status: HealthCacheValue, cached: boolean) {
-    return {
-      provider,
-      status: status.status,
-      failureReason: status.failureReason,
-      statusCode: status.statusCode,
-      latencyMs: status.latencyMs,
-      checkedAt: new Date(status.checkedAt).toISOString(),
-      cached,
-      message: status.message ? this.redact(status.message) : undefined,
-    }
-  }
-
-  private static redact(message: string) {
-    return message.replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]").replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
-  }
-
-  private static sleep(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 }

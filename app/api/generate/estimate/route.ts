@@ -81,19 +81,15 @@ export async function POST(request: NextRequest) {
       modelName: modelConfig.modelName,
       prompt: promptWithAttachments,
     })
-    const estimatedTokens = pricing.estimatedTokens
     const estimatedCost = pricing.estimatedCost
     const remainingBalance = user.balance - estimatedCost
 
     return NextResponse.json({
       model: modelConfig.key,
-      provider: modelConfig.provider,
-      estimatedTokens,
-      estimatedInputTokens: pricing.estimatedInputTokens,
-      estimatedOutputTokens: pricing.estimatedOutputTokens,
+      provider: "swift",
       estimatedCost,
       minimumCharge: pricing.minimumCharge,
-      pricingMode: pricing.pricingMode,
+      pricingMode: "fixed",
       currentBalance: user.balance,
       remainingBalance,
       canAfford: remainingBalance >= 0,

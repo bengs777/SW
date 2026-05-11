@@ -1058,22 +1058,21 @@ export function ChatPanel({
                     <p>Estimating request cost...</p>
                   ) : estimate.error ? (
                     <p>
-                      Estimation unavailable ({estimate.error}). Flat model price: {(
+                      Estimasi belum tersedia ({estimate.error}). Harga tier: Rp {(
                         selectedModelInfo?.price || 0
-                      ).toLocaleString("id-ID")} credits.
+                      ).toLocaleString("id-ID")}.
                     </p>
                   ) : (
                     <div className="flex flex-wrap items-center gap-3">
-                      <span>Est. tokens: {(estimate.estimatedTokens || 0).toLocaleString("id-ID")}</span>
-                      <span>Est. cost: {(estimate.estimatedCost || selectedModelInfo?.price || 0).toLocaleString("id-ID")} credits</span>
+                      <span>Estimasi: Rp {(estimate.estimatedCost || selectedModelInfo?.price || 0).toLocaleString("id-ID")}</span>
                       {typeof estimate.currentBalance === "number" && (
-                        <span>Balance: {estimate.currentBalance.toLocaleString("id-ID")} credits</span>
+                        <span>Saldo: Rp {estimate.currentBalance.toLocaleString("id-ID")}</span>
                       )}
                       {typeof estimate.remainingBalance === "number" && (
-                        <span>After request: {estimate.remainingBalance.toLocaleString("id-ID")} credits</span>
+                        <span>Sisa saldo: Rp {estimate.remainingBalance.toLocaleString("id-ID")}</span>
                       )}
                       {estimate.canAfford === false && (
-                        <span className="font-medium">Insufficient balance for this request.</span>
+                        <span className="font-medium">Saldo tidak cukup untuk request ini.</span>
                       )}
                     </div>
                   )}
@@ -1145,7 +1144,7 @@ export function ChatPanel({
                   <span className="truncate text-xs text-muted-foreground">{selectedModelDescription}</span>
                 </div>
                 <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
-                  {(selectedModelInfo?.price ?? 0).toLocaleString("id-ID")} credits
+                  Rp {(selectedModelInfo?.price ?? 0).toLocaleString("id-ID")}
                 </span>
               </SelectTrigger>
               <SelectContent className="w-[360px] p-2">
@@ -1162,7 +1161,7 @@ export function ChatPanel({
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-foreground">{sanitizeModelDisplayName(model.label)}</span>
                         <span className="text-[11px] text-muted-foreground">
-                          {(typeof model.price === "number" ? model.price : 0).toLocaleString("id-ID")} credits/request
+                          Rp {(typeof model.price === "number" ? model.price : 0).toLocaleString("id-ID")} / generation
                         </span>
                       </div>
                       <p className="text-xs text-muted-foreground">
@@ -1245,7 +1244,7 @@ function ProviderHealthCard({
   if (!status) {
     return (
       <div className="rounded-xl border border-border bg-card/60 px-3 py-2 text-xs text-muted-foreground">
-        Status provider akan muncul setelah request generate dijalankan.
+        Status Swift engine akan muncul setelah request generate dijalankan.
       </div>
     )
   }
@@ -1253,12 +1252,12 @@ function ProviderHealthCard({
   const config =
     status.issue === "healthy"
       ? {
-          title: "Provider siap dipakai",
+          title: "Swift siap dipakai",
           className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-100",
         }
       : status.issue === "latency"
         ? {
-            title: "Provider hidup tapi lambat",
+            title: "Swift hidup tapi lambat",
             className: "border-amber-500/30 bg-amber-500/10 text-amber-100",
           }
         : status.issue === "auth"
@@ -1268,16 +1267,16 @@ function ProviderHealthCard({
             }
           : status.issue === "quota"
             ? {
-                title: "Kuota provider habis",
+                title: "Kapasitas Swift sedang penuh",
                 className: "border-rose-500/30 bg-rose-500/10 text-rose-100",
               }
             : status.issue === "config"
               ? {
-                  title: "Konfigurasi provider belum lengkap",
+                  title: "Konfigurasi Swift belum lengkap",
                   className: "border-rose-500/30 bg-rose-500/10 text-rose-100",
                 }
               : {
-                  title: "Kesehatan provider belum ideal",
+                  title: "Kesehatan Swift belum ideal",
                   className: "border-border bg-card/80 text-foreground",
                 }
 
@@ -1286,7 +1285,7 @@ function ProviderHealthCard({
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-medium">{config.title}</p>
-          <p className="mt-1 text-xs opacity-90">{status.reason || "Provider status tersedia."}</p>
+          <p className="mt-1 text-xs opacity-90">{status.reason || "Status Swift tersedia."}</p>
         </div>
         <ProviderStatusBadge status={status} />
       </div>
@@ -1529,11 +1528,11 @@ function GeneratingStatus({ startedAt, progress }: { startedAt: Date; progress?:
   }
 
   if (!progress && elapsedMs >= 10000) {
-    label = "Provider sedang lambat, mohon tunggu..."
+    label = "Swift sedang lambat, mohon tunggu..."
   }
 
   if (!progress && elapsedMs >= 18000) {
-    label = "Masih menunggu provider. Request akan dihentikan otomatis jika terlalu lama."
+    label = "Masih menunggu Swift. Request akan dihentikan otomatis jika terlalu lama."
   }
 
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))

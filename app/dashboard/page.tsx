@@ -168,7 +168,7 @@ export default async function DashboardPage() {
                 Build and monitor workspaces without the template feel.
               </h1>
               <p className="max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                Keep credits, recent activity, and generated projects in one control room. The layout is tuned to feel like a real product dashboard, not a demo screen.
+                Keep Rupiah balance, recent activity, and generated projects in one control room. The layout is tuned to feel like a real product dashboard, not a demo screen.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -203,7 +203,7 @@ export default async function DashboardPage() {
           icon={Wallet}
           label="Current Balance"
           value={`Rp ${balance.toLocaleString("id-ID")}`}
-          detail="Available credits for generation"
+          detail="Available Rupiah balance for generation"
         />
         <MetricCard
           icon={Activity}
@@ -230,7 +230,7 @@ export default async function DashboardPage() {
           <CardHeader>
             <CardTitle>Recent Usage</CardTitle>
             <CardDescription>
-              Latest model requests with cost, provider, and status.
+              Latest Swift requests with cost and status.
             </CardDescription>
           </CardHeader>
           <CardContent className="p-6">
@@ -250,7 +250,7 @@ export default async function DashboardPage() {
                       <div className="min-w-0">
                         <div className="text-sm font-semibold text-foreground">{log.model}</div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          {log.provider} • {formatDistanceToNow(log.createdAt, { addSuffix: true })}
+                          Swift AI • {formatDistanceToNow(log.createdAt, { addSuffix: true })}
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -290,7 +290,7 @@ export default async function DashboardPage() {
               <InfoTile
                 label="Last activity"
                 value={latestActivityLabel}
-                description={latestActivity ? latestActivity.provider : "Waiting for usage"}
+                description={latestActivity ? "Swift AI" : "Waiting for usage"}
               />
             </div>
 

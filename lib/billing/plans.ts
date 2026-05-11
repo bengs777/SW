@@ -37,7 +37,7 @@ export const BILLING_PLANS: BillingPlanDefinition[] = [
     renewalDays: 30,
     ctaLabel: "Buat akun gratis",
     features: [
-      "5.000 credits per bulan",
+      "Rp5.000 saldo generasi per bulan",
       "Maksimal 3 project aktif",
       "Template dasar",
       "Komunitas support",
@@ -52,7 +52,7 @@ export const BILLING_PLANS: BillingPlanDefinition[] = [
     id: "builder",
     name: "Builder",
     badge: "Paling populer",
-    description: "Untuk solo founder yang butuh volume credits lebih besar.",
+    description: "Untuk solo founder yang butuh saldo generasi lebih besar.",
     priceIdr: 99_000,
     monthlyCredits: 50_000,
     tokensLimit: 50_000,
@@ -60,7 +60,7 @@ export const BILLING_PLANS: BillingPlanDefinition[] = [
     highlighted: true,
     ctaLabel: "Lanjut ke billing",
     features: [
-      "50.000 credits per bulan",
+      "Rp50.000 saldo generasi per bulan",
       "Project tanpa batas",
       "Prioritas antrean generate",
       "Export project penuh",
@@ -84,7 +84,7 @@ export const BILLING_PLANS: BillingPlanDefinition[] = [
     renewalDays: 30,
     ctaLabel: "Lanjut ke billing",
     features: [
-      "250.000 credits per bulan",
+      "Rp250.000 saldo generasi per bulan",
       "Kolaborasi workspace",
       "Priority support",
       "Advanced usage insights",

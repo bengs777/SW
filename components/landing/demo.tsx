@@ -428,11 +428,11 @@ function PricingPreview() {
             Feature comparison
           </div>
           <Badge variant="secondary" className="rounded-full px-2.5 py-1 text-[11px]">
-            Credits-first billing
+            Rupiah-first billing
           </Badge>
         </div>
         <div className="mt-3 space-y-2 text-sm">
-          <ComparisonRow label="Credits" free="5k" builder="50k" studio="250k" />
+          <ComparisonRow label="Saldo" free="Rp5k" builder="Rp50k" studio="Rp250k" />
           <ComparisonRow label="Top up" free="No" builder="Yes" studio="Yes" />
           <ComparisonRow label="Support" free="Community" builder="Priority" studio="Priority chat" />
         </div>
@@ -554,7 +554,7 @@ function PlanPreviewCard({
       <div className="mt-3 space-y-2 text-sm text-muted-foreground">
         <div className="flex items-center gap-2">
           <Check className="h-3.5 w-3.5 text-primary" />
-          Credits included
+          Saldo included
         </div>
         <div className="flex items-center gap-2">
           <Check className="h-3.5 w-3.5 text-primary" />

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { requireDeveloperActorResponse } from "@/lib/admin"
 import { ProviderRouter } from "@/lib/ai/provider-router"
+import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
 
 export const runtime = "nodejs"
 
@@ -11,7 +12,9 @@ export async function GET(request: NextRequest) {
   }
 
   const refresh = request.nextUrl.searchParams.get("refresh") === "1"
-  const providers = await ProviderRouter.getConfiguredProviderHealth({ refresh })
+  const providers = refresh
+    ? await Promise.all(getConfiguredSwiftModelIds().map((modelId) => ProviderRouter.checkProviderHealth(modelId)))
+    : await ProviderRouter.getConfiguredProviderHealth()
 
   const status =
     providers.length === 0

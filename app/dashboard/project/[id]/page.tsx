@@ -394,7 +394,7 @@ export default function EditorPage() {
         status: "error",
         issue: "auth",
         reason: "Swift AI engine rejected authentication or model access",
-        action: "Hubungi admin atau cek konfigurasi provider internal di dashboard production.",
+        action: "Hubungi admin atau cek konfigurasi Swift engine di dashboard production.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -413,10 +413,10 @@ export default function EditorPage() {
         status: "error",
         issue: "quota",
         reason: normalized.includes("fewer max_tokens") || normalized.includes("can only afford")
-          ? "Credit provider internal tidak cukup untuk batas output request saat ini"
+          ? "Kapasitas Swift internal tidak cukup untuk batas output request saat ini"
           : "Swift AI engine sedang rate-limited",
         action: normalized.includes("fewer max_tokens") || normalized.includes("can only afford")
-          ? "Turunkan batas output tier atau isi ulang credit provider internal."
+          ? "Turunkan batas output tier atau coba lagi sebentar lagi."
           : "Coba lagi beberapa menit atau pilih Swift 1 untuk mode lebih cepat.",
         checkedAt: new Date().toISOString(),
       }
@@ -432,9 +432,9 @@ export default function EditorPage() {
         issue: "latency",
         reason: normalized.includes("max_tokens")
           ? "Batas token output terlalu tinggi untuk request ini"
-          : "Provider sedang rate-limited",
+          : "Swift sedang rate-limited",
         action: normalized.includes("max_tokens")
-          ? "Coba lagi dengan prompt lebih singkat, atau turunkan OPENROUTER_MAX_TOKENS di .env."
+          ? "Coba lagi dengan prompt lebih singkat atau pilih tier yang lebih ringan."
           : "Tunggu beberapa menit lalu coba lagi.",
         checkedAt: new Date().toISOString(),
       }
@@ -449,7 +449,7 @@ export default function EditorPage() {
         status: "error",
         issue: "config",
         reason: "Tier Swift yang dipilih sedang tidak tersedia",
-        action: "Coba pilih Swift 1/2/3 lain atau cek konfigurasi provider internal.",
+        action: "Coba pilih Swift 1/2/3 lain atau cek konfigurasi Swift engine.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -459,7 +459,7 @@ export default function EditorPage() {
         status: "slow",
         issue: "latency",
         reason: "Swift AI engine timeout",
-        action: "Coba lagi nanti. Sistem otomatis mencoba fallback internal sebelum request dianggap gagal.",
+        action: "Coba lagi nanti. Sistem otomatis mencoba engine cadangan sebelum request dianggap gagal.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -469,7 +469,7 @@ export default function EditorPage() {
         status: "error",
         issue: "config",
         reason: "Swift AI configuration is incomplete",
-        action: "Pastikan minimal satu provider internal aktif, lalu restart server.",
+        action: "Pastikan gateway Swift aktif, lalu restart server.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -478,7 +478,7 @@ export default function EditorPage() {
       status: "error",
       issue: "unknown",
       reason: "Swift AI engine sedang mengalami gangguan sementara",
-      action: "Credit otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi atau pilih Swift 1.",
+      action: "Saldo otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi atau pilih Swift 1.",
       checkedAt: new Date().toISOString(),
     }
   }, [])
@@ -599,7 +599,7 @@ export default function EditorPage() {
           ? {
               ...current,
               stage: "request",
-              label: "Mengirim prompt ke provider AI",
+              label: "Mengirim prompt ke Swift engine",
             }
           : current
       )
@@ -631,7 +631,7 @@ export default function EditorPage() {
           ? {
               ...current,
               stage: "parse",
-              label: "Parsing output provider",
+              label: "Parsing output Swift",
             }
           : current
       )
@@ -675,7 +675,7 @@ export default function EditorPage() {
           status: "connected",
           issue: "healthy",
           reason: "Request terakhir berhasil.",
-          action: "Provider siap dipakai.",
+          action: "Swift siap dipakai.",
           checkedAt: new Date().toISOString(),
         })
       }
@@ -784,7 +784,7 @@ export default function EditorPage() {
     } catch (error) {
       const message =
         error instanceof DOMException && error.name === "AbortError"
-          ? "Swift AI engine timeout. Request dihentikan otomatis setelah fallback internal. Credit akan otomatis dikembalikan jika request gagal."
+          ? "Swift AI engine timeout. Request dihentikan otomatis setelah fallback internal. Saldo akan otomatis dikembalikan jika request gagal."
           : error instanceof Error
             ? error.message
             : "Sorry, I encountered an error while generating. Please try again."
@@ -796,7 +796,7 @@ export default function EditorPage() {
               stage: error instanceof DOMException && error.name === "AbortError" ? "timeout" : "error",
               label:
                 error instanceof DOMException && error.name === "AbortError"
-                  ? "Provider timeout"
+                  ? "Swift timeout"
                   : "Generate gagal",
             }
           : current
