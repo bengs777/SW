@@ -85,6 +85,68 @@ const CDN_IMPORTS: Record<string, string> = {
   "next/navigation": "https://esm.sh/next@14/navigation",
 }
 
+const CORE_IMPORTS = ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime"]
+const CODE_FILE_RE = /\.(?:tsx?|jsx?)$/i
+const CSS_FILE_RE = /\.css$/i
+const JSON_FILE_RE = /\.json$/i
+const STYLE_IMPORT_RE = /\.css(?:\?|#|$)/i
+
+const SHIM_MODULES: Record<string, string> = {
+  "next/link": `
+    import React from "react";
+    export default function Link(props) {
+      const { href = "#", children, prefetch, replace, scroll, shallow, locale, ...rest } = props || {};
+      const resolvedHref = typeof href === "string" ? href : href && href.pathname ? href.pathname : "#";
+      return React.createElement("a", { ...rest, href: resolvedHref }, children);
+    }
+  `,
+  "next/image": `
+    import React from "react";
+    export default function Image(props) {
+      const { src = "", alt = "", width, height, fill, priority, quality, sizes, loader, ...rest } = props || {};
+      const style = { ...(rest.style || {}) };
+      if (fill) Object.assign(style, { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: rest.objectFit || "cover" });
+      return React.createElement("img", { ...rest, src: typeof src === "string" ? src : src && src.src ? src.src : "", alt, width: fill ? undefined : width, height: fill ? undefined : height, style });
+    }
+  `,
+  "next/navigation": `
+    const noop = function(){};
+    const router = { push: noop, replace: noop, refresh: noop, back: noop, forward: noop, prefetch: noop };
+    export function useRouter(){ return router; }
+    export function usePathname(){ return "/"; }
+    export function useSearchParams(){ return new URLSearchParams(""); }
+    export function useParams(){ return {}; }
+    export function redirect(){ throw new Error("next/navigation redirect() is not available in preview."); }
+    export function notFound(){ throw new Error("next/navigation notFound() is not available in preview."); }
+  `,
+  "next/font/google": `
+    function makeFont() { return { className: "", variable: "", style: {} }; }
+    export const Inter = makeFont;
+    export const Geist = makeFont;
+    export const Roboto = makeFont;
+    export const Poppins = makeFont;
+    export const Montserrat = makeFont;
+    export const Lato = makeFont;
+    export const Open_Sans = makeFont;
+    export const Playfair_Display = makeFont;
+    export const Space_Grotesk = makeFont;
+    export const Manrope = makeFont;
+  `,
+  "@/lib/utils": `
+    function append(out, value) {
+      if (!value) return;
+      if (typeof value === "string" || typeof value === "number") out.push(String(value));
+      else if (Array.isArray(value)) value.forEach(function(item){ append(out, item); });
+      else if (typeof value === "object") Object.keys(value).forEach(function(key){ if (value[key]) out.push(key); });
+    }
+    export function cn() {
+      var out = [];
+      Array.prototype.forEach.call(arguments, function(value){ append(out, value); });
+      return out.join(" ");
+    }
+  `,
+}
+
 // ---------------------------------------------------------------------------
 // Import Analysis
 // ---------------------------------------------------------------------------
@@ -105,11 +167,27 @@ function isExternalPackage(source: string): boolean {
   return first !== "." && first !== "/" && !source.startsWith("@/")
 }
 
+function isCodeFile(path: string): boolean {
+  return CODE_FILE_RE.test(path)
+}
+
+function isCssFile(path: string): boolean {
+  return CSS_FILE_RE.test(path)
+}
+
+function isJsonFile(path: string): boolean {
+  return JSON_FILE_RE.test(path)
+}
+
+function isStyleImport(source: string): boolean {
+  return STYLE_IMPORT_RE.test(source)
+}
+
 // ---------------------------------------------------------------------------
 // Path Resolution
 // ---------------------------------------------------------------------------
 
-const EXTENSIONS = ["", ".tsx", ".ts", ".jsx", ".js", "/index.tsx", "/index.ts", "/index.js"]
+const EXTENSIONS = ["", ".tsx", ".ts", ".jsx", ".js", ".json", "/index.tsx", "/index.ts", "/index.jsx", "/index.js"]
 
 function tryExtension(basePath: string, fileMap: Record<string, string>): string | null {
   for (const ext of EXTENSIONS) {
@@ -123,6 +201,9 @@ function resolveLocalPath(baseFile: string, importSource: string, fileMap: Recor
   if (importSource.startsWith("@/")) {
     const withoutAlias = importSource.slice(2)
     return tryExtension(withoutAlias, fileMap)
+  }
+  if (importSource.startsWith("/")) {
+    return tryExtension(importSource.replace(/^\/+/, ""), fileMap)
   }
   const dir = baseFile.lastIndexOf("/") >= 0 ? baseFile.slice(0, baseFile.lastIndexOf("/") + 1) : ""
   const parts = dir.split("/").filter(Boolean)
@@ -145,6 +226,10 @@ function rewriteImports(code: string, filePath: string, fileMap: Record<string, 
     (match, src1, src2) => {
       const src = src1 || src2
       if (!src) return match
+
+      if (isStyleImport(src)) {
+        return ""
+      }
 
       // External package — keep as-is, import map will resolve
       if (isExternalPackage(src)) {
@@ -174,8 +259,6 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
   const [srcDoc, setSrcDoc] = useState<string | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [iframeLoaded, setIframeLoaded] = useState(false)
-  const [iframeError, setIframeError] = useState(false)
   const mountedRef = useRef(true)
 
   // Stable fingerprint for file changes
@@ -196,8 +279,6 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
     }
 
     setStatus("compiling")
-    setIframeLoaded(false)
-    setIframeError(false)
 
     try {
       const html = buildPreviewSrcDoc(files)
@@ -245,13 +326,26 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
   // --- Reset on fresh file set ---
   useEffect(() => {
     setPreviewError(null)
-    setIframeLoaded(false)
-    setIframeError(false)
   }, [fileFingerprint])
+
+  useEffect(() => {
+    function handlePreviewMessage(event: MessageEvent) {
+      if (event.source !== iframeRef.current?.contentWindow) return
+      const data = event.data as { type?: string; message?: string; stack?: string } | null
+      if (!data || data.type !== "swift-preview-error") return
+
+      const message = data.message || "Unknown preview runtime error"
+      setStatus("error")
+      setPreviewError({ message, stack: data.stack })
+      onError?.(data.stack ? `${message}\n\n${data.stack}` : message)
+    }
+
+    window.addEventListener("message", handlePreviewMessage)
+    return () => window.removeEventListener("message", handlePreviewMessage)
+  }, [onError])
 
   // --- iframe error handler (runtime errors) ---
   const handleIframeError = useCallback(() => {
-    setIframeError(true)
     setStatus("error")
     const msg = "The preview iframe failed to load."
     setPreviewError({ message: msg })
@@ -259,8 +353,6 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
   }, [onError])
 
   const handleIframeLoad = useCallback(() => {
-    setIframeLoaded(true)
-    setIframeError(false)
     setStatus("ready")
   }, [])
 
@@ -377,11 +469,32 @@ function escapeScriptContent(str: string): string {
     .replace(/<!--/g, "<\\!--")
 }
 
+function normalizePreviewPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "")
+}
+
+function buildJsonModule(content: string, path: string): string {
+  try {
+    const parsed = JSON.parse(content)
+    const namedExports =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? Object.keys(parsed)
+            .filter((key) => /^[A-Za-z_$][\w$]*$/.test(key))
+            .map((key) => `export const ${key} = data[${JSON.stringify(key)}];`)
+            .join("\n")
+        : ""
+
+    return `const data = ${JSON.stringify(parsed)};\n${namedExports}\nexport default data;`
+  } catch {
+    return `throw new Error(${JSON.stringify(`Invalid JSON in ${path}`)});`
+  }
+}
+
 function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   // Build file map with normalized paths
   const fileMap: Record<string, string> = {}
   for (const file of files) {
-    const normalized = file.path.replace(/\\/g, "/").replace(/^\.\//, "")
+    const normalized = normalizePreviewPath(file.path)
     fileMap[normalized] = file.content
   }
 
@@ -392,7 +505,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   }
 
   // Detect all external packages used across all files
-  const allImports = new Set<string>()
+  const allImports = new Set<string>(CORE_IMPORTS)
   for (const file of files) {
     const imports = extractImports(file.content)
     for (const imp of imports) {
@@ -405,6 +518,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   // Build import map for CDN packages
   const importMap: Record<string, string> = {}
   for (const pkg of allImports) {
+    if (SHIM_MODULES[pkg]) continue
     if (CDN_IMPORTS[pkg]) {
       importMap[pkg] = CDN_IMPORTS[pkg]
     } else {
@@ -416,13 +530,24 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   // Rewrite imports in all files — resolve local import paths
   const rewrittenFiles: Record<string, string> = {}
   for (const [path, content] of Object.entries(fileMap)) {
-    rewrittenFiles[path] = rewriteImports(content, path, fileMap)
+    if (isCodeFile(path)) {
+      rewrittenFiles[path] = rewriteImports(content, path, fileMap)
+    } else if (isJsonFile(path)) {
+      rewrittenFiles[path] = buildJsonModule(content, path)
+    }
   }
+
+  const cssFiles = Object.entries(fileMap)
+    .filter(([path]) => isCssFile(path))
+    .map(([path, content]) => `\n/* ${path} */\n${content}`)
+    .join("\n")
 
   // Serialize for iframe
   const serializedFiles = escapeScriptContent(JSON.stringify(rewrittenFiles))
   const serializedEntry = JSON.stringify(entryKey)
   const serializedImportMap = escapeScriptContent(JSON.stringify(importMap))
+  const serializedCss = escapeScriptContent(JSON.stringify(cssFiles))
+  const serializedShims = escapeScriptContent(JSON.stringify(SHIM_MODULES))
 
   return `<!DOCTYPE html>
 <html>
@@ -463,6 +588,8 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   var __files = ${serializedFiles};
   var __entry = ${serializedEntry};
   var __cdnImportMap = ${serializedImportMap};
+  var __css = ${serializedCss};
+  var __shimModules = ${serializedShims};
   var __cache = {};
   var __blobMap = {};
   var __exts = ['','.tsx','.ts','.jsx','.js','/index.tsx','/index.ts','/index.js'];
@@ -484,8 +611,19 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     if(typeof err==='string')msg=err;
     else if(err&&err.message)msg=err.message+(err.stack?'\\n\\n'+err.stack:'');
     else msg=String(err);
+    try {
+      window.parent.postMessage({ type: 'swift-preview-error', message: msg }, '*');
+    } catch (postMessageError) {}
     msg=escapeHtml(msg).replace(/\\n/g,'<br>');
     el.innerHTML='<div class="title">Preview Error</div><div class="stack">'+msg+'</div>';
+  }
+
+  function injectCss(){
+    if(!__css) return;
+    var style = document.createElement('style');
+    style.setAttribute('data-preview-css', 'true');
+    style.textContent = __css;
+    document.head.appendChild(style);
   }
 
   function getFileContent(path){
@@ -539,14 +677,26 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     return url;
   }
 
+  function createShimModule(specifier, code){
+    if(__blobMap[specifier]) return __blobMap[specifier];
+    var blob = new Blob([code], {type:'text/javascript'});
+    var url = URL.createObjectURL(blob);
+    __blobMap[specifier] = url;
+    return url;
+  }
+
   try{
     clearTimeout(__transformTimeout);
     document.body.className='ready';
+    injectCss();
 
     // Step 1: Transform all files and create blob URLs
     var allPaths = Object.keys(__files);
     for(var i=0; i<allPaths.length; i++){
       executeModule(allPaths[i]);
+    }
+    for(var shim in __shimModules){
+      createShimModule(shim, __shimModules[shim]);
     }
 
     // Step 2: Build complete import map (CDN + local blob URLs)
@@ -602,6 +752,9 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         }
         ErrorBoundary.prototype.componentDidCatch = function(error, info){
           console.error("[Preview ErrorBoundary]", error, info);
+          try {
+            window.parent.postMessage({ type: 'swift-preview-error', message: error && error.message ? error.message : String(error), stack: error && error.stack ? error.stack : "" }, '*');
+          } catch (postMessageError) {}
         };
         ErrorBoundary.getDerivedStateFromError = function(error){
           return {hasError: true, error: error};
@@ -653,6 +806,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 // ---------------------------------------------------------------------------
 
 function guessEntryFile(files: GeneratedFile[]): string | null {
+  const normalizedPaths = files.map((file) => normalizePreviewPath(file.path))
   const priorities = [
     "app/page.tsx",
     "app/page.jsx",
@@ -664,11 +818,11 @@ function guessEntryFile(files: GeneratedFile[]): string | null {
     "index.jsx",
   ]
   for (const path of priorities) {
-    if (files.some((f) => f.path.replace(/\\/g, "/") === path)) {
+    if (normalizedPaths.includes(path)) {
       return path
     }
   }
   // Fallback: first tsx/jsx file
   const first = files.find((f) => /\.tsx$|\.jsx$/i.test(f.path))
-  return first ? first.path.replace(/\\/g, "/") : null
+  return first ? normalizePreviewPath(first.path) : null
 }
