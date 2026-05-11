@@ -10,6 +10,7 @@ type OrchestratorOpts = {
   provider: ProviderName
   modelName: string
   idempotencyKey?: string
+  signal?: AbortSignal
 }
 
 type OrchestratorExisting = {
@@ -63,6 +64,7 @@ export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<Orc
     provider: opts.provider,
     modelName: opts.modelName,
     applyFiles: false,
+    signal: opts.signal,
   })
 
   if (!result.success) {

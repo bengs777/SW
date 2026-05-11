@@ -1196,6 +1196,7 @@ export async function POST(request: NextRequest) {
           prompt: promptIntent.mode === "inspect" ? promptWithPreviewContext : promptWithAttachments,
           mode: promptIntent.mode === "inspect" ? "inspect" : "chat",
           promptLanguage,
+          signal: request.signal,
         })
 
         await BillingService.markCompleted(usageLog.id, {
@@ -1253,6 +1254,7 @@ export async function POST(request: NextRequest) {
           prompt: buildClarifyingPrompt(promptWithAttachments, promptLanguage),
           mode: "chat",
           promptLanguage,
+          signal: request.signal,
         })
 
         await BillingService.markCompleted(usageLog.id, {
@@ -1376,6 +1378,7 @@ export async function POST(request: NextRequest) {
         provider,
         modelName: modelConfig.modelName,
         idempotencyKey,
+        signal: request.signal,
       })
 
       if (orchestration.alreadyExists) {
@@ -1457,6 +1460,7 @@ export async function POST(request: NextRequest) {
           mode: "files",
           promptLanguage,
           temperatureOverride: 0,
+          signal: request.signal,
         })
 
         const recoveredFiles = extractGeneratedFilesFromProviderMessage(recoveryResult.message)

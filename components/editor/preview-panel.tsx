@@ -22,6 +22,7 @@ import {
   ChevronRight,
   ChevronDown,
   Folder,
+  Square,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { GeneratedFile } from "@/lib/types"
@@ -55,6 +56,7 @@ interface PreviewPanelProps {
   onPreviewErrorChange?: (error: string | null) => void
   isGenerating?: boolean
   generationProgress?: GenerationProgress | null
+  onCancelGeneration?: () => void
   projectId?: string
 }
 
@@ -75,6 +77,7 @@ export function PreviewPanel({
   onPreviewErrorChange,
   isGenerating = false,
   generationProgress = null,
+  onCancelGeneration,
   projectId,
 }: PreviewPanelProps) {
   const [internalActiveTab, setInternalActiveTab] = useState<"preview" | "code" | "explorer">("preview")
@@ -326,7 +329,7 @@ export function PreviewPanel({
                 projectId={projectId}
               />
             ) : isGenerating ? (
-              <GeneratingPreview progress={generationProgress} />
+              <GeneratingPreview progress={generationProgress} onCancelGeneration={onCancelGeneration} />
             ) : (
               <EmptyPreview />
             )}
@@ -368,7 +371,13 @@ export function PreviewPanel({
   )
 }
 
-function GeneratingPreview({ progress }: { progress?: GenerationProgress | null }) {
+function GeneratingPreview({
+  progress,
+  onCancelGeneration,
+}: {
+  progress?: GenerationProgress | null
+  onCancelGeneration?: () => void
+}) {
   const [elapsedMs, setElapsedMs] = useState(() =>
     progress ? Date.now() - progress.startedAt.getTime() : 0
   )
@@ -408,6 +417,31 @@ function GeneratingPreview({ progress }: { progress?: GenerationProgress | null 
         <p className="mt-4 line-clamp-2 max-w-md text-xs text-muted-foreground">
           Prompt: {progress.prompt}
         </p>
+      )}
+      {progress?.workPlan && progress.workPlan.length > 0 && (
+        <div className="mt-4 w-full max-w-md rounded-lg border border-border bg-background/70 p-3 text-left">
+          <p className="mb-2 text-[11px] font-medium uppercase text-muted-foreground">Rencana Swift</p>
+          <div className="grid gap-1.5">
+            {progress.workPlan.map((item) => (
+              <div key={item} className="flex gap-2 text-xs text-muted-foreground">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500" />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {onCancelGeneration && progress?.stage !== "cancelled" && (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          className="mt-5 gap-2"
+          onClick={onCancelGeneration}
+        >
+          <Square className="h-4 w-4" />
+          Stop generate
+        </Button>
       )}
     </div>
   )

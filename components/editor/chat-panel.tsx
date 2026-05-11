@@ -6,7 +6,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
-import { Zap, Send, Paperclip, Image as ImageIcon, ShieldAlert, ChevronDown, X } from "lucide-react"
+import { Zap, Send, Paperclip, Image as ImageIcon, ShieldAlert, ChevronDown, X, Square } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { Message } from "@/app/dashboard/project/[id]/page"
 import type { ProviderStatus } from "@/app/dashboard/project/[id]/page"
@@ -36,7 +36,10 @@ type UploadedProjectAttachment = {
   uploadedByUserId: string
 }
 const sanitizeModelDisplayName = (value: string) =>
-  value.replace(/:free\b/gi, "").trim()
+  sanitizePublicAiCopy(value).replace(/:free\b/gi, "").trim()
+
+const sanitizePublicAiCopy = (value: string) =>
+  value.replace(/DeepSeek V4 Flash/gi, "Swift AI")
 
 export type CollaborationMode = "build" | "edit" | "fix" | "review" | "ask"
 
@@ -51,6 +54,7 @@ interface ChatPanelProps {
     previewErrorContext?: string | null,
     collaborationMode?: CollaborationMode
   ) => void
+  onCancelGeneration?: () => void
   isGenerating: boolean
   modelOptions: ModelOption[]
   selectedModel: string
@@ -444,6 +448,7 @@ export function ChatPanel({
   projectId,
   messages,
   onSendMessage,
+  onCancelGeneration,
   isGenerating,
   modelOptions,
   selectedModel,
@@ -792,7 +797,11 @@ export function ChatPanel({
         <div className="max-h-[42vh] space-y-3 overflow-y-auto pr-1">
           <ProviderHealthCard status={providerStatus} />
           {generationProgress && (
-            <GenerationProgressCard progress={generationProgress} />
+            <GenerationProgressCard
+              progress={generationProgress}
+              isGenerating={isGenerating}
+              onCancelGeneration={onCancelGeneration}
+            />
           )}
           <div className="rounded-2xl border border-border bg-card/80 p-3 shadow-sm">
             {previewErrorContext && (
@@ -925,14 +934,15 @@ export function ChatPanel({
             <Button
               type="button"
               size="lg"
+              variant={isGenerating ? "destructive" : "default"}
               className="mt-3 h-12 w-full gap-2 text-sm font-semibold"
-              onClick={handleSubmit}
-              disabled={!canSubmit}
+              onClick={isGenerating ? onCancelGeneration : handleSubmit}
+              disabled={isGenerating ? !onCancelGeneration : !canSubmit}
             >
               {isGenerating ? (
                 <>
-                  <Zap className="h-4 w-4 animate-pulse" />
-                  {promptCopy.submittingLabel}
+                  <Square className="h-4 w-4" />
+                  {promptLanguage === "id" ? "Stop generate" : "Stop generation"}
                 </>
               ) : (
                 <>
@@ -1284,7 +1294,7 @@ function ProviderHealthCard({
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-medium">{config.title}</p>
-          <p className="mt-1 text-xs opacity-90">{status.reason || "Status Swift tersedia."}</p>
+          <p className="mt-1 text-xs opacity-90">{sanitizePublicAiCopy(status.reason || "Status Swift tersedia.")}</p>
         </div>
         <ProviderStatusBadge status={status} />
       </div>
@@ -1297,13 +1307,21 @@ function ProviderHealthCard({
         )}
       </div>
       {status.action && (
-        <p className="mt-2 text-xs opacity-90">{status.action}</p>
+        <p className="mt-2 text-xs opacity-90">{sanitizePublicAiCopy(status.action)}</p>
       )}
     </div>
   )
 }
 
-function GenerationProgressCard({ progress }: { progress: GenerationProgress }) {
+function GenerationProgressCard({
+  progress,
+  isGenerating,
+  onCancelGeneration,
+}: {
+  progress: GenerationProgress
+  isGenerating?: boolean
+  onCancelGeneration?: () => void
+}) {
   const [elapsedMs, setElapsedMs] = useState(() => Date.now() - progress.startedAt.getTime())
 
   useEffect(() => {
@@ -1317,7 +1335,8 @@ function GenerationProgressCard({ progress }: { progress: GenerationProgress }) 
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = Math.max(1, Math.ceil(progress.timeoutMs / 1000))
   const percent = Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
-  const isTerminal = progress.stage === "timeout" || progress.stage === "error"
+  const isTerminal = progress.stage === "timeout" || progress.stage === "error" || progress.stage === "cancelled"
+  const steps = getGenerationSteps(progress.stage)
 
   return (
     <div className={cn(
@@ -1331,9 +1350,23 @@ function GenerationProgressCard({ progress }: { progress: GenerationProgress }) 
             {progress.modelKey || "Swift AI"} · {elapsedSeconds}s / {timeoutSeconds}s
           </p>
         </div>
-        <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase text-muted-foreground">
-          {progress.stage}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[10px] uppercase text-muted-foreground">
+            {progress.stage}
+          </span>
+          {isGenerating && onCancelGeneration && progress.stage !== "cancelled" && (
+            <Button
+              type="button"
+              size="sm"
+              variant="destructive"
+              className="h-7 gap-1 px-2 text-[11px]"
+              onClick={onCancelGeneration}
+            >
+              <Square className="h-3 w-3" />
+              Stop
+            </Button>
+          )}
+        </div>
       </div>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background">
         <div
@@ -1346,8 +1379,69 @@ function GenerationProgressCard({ progress }: { progress: GenerationProgress }) 
           Prompt: {progress.prompt}
         </p>
       )}
+      {progress.workPlan && progress.workPlan.length > 0 && (
+        <div className="mt-3 rounded-lg border border-border bg-background/70 p-2">
+          <p className="mb-2 text-[11px] font-medium uppercase text-muted-foreground">Rencana Swift</p>
+          <div className="grid gap-1">
+            {progress.workPlan.map((item) => (
+              <div key={item} className="flex gap-2 text-[11px] text-muted-foreground">
+                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500" />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="mt-3 grid gap-1">
+        {steps.map((step) => (
+          <div key={step.label} className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                step.state === "done"
+                  ? "bg-emerald-500"
+                  : step.state === "active"
+                    ? "bg-sky-500"
+                    : "bg-muted-foreground/30"
+              )}
+            />
+            <span className={cn(step.state === "active" && "font-medium text-foreground")}>{step.label}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
+}
+
+function getGenerationSteps(stage: GenerationProgress["stage"]) {
+  const order: Array<{ stage: GenerationProgress["stage"]; label: string }> = [
+    { stage: "context", label: "Membaca konteks editor" },
+    { stage: "request", label: "Mengirim prompt dan membuat arah kerja" },
+    { stage: "provider", label: "Menulis file dengan Swift AI" },
+    { stage: "parse", label: "Membaca hasil output" },
+    { stage: "validate", label: "Validasi relevansi dan struktur" },
+    { stage: "save", label: "Menyimpan file valid" },
+    { stage: "preview", label: "Menyiapkan preview" },
+  ]
+  const currentIndex = order.findIndex((item) => item.stage === stage)
+
+  return order.map((item, index) => ({
+    label: item.label,
+    state:
+      stage === "cancelled" || stage === "timeout" || stage === "error"
+        ? index < Math.max(currentIndex, 0)
+          ? "done"
+          : index === Math.max(currentIndex, 0)
+            ? "active"
+            : "pending"
+        : currentIndex < 0
+          ? "pending"
+          : index < currentIndex
+            ? "done"
+            : index === currentIndex
+              ? "active"
+              : "pending",
+  }))
 }
 
 function formatCheckedAt(value: string) {
@@ -1447,7 +1541,7 @@ function MessageBubble({
           </div>
         ) : (
           <>
-            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+            <p className="text-sm whitespace-pre-wrap">{sanitizePublicAiCopy(message.content)}</p>
             {isUser && Array.isArray(message.metadata?.attachments) && message.metadata.attachments.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
                 {message.metadata.attachments.map((name) => (

@@ -22,6 +22,7 @@ export async function executePlan(
     provider?: ProviderName
     modelName?: string
     applyFiles?: boolean
+    signal?: AbortSignal
   }
 ): Promise<{ success: boolean; files?: GeneratedFile[]; providerResult?: ProviderResult | null; error?: string }> {
   const projectId = opts.projectId
@@ -47,6 +48,7 @@ export async function executePlan(
             modelName: model.modelName,
             prompt: ctx,
             mode: "files",
+            signal: opts.signal,
           })
 
           lastProviderResult = providerResp
