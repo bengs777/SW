@@ -38,12 +38,12 @@ export async function GET(request: NextRequest) {
     reason: hasHealthy
       ? "Swift AI engine is ready"
       : hasDegraded
-        ? "Swift AI engine is available through a slower fallback path"
+        ? "DeepSeek V4 Flash is responding slowly"
         : "Swift AI engine is temporarily unavailable",
     action: hasHealthy
       ? "Swift siap dipakai."
       : hasDegraded
-        ? "Generate tetap bisa dicoba, atau pilih Swift 1 untuk mode lebih cepat."
+        ? "Generate tetap bisa dicoba, atau coba lagi beberapa menit."
         : "Coba lagi sebentar lagi. Saldo akan otomatis dikembalikan jika generate gagal.",
     provider: "swift",
     modelName: model.key,

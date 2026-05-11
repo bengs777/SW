@@ -1,13 +1,9 @@
 export const SWIFT_PROVIDER = "swift"
-export const SWIFT_1_MODEL_KEY = "swift-1"
 export const SWIFT_2_MODEL_KEY = "swift-2"
-export const SWIFT_3_MODEL_KEY = "swift-3"
 export const DEFAULT_SWIFT_TIER_KEY = SWIFT_2_MODEL_KEY
+export const DEEPSEEK_V4_FLASH_MODEL_ID = "deepseek/deepseek-v4-flash"
 
-export type SwiftTierKey =
-  | typeof SWIFT_1_MODEL_KEY
-  | typeof SWIFT_2_MODEL_KEY
-  | typeof SWIFT_3_MODEL_KEY
+export type SwiftTierKey = typeof SWIFT_2_MODEL_KEY
 
 export type ProviderHealthStatus = "healthy" | "degraded" | "offline"
 export type ProviderFailureReason =
@@ -47,75 +43,26 @@ export type SwiftTierConfig = {
 }
 
 export const USER_FRIENDLY_AI_ENGINE_ERROR =
-  "Swift sedang mengalami gangguan sementara pada AI engine. Saldo Rupiah kamu otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi atau pilih Swift 1 untuk mode lebih cepat."
+  "Swift sedang mengalami gangguan sementara pada DeepSeek V4 Flash. Saldo Rupiah kamu otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi."
 
 export const USER_FRIENDLY_QUEUE_OVERLOAD_ERROR =
   "Swift sedang ramai. Coba lagi sebentar lagi."
 
-function readEnv(name: string, fallback: string) {
-  const value = process.env[name]
-  return value && value.trim() ? value.trim() : fallback
-}
-
 export function getSwiftTierConfigs(): SwiftTierConfig[] {
-  const swift1Primary = readEnv("OPENROUTER_SWIFT1_MODEL", "deepseek/deepseek-v4-flash")
-  const swift1Fallback = readEnv("OPENROUTER_SWIFT1_FALLBACK_MODEL", "google/gemini-2.5-flash")
-  const swift2Primary = readEnv("OPENROUTER_SWIFT2_MODEL", "openai/gpt-4.1-mini")
-  const swift2Fallback = readEnv("OPENROUTER_SWIFT2_FALLBACK_MODEL", "deepseek/deepseek-v4-flash")
-  const swift3Primary = readEnv("OPENROUTER_SWIFT3_MODEL", "anthropic/claude-sonnet-4.6")
-  const swift3Fallback = readEnv("OPENROUTER_SWIFT3_FALLBACK_MODEL", "google/gemini-2.5-pro-preview")
-
   return [
     {
-      key: SWIFT_1_MODEL_KEY,
-      label: "Swift 1 — Fast",
-      shortLabel: "Swift 1",
-      description: "Cepat dan hemat untuk UI/component/simple coding.",
-      note: "Cepat dan hemat untuk UI/component/simple coding.",
-      priceIdr: 2000,
-      price: 2000,
-      timeoutMs: 20_000,
-      maxOutputTokens: 4000,
-      rank: 1,
-      queue: { concurrency: 8, maxQueueDepth: 100 },
-      targets: [
-        { modelId: swift1Primary, role: "primary" },
-        { modelId: swift1Fallback, role: "fallback" },
-      ],
-    },
-    {
       key: SWIFT_2_MODEL_KEY,
-      label: "Swift 2 — Builder",
-      shortLabel: "Swift 2",
-      description: "Seimbang untuk fullstack, CRUD, auth, APIs, dan dashboard.",
-      note: "Seimbang untuk fullstack, CRUD, auth, APIs, dan dashboard.",
+      label: "DeepSeek V4 Flash",
+      shortLabel: "DeepSeek V4 Flash",
+      description: "AI utama Swift untuk chat, generate, debug, dan build fullstack.",
+      note: "Satu-satunya AI aktif di Swift.",
       priceIdr: 4000,
       price: 4000,
       timeoutMs: 35_000,
       maxOutputTokens: 8000,
-      rank: 2,
+      rank: 1,
       queue: { concurrency: 4, maxQueueDepth: 50 },
-      targets: [
-        { modelId: swift2Primary, role: "primary" },
-        { modelId: swift2Fallback, role: "fallback" },
-      ],
-    },
-    {
-      key: SWIFT_3_MODEL_KEY,
-      label: "Swift 3 — Engineer",
-      shortLabel: "Swift 3",
-      description: "Terbaik untuk debugging, repair, refactor, dan production hardening.",
-      note: "Terbaik untuk debugging, repair, refactor, dan production hardening.",
-      priceIdr: 10000,
-      price: 10000,
-      timeoutMs: 60_000,
-      maxOutputTokens: 16000,
-      rank: 3,
-      queue: { concurrency: 2, maxQueueDepth: 20 },
-      targets: [
-        { modelId: swift3Primary, role: "primary" },
-        { modelId: swift3Fallback, role: "fallback" },
-      ],
+      targets: [{ modelId: DEEPSEEK_V4_FLASH_MODEL_ID, role: "primary" }],
     },
   ]
 }
@@ -129,7 +76,7 @@ export function isSwiftTierKey(key: string | null | undefined): key is SwiftTier
 }
 
 export function getDefaultSwiftTier() {
-  return getSwiftTierConfig(DEFAULT_SWIFT_TIER_KEY) || getSwiftTierConfigs()[1]
+  return getSwiftTierConfig(DEFAULT_SWIFT_TIER_KEY) || getSwiftTierConfigs()[0]
 }
 
 export function hasOpenRouterGatewayKey() {
@@ -152,7 +99,7 @@ export function getSwiftTierOptions() {
 }
 
 /**
- * Maps an internal model ID (e.g., "anthropic/claude-sonnet-4.6") to its Swift tier key.
+ * Maps the internal DeepSeek V4 Flash model ID to its Swift tier key.
  * Used to sanitize public API responses so they never expose provider names or internal model IDs.
  */
 export function mapModelIdToTierKey(modelId: string): string | null {

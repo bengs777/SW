@@ -1,4 +1,4 @@
-import { DEFAULT_MODEL_KEY, SWIFT_BASIC_MODEL_KEY, SWIFT_BUILD_MODEL_KEY, SWIFT_PRO_MODEL_KEY } from "@/lib/ai/models"
+import { DEFAULT_MODEL_KEY, SWIFT_BUILD_MODEL_KEY } from "@/lib/ai/models"
 
 type TokenPricing = {
   inputPer1k: number
@@ -16,20 +16,11 @@ type PricingResult = {
 }
 
 const FIXED_MODEL_PRICES: Record<string, number> = {
-  [SWIFT_BASIC_MODEL_KEY]: 2000,
   [SWIFT_BUILD_MODEL_KEY]: 4000,
-  [SWIFT_PRO_MODEL_KEY]: 10000,
 }
 
 const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
-  "claude-haiku-4-5-20251001": { inputPer1k: 300, outputPer1k: 1200, minimumCharge: 6000 },
-  "claude-opus-4-6": { inputPer1k: 2500, outputPer1k: 10000, minimumCharge: 30000 },
-  "deepseek-r1-0528": { inputPer1k: 900, outputPer1k: 3000, minimumCharge: 12000 },
-  "deepseek-v3.1": { inputPer1k: 350, outputPer1k: 1200, minimumCharge: 7000 },
-  "deepseek-v3.2": { inputPer1k: 400, outputPer1k: 1400, minimumCharge: 8000 },
-  "glm-4.5": { inputPer1k: 350, outputPer1k: 1200, minimumCharge: 7000 },
-  "glm-4.6": { inputPer1k: 500, outputPer1k: 1600, minimumCharge: 9000 },
-  "glm-5.1": { inputPer1k: 800, outputPer1k: 2500, minimumCharge: 12000 },
+  "deepseek/deepseek-v4-flash": { inputPer1k: 350, outputPer1k: 1200, minimumCharge: 4000 },
 }
 
 export function estimateRequestTokens(prompt: string) {

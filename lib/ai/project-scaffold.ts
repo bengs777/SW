@@ -171,9 +171,7 @@ export async function GET() {
 export async function GET() {
   return NextResponse.json({
     models: [
-      { key: "swift-1", label: "Swift 1 — Fast", provider: "swift", price: 2000 },
-      { key: "swift-2", label: "Swift 2 — Builder", provider: "swift", price: 4000 },
-      { key: "swift-3", label: "Swift 3 — Engineer", provider: "swift", price: 10000 },
+      { key: "swift-2", label: "DeepSeek V4 Flash", provider: "swift", price: 4000 },
     ],
   })
 }

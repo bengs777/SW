@@ -417,7 +417,7 @@ export default function EditorPage() {
           : "Swift AI engine sedang rate-limited",
         action: normalized.includes("fewer max_tokens") || normalized.includes("can only afford")
           ? "Turunkan batas output tier atau coba lagi sebentar lagi."
-          : "Coba lagi beberapa menit atau pilih Swift 1 untuk mode lebih cepat.",
+          : "Coba lagi beberapa menit.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -449,7 +449,7 @@ export default function EditorPage() {
         status: "error",
         issue: "config",
         reason: "Tier Swift yang dipilih sedang tidak tersedia",
-        action: "Coba pilih Swift 1/2/3 lain atau cek konfigurasi Swift engine.",
+        action: "Cek konfigurasi DeepSeek V4 Flash di Swift engine.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -478,7 +478,7 @@ export default function EditorPage() {
       status: "error",
       issue: "unknown",
       reason: "Swift AI engine sedang mengalami gangguan sementara",
-      action: "Saldo otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi atau pilih Swift 1.",
+      action: "Saldo otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi.",
       checkedAt: new Date().toISOString(),
     }
   }, [])

@@ -6,7 +6,7 @@ export async function POST() {
   return NextResponse.json(
     {
       success: false,
-      error: "This AI route is disabled. Use /api/generate with Swift 1, Swift 2, or Swift 3.",
+      error: "This AI route is disabled. Use /api/generate with DeepSeek V4 Flash.",
       files: [],
     },
     { status: 410 }

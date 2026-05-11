@@ -837,7 +837,7 @@ async function parseGenerateRequest(request: NextRequest): Promise<GenerateReque
   }
 
   if (!isSupportedSwiftModelKey(selectedModel)) {
-    return NextResponse.json({ error: "Selected model is not available. Use a Swift model tier.", code: "MODEL_NOT_AVAILABLE" }, { status: 403 })
+    return NextResponse.json({ error: "Selected model is not available. Use DeepSeek V4 Flash.", code: "MODEL_NOT_AVAILABLE" }, { status: 403 })
   }
 
   if (!projectId) {
@@ -1843,8 +1843,7 @@ const RETRY_BUDGET_BY_PROFILE: Record<PromptProfile, { maxCheapRetries: number; 
 }
 
 function getPromptProfileForTier(tierKey: string): PromptProfile {
-  if (tierKey === "swift-1") return "lightweight"
-  if (tierKey === "swift-3") return "advanced"
+  void tierKey
   return "balanced"
 }
 
@@ -1866,7 +1865,7 @@ function adaptPromptForGenerationProfile(input: {
       "Avoid enterprise architecture, auth, complex charts, large CRUD systems, and oversized file graphs in this tier.",
       "Use mock data in the page when needed. Keep imports simple and resolvable.",
       "",
-      "Original user intent, simplified for Swift 1:",
+      "Original user intent, simplified for DeepSeek V4 Flash:",
       compactText(input.originalPrompt || input.prompt, 1200),
     ].join("\n")
   }

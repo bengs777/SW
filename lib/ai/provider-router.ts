@@ -9,7 +9,6 @@ import {
   type SwiftModelTarget,
   type SwiftTierConfig,
   type SwiftTierKey,
-  mapModelIdToTierKey,
 } from "@/lib/ai/swift-tiers"
 import { createOpenRouterChatCompletion } from "@/lib/ai/openrouter-client"
 import { SwiftAiError, redactAiSecret } from "@/lib/ai/errors"
@@ -33,8 +32,8 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
   },
   openrouter: {
     id: "openrouter",
-    label: "OpenRouter",
-    enabled: true,
+    label: "OpenRouter gateway",
+    enabled: false,
   },
 }
 
@@ -326,8 +325,8 @@ export class ProviderRouter {
   }
 
   private static resolveTier(modelName: string, mode: "chat" | "files" | "inspect"): SwiftTierConfig {
-    const fallbackKey = mode === "inspect" ? "swift-3" : DEFAULT_SWIFT_TIER_KEY
-    return getSwiftTierConfig(modelName) || getSwiftTierConfig(fallbackKey) || getSwiftTierConfig(DEFAULT_SWIFT_TIER_KEY)!
+    void mode
+    return getSwiftTierConfig(modelName) || getSwiftTierConfig(DEFAULT_SWIFT_TIER_KEY)!
   }
 
   private static async callOpenRouterTarget(

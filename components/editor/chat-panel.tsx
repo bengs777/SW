@@ -15,11 +15,10 @@ import type { ModelOption, PromptAttachment } from "@/lib/types"
 import { analyzePromptIntent } from "@/lib/ai/prompt-intent"
 import { getTemplate, PROMPT_LANGUAGE_LABELS } from "@/lib/ai/prompt-templates"
 import type { PromptLanguage, PromptTemplateKey, TemplateVariant } from "@/lib/ai/prompt-templates"
-import { SWIFT_PRO_MODEL_KEY } from "@/lib/ai/models"
 
 const MAX_PROMPT_LENGTH = 12000
 const MAX_ATTACHMENTS = 5
-const VISION_CAPABLE_MODEL_KEYS = new Set([SWIFT_PRO_MODEL_KEY])
+const VISION_CAPABLE_MODEL_KEYS = new Set<string>()
 const MAX_FILE_SIZE_BYTES = 3 * 1024 * 1024
 const MAX_TEXT_FILE_CHARS = 18000
 const MAX_IMAGE_DATA_URL_CHARS = 18000
@@ -1086,8 +1085,8 @@ export function ChatPanel({
           {hasImageAttachments && !selectedModelSupportsVision && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               {promptLanguage === "id"
-                ? "Model yang dipilih tidak mendukung input gambar. Gambar akan dikirim sebagai referensi nama file saja. Pilih Swift 3 untuk dukungan konteks visual."
-                : "The selected model does not support image input. Images will be sent as filename references only. Select Swift 3 for visual context support."}
+                ? "DeepSeek V4 Flash belum mendukung input gambar di konfigurasi ini. Gambar akan dikirim sebagai referensi nama file saja."
+                : "DeepSeek V4 Flash does not support image input in this configuration. Images will be sent as filename references only."}
             </div>
           )}
           {attachments.length > 0 && (
