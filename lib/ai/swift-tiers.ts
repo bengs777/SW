@@ -43,7 +43,7 @@ export type SwiftTierConfig = {
 }
 
 export const USER_FRIENDLY_AI_ENGINE_ERROR =
-  "Swift sedang mengalami gangguan sementara pada DeepSeek V4 Flash. Saldo Rupiah kamu otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi."
+  "Swift AI sedang mengalami gangguan sementara. Saldo Rupiah kamu otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi."
 
 export const USER_FRIENDLY_QUEUE_OVERLOAD_ERROR =
   "Swift sedang ramai. Coba lagi sebentar lagi."
@@ -52,8 +52,8 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
   return [
     {
       key: SWIFT_2_MODEL_KEY,
-      label: "DeepSeek V4 Flash",
-      shortLabel: "DeepSeek V4 Flash",
+      label: "Swift AI",
+      shortLabel: "Swift",
       description: "AI utama Swift untuk chat, generate, debug, dan build fullstack.",
       note: "Satu-satunya AI aktif di Swift.",
       priceIdr: 4000,

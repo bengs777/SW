@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
     reason: hasHealthy
       ? "Swift AI engine is ready"
       : hasDegraded
-        ? "DeepSeek V4 Flash is responding slowly"
+        ? "Swift AI engine is responding slowly"
         : "Swift AI engine is temporarily unavailable",
     action: hasHealthy
       ? "Swift siap dipakai."

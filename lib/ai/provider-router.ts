@@ -287,7 +287,7 @@ export class ProviderRouter {
           { role: "system", content: "You are a health probe. Reply with OK only." },
           { role: "user", content: "OK" },
         ],
-        maxTokens: 16,
+        maxTokens: 64,
         timeoutMs: 8_000,
         temperature: 0,
       })

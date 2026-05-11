@@ -837,7 +837,7 @@ async function parseGenerateRequest(request: NextRequest): Promise<GenerateReque
   }
 
   if (!isSupportedSwiftModelKey(selectedModel)) {
-    return NextResponse.json({ error: "Selected model is not available. Use DeepSeek V4 Flash.", code: "MODEL_NOT_AVAILABLE" }, { status: 403 })
+    return NextResponse.json({ error: "Selected model is not available. Use Swift AI.", code: "MODEL_NOT_AVAILABLE" }, { status: 403 })
   }
 
   if (!projectId) {
@@ -1865,7 +1865,7 @@ function adaptPromptForGenerationProfile(input: {
       "Avoid enterprise architecture, auth, complex charts, large CRUD systems, and oversized file graphs in this tier.",
       "Use mock data in the page when needed. Keep imports simple and resolvable.",
       "",
-      "Original user intent, simplified for DeepSeek V4 Flash:",
+      "Original user intent, simplified for Swift AI:",
       compactText(input.originalPrompt || input.prompt, 1200),
     ].join("\n")
   }

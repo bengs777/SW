@@ -148,6 +148,7 @@ async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean
         temperature: input.temperature ?? 0.2,
         top_p: input.topP ?? 0.9,
         max_tokens: input.maxTokens,
+        include_reasoning: false,
         stream,
         ...(input.responseFormat ? { response_format: { type: input.responseFormat } } : {}),
       }),

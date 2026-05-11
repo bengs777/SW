@@ -449,7 +449,7 @@ export default function EditorPage() {
         status: "error",
         issue: "config",
         reason: "Tier Swift yang dipilih sedang tidak tersedia",
-        action: "Cek konfigurasi DeepSeek V4 Flash di Swift engine.",
+        action: "Cek konfigurasi Swift AI engine.",
         checkedAt: new Date().toISOString(),
       }
     }

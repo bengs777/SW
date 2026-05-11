@@ -1085,8 +1085,8 @@ export function ChatPanel({
           {hasImageAttachments && !selectedModelSupportsVision && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               {promptLanguage === "id"
-                ? "DeepSeek V4 Flash belum mendukung input gambar di konfigurasi ini. Gambar akan dikirim sebagai referensi nama file saja."
-                : "DeepSeek V4 Flash does not support image input in this configuration. Images will be sent as filename references only."}
+                ? "Swift AI belum mendukung input gambar di konfigurasi ini. Gambar akan dikirim sebagai referensi nama file saja."
+                : "Swift AI does not support image input in this configuration. Images will be sent as filename references only."}
             </div>
           )}
           {attachments.length > 0 && (
