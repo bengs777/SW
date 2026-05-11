@@ -21,6 +21,7 @@ const FIXED_MODEL_PRICES: Record<string, number> = {
 
 const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
   "deepseek/deepseek-v4-flash": { inputPer1k: 350, outputPer1k: 1200, minimumCharge: 4000 },
+  "deepseek/deepseek-v4-flash:nitro": { inputPer1k: 350, outputPer1k: 1200, minimumCharge: 4000 },
 }
 
 export function estimateRequestTokens(prompt: string) {

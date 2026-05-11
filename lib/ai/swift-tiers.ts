@@ -2,6 +2,7 @@ export const SWIFT_PROVIDER = "swift"
 export const SWIFT_2_MODEL_KEY = "swift-2"
 export const DEFAULT_SWIFT_TIER_KEY = SWIFT_2_MODEL_KEY
 export const DEEPSEEK_V4_FLASH_MODEL_ID = "deepseek/deepseek-v4-flash"
+export const DEEPSEEK_V4_FLASH_NITRO_MODEL_ID = "deepseek/deepseek-v4-flash:nitro"
 
 export type SwiftTierKey = typeof SWIFT_2_MODEL_KEY
 
@@ -62,7 +63,10 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       maxOutputTokens: 8000,
       rank: 1,
       queue: { concurrency: 4, maxQueueDepth: 50 },
-      targets: [{ modelId: DEEPSEEK_V4_FLASH_MODEL_ID, role: "primary" }],
+      targets: [
+        { modelId: DEEPSEEK_V4_FLASH_MODEL_ID, role: "primary" },
+        { modelId: DEEPSEEK_V4_FLASH_NITRO_MODEL_ID, role: "fallback" },
+      ],
     },
   ]
 }
