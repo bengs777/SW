@@ -679,8 +679,8 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
           plugins: ['jsx','typescript']
         }
       });
-      assertNoUnresolvedAlias(path, result.code, 'post-babel');
       var repairedCode = rewriteStaleErrorBoundaryReferences(path, result.code, 'post-babel');
+      assertNoUnresolvedAlias(path, repairedCode, 'post-babel:post-repair');
       __cache[path] = repairedCode;
       return repairedCode;
     }catch(e){

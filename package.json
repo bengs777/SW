@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "audit:production": "node scripts/production-audit.js",
     "test:regression": "node scripts/regression-tests.js",
+    "demo:readiness": "node scripts/demo-readiness.js",
     "db:push:local": "node scripts/db-push.js local",
     "db:push:prod": "node scripts/db-push.js prod",
     "db:generate": "prisma generate",

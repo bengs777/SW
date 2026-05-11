@@ -1832,6 +1832,7 @@ export async function POST(request: NextRequest) {
 const GENERATED_REACT_FILE_PATTERN = /^(app|components|src\/app|src\/components)\/.+\.(tsx|jsx)$/i
 const GENERATED_REACT_PAGE_PATTERN = /^(app|src\/app)\/(?:.+\/)?page\.(tsx|jsx)$/i
 const SWIFT_SAFE_ERROR_BOUNDARY_PATH = "components/swift-safe-error-boundary.tsx"
+const SWIFT_SAFE_ERROR_BOUNDARY_IMPORT = "@/components/swift-safe-error-boundary"
 const REQUIRED_GENERATION_FILES = ["app/layout.tsx", "app/page.tsx"]
 const GENERATION_CODE_FILE_PATTERN = /\.(tsx|ts|jsx|js)$/i
 const GENERATION_IMPORT_EXTENSIONS = ["", ".tsx", ".ts", ".jsx", ".js", ".json", "/index.tsx", "/index.ts", "/index.jsx", "/index.js"]
@@ -2188,10 +2189,10 @@ function rewriteGeneratedBoundaryReferences(content: string) {
   output = output.replace(/\bErrorBoundary\b/g, "SwiftSafeErrorBoundary")
   output = output.replace(/SwiftSafeSwiftSafeErrorBoundary/g, "SwiftSafeErrorBoundary")
 
-  if (!/import\s+\{\s*SwiftSafeErrorBoundary\s*\}\s+from\s+["']@\/components\/swift-safe-error-boundary["']/.test(output)) {
+  if (!hasSwiftSafeBoundaryImport(output)) {
     output = insertImportAfterDirectives(
       output,
-      `import { SwiftSafeErrorBoundary } from "@/components/swift-safe-error-boundary"\n`
+      buildSwiftSafeBoundaryImport()
     )
   }
 
@@ -2205,8 +2206,7 @@ function wrapGeneratedPageWithSafeBoundary(content: string) {
     return source
   }
 
-  const importLine = `import { SwiftSafeErrorBoundary } from "@/components/swift-safe-error-boundary"\n`
-  source = insertImportAfterDirectives(source, importLine)
+  source = insertImportAfterDirectives(source, buildSwiftSafeBoundaryImport())
 
   const namedDefaultFunction = source.match(/export\s+default\s+(async\s+)?function\s+([A-Z][A-Za-z0-9_]*)\s*\(/)
   if (namedDefaultFunction?.[2]) {
@@ -2229,6 +2229,15 @@ function wrapGeneratedPageWithSafeBoundary(content: string) {
   }
 
   return `${source}\n\nexport default function SwiftSafeGeneratedPage() {\n  return (\n    <SwiftSafeErrorBoundary>\n      <div className="min-h-screen bg-background text-foreground">\n        <div className="mx-auto max-w-3xl p-6">\n          <h1 className="text-2xl font-semibold">Preview ready</h1>\n          <p className="mt-2 text-sm text-muted-foreground">The generated page could not be wrapped automatically, so Swift rendered a safe fallback.</p>\n        </div>\n      </div>\n    </SwiftSafeErrorBoundary>\n  )\n}\n`
+}
+
+function buildSwiftSafeBoundaryImport() {
+  return `import { SwiftSafeErrorBoundary } from "${SWIFT_SAFE_ERROR_BOUNDARY_IMPORT}"\n`
+}
+
+function hasSwiftSafeBoundaryImport(source: string) {
+  const escapedSpecifier = SWIFT_SAFE_ERROR_BOUNDARY_IMPORT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(`import\\s+\\{\\s*SwiftSafeErrorBoundary\\s*\\}\\s+from\\s+["']${escapedSpecifier}["']`).test(source)
 }
 
 function insertImportAfterDirectives(source: string, importLine: string) {

@@ -54,6 +54,12 @@ assert(
 )
 
 assert(
+  "post-babel boundary repair precedes alias assertion",
+  /var repairedCode = rewriteStaleErrorBoundaryReferences\(path, result\.code, 'post-babel'\);\s*assertNoUnresolvedAlias\(path, repairedCode, 'post-babel:post-repair'\)/.test(sandboxPreview),
+  "post-babel generated boundary imports must be repaired before unresolved alias validation"
+)
+
+assert(
   "generation quality gate is stage aware",
   /validateGenerationQualityGate\(files: GeneratedFile\[\], stage: GenerationStage = "expansion"\)/.test(generateRoute) &&
     /const shouldValidateImports = stage !== "scaffold"/.test(generateRoute),
