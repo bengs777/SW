@@ -68,9 +68,9 @@ function splitSqlStatements(sql) {
     .filter(Boolean)
     .map((statement) =>
       statement
-        .replace(/^CREATE TABLE\s+/i, "CREATE TABLE IF NOT EXISTS ")
-        .replace(/^CREATE UNIQUE INDEX\s+/i, "CREATE UNIQUE INDEX IF NOT EXISTS ")
-        .replace(/^CREATE INDEX\s+/i, "CREATE INDEX IF NOT EXISTS ")
+        .replace(/\bCREATE TABLE\s+/i, "CREATE TABLE IF NOT EXISTS ")
+        .replace(/\bCREATE UNIQUE INDEX\s+/i, "CREATE UNIQUE INDEX IF NOT EXISTS ")
+        .replace(/\bCREATE INDEX\s+/i, "CREATE INDEX IF NOT EXISTS ")
     )
 }
 

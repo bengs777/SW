@@ -65,6 +65,40 @@ function getRedis() {
   return redisClient
 }
 
+async function evalQueueScript(
+  script: string,
+  keys: string[],
+  args: string[]
+): Promise<string[]> {
+  if (!env.upstashRedisRestUrl || !env.upstashRedisRestToken) {
+    throw new SwiftQueueError(
+      "config",
+      "Redis configuration is required for production AI queue protection.",
+      500
+    )
+  }
+
+  const response = await fetch(env.upstashRedisRestUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.upstashRedisRestToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(["EVAL", script, String(keys.length), ...keys, ...args]),
+  })
+  const payload = await response.json().catch(() => null) as { result?: unknown; error?: string } | null
+
+  if (!response.ok || payload?.error) {
+    throw new SwiftQueueError(
+      "config",
+      payload?.error || "Upstash Redis REST command failed.",
+      500
+    )
+  }
+
+  return Array.isArray(payload?.result) ? payload.result.map(String) : []
+}
+
 const acquireScript = `
 local activeKey = KEYS[1]
 local depthKey = KEYS[2]
@@ -138,6 +172,10 @@ export async function acquireSwiftQueueSlot(input: QueueLeaseInput): Promise<Que
 
   const redis = getRedis()
   if (!redis) {
+    if (env.upstashRedisRestUrl && env.upstashRedisRestToken) {
+      return acquireRestSlot(input, tier.queue.concurrency, tier.queue.maxQueueDepth, startedAt, duplicateKey, timeoutMs, tier.timeoutMs)
+    }
+
     return acquireMemorySlot(input, tier.queue.concurrency, startedAt, duplicateKey)
   }
 
@@ -182,6 +220,57 @@ export async function acquireSwiftQueueSlot(input: QueueLeaseInput): Promise<Que
   }
 
   await redis.eval(releaseScript, keys.length, ...keys, token)
+  throw new SwiftQueueError("timeout", USER_FRIENDLY_QUEUE_OVERLOAD_ERROR, 429)
+}
+
+async function acquireRestSlot(
+  input: QueueLeaseInput,
+  concurrency: number,
+  maxQueueDepth: number,
+  startedAt: number,
+  duplicateKey: string,
+  timeoutMs: number,
+  tierTimeoutMs: number
+): Promise<QueueLease> {
+  const token = `${input.userId}:${input.projectId}:${Date.now()}:${Math.random().toString(36).slice(2)}`
+  const keys = [
+    `swift:ai:active:${input.tierKey}`,
+    `swift:ai:queued:${input.tierKey}`,
+    duplicateKey,
+    `swift:ai:queued-token:${token}`,
+  ]
+  const ttlMs = Math.max(timeoutMs + tierTimeoutMs + 30_000, 120_000)
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const result = await evalQueueScript(acquireScript, keys, [
+      token,
+      String(concurrency),
+      String(maxQueueDepth),
+      String(ttlMs),
+    ])
+    const status = result[0]
+
+    if (status === "acquired") {
+      return {
+        queueWaitMs: Date.now() - startedAt,
+        release: async () => {
+          await evalQueueScript(releaseScript, keys, [token])
+        },
+      }
+    }
+
+    if (status === "duplicate") {
+      throw new SwiftQueueError("duplicate", "Request yang sama sedang diproses. Swift membatalkan duplikasi agar saldo tidak terpakai dua kali.", 409)
+    }
+
+    if (status === "overloaded") {
+      throw new SwiftQueueError("overloaded", USER_FRIENDLY_QUEUE_OVERLOAD_ERROR, 429)
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+
+  await evalQueueScript(releaseScript, keys, [token])
   throw new SwiftQueueError("timeout", USER_FRIENDLY_QUEUE_OVERLOAD_ERROR, 429)
 }
 

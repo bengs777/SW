@@ -1,6 +1,38 @@
 const { loadEnvConfig } = require("@next/env")
+const fs = require("fs")
+const path = require("path")
 
-loadEnvConfig(process.cwd(), true)
+loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production")
+
+const explicitEnvFile =
+  process.env.DEPLOY_ENV_FILE ||
+  (process.env.NODE_ENV === "production" && fs.existsSync(path.join(process.cwd(), ".env.production"))
+    ? ".env.production"
+    : "")
+
+if (explicitEnvFile) {
+  loadEnvFile(explicitEnvFile)
+}
+
+function loadEnvFile(file) {
+  const envPath = path.join(process.cwd(), file)
+  if (!fs.existsSync(envPath)) return
+
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/)
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+
+    const separatorIndex = trimmed.indexOf("=")
+    if (separatorIndex === -1) continue
+
+    const key = trimmed.slice(0, separatorIndex).trim()
+    const rawValue = trimmed.slice(separatorIndex + 1).trim()
+    if (!key) continue
+
+    process.env[key] = rawValue.replace(/^["']|["']$/g, "")
+  }
+}
 
 function value(...keys) {
   for (const key of keys) {
@@ -16,13 +48,21 @@ function normalizeUrl(input) {
   return String(input || "").replace(/\/+$/, "")
 }
 
+function isProductionUrl(input) {
+  const current = normalizeUrl(input)
+  return /^https:\/\//i.test(current) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(current)
+}
+
+const nextAuthUrl = value("NEXTAUTH_URL")
+const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
+
 const checks = [
   required("DATABASE_URL", "Production build and Prisma database URL", value("DATABASE_URL")),
   required("TURSO_DATABASE_URL", "Runtime app database URL", value("TURSO_DATABASE_URL")),
   required("TURSO_AUTH_TOKEN", "Runtime database auth token", value("TURSO_AUTH_TOKEN")),
   required("NEXTAUTH_SECRET", "Auth session secret", value("NEXTAUTH_SECRET")),
-  required("NEXTAUTH_URL", "Canonical auth URL", value("NEXTAUTH_URL")),
-  required("NEXT_PUBLIC_APP_URL", "Public app URL", value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")),
+  required("NEXTAUTH_URL", "Canonical auth URL", isProductionUrl(nextAuthUrl), "Must be an https production URL, not localhost."),
+  required("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(appUrl), "Must be an https production URL, not localhost."),
   required("GOOGLE_CLIENT_ID", "Google OAuth client ID", value("GOOGLE_CLIENT_ID")),
   required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", value("GOOGLE_CLIENT_SECRET")),
   required("OPENROUTER_API_KEY", "AI provider API key", value("OPENROUTER_API_KEY")),
@@ -46,7 +86,7 @@ const checks = [
   ),
   required("SUPABASE_SERVICE_ROLE_KEY", "Supabase service role key", value("SUPABASE_SERVICE_ROLE_KEY")),
   required("SUPABASE_STORAGE_BUCKET", "Supabase storage bucket", value("SUPABASE_STORAGE_BUCKET")),
-  recommended("VERCEL_ACCESS_TOKEN", "Generated-app deploy token", value("VERCEL_ACCESS_TOKEN")),
+  recommended("VERCEL_ACCESS_TOKEN", "Generated-app deploy token", value("VERCEL_ACCESS_TOKEN", "verpro_akses_token")),
   recommended("PAKASIR_SLUG", "Payment merchant slug", value("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID")),
   recommended("PAKASIR_API_KEY", "Payment API key", value("PAKASIR_API_KEY")),
   recommended("CRYPTO_PAYMENT_PRIVATE_KEY", "Crypto payment private key", value("CRYPTO_PAYMENT_PRIVATE_KEY")),

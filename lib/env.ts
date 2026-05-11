@@ -92,7 +92,7 @@ export const env = {
   aiQueueTimeoutMs: Math.max(10_000, Math.round(getEnvNumber(180_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || "https://openrouter.ai/api/v1"),
-  openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL") || "https://swift.biz.id"),
+  openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),
   openRouterAppName: getEnv("OPENROUTER_APP_NAME") || "Swift AI",
   devOwnerEmail: DEV_OWNER_EMAIL,
   supabaseServiceRoleKey,
@@ -114,7 +114,7 @@ export const env = {
   appUrl: normalizeAppUrl(getEnv("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL") || "http://localhost:3000"),
   pakasirSlug: getEnv("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID"),
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
-  vercelAccessToken: getEnv("VERCEL_ACCESS_TOKEN"),
+  vercelAccessToken: getEnv("VERCEL_ACCESS_TOKEN", "verpro_akses_token"),
   tursoAuthToken: getEnv("TURSO_AUTH_TOKEN"),
   // Crypto Payment
   cryptoPaymentPrivateKey: getEnv("CRYPTO_PAYMENT_PRIVATE_KEY"),

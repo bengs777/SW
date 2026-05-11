@@ -13,6 +13,11 @@ function hasValue(value: string | number | null | undefined) {
   return typeof value === "number" ? Number.isFinite(value) : Boolean(value && value.trim())
 }
 
+function isProductionUrl(value: string | null | undefined) {
+  if (!value) return false
+  return /^https:\/\//i.test(value) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(value)
+}
+
 function check(key: string, label: string, value: unknown, severity: ReadinessCheck["severity"], detail?: string): ReadinessCheck {
   return {
     key,
@@ -29,8 +34,8 @@ export function getProductionReadiness() {
     check("TURSO_DATABASE_URL", "Turso/libSQL runtime database URL", env.tursoDatabaseUrl, "required"),
     check("TURSO_AUTH_TOKEN", "Turso auth token", env.tursoAuthToken, "required"),
     check("NEXTAUTH_SECRET", "NextAuth secret", env.nextAuthSecret, "required"),
-    check("NEXTAUTH_URL", "NextAuth canonical URL", env.nextAuthUrl, "required"),
-    check("NEXT_PUBLIC_APP_URL", "Public app URL", env.appUrl, "required"),
+    check("NEXTAUTH_URL", "NextAuth canonical URL", isProductionUrl(env.nextAuthUrl), "required", env.nextAuthUrl ? "Must be an https production URL, not localhost." : undefined),
+    check("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(env.appUrl), "required", env.appUrl ? "Must be an https production URL, not localhost." : undefined),
     check("GOOGLE_CLIENT_ID", "Google OAuth client ID", env.googleClientId, "required"),
     check("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", env.googleClientSecret, "required"),
     check("OPENROUTER_API_KEY", "Swift AI OpenRouter gateway key", env.openRouterApiKey, "required"),
