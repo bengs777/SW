@@ -1,0 +1,93 @@
+const { loadEnvConfig } = require("@next/env")
+
+loadEnvConfig(process.cwd(), true)
+
+function value(...keys) {
+  for (const key of keys) {
+    const current = process.env[key]
+    if (current && current.trim()) {
+      return current.trim()
+    }
+  }
+  return ""
+}
+
+function normalizeUrl(input) {
+  return String(input || "").replace(/\/+$/, "")
+}
+
+const checks = [
+  required("DATABASE_URL", "Production build and Prisma database URL", value("DATABASE_URL")),
+  required("TURSO_DATABASE_URL", "Runtime app database URL", value("TURSO_DATABASE_URL")),
+  required("TURSO_AUTH_TOKEN", "Runtime database auth token", value("TURSO_AUTH_TOKEN")),
+  required("NEXTAUTH_SECRET", "Auth session secret", value("NEXTAUTH_SECRET")),
+  required("NEXTAUTH_URL", "Canonical auth URL", value("NEXTAUTH_URL")),
+  required("NEXT_PUBLIC_APP_URL", "Public app URL", value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")),
+  required("GOOGLE_CLIENT_ID", "Google OAuth client ID", value("GOOGLE_CLIENT_ID")),
+  required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", value("GOOGLE_CLIENT_SECRET")),
+  required("OPENROUTER_API_KEY", "AI provider API key", value("OPENROUTER_API_KEY")),
+  required(
+    "REDIS_CONFIG",
+    "Queue/rate-limit Redis config",
+    value("REDIS_URL") || (value("UPSTASH_REDIS_REST_URL") && value("UPSTASH_REDIS_REST_TOKEN")),
+    value("REDIS_URL")
+      ? "TCP Redis configured"
+      : value("UPSTASH_REDIS_REST_URL") && value("UPSTASH_REDIS_REST_TOKEN")
+        ? "Upstash REST configured. BullMQ workers still require REDIS_URL."
+        : "Set REDIS_URL or UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN"
+  ),
+  required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
+  required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),
+  required("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", value("NEXT_PUBLIC_SUPABASE_URL")),
+  required(
+    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY",
+    "Supabase public key",
+    value("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY")
+  ),
+  required("SUPABASE_SERVICE_ROLE_KEY", "Supabase service role key", value("SUPABASE_SERVICE_ROLE_KEY")),
+  required("SUPABASE_STORAGE_BUCKET", "Supabase storage bucket", value("SUPABASE_STORAGE_BUCKET")),
+  recommended("VERCEL_ACCESS_TOKEN", "Generated-app deploy token", value("VERCEL_ACCESS_TOKEN")),
+  recommended("PAKASIR_SLUG", "Payment merchant slug", value("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID")),
+  recommended("PAKASIR_API_KEY", "Payment API key", value("PAKASIR_API_KEY")),
+  recommended("CRYPTO_PAYMENT_PRIVATE_KEY", "Crypto payment private key", value("CRYPTO_PAYMENT_PRIVATE_KEY")),
+  recommended("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS", "Crypto payment receiving address", value("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS")),
+]
+
+const requiredMissing = checks.filter((check) => check.severity === "required" && !check.ok)
+const recommendedMissing = checks.filter((check) => check.severity === "recommended" && !check.ok)
+
+console.log("\nDeploy Readiness")
+console.log("----------------")
+for (const check of checks) {
+  const state = check.ok ? "PASS" : check.severity === "required" ? "FAIL" : "WARN"
+  console.log(`${state} ${check.key} - ${check.label}${check.detail ? ` (${check.detail})` : ""}`)
+}
+
+console.log("\nSummary")
+console.log(`Required: ${checks.filter((check) => check.severity === "required" && check.ok).length}/${checks.filter((check) => check.severity === "required").length} passed`)
+console.log(`Recommended missing: ${recommendedMissing.length}`)
+
+if (requiredMissing.length > 0) {
+  console.log(`NOT_READY_FOR_DEPLOY: ${requiredMissing.map((check) => check.key).join(", ")}`)
+  process.exitCode = 1
+} else {
+  console.log("READY_FOR_DEPLOY")
+}
+
+function required(key, label, current, detail) {
+  return check(key, label, current, "required", detail)
+}
+
+function recommended(key, label, current, detail) {
+  return check(key, label, current, "recommended", detail)
+}
+
+function check(key, label, current, severity, detail) {
+  return {
+    key,
+    label,
+    ok: Boolean(current),
+    severity,
+    detail,
+  }
+}

@@ -12,7 +12,15 @@ Run before presenting:
 npm run demo:readiness
 ```
 
+Run before production deploy:
+
+```bash
+npm run deploy:readiness
+```
+
 For production-build verification, `DATABASE_URL` must be configured because the build wrapper intentionally blocks production builds without database access.
+
+`deploy:readiness` prints only variable names and pass/fail status. It does not print secret values.
 
 ## Current Readiness Proof
 
@@ -20,6 +28,7 @@ For production-build verification, `DATABASE_URL` must be configured because the
 - TypeScript typecheck passes.
 - ESLint has no errors.
 - Production audit passes when required environment variables are present.
+- Deploy readiness is blocked until required production environment variables are configured in Vercel or the shell running the deploy.
 - Runtime preview repair now rewrites stale generated `ErrorBoundary` code before hard alias validation.
 - Safe boundary repair injects virtual preview modules instead of raw `@/` aliases.
 
