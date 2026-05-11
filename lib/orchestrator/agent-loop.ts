@@ -15,7 +15,14 @@ function payloadPrompt(task: { payload?: Record<string, unknown> }, fallback: st
 
 export async function executePlan(
   plan: OrchestratorPlan,
-  opts: { projectId: string; idempotencyKey?: string; files?: GeneratedFile[] }
+  opts: {
+    projectId: string
+    idempotencyKey?: string
+    files?: GeneratedFile[]
+    provider?: ProviderName
+    modelName?: string
+    applyFiles?: boolean
+  }
 ): Promise<{ success: boolean; files?: GeneratedFile[]; providerResult?: ProviderResult | null; error?: string }> {
   const projectId = opts.projectId
   let contextFiles: GeneratedFile[] = opts.files || []
@@ -28,7 +35,9 @@ export async function executePlan(
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         if (task.type === "ai:generate") {
-          const model = chooseModelForTask("generate")
+          const model = opts.provider && opts.modelName
+            ? { provider: opts.provider, modelName: opts.modelName }
+            : chooseModelForTask("generate")
           const ctx = buildContextForTask({ prompt: payloadPrompt(task, plan.prompt), files: contextFiles, maxFiles: 8 })
 
           const providerResp = await ProviderRouter.generate({
@@ -53,26 +62,10 @@ export async function executePlan(
         if (task.type === "validate") {
           const validation = await Executor.validateFiles(contextFiles)
           if (!validation.valid) {
-            // ask strong model to inspect and return patched files
-            const model = chooseModelForTask("inspect")
-            const inspectPrompt = `Inspect validation issues and return a JSON array of files (path/content). Validation: ${JSON.stringify(
-              validation.result
-            )}`
-
-            const providerResp = await ProviderRouter.generate({
-              provider: model.provider as ProviderName,
-              modelName: model.modelName,
-              prompt: inspectPrompt + "\n\n" + buildContextForTask({ prompt: plan.prompt, files: contextFiles, maxFiles: 8 }),
-              mode: "inspect",
-            })
-
-            lastProviderResult = providerResp
-            const parsed = extractGeneratedFilesFromProviderMessage(providerResp.message)
-            if (!parsed.files || parsed.files.length === 0) {
-              throw new Error("Inspect did not return files to repair validation")
-            }
-
-            contextFiles = parsed.files
+            // The public generate route performs full-stack validation and
+            // deterministic auto-repair after provider output is parsed. Avoid
+            // making a second AI call here, which can turn a successful
+            // generation into a user-visible timeout.
           }
 
           taskSucceeded = true
@@ -80,7 +73,9 @@ export async function executePlan(
         }
 
         if (task.type === "file:apply") {
-          await Executor.applyFiles(projectId, payloadPrompt(task, plan.prompt), contextFiles)
+          if (opts.applyFiles) {
+            await Executor.applyFiles(projectId, payloadPrompt(task, plan.prompt), contextFiles)
+          }
           taskSucceeded = true
           break
         }

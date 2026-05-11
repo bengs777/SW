@@ -20,6 +20,7 @@ type OrchestratorExisting = {
 
 type OrchestratorNew = {
   alreadyExists: false
+  files: GeneratedFile[]
   providerResult: {
     message: string
     providerUsed: string
@@ -56,11 +57,18 @@ export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<Orc
 
   // Build a local plan (no external AI calls) and run it via the agent loop
   const plan = await buildPlan(prompt, { projectId })
-  const result = await executePlan(plan, { projectId, idempotencyKey })
+  const result = await executePlan(plan, {
+    projectId,
+    idempotencyKey,
+    provider: opts.provider,
+    modelName: opts.modelName,
+    applyFiles: false,
+  })
 
   if (!result.success) {
     return {
       alreadyExists: false,
+      files: result.files || [],
       providerResult: {
         message: result.error || 'Orchestrator failed',
         providerUsed: result.providerResult?.providerUsed || '',
@@ -73,8 +81,9 @@ export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<Orc
 
   return {
     alreadyExists: false,
+    files: result.files || [],
     providerResult: {
-      message: 'Orchestrator completed',
+      message: result.providerResult?.message || JSON.stringify({ files: result.files || [] }),
       providerUsed: result.providerResult?.providerUsed || '',
       modelUsed: result.providerResult?.modelUsed || '',
       usedFallback: result.providerResult?.usedFallback || false,
