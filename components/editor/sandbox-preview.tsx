@@ -386,6 +386,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   var __blobMap = {};
   var __finalCodeMap = {};
   var __buildingModules = {};
+  var __revokedBlobUrls = [];
   var __exts = ['','.tsx','.ts','.jsx','.js','/index.tsx','/index.ts','/index.js'];
   var __bootStartedAt = performance.now();
 
@@ -396,6 +397,25 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   emitTelemetry('runtime.boot', {
     moduleCount: Object.keys(__compiledModules).length
   });
+
+  function revokeAllBlobUrls(){
+    for(var key in __blobMap){
+      var url = __blobMap[key];
+      if(typeof url === 'string' && url.indexOf('blob:') === 0){
+        try {
+          URL.revokeObjectURL(url);
+          __revokedBlobUrls.push(url);
+        } catch (revokeError) {}
+      }
+    }
+    __cache = {};
+    __blobMap = {};
+    __finalCodeMap = {};
+    __buildingModules = {};
+  }
+
+  window.addEventListener('pagehide', revokeAllBlobUrls);
+  window.addEventListener('beforeunload', revokeAllBlobUrls);
 
   function escapeHtml(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -447,6 +467,24 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     var diagnostics = collectUnresolvedAliasDiagnostics(code, path, phase || 'runtime-validation');
     if(diagnostics.length > 0){
       throw new Error('UNRESOLVED_ALIAS_DETECTED\\n' + JSON.stringify(diagnostics, null, 2));
+    }
+  }
+
+  function assertNoStaleErrorBoundary(path, code, phase){
+    var source = String(code || '');
+    if(
+      /\\bfunction\\s+ErrorBoundary\\b/.test(source) ||
+      /\\bconst\\s+ErrorBoundary\\b/.test(source) ||
+      /\\bvar\\s+ErrorBoundary\\b/.test(source) ||
+      /\\blet\\s+ErrorBoundary\\b/.test(source) ||
+      /\\bclass\\s+ErrorBoundary\\b/.test(source) ||
+      /from\\s+["'][^"']*error-boundary[^"']*["']/.test(source)
+    ){
+      emitTelemetry('runtime.stale_error_boundary_detected', {
+        path: path,
+        phase: phase || 'runtime-validation'
+      });
+      throw new Error('STALE_ERROR_BOUNDARY_DETECTED in ' + path + ' during ' + (phase || 'runtime-validation'));
     }
   }
 
@@ -540,9 +578,11 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     var paths = Object.keys(__compiledModules);
     for(var i=0;i<paths.length;i++){
       assertNoUnresolvedAlias(paths[i], __compiledModules[paths[i]], 'pre-transform');
+      assertNoStaleErrorBoundary(paths[i], __compiledModules[paths[i]], 'pre-transform');
     }
     for(var shim in __shimModules){
       assertNoUnresolvedAlias('shim:' + shim, __shimModules[shim], 'pre-transform');
+      assertNoStaleErrorBoundary('shim:' + shim, __shimModules[shim], 'pre-transform');
     }
   }
 
@@ -580,6 +620,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         }
       });
       assertNoUnresolvedAlias(path, result.code, 'post-babel');
+      assertNoStaleErrorBoundary(path, result.code, 'post-babel');
       __cache[path] = result.code;
       return result.code;
     }catch(e){
@@ -603,6 +644,9 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
     code = linkLocalVirtualImports(path, code);
     assertNoUnresolvedAlias(path, code, 'pre-blob');
+    assertNoStaleErrorBoundary(path, code, 'pre-blob');
+    console.log('FINAL_EXECUTED_MODULE', path);
+    console.log(code);
     __finalCodeMap[path] = code;
 
     var blob = new Blob([code], {type:'text/javascript'});
@@ -644,6 +688,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   function createShimModule(specifier, code){
     if(__blobMap[specifier]) return __blobMap[specifier];
     assertNoUnresolvedAlias('shim:' + specifier, code, 'pre-blob');
+    assertNoStaleErrorBoundary('shim:' + specifier, code, 'pre-blob');
     var blob = new Blob([code], {type:'text/javascript'});
     var url = URL.createObjectURL(blob);
     __blobMap[specifier] = url;
@@ -652,6 +697,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 
   try{
     document.body.className='ready';
+    revokeAllBlobUrls();
     assertCompiledModuleSet();
     injectCss();
     for(var warningIndex = 0; warningIndex < __warnings.length; warningIndex++){
@@ -731,24 +777,24 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         return;
       }
 
-      // Error Boundary Component
-      var ErrorBoundary = (function(){
-        function ErrorBoundary(props){
-          this.props = props;
+      // Runtime Error Boundary Component
+      class SwiftPreviewRuntimeBoundary extends React.Component {
+        constructor(props){
+          super(props);
           this.state = {hasError: false, error: null};
         }
-        ErrorBoundary.prototype.componentDidCatch = function(error, info){
+        componentDidCatch(error, info){
           emitTelemetry('runtime.error_boundary', {
             message: error && error.message ? error.message : String(error)
           });
           try {
             window.parent.postMessage({ type: 'swift-preview-error', message: error && error.message ? error.message : String(error), stack: error && error.stack ? error.stack : "" }, '*');
           } catch (postMessageError) {}
-        };
-        ErrorBoundary.getDerivedStateFromError = function(error){
+        }
+        static getDerivedStateFromError(error){
           return {hasError: true, error: error};
-        };
-        ErrorBoundary.prototype.render = function(){
+        }
+        render(){
           if(this.state.hasError){
             return React.createElement("div", {
               style: { padding: "32px", fontFamily: "monospace", fontSize: "13px", color: "#d00", backgroundColor: "#fff5f5", minHeight: "100vh" }
@@ -765,14 +811,13 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
             );
           }
           return this.props.children;
-        };
-        return ErrorBoundary;
-      })();
+        }
+      }
 
       // Render with Error Boundary
       var root = ReactDOMClient.createRoot(container);
       root.render(
-        React.createElement(ErrorBoundary, null,
+        React.createElement(SwiftPreviewRuntimeBoundary, null,
           React.createElement(App)
         )
       );
