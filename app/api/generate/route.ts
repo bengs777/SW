@@ -54,6 +54,35 @@ class RelevanceValidationError extends Error {
   }
 }
 
+type GenerationQualityGateIssue = {
+  code: string
+  message: string
+  file?: string
+}
+
+type GenerationQualityGateResult = {
+  ok: boolean
+  issues: GenerationQualityGateIssue[]
+  scores: {
+    projectCompleteness: number
+    dependencyHealth: number
+    previewSafety: number
+  }
+}
+
+type GenerationStage = "scaffold" | "expansion" | "repair"
+type PromptProfile = "lightweight" | "balanced" | "advanced"
+
+class GenerationQualityGateError extends Error {
+  details: GenerationQualityGateResult
+
+  constructor(details: GenerationQualityGateResult) {
+    super("GENERATION_QUALITY_GATE_FAILED")
+    this.name = "GenerationQualityGateError"
+    this.details = details
+  }
+}
+
 type RelevanceReport = {
   score: number
   totalTerms: number
@@ -580,9 +609,16 @@ async function recordGenerationRequestLog(input: {
   }
 }
 
-function buildRecoveryRetryPrompt(userPrompt: string, contextualPrompt: string) {
+function buildRecoveryRetryPrompt(
+  userPrompt: string,
+  contextualPrompt: string,
+  options?: { stage?: GenerationStage; profile?: PromptProfile; failureType?: string }
+) {
   return [
     "Your previous response was invalid or contained no files.",
+    `generationStage: ${options?.stage || "repair"}`,
+    `promptProfile: ${options?.profile || "balanced"}`,
+    `failureType: ${options?.failureType || "unknown"}`,
     `User Request: ${userPrompt}`,
     "",
     "Return ONLY a valid JSON object with this exact shape:",
@@ -631,11 +667,15 @@ function buildFinalPrompt({
   userPrompt,
   executionContext,
   errorLogs,
+  generationStage = "expansion",
+  promptProfile = "balanced",
 }: {
   mode: FinalPromptMode
   userPrompt: string
   executionContext?: string
   errorLogs?: string | null
+  generationStage?: GenerationStage
+  promptProfile?: PromptProfile
 }) {
   const contextPriority = [
     "CONTEXT PRIORITY:",
@@ -672,6 +712,19 @@ function buildFinalPrompt({
     "",
     "OUTPUT:",
     '{ "message": "short summary", "files": [{ "path": "string", "language": "tsx|ts|css|json|html|prisma|md|env", "content": "complete file content" }], "dependencies": [], "env": {} }',
+  ].join("\n")
+
+  const governance = [
+    "GENERATION GOVERNANCE:",
+    `- generationStage: ${generationStage}`,
+    `- promptProfile: ${promptProfile}`,
+    "- Step 1 must preserve a renderable scaffold: app/layout.tsx, app/page.tsx, and small components.",
+    "- Step 2 may expand features only after the scaffold remains valid.",
+    promptProfile === "lightweight"
+      ? "- Lightweight profile: keep output small, preview-safe, and deterministic. Prefer a compact dashboard scaffold over enterprise architecture."
+      : promptProfile === "advanced"
+        ? "- Advanced profile: architecture/debug/hardening is allowed, but every returned file must remain runnable."
+        : "- Balanced profile: moderate CRUD/API expansion is allowed; avoid oversized file graphs.",
   ].join("\n")
 
   const fixer = [
@@ -722,6 +775,8 @@ function buildFinalPrompt({
 
   return [
     contextPriority,
+    "",
+    governance,
     "",
     systemPrompt,
     "",
@@ -1273,6 +1328,9 @@ export async function POST(request: NextRequest) {
         errorLogs: previewErrorLogs,
         existingFileCount: existingFiles.length,
       })
+      const promptProfile = getPromptProfileForTier(modelConfig.key)
+      const generationStage: GenerationStage = existingFiles.length > 0 && promptMode !== "rebuild" ? "expansion" : "scaffold"
+      const retryBudget = getRetryBudgetForProfile(promptProfile)
       const basePrompt = promptEnhancement.prompt
       const effectivePrompt =
         existingFiles.length > 0
@@ -1282,14 +1340,33 @@ export async function POST(request: NextRequest) {
               existingFiles,
             })
           : basePrompt
+      const governedPrompt = adaptPromptForGenerationProfile({
+        prompt: effectivePrompt,
+        originalPrompt: prompt,
+        profile: promptProfile,
+        stage: generationStage,
+      })
       const fullStackPrompt = compactProviderPrompt(
         buildFinalPrompt({
           mode: finalPromptMode,
-          userPrompt: enforceFullStackRequirement(effectivePrompt),
+          userPrompt: enforceFullStackRequirement(governedPrompt),
           executionContext: providerExecutionContext,
           errorLogs: previewErrorLogs,
+          generationStage,
+          promptProfile,
         })
       )
+      const scaffold = buildProjectFiles({
+        prompt: fullStackPrompt,
+        originalPrompt: promptWithAttachments,
+        projectName: project.name,
+        providerMessage: null,
+        promptSummary: promptEnhancement.summary,
+      })
+      const scaffoldQuality = validateGenerationQualityGate(scaffold.files)
+      if (!scaffoldQuality.ok) {
+        throw new GenerationQualityGateError(scaffoldQuality)
+      }
 
       // Use orchestrator which checks idempotency and delegates to ProviderRouter
       const orchestration = await orchestrateGeneration({
@@ -1360,12 +1437,22 @@ export async function POST(request: NextRequest) {
           selectedModel: modelConfig.key,
           providerUsed: result.providerUsed,
           modelUsed: result.modelUsed,
+          retryAction: classifyGenerationFailure({
+            files: providerParsed.files,
+            parseMode: providerParsed.parseMode,
+            quality: null,
+          }),
+          retryBudget,
         })
 
         const recoveryResult = await ProviderRouter.generate({
           provider,
           modelName: modelConfig.modelName,
-          prompt: buildRecoveryRetryPrompt(prompt, fullStackPrompt),
+          prompt: buildRecoveryRetryPrompt(prompt, fullStackPrompt, {
+            stage: "repair",
+            profile: promptProfile,
+            failureType: "incomplete_files",
+          }),
           mode: "files",
           promptLanguage,
           temperatureOverride: 0,
@@ -1381,14 +1468,6 @@ export async function POST(request: NextRequest) {
 
       providerMessagePreview = result.message.slice(0, 1200)
       providerParseMode = providerParsed.parseMode
-      const scaffold = buildProjectFiles({
-        prompt: fullStackPrompt,
-        originalPrompt: promptWithAttachments,
-        projectName: project.name,
-        providerMessage: result.message,
-        promptSummary: promptEnhancement.summary,
-      })
-
       let generatedFiles: GeneratedFile[] = []
       let providerAssemblyMessage = ""
       const providerUpdatedEntry = hasPrimaryEntryUpdate(providerParsed.files)
@@ -1412,8 +1491,8 @@ export async function POST(request: NextRequest) {
               ? `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}). Karena prompt terdeteksi sebagai rebuild, sistem mengganti arah project lama dan menerapkan output Swift menjadi ${generatedFiles.length} file.`
             : `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}) dan sistem menggabungkannya ke project existing (${existingFiles.length} file) menjadi ${generatedFiles.length} file.`
         } else {
-          generatedFiles = providerParsed.files
-          providerAssemblyMessage = `Swift menghasilkan ${providerParsed.files.length} file valid (${providerParsed.parseMode}) dan sistem menerapkannya sebagai file project baru.`
+          generatedFiles = mergeGeneratedFiles(scaffold.files, providerParsed.files)
+          providerAssemblyMessage = `Scaffold awal valid (${scaffold.files.length} file), lalu Swift menghasilkan ${providerParsed.files.length} file expansion valid (${providerParsed.parseMode}) menjadi ${generatedFiles.length} file project.`
         }
       } else if (existingFiles.length > 0) {
         throw new Error("AI_OUTPUT_HAS_NO_FILES")
@@ -1421,29 +1500,53 @@ export async function POST(request: NextRequest) {
         throw new Error("AI_OUTPUT_HAS_NO_FILES")
       }
 
+      const qualityBeforeRepair = validateGenerationQualityGate(generatedFiles)
       const validationBeforeRepair = validateFullStackFiles(generatedFiles)
       const repairResult = autoRepairFullStackFiles(generatedFiles, scaffold.files)
       generatedFiles = repairResult.files
+      const qualityRepairResult = autoRepairGenerationQualityFiles(generatedFiles, scaffold.files)
+      generatedFiles = qualityRepairResult.files
 
       const repairedCategoryText =
         repairResult.missingBeforeRepair.length > 0
           ? repairResult.missingBeforeRepair.join(", ")
           : ""
 
-      if (repairResult.repaired) {
-        providerAssemblyMessage += `\n\nAuto-repair full-stack diterapkan: kategori [${repairedCategoryText}] dilengkapi dengan ${repairResult.addedFiles.length} file fallback.`
+      if (repairResult.repaired || qualityRepairResult.repaired) {
+        const addedCount = repairResult.addedFiles.length + qualityRepairResult.addedFiles.length
+        providerAssemblyMessage += `\n\nGeneration incomplete. Attempting repair...\nAuto-repair diterapkan dengan ${addedCount} file fallback.`
       } else if (validationBeforeRepair.missingCategories.length > 0) {
         providerAssemblyMessage += `\n\nValidasi full-stack mendeteksi kekurangan [${repairedCategoryText}], namun tidak ada fallback file tambahan yang bisa diterapkan otomatis.`
       }
 
       generatedFiles = hardenGeneratedReactAppFiles(generatedFiles)
       const validationAfterRepair = validateFullStackFiles(generatedFiles)
+      const qualityAfterRepair = validateGenerationQualityGate(generatedFiles)
+
+      if (!qualityAfterRepair.ok) {
+        const retryAction = classifyGenerationFailure({
+          files: generatedFiles,
+          parseMode: providerParsed.parseMode,
+          quality: qualityAfterRepair,
+        })
+        log("warn", "Generation quality gate failed after repair", {
+          projectId: project.id,
+          selectedModel: modelConfig.key,
+          issues: qualityAfterRepair.issues,
+          scores: qualityAfterRepair.scores,
+          qualityBeforeRepair,
+          qualityRepairAddedFiles: qualityRepairResult.addedFiles.map((file) => file.path),
+          retryAction,
+          retryBudget,
+        })
+        throw new GenerationQualityGateError(qualityAfterRepair)
+      }
 
       if (validationAfterRepair.missingCategories.length > 0) {
         throw new StrictFullStackValidationError({
           missingBeforeRepair: validationBeforeRepair.missingCategories,
           missingAfterRepair: validationAfterRepair.missingCategories,
-          addedFiles: repairResult.addedFiles.map((file) => file.path),
+          addedFiles: [...repairResult.addedFiles, ...qualityRepairResult.addedFiles].map((file) => file.path),
           parseMode: providerParsed.parseMode,
           providerFileCount: providerParsed.files.length,
           finalFileCount: generatedFiles.length,
@@ -1466,6 +1569,11 @@ export async function POST(request: NextRequest) {
         missingBeforeRepair: validationBeforeRepair.missingCategories,
         missingAfterRepair: validationAfterRepair.missingCategories,
         autoRepairAddedFiles: repairResult.addedFiles.map((file) => file.path),
+        generationQuality: qualityAfterRepair.scores,
+        generationQualityIssues: qualityAfterRepair.issues,
+        promptProfile,
+        generationStage,
+        retryBudget,
         shouldRebaseFromScaffold,
         providerUpdatedEntry,
         promptMode,
@@ -1539,6 +1647,10 @@ export async function POST(request: NextRequest) {
           relevanceScore: relevanceReport.score,
           recoveryRetryUsed,
           recoveryRetrySucceeded,
+          promptProfile,
+          generationStage,
+          retryBudget,
+          qualityScores: qualityAfterRepair.scores,
           finalPromptMode,
         },
       })
@@ -1565,6 +1677,7 @@ export async function POST(request: NextRequest) {
     } catch (error) {
       const isStrictFullStackError = error instanceof StrictFullStackValidationError
       const isRelevanceError = error instanceof RelevanceValidationError
+      const isQualityGateError = error instanceof GenerationQualityGateError
       const errorMessage = error instanceof Error ? error.message : "AI request failed"
       const providerFailure = error instanceof SwiftProviderFailureError ? error : null
       const lastFailedAttempt = providerFailure
@@ -1579,6 +1692,8 @@ export async function POST(request: NextRequest) {
       const preservedFiles = existingFiles
       const friendlyMessage = isStrictFullStackError
         ? buildStrictFailSafeMessage((error as StrictFullStackValidationError).details)
+        : isQualityGateError
+          ? buildGenerationQualityGateMessage((error as GenerationQualityGateError).details)
         : isRelevanceError
           ? buildRelevanceFailSafeMessage((error as RelevanceValidationError).details)
         : providerFailure
@@ -1618,6 +1733,8 @@ export async function POST(request: NextRequest) {
           refunded: true,
           failSafe: isStrictFullStackError
             ? "strict-fullstack"
+            : isQualityGateError
+              ? "generation-quality"
             : isRelevanceError
               ? "relevance"
               : null,
@@ -1660,6 +1777,14 @@ export async function POST(request: NextRequest) {
               },
               failSafeCode: "STRICT_FULLSTACK_FAILSAFE",
             }
+          : isQualityGateError
+            ? {
+                failSafe: {
+                  type: "generation-quality",
+                  details: (error as GenerationQualityGateError).details,
+                },
+                failSafeCode: "GENERATION_QUALITY_GATE_FAILED",
+              }
           : isRelevanceError
             ? {
                 failSafe: {
@@ -1699,6 +1824,229 @@ export async function POST(request: NextRequest) {
 const GENERATED_REACT_FILE_PATTERN = /^(app|components|src\/app|src\/components)\/.+\.(tsx|jsx)$/i
 const GENERATED_REACT_PAGE_PATTERN = /^(app|src\/app)\/(?:.+\/)?page\.(tsx|jsx)$/i
 const SWIFT_SAFE_ERROR_BOUNDARY_PATH = "components/swift-safe-error-boundary.tsx"
+const REQUIRED_GENERATION_FILES = ["app/layout.tsx", "app/page.tsx"]
+const GENERATION_CODE_FILE_PATTERN = /\.(tsx|ts|jsx|js)$/i
+const GENERATION_IMPORT_EXTENSIONS = ["", ".tsx", ".ts", ".jsx", ".js", ".json", "/index.tsx", "/index.ts", "/index.jsx", "/index.js"]
+const RETRY_BUDGET_BY_PROFILE: Record<PromptProfile, { maxCheapRetries: number; maxPremiumRetries: number }> = {
+  lightweight: { maxCheapRetries: 2, maxPremiumRetries: 0 },
+  balanced: { maxCheapRetries: 2, maxPremiumRetries: 1 },
+  advanced: { maxCheapRetries: 1, maxPremiumRetries: 1 },
+}
+
+function getPromptProfileForTier(tierKey: string): PromptProfile {
+  if (tierKey === "swift-1") return "lightweight"
+  if (tierKey === "swift-3") return "advanced"
+  return "balanced"
+}
+
+function getRetryBudgetForProfile(profile: PromptProfile) {
+  return RETRY_BUDGET_BY_PROFILE[profile]
+}
+
+function adaptPromptForGenerationProfile(input: {
+  prompt: string
+  originalPrompt: string
+  profile: PromptProfile
+  stage: GenerationStage
+}) {
+  if (input.profile === "lightweight") {
+    return [
+      "Build a lightweight dashboard scaffold first.",
+      "Limit scope to a small, deterministic, preview-safe app.",
+      "Required output: app/layout.tsx, app/page.tsx, and small reusable components only.",
+      "Avoid enterprise architecture, auth, complex charts, large CRUD systems, and oversized file graphs in this tier.",
+      "Use mock data in the page when needed. Keep imports simple and resolvable.",
+      "",
+      "Original user intent, simplified for Swift 1:",
+      compactText(input.originalPrompt || input.prompt, 1200),
+    ].join("\n")
+  }
+
+  if (input.stage === "scaffold") {
+    return [
+      "Start with a valid scaffold-first project, then add only the most important feature slice.",
+      "The project must remain renderable after this response.",
+      "",
+      input.prompt,
+    ].join("\n")
+  }
+
+  return input.prompt
+}
+
+function classifyGenerationFailure(input: {
+  files: GeneratedFile[]
+  parseMode: string
+  quality: GenerationQualityGateResult | null
+}) {
+  if (input.files.length === 0) return "incomplete_files"
+  if (input.parseMode === "none") return "malformed_json"
+  if (input.quality?.issues.some((issue) => issue.code === "unresolved_import")) return "unresolved_imports"
+  if (input.quality?.issues.some((issue) => issue.code === "invalid_tsx")) return "invalid_jsx"
+  if (input.quality && !input.quality.ok) return "project_incomplete"
+  return "unknown"
+}
+
+function validateGenerationQualityGate(files: GeneratedFile[]): GenerationQualityGateResult {
+  const normalizedFiles = files.map((file) => ({
+    ...file,
+    path: normalizeGeneratedPath(file.path),
+    content: String(file.content || ""),
+  }))
+  const byPath = new Map(normalizedFiles.map((file) => [file.path, file]))
+  const issues: GenerationQualityGateIssue[] = []
+
+  for (const requiredPath of REQUIRED_GENERATION_FILES) {
+    if (!byPath.has(requiredPath)) {
+      issues.push({
+        code: "missing_required_file",
+        file: requiredPath,
+        message: `${requiredPath} is required.`,
+      })
+    }
+  }
+
+  if (normalizedFiles.length < 2) {
+    issues.push({
+      code: "too_few_files",
+      message: "Generated project must contain at least 2 valid files.",
+    })
+  }
+
+  let syntaxChecked = 0
+  let syntaxPassed = 0
+  let importChecked = 0
+  let importPassed = 0
+
+  for (const file of normalizedFiles) {
+    if (!GENERATION_CODE_FILE_PATTERN.test(file.path)) {
+      continue
+    }
+
+    syntaxChecked += 1
+    const diagnostics = getPreviewSyntaxDiagnostics(file.content, file.path)
+    if (diagnostics.length === 0) {
+      syntaxPassed += 1
+    } else {
+      issues.push({
+        code: "invalid_tsx",
+        file: file.path,
+        message: formatPreviewDiagnostic(diagnostics[0]),
+      })
+    }
+
+    for (const specifier of collectStaticImportSpecifiers(file.content)) {
+      if (!isLocalGenerationImport(specifier)) {
+        continue
+      }
+
+      importChecked += 1
+      if (resolveGeneratedImport(specifier, file.path, byPath)) {
+        importPassed += 1
+      } else {
+        issues.push({
+          code: "unresolved_import",
+          file: file.path,
+          message: `Unable to resolve local import "${specifier}".`,
+        })
+      }
+    }
+  }
+
+  const requiredPresent = REQUIRED_GENERATION_FILES.filter((path) => byPath.has(path)).length
+  const projectCompleteness = Math.round(((requiredPresent / REQUIRED_GENERATION_FILES.length) * 70) + (normalizedFiles.length >= 2 ? 30 : 0))
+  const dependencyHealth = importChecked === 0 ? 100 : Math.round((importPassed / importChecked) * 100)
+  const previewSafety = syntaxChecked === 0 ? 0 : Math.round((syntaxPassed / syntaxChecked) * 100)
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    scores: {
+      projectCompleteness,
+      dependencyHealth,
+      previewSafety,
+    },
+  }
+}
+
+function autoRepairGenerationQualityFiles(files: GeneratedFile[], scaffoldFiles: GeneratedFile[]) {
+  const byPath = new Map(files.map((file) => [normalizeGeneratedPath(file.path), file]))
+  const addedFiles: GeneratedFile[] = []
+
+  for (const requiredPath of REQUIRED_GENERATION_FILES) {
+    if (byPath.has(requiredPath)) {
+      continue
+    }
+
+    const fallback = scaffoldFiles.find((file) => normalizeGeneratedPath(file.path) === requiredPath)
+    if (!fallback) {
+      continue
+    }
+
+    byPath.set(requiredPath, fallback)
+    addedFiles.push(fallback)
+  }
+
+  return {
+    files: Array.from(byPath.values()).sort((left, right) => normalizeGeneratedPath(left.path).localeCompare(normalizeGeneratedPath(right.path))),
+    addedFiles,
+    repaired: addedFiles.length > 0,
+  }
+}
+
+function collectStaticImportSpecifiers(content: string) {
+  const info = ts.preProcessFile(String(content || ""), true, true)
+  return [
+    ...info.importedFiles.map((item) => item.fileName),
+    ...info.referencedFiles.map((item) => item.fileName),
+  ].filter(Boolean)
+}
+
+function isLocalGenerationImport(specifier: string) {
+  return specifier.startsWith(".") || specifier.startsWith("@/") || specifier.startsWith("~/")
+}
+
+function resolveGeneratedImport(specifier: string, importerPath: string, files: Map<string, GeneratedFile>) {
+  const normalizedSpecifier = specifier.startsWith("@/") || specifier.startsWith("~/")
+    ? specifier.slice(2)
+    : normalizeRelativeGeneratedImport(specifier, importerPath)
+
+  for (const extension of GENERATION_IMPORT_EXTENSIONS) {
+    const candidate = normalizeGeneratedPath(`${normalizedSpecifier}${extension}`)
+    if (files.has(candidate)) {
+      return candidate
+    }
+
+    const srcCandidate = normalizeGeneratedPath(`src/${candidate}`)
+    if (files.has(srcCandidate)) {
+      return srcCandidate
+    }
+  }
+
+  return ""
+}
+
+function normalizeRelativeGeneratedImport(specifier: string, importerPath: string) {
+  const importerParts = normalizeGeneratedPath(importerPath).split("/")
+  importerParts.pop()
+  const parts = [...importerParts, ...specifier.split("/")]
+  const output: string[] = []
+
+  for (const part of parts) {
+    if (!part || part === ".") {
+      continue
+    }
+
+    if (part === "..") {
+      output.pop()
+      continue
+    }
+
+    output.push(part)
+  }
+
+  return output.join("/")
+}
 
 function hardenGeneratedReactAppFiles(files: GeneratedFile[]): GeneratedFile[] {
   const normalized = files.map((file) => {
@@ -2607,6 +2955,28 @@ function buildStrictFailSafeMessage(details: {
     `- Jumlah file akhir saat validasi: ${details.finalFileCount}`,
     "",
     "Saldo request ini sudah otomatis direfund. Coba prompt yang lebih spesifik atau ganti model.",
+  ].join("\n")
+}
+
+function buildGenerationQualityGateMessage(details: GenerationQualityGateResult) {
+  const issueText = details.issues.length > 0
+    ? details.issues.slice(0, 6).map((issue) => `- ${issue.file ? `${issue.file}: ` : ""}${issue.message}`).join("\n")
+    : "- Unknown generation quality failure"
+
+  return [
+    "Generation incomplete.",
+    "Attempting repair...",
+    "",
+    "Project failed safety validation after auto-repair, so preview was not started.",
+    "",
+    "Diagnostics:",
+    issueText,
+    "",
+    `Project completeness: ${details.scores.projectCompleteness}%`,
+    `Dependency health: ${details.scores.dependencyHealth}%`,
+    `Preview safety: ${details.scores.previewSafety}%`,
+    "",
+    "Saldo request ini sudah otomatis direfund. Coba ulang dengan prompt lebih kecil atau pilih tier Swift yang lebih kuat.",
   ].join("\n")
 }
 
