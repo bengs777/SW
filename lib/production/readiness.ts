@@ -37,7 +37,17 @@ export function getProductionReadiness() {
     check("OPENROUTER_BASE_URL", "OpenRouter compatible API base URL", env.openRouterBaseUrl, "recommended"),
     check("OPENROUTER_SITE_URL", "OpenRouter attribution site URL", env.openRouterSiteUrl, "recommended"),
     check("OPENROUTER_APP_NAME", "OpenRouter attribution app name", env.openRouterAppName, "recommended"),
-    check("REDIS_URL", "Redis/BullMQ queue URL", env.redisUrl, "required"),
+    check(
+      "REDIS_CONFIG",
+      "Redis queue protection config",
+      env.hasRedisConfig,
+      "required",
+      env.redisUrl
+        ? "TCP Redis configured"
+        : env.upstashRedisRestUrl && env.upstashRedisRestToken
+          ? "Upstash REST configured"
+          : "REDIS_URL or Upstash REST URL/token required"
+    ),
     check("SANDBOX_SERVICE_URL", "External sandbox runtime service URL", env.sandboxServiceUrl, "required"),
     check("SANDBOX_SERVICE_TOKEN", "External sandbox runtime bearer token", env.sandboxServiceToken, "required"),
     check("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", env.supabaseUrl, "required"),

@@ -32,10 +32,25 @@ const memoryDuplicates = new Set<string>()
 let redisClient: IORedis | null = null
 
 function getRedis() {
+  const hasRedisConfig =
+    !!env.redisUrl ||
+    (
+      !!env.upstashRedisRestUrl &&
+      !!env.upstashRedisRestToken
+    )
+
+  if (
+    env.nodeEnv === "production" &&
+    !hasRedisConfig
+  ) {
+    throw new SwiftQueueError(
+      "config",
+      "Redis configuration is required for production AI queue protection.",
+      500
+    )
+  }
+
   if (!env.redisUrl) {
-    if (env.nodeEnv === "production") {
-      throw new SwiftQueueError("config", "REDIS_URL is required for production AI queue protection.", 500)
-    }
     return null
   }
 

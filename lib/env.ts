@@ -67,6 +67,10 @@ const supabaseServiceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY")
 const supabaseStorageBucket = getEnv("SUPABASE_STORAGE_BUCKET")
 const sandboxServiceUrl = normalizeUrl(getEnv("SANDBOX_SERVICE_URL"))
 const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
+const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
+const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
+const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
+const hasRedisConfig = Boolean(redisUrl || (upstashRedisRestUrl && upstashRedisRestToken))
 const isServerRuntime = typeof window === "undefined"
 
 export const env = {
@@ -97,7 +101,10 @@ export const env = {
   supabaseUrl,
   supabaseStorageBucket,
   supabaseBucket: supabaseStorageBucket,
-  redisUrl: getEnv("REDIS_URL", "UPSTASH_REDIS_URL"),
+  redisUrl,
+  upstashRedisRestUrl,
+  upstashRedisRestToken,
+  hasRedisConfig,
   sandboxServiceUrl,
   sandboxServiceToken,
   sandboxPublicBaseUrl: normalizeUrl(getEnv("SANDBOX_PUBLIC_BASE_URL")),
@@ -136,7 +143,9 @@ export function getMissingProductionEnvVars() {
   }
   if (!env.supabaseServiceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY")
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
-  if (!env.redisUrl) missing.push("REDIS_URL")
+  if (!env.hasRedisConfig) {
+    missing.push("REDIS_URL or UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN")
+  }
   if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
 
