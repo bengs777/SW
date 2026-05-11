@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/client"
 import { getRuntimeModelOptions } from "@/lib/ai/runtime-models"
+import { LEGACY_SWIFT_2_MODEL_KEY, SWIFT_BUILDER_MODEL_KEY } from "@/lib/ai/model-tiers"
 
 export class ModelConfigService {
   static async ensureDefaults() {
@@ -59,10 +60,11 @@ export class ModelConfigService {
 
   static async getActiveModelByKey(key: string) {
     await this.ensureDefaults()
+    const normalizedKey = key === LEGACY_SWIFT_2_MODEL_KEY ? SWIFT_BUILDER_MODEL_KEY : key
 
     return prisma.modelConfig.findFirst({
       where: {
-        key,
+        key: normalizedKey,
         isActive: true,
       },
     })

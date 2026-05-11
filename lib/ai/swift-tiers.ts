@@ -1,10 +1,20 @@
 export const SWIFT_PROVIDER = "swift"
-export const SWIFT_2_MODEL_KEY = "swift-2"
-export const DEFAULT_SWIFT_TIER_KEY = SWIFT_2_MODEL_KEY
-export const DEEPSEEK_V4_FLASH_MODEL_ID = "deepseek/deepseek-v4-flash"
-export const DEEPSEEK_V4_FLASH_NITRO_MODEL_ID = "deepseek/deepseek-v4-flash:nitro"
+export const SWIFT_FAST_MODEL_KEY = "swift-fast"
+export const SWIFT_BUILDER_MODEL_KEY = "swift-builder"
+export const SWIFT_PREMIUM_REPAIR_MODEL_KEY = "swift-premium-repair"
+export const SWIFT_2_MODEL_KEY = SWIFT_BUILDER_MODEL_KEY
+export const DEFAULT_SWIFT_TIER_KEY = SWIFT_BUILDER_MODEL_KEY
+export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
-export type SwiftTierKey = typeof SWIFT_2_MODEL_KEY
+export const DEEPSEEK_V32_MODEL_ID =
+  process.env.OPENROUTER_DEEPSEEK_V32_MODEL || process.env.OPENROUTER_DEEPSEEK_V32_PRO_MODEL || "deepseek/deepseek-v3.2"
+export const DEEPSEEK_V32_PRO_MODEL_ID = DEEPSEEK_V32_MODEL_ID
+
+export type SwiftTierKey =
+  | typeof SWIFT_FAST_MODEL_KEY
+  | typeof SWIFT_BUILDER_MODEL_KEY
+  | typeof SWIFT_PREMIUM_REPAIR_MODEL_KEY
+  | typeof LEGACY_SWIFT_2_MODEL_KEY
 
 export type ProviderHealthStatus = "healthy" | "degraded" | "offline"
 export type ProviderFailureReason =
@@ -22,7 +32,7 @@ export type ProviderFailureReason =
 
 export type SwiftModelTarget = {
   modelId: string
-  role: "primary" | "fallback"
+  role: "primary"
   timeoutMs?: number
   maxOutputTokens?: number
 }
@@ -38,6 +48,8 @@ export type SwiftTierConfig = {
   timeoutMs: number
   maxOutputTokens: number
   rank: number
+  public: boolean
+  generationLayer: "fast" | "builder" | "premium-repair"
   targets: SwiftModelTarget[]
   queue: {
     concurrency: number
@@ -52,33 +64,86 @@ export const USER_FRIENDLY_QUEUE_OVERLOAD_ERROR =
   "Swift sedang ramai. Coba lagi sebentar lagi."
 
 export function getSwiftTierConfigs(): SwiftTierConfig[] {
+  const builderTier: SwiftTierConfig = {
+    key: SWIFT_BUILDER_MODEL_KEY,
+    label: "Swift Builder",
+    shortLabel: "Builder",
+    description: "Core engine untuk full-stack SaaS, dashboard, CRUD, Prisma, API route, dan arsitektur project.",
+    note: "Rute utama DeepSeek V3.2 untuk generasi full-stack yang butuh struktur stabil.",
+    priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || 22000),
+    price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || 22000),
+    timeoutMs: 120_000,
+    maxOutputTokens: 9000,
+    rank: 2,
+    public: true,
+    generationLayer: "builder",
+    queue: { concurrency: 3, maxQueueDepth: 36 },
+    targets: [
+      { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 95_000, maxOutputTokens: 8500 },
+    ],
+  }
+
   return [
     {
-      key: SWIFT_2_MODEL_KEY,
+      key: SWIFT_FAST_MODEL_KEY,
+      label: "Swift Fast",
+      shortLabel: "Fast",
+      description: "Murah dan cepat untuk UI kecil, landing page, copywriting, komponen, formatting, dan edit ringan.",
+      note: "Tidak dipakai untuk repair otonom, dependency debugging, atau refactor besar.",
+      priceIdr: Number(process.env.SWIFT_FAST_PRICE_IDR || 4000),
+      price: Number(process.env.SWIFT_FAST_PRICE_IDR || 4000),
+      timeoutMs: 75_000,
+      maxOutputTokens: 4500,
+      rank: 1,
+      public: true,
+      generationLayer: "fast",
+      queue: { concurrency: 6, maxQueueDepth: 64 },
+      targets: [
+        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 75_000, maxOutputTokens: 4500 },
+      ],
+    },
+    builderTier,
+    {
+      ...builderTier,
+      key: LEGACY_SWIFT_2_MODEL_KEY,
       label: "Swift AI",
       shortLabel: "Swift",
-      description: "AI utama Swift untuk chat, generate, debug, dan build fullstack.",
-      note: "Satu-satunya AI aktif di Swift.",
-      priceIdr: 4000,
-      price: 4000,
-      timeoutMs: 95_000,
-      maxOutputTokens: 6000,
-      rank: 1,
-      queue: { concurrency: 4, maxQueueDepth: 50 },
+      description: "Legacy alias yang diarahkan ke Swift Builder agar request lama tetap berjalan.",
+      note: "Alias kompatibilitas. Request baru otomatis dirutekan ke Swift Fast atau Swift Builder sesuai kompleksitas.",
+      priceIdr: builderTier.priceIdr,
+      price: builderTier.price,
+      rank: 99,
+      public: false,
+    },
+    {
+      key: SWIFT_PREMIUM_REPAIR_MODEL_KEY,
+      label: "Swift Premium Repair",
+      shortLabel: "Premium Repair",
+      description: "Repair runtime premium untuk crash berulang, dependency graph rusak, dan build error persisten.",
+      note: "Hanya untuk eskalasi repair. Tidak pernah menjadi default generasi.",
+      priceIdr: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || 75000),
+      price: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || 75000),
+      timeoutMs: 150_000,
+      maxOutputTokens: 9000,
+      rank: 100,
+      public: false,
+      generationLayer: "premium-repair",
+      queue: { concurrency: 1, maxQueueDepth: 12 },
       targets: [
-        { modelId: DEEPSEEK_V4_FLASH_MODEL_ID, role: "primary", timeoutMs: 35_000, maxOutputTokens: 4500 },
-        { modelId: DEEPSEEK_V4_FLASH_NITRO_MODEL_ID, role: "fallback", timeoutMs: 95_000, maxOutputTokens: 6000 },
+        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 120_000, maxOutputTokens: 9000 },
       ],
     },
   ]
 }
 
 export function getSwiftTierConfig(key: string | null | undefined) {
-  return getSwiftTierConfigs().find((tier) => tier.key === key) || null
+  const normalizedKey = key === LEGACY_SWIFT_2_MODEL_KEY ? SWIFT_BUILDER_MODEL_KEY : key
+  return getSwiftTierConfigs().find((tier) => tier.key === normalizedKey) || null
 }
 
 export function isSwiftTierKey(key: string | null | undefined): key is SwiftTierKey {
-  return Boolean(key && getSwiftTierConfig(key))
+  if (!key) return false
+  return Boolean(getSwiftTierConfig(key))
 }
 
 export function getDefaultSwiftTier() {
@@ -90,24 +155,22 @@ export function hasOpenRouterGatewayKey() {
 }
 
 export function getSwiftTierOptions() {
-  return getSwiftTierConfigs().map((tier) => ({
-    key: tier.key,
-    label: tier.label,
-    provider: SWIFT_PROVIDER,
-    modelName: tier.key,
-    price: tier.priceIdr,
-    priceIdr: tier.priceIdr,
-    isActive: true,
-    rank: tier.rank,
-    description: tier.description,
-    note: tier.note,
-  }))
+  return getSwiftTierConfigs()
+    .filter((tier) => tier.public)
+    .map((tier) => ({
+      key: tier.key,
+      label: tier.label,
+      provider: SWIFT_PROVIDER,
+      modelName: tier.key,
+      price: tier.priceIdr,
+      priceIdr: tier.priceIdr,
+      isActive: true,
+      rank: tier.rank,
+      description: tier.description,
+      note: tier.note,
+    }))
 }
 
-/**
- * Maps the internal DeepSeek V4 Flash model ID to its Swift tier key.
- * Used to sanitize public API responses so they never expose provider names or internal model IDs.
- */
 export function mapModelIdToTierKey(modelId: string): string | null {
   const configs = getSwiftTierConfigs()
   for (const tier of configs) {
@@ -120,10 +183,6 @@ export function mapModelIdToTierKey(modelId: string): string | null {
   return null
 }
 
-/**
- * Returns the public-facing provider name for all Swift tiers.
- * This should always be "swift" - never expose OpenRouter or underlying providers.
- */
 export function getPublicProviderName(): string {
   return SWIFT_PROVIDER
 }

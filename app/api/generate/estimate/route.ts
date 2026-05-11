@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/client"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import type { PromptAttachment } from "@/lib/types"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
+import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
 import { z } from "zod"
 
 const MAX_PROMPT_LENGTH = 12000
@@ -48,6 +49,11 @@ export async function POST(request: NextRequest) {
     const attachments = normalizeAttachments(body.attachments)
     const promptWithAttachments = appendAttachmentsToPrompt(prompt, attachments)
     const selectedModel = body.selectedModel.trim()
+    const routingDecision = routeModelForRequest({
+      prompt: promptWithAttachments,
+      purpose: "generate",
+      attachmentCount: attachments.length,
+    })
 
     if (promptWithAttachments.length > MAX_PROMPT_LENGTH) {
       return NextResponse.json(
@@ -61,7 +67,7 @@ export async function POST(request: NextRequest) {
     }
 
     const [modelConfig, user] = await Promise.all([
-      ModelConfigService.getActiveModelByKey(selectedModel),
+      ModelConfigService.getActiveModelByKey(routingDecision.modelName),
       prisma.user.findUnique({
         where: { email },
         select: { balance: true },
@@ -87,9 +93,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       model: modelConfig.key,
       provider: "swift",
+      requestedModel: selectedModel,
+      routing: {
+        classification: routingDecision.classification,
+        layer: routingDecision.layer,
+        reason: routingDecision.reason,
+      },
       estimatedCost,
+      estimatedRawCost: pricing.estimatedRawCost,
+      profitMultiplier: pricing.profitMultiplier,
       minimumCharge: pricing.minimumCharge,
-      pricingMode: "fixed",
+      pricingMode: pricing.pricingMode,
       currentBalance: user.balance,
       remainingBalance,
       canAfford: remainingBalance >= 0,

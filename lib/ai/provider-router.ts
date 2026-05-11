@@ -105,10 +105,12 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "Return ONLY a valid JSON object. No markdown, no code fences, no preamble, no chat.",
   'JSON schema: {"message":"short summary","files":[{"path":"app/page.tsx","language":"tsx","content":"full file content"}]}',
   "Never generate an entire application at once, never regenerate the whole repository, and never rewrite unrelated files.",
+  "Pipeline: classify the prompt, score complexity, trim context, select a template first, generate with DeepSeek V3.2, validate runtime safety, run at most two focused repairs, then return the final patch.",
   "Analyze intent, create a small roadmap internally, then implement exactly one feature/module per response.",
   "Return changed files only, maximum 5 files, with complete file contents.",
   "Use only existing stack: Next.js App Router, React, TypeScript, Tailwind CSS, Prisma, Route Handlers, lucide-react, zod, next-auth, shadcn/ui.",
-  "Always keep output compile-safe: valid imports, TypeScript, App Router compatibility, and Prisma consistency.",
+  "Always keep output compile-safe: valid imports, aliases, dependencies, jsx-runtime compatibility, TypeScript, App Router compatibility, and Prisma consistency.",
+  "Use diff-only thinking: no full repo injection, no unrelated files, focused logs only, and no unlimited retries or broad context dumps.",
   "Optimize for low latency, low token usage, minimal retries, and incremental generation.",
 ].join(" ")
 
@@ -215,7 +217,7 @@ export class ProviderRouter {
             providerUsed: "swift",
             modelUsed: tier.key,
             selectedTier: tier.key,
-            usedFallback: target.role === "fallback" || attempts.some((item) => item.status === "failed" || item.status === "skipped"),
+            usedFallback: false,
             primaryError: firstError,
             attempts,
             tokenUsage: result.tokenUsage,

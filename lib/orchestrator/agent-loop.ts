@@ -40,8 +40,13 @@ export async function executePlan(
         if (task.type === "ai:generate") {
           const model = opts.provider && opts.modelName
             ? { provider: opts.provider, modelName: opts.modelName }
-            : chooseModelForTask("generate")
-          const ctx = buildContextForTask({ prompt: payloadPrompt(task, plan.prompt), files: contextFiles, maxFiles: 8 })
+            : chooseModelForTask("generate", { prompt: payloadPrompt(task, plan.prompt), existingFiles: contextFiles })
+          const ctx = buildContextForTask({
+            prompt: payloadPrompt(task, plan.prompt),
+            files: contextFiles,
+            maxFiles: 8,
+            layer: "decision" in model && model.decision ? model.decision.layer : "builder",
+          })
 
           const providerResp = await ProviderRouter.generate({
             provider: model.provider as ProviderName,

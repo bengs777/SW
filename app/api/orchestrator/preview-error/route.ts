@@ -9,6 +9,7 @@ import { extractGeneratedFilesFromProviderMessage } from "@/lib/ai/provider-outp
 import { enforceUserRateLimit } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 import * as Executor from "@/lib/orchestrator/executor"
+import { MAX_AUTOMATIC_REPAIR_ATTEMPTS, routeModelForRequest } from "@/lib/ai/generation-pipeline"
 
 export const runtime = "nodejs"
 
@@ -19,6 +20,8 @@ type RepairAttempt = {
   reason?: string
   parseMode?: string
   applied?: string[]
+  model?: string
+  layer?: string
 }
 
 const MAX_MESSAGE_LENGTH = 4000
@@ -153,10 +156,23 @@ export async function POST(req: NextRequest) {
     const activeFile = contextFiles.find((f) => f.path === file) || null
     const inspectContext = buildContextForTask({ prompt: message + "\n\nStack:\n" + stack, files: contextFiles, activeFile })
 
-    // Agent loop: try up to 3 inspect attempts
+    // Agent loop: two automatic attempts max. Premium repair is returned as
+    // an escalation option so expensive models are never used by default.
     const attempts: RepairAttempt[] = []
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const modelChoice = chooseModelForTask("inspect")
+    for (let attempt = 0; attempt < MAX_AUTOMATIC_REPAIR_ATTEMPTS; attempt += 1) {
+      const routeDecision = routeModelForRequest({
+        prompt: `${message}\n${stack}`,
+        purpose: "repair",
+        existingFiles: contextFiles,
+        previewError: message,
+        repairAttempt: attempt,
+      })
+      const modelChoice = chooseModelForTask("repair", {
+        prompt: `${message}\n${stack}`,
+        existingFiles: contextFiles,
+        previewError: message,
+        repairAttempt: attempt,
+      })
 
       const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nRespond ONLY with a valid JSON array of files to PATCH. Each entry must be an object: {"path":"app/page.tsx","content":"<full file content>"}. No explanation, no markdown, no extra text.`
 
@@ -171,38 +187,84 @@ export async function POST(req: NextRequest) {
           mode: "inspect",
         })
       } catch (err: unknown) {
-        attempts.push({ attempt, ok: false, error: getErrorMessage(err) })
-        break
+        attempts.push({
+          attempt,
+          ok: false,
+          error: getErrorMessage(err),
+          model: routeDecision.modelName,
+          layer: routeDecision.layer,
+        })
+        continue
       }
 
       const parsed = extractGeneratedFilesFromProviderMessage(providerResp.message)
       if (!parsed.files || parsed.files.length === 0) {
-        attempts.push({ attempt, ok: false, reason: 'no_files_parsed', parseMode: parsed.parseMode })
-        break
+        attempts.push({
+          attempt,
+          ok: false,
+          reason: "no_files_parsed",
+          parseMode: parsed.parseMode,
+          model: routeDecision.modelName,
+          layer: routeDecision.layer,
+        })
+        continue
       }
 
       try {
         await Executor.applyFiles(projectId, `preview-inspect:${attempt}`, parsed.files)
-        attempts.push({ attempt, ok: true, applied: parsed.files.map((f) => f.path) })
-      } catch (err: unknown) {
-        attempts.push({ attempt, ok: false, error: getErrorMessage(err) })
+        attempts.push({
+          attempt,
+          ok: true,
+          applied: parsed.files.map((f) => f.path),
+          model: routeDecision.modelName,
+          layer: routeDecision.layer,
+        })
         break
+      } catch (err: unknown) {
+        attempts.push({
+          attempt,
+          ok: false,
+          error: getErrorMessage(err),
+          model: routeDecision.modelName,
+          layer: routeDecision.layer,
+        })
+        continue
       }
-
-      // If we applied patches, let the client reload preview and re-report if error persists.
-      // Continue loop to allow up to 3 sequential repair attempts without client involvement.
     }
+    const premiumEscalation = attempts.some((attempt) => attempt.ok)
+      ? null
+      : routeModelForRequest({
+          prompt: `${message}\n${stack}`,
+          purpose: "repair",
+          existingFiles: contextFiles,
+          previewError: message,
+          repairAttempt: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
+          allowPremiumEscalation: true,
+        })
 
     log("info", "preview-error repair completed", {
       userId,
       projectId,
       role: access.role,
       attempts: attempts.length,
+      maxAutomaticRepairAttempts: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
+      premiumEscalationSuggested: Boolean(premiumEscalation),
       appliedFiles: attempts.flatMap((attempt) => attempt.applied ?? []).length,
       latencyMs: Date.now() - startedAt,
     })
 
-    return NextResponse.json({ success: true, attempts })
+    return NextResponse.json({
+      success: true,
+      attempts,
+      maxAutomaticRepairAttempts: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
+      premiumEscalation: premiumEscalation
+        ? {
+            model: premiumEscalation.modelName,
+            layer: premiumEscalation.layer,
+            reason: premiumEscalation.reason,
+          }
+        : null,
+    })
   } catch (err: unknown) {
     log("error", "preview-error failed", { userId, error: getErrorMessage(err) })
     return NextResponse.json({ success: false, error: getErrorMessage(err) }, { status: 500 })

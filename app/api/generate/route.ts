@@ -25,6 +25,7 @@ import { USER_FRIENDLY_AI_ENGINE_ERROR, getSwiftTierConfig } from "@/lib/ai/mode
 import { SwiftQueueError, acquireSwiftQueueSlot } from "@/lib/ai/queue"
 import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
+import { classifyPrompt, normalizeGeneratedDependencies, routeModelForRequest } from "@/lib/ai/generation-pipeline"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -1093,6 +1094,7 @@ export async function POST(request: NextRequest) {
       idempotencyKey,
       jobId,
       previewContextFromClient,
+      attachments,
       promptWithAttachments,
     } = parsedRequest
     activeJobId = jobId
@@ -1130,10 +1132,29 @@ export async function POST(request: NextRequest) {
     }
 
     const { existingFiles, promptIntent, promptWithPreviewContext } = executionContext
+    const routingPurpose =
+      promptIntent.mode === "inspect"
+        ? "inspect"
+        : collaborationMode === "fix"
+          ? "repair"
+          : "generate"
+    const routingClassification = classifyPrompt(prompt, {
+      collaborationMode,
+      previewError: previewContextFromClient?.previewError?.message || null,
+      existingFiles,
+    })
+    const routingDecision = routeModelForRequest({
+      prompt: promptWithPreviewContext,
+      purpose: routingPurpose,
+      classification: routingClassification,
+      existingFiles,
+      previewError: previewContextFromClient?.previewError?.message || null,
+      attachmentCount: attachments.length,
+    })
 
     await enforceAiUsageRateLimit(user.id)
 
-    const generationModel = await resolveGenerationModel(selectedModel)
+    const generationModel = await resolveGenerationModel(routingDecision.modelName)
     if ("error" in generationModel) {
       await GenerationJobService.markFailed(jobId, "Selected model is not available")
       return generationModel.error
@@ -1278,6 +1299,8 @@ export async function POST(request: NextRequest) {
             usageLogId: usageLog.id,
             userId: user.id,
             selectedTier: modelConfig.key,
+            requestedTier: selectedModel,
+            routing: routingDecision,
             providerUsed: chatResult.providerUsed,
             providerModelUsed: chatResult.modelUsed,
             creditStatus: "captured",
@@ -1304,6 +1327,12 @@ export async function POST(request: NextRequest) {
             billedProvider: "swift",
             cost: requestCost,
             remainingBalance: user.balance - requestCost,
+            routing: {
+              requestedModel: selectedModel,
+              selectedModel: modelConfig.key,
+              classification: routingDecision.classification,
+              layer: routingDecision.layer,
+            },
           },
         })
       }
@@ -1342,6 +1371,8 @@ export async function POST(request: NextRequest) {
             usageLogId: usageLog.id,
             userId: user.id,
             selectedTier: modelConfig.key,
+            requestedTier: selectedModel,
+            routing: routingDecision,
             providerUsed: clarificationResult.providerUsed,
             providerModelUsed: clarificationResult.modelUsed,
             creditStatus: "captured",
@@ -1369,6 +1400,12 @@ export async function POST(request: NextRequest) {
             billedProvider: "swift",
             cost: requestCost,
             remainingBalance: user.balance - requestCost,
+            routing: {
+              requestedModel: selectedModel,
+              selectedModel: modelConfig.key,
+              classification: routingDecision.classification,
+              layer: routingDecision.layer,
+            },
           },
         })
       }
@@ -1484,6 +1521,8 @@ export async function POST(request: NextRequest) {
             usageLogId: usageLog.id,
             userId: user.id,
             selectedTier: modelConfig.key,
+            requestedTier: selectedModel,
+            routing: routingDecision,
             creditStatus: "refunded",
             billingStatus: "refunded",
             amountIdr: requestCost,
@@ -1527,6 +1566,8 @@ export async function POST(request: NextRequest) {
         log("warn", "Parser failed to detect files, running aggressive recovery retry", {
           projectId: project.id,
           selectedModel: modelConfig.key,
+          requestedModel: selectedModel,
+          routing: routingDecision,
           providerUsed: result.providerUsed,
           modelUsed: result.modelUsed,
           retryAction: classifyGenerationFailure({
@@ -1619,6 +1660,8 @@ export async function POST(request: NextRequest) {
       }
 
       generatedFiles = hardenGeneratedReactAppFiles(generatedFiles)
+      const dependencyNormalization = normalizeGeneratedDependencies(generatedFiles)
+      generatedFiles = dependencyNormalization.files
       const validationAfterRepair = validateFullStackFiles(generatedFiles)
       const qualityAfterRepair = validateGenerationQualityGate(generatedFiles, "expansion")
 
@@ -1631,6 +1674,8 @@ export async function POST(request: NextRequest) {
         log("warn", "Generation quality gate failed after repair", {
           projectId: project.id,
           selectedModel: modelConfig.key,
+          requestedModel: selectedModel,
+          routing: routingDecision,
           issues: qualityAfterRepair.issues,
           scores: qualityAfterRepair.scores,
           qualityBeforeRepair,
@@ -1660,6 +1705,8 @@ export async function POST(request: NextRequest) {
       log("info", "Generation output assembled", {
         projectId: project.id,
         selectedModel: modelConfig.key,
+        requestedModel: selectedModel,
+        routing: routingDecision,
         providerUsed: result.providerUsed,
         providerModelUsed: result.modelUsed,
         existingFileCount: existingFiles.length,
@@ -1668,6 +1715,11 @@ export async function POST(request: NextRequest) {
         missingBeforeRepair: validationBeforeRepair.missingCategories,
         missingAfterRepair: validationAfterRepair.missingCategories,
         autoRepairAddedFiles: repairResult.addedFiles.map((file) => file.path),
+        dependencyNormalization: {
+          addedPackages: dependencyNormalization.addedPackages,
+          normalizedPackages: dependencyNormalization.normalizedPackages,
+          conflictsPrevented: dependencyNormalization.conflictsPrevented,
+        },
         generationQuality: qualityAfterRepair.scores,
         generationQualityIssues: qualityAfterRepair.issues,
         promptProfile,
@@ -1688,10 +1740,7 @@ export async function POST(request: NextRequest) {
       const baseResponseMessage = promptEnhancement.usedEnhancement
         ? `${providerAssemblyMessage}\n\nPrompt user sudah diperjelas lebih dulu dengan ${sourceList}. Ringkasan brief: ${promptEnhancement.summary}`
         : providerAssemblyMessage
-      const fallbackNote = result.usedFallback
-        ? `\n\nCatatan: layanan utama ${SWIFT_AI_DISPLAY_NAME} sempat gagal merespons, jadi request otomatis dialihkan ke jalur cadangan ${SWIFT_AI_DISPLAY_NAME}.`
-        : ""
-      const responseMessage = `${baseResponseMessage}${fallbackNote}`
+      const responseMessage = baseResponseMessage
 
       // Create a preview-safe copy of files: replace frontend files that contain
       // async/top-level await or Promise usage with a lightweight preview fallback
@@ -1732,6 +1781,8 @@ export async function POST(request: NextRequest) {
           usageLogId: usageLog.id,
           userId: user.id,
           selectedTier: modelConfig.key,
+          requestedTier: selectedModel,
+          routing: routingDecision,
           providerUsed: result.providerUsed,
           providerModelUsed: result.modelUsed,
           creditStatus: "captured",
@@ -1748,6 +1799,7 @@ export async function POST(request: NextRequest) {
           providerFileCount: providerParsed.files.length,
           fileDiff: savedGeneration.fileDiff,
           parseMode: providerParsed.parseMode,
+          dependencyNormalization,
           relevanceScore: relevanceReport.score,
           recoveryRetryUsed,
           recoveryRetrySucceeded,
@@ -1782,6 +1834,12 @@ export async function POST(request: NextRequest) {
           billedProvider: "swift",
           cost: requestCost,
           remainingBalance: user.balance - requestCost,
+          routing: {
+            requestedModel: selectedModel,
+            selectedModel: modelConfig.key,
+            classification: routingDecision.classification,
+            layer: routingDecision.layer,
+          },
         },
       })
     } catch (error) {
@@ -1843,6 +1901,8 @@ export async function POST(request: NextRequest) {
           usageLogId: usageLog.id,
           userId: user.id,
           selectedTier: modelConfig.key,
+          requestedTier: selectedModel,
+          routing: routingDecision,
           providerUsed: lastFailedAttempt?.provider || null,
           failureReason: lastFailedAttempt?.failureReason || null,
           creditStatus: "refunded",
@@ -1975,7 +2035,8 @@ const RETRY_BUDGET_BY_PROFILE: Record<PromptProfile, { maxCheapRetries: number; 
 }
 
 function getPromptProfileForTier(tierKey: string): PromptProfile {
-  void tierKey
+  if (tierKey === "swift-fast") return "lightweight"
+  if (tierKey === "swift-premium-repair") return "advanced"
   return "balanced"
 }
 

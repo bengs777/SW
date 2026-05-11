@@ -578,7 +578,7 @@ export default function EditorPage() {
         status: "slow",
         issue: "latency",
         reason: "Swift AI engine timeout",
-        action: "Coba lagi nanti. Sistem otomatis mencoba engine cadangan sebelum request dianggap gagal.",
+        action: "Coba lagi nanti dengan prompt lebih fokus. Swift membatasi retry agar biaya tetap terkendali.",
         checkedAt: new Date().toISOString(),
       }
     }
