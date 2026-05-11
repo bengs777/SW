@@ -62,6 +62,7 @@ type GenerationQualityGateIssue = {
 
 type GenerationQualityGateResult = {
   ok: boolean
+  stage: GenerationStage
   issues: GenerationQualityGateIssue[]
   scores: {
     projectCompleteness: number
@@ -1363,7 +1364,7 @@ export async function POST(request: NextRequest) {
         providerMessage: null,
         promptSummary: promptEnhancement.summary,
       })
-      const scaffoldQuality = validateGenerationQualityGate(scaffold.files)
+      const scaffoldQuality = validateGenerationQualityGate(scaffold.files, "scaffold")
       if (!scaffoldQuality.ok) {
         throw new GenerationQualityGateError(scaffoldQuality)
       }
@@ -1500,7 +1501,7 @@ export async function POST(request: NextRequest) {
         throw new Error("AI_OUTPUT_HAS_NO_FILES")
       }
 
-      const qualityBeforeRepair = validateGenerationQualityGate(generatedFiles)
+      const qualityBeforeRepair = validateGenerationQualityGate(generatedFiles, generationStage)
       const validationBeforeRepair = validateFullStackFiles(generatedFiles)
       const repairResult = autoRepairFullStackFiles(generatedFiles, scaffold.files)
       generatedFiles = repairResult.files
@@ -1521,7 +1522,7 @@ export async function POST(request: NextRequest) {
 
       generatedFiles = hardenGeneratedReactAppFiles(generatedFiles)
       const validationAfterRepair = validateFullStackFiles(generatedFiles)
-      const qualityAfterRepair = validateGenerationQualityGate(generatedFiles)
+      const qualityAfterRepair = validateGenerationQualityGate(generatedFiles, "expansion")
 
       if (!qualityAfterRepair.ok) {
         const retryAction = classifyGenerationFailure({
@@ -1769,6 +1770,13 @@ export async function POST(request: NextRequest) {
         },
         refunded: true,
         warning: friendlyMessage,
+        errorCode: isQualityGateError
+          ? "GENERATION_INCOMPLETE_REPAIRING"
+          : isStrictFullStackError
+            ? "PROJECT_SAFETY_VALIDATION_FAILED"
+            : isRelevanceError
+              ? "PROJECT_RELEVANCE_VALIDATION_FAILED"
+              : "GENERATION_FAILED",
         ...(isStrictFullStackError
           ? {
               failSafe: {
@@ -1887,7 +1895,7 @@ function classifyGenerationFailure(input: {
   return "unknown"
 }
 
-function validateGenerationQualityGate(files: GeneratedFile[]): GenerationQualityGateResult {
+function validateGenerationQualityGate(files: GeneratedFile[], stage: GenerationStage = "expansion"): GenerationQualityGateResult {
   const normalizedFiles = files.map((file) => ({
     ...file,
     path: normalizeGeneratedPath(file.path),
@@ -1917,6 +1925,7 @@ function validateGenerationQualityGate(files: GeneratedFile[]): GenerationQualit
   let syntaxPassed = 0
   let importChecked = 0
   let importPassed = 0
+  const shouldValidateImports = stage !== "scaffold"
 
   for (const file of normalizedFiles) {
     if (!GENERATION_CODE_FILE_PATTERN.test(file.path)) {
@@ -1935,20 +1944,22 @@ function validateGenerationQualityGate(files: GeneratedFile[]): GenerationQualit
       })
     }
 
-    for (const specifier of collectStaticImportSpecifiers(file.content)) {
-      if (!isLocalGenerationImport(specifier)) {
-        continue
-      }
+    if (shouldValidateImports) {
+      for (const specifier of collectStaticImportSpecifiers(file.content)) {
+        if (!isLocalGenerationImport(specifier)) {
+          continue
+        }
 
-      importChecked += 1
-      if (resolveGeneratedImport(specifier, file.path, byPath)) {
-        importPassed += 1
-      } else {
-        issues.push({
-          code: "unresolved_import",
-          file: file.path,
-          message: `Unable to resolve local import "${specifier}".`,
-        })
+        importChecked += 1
+        if (resolveGeneratedImport(specifier, file.path, byPath)) {
+          importPassed += 1
+        } else {
+          issues.push({
+            code: "unresolved_import",
+            file: file.path,
+            message: `Unable to resolve local import "${specifier}".`,
+          })
+        }
       }
     }
   }
@@ -1960,6 +1971,7 @@ function validateGenerationQualityGate(files: GeneratedFile[]): GenerationQualit
 
   return {
     ok: issues.length === 0,
+    stage,
     issues,
     scores: {
       projectCompleteness,
@@ -2970,6 +2982,7 @@ function buildGenerationQualityGateMessage(details: GenerationQualityGateResult)
     "Project failed safety validation after auto-repair, so preview was not started.",
     "",
     "Diagnostics:",
+    `- Validation stage: ${details.stage}`,
     issueText,
     "",
     `Project completeness: ${details.scores.projectCompleteness}%`,

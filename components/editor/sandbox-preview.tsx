@@ -470,16 +470,40 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     }
   }
 
-  function assertNoStaleErrorBoundary(path, code, phase){
+  function hasStaleErrorBoundary(code){
     var source = String(code || '');
-    if(
+    return (
       /\\bfunction\\s+ErrorBoundary\\b/.test(source) ||
       /\\bconst\\s+ErrorBoundary\\b/.test(source) ||
       /\\bvar\\s+ErrorBoundary\\b/.test(source) ||
       /\\blet\\s+ErrorBoundary\\b/.test(source) ||
       /\\bclass\\s+ErrorBoundary\\b/.test(source) ||
       /from\\s+["'][^"']*error-boundary[^"']*["']/.test(source)
-    ){
+    );
+  }
+
+  function rewriteStaleErrorBoundaryReferences(path, code, phase){
+    if(!hasStaleErrorBoundary(code)) return code;
+    emitTelemetry('runtime.stale_error_boundary_repair', {
+      path: path,
+      phase: phase || 'runtime-repair',
+      action: 'rewrite-to-swift-safe-boundary'
+    });
+    var source = String(code || '');
+    source = source.replace(/^\\s*import\\s+[\\s\\S]*?\\bErrorBoundary\\b[\\s\\S]*?from\\s+["'][^"']+["'];?\\s*$/gm, "");
+    source = source.replace(/^\\s*import\\s+[\\s\\S]*?from\\s+["'][^"']*error-boundary[^"']*["'];?\\s*$/gim, "");
+    source = source.replace(/^\\s*export\\s+\\{[\\s\\S]*?\\bErrorBoundary\\b[\\s\\S]*?\\}\\s+from\\s+["'][^"']+["'];?\\s*$/gm, "");
+    source = source.replace(/^\\s*export\\s+\\*?\\s*from\\s+["'][^"']*error-boundary[^"']*["'];?\\s*$/gim, "");
+    source = source.replace(/\\bErrorBoundary\\b/g, "SwiftSafeErrorBoundary");
+    source = source.replace(/SwiftSafeSwiftSafeErrorBoundary/g, "SwiftSafeErrorBoundary");
+    if(source.indexOf('SwiftSafeErrorBoundary') >= 0 && source.indexOf('@/components/swift-safe-error-boundary') < 0){
+      source = 'import { SwiftSafeErrorBoundary } from "@/components/swift-safe-error-boundary";\\n' + source;
+    }
+    return source;
+  }
+
+  function assertNoStaleErrorBoundary(path, code, phase){
+    if(hasStaleErrorBoundary(code)){
       emitTelemetry('runtime.stale_error_boundary_detected', {
         path: path,
         phase: phase || 'runtime-validation'
@@ -578,11 +602,23 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     var paths = Object.keys(__compiledModules);
     for(var i=0;i<paths.length;i++){
       assertNoUnresolvedAlias(paths[i], __compiledModules[paths[i]], 'pre-transform');
-      assertNoStaleErrorBoundary(paths[i], __compiledModules[paths[i]], 'pre-transform');
+      if(hasStaleErrorBoundary(__compiledModules[paths[i]])){
+        emitTelemetry('runtime.stale_error_boundary_warning', {
+          path: paths[i],
+          phase: 'pre-transform',
+          action: 'will-attempt-rewrite'
+        });
+      }
     }
     for(var shim in __shimModules){
       assertNoUnresolvedAlias('shim:' + shim, __shimModules[shim], 'pre-transform');
-      assertNoStaleErrorBoundary('shim:' + shim, __shimModules[shim], 'pre-transform');
+      if(hasStaleErrorBoundary(__shimModules[shim])){
+        emitTelemetry('runtime.stale_error_boundary_warning', {
+          path: 'shim:' + shim,
+          phase: 'pre-transform',
+          action: 'will-attempt-rewrite'
+        });
+      }
     }
   }
 
@@ -605,6 +641,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
       return null;
     }
     assertNoUnresolvedAlias(path, content, 'pre-transform');
+    content = rewriteStaleErrorBoundaryReferences(path, content, 'pre-transform');
 
     try{
       var result = Babel.transform(content, {
@@ -620,9 +657,9 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         }
       });
       assertNoUnresolvedAlias(path, result.code, 'post-babel');
-      assertNoStaleErrorBoundary(path, result.code, 'post-babel');
-      __cache[path] = result.code;
-      return result.code;
+      var repairedCode = rewriteStaleErrorBoundaryReferences(path, result.code, 'post-babel');
+      __cache[path] = repairedCode;
+      return repairedCode;
     }catch(e){
       throw new Error('Compile error in '+path+': '+e.message);
     }
@@ -643,6 +680,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     }
 
     code = linkLocalVirtualImports(path, code);
+    code = rewriteStaleErrorBoundaryReferences(path, code, 'pre-blob');
     assertNoUnresolvedAlias(path, code, 'pre-blob');
     assertNoStaleErrorBoundary(path, code, 'pre-blob');
     console.log('FINAL_EXECUTED_MODULE', path);
@@ -688,6 +726,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   function createShimModule(specifier, code){
     if(__blobMap[specifier]) return __blobMap[specifier];
     assertNoUnresolvedAlias('shim:' + specifier, code, 'pre-blob');
+    code = rewriteStaleErrorBoundaryReferences('shim:' + specifier, code, 'pre-blob');
     assertNoStaleErrorBoundary('shim:' + specifier, code, 'pre-blob');
     var blob = new Blob([code], {type:'text/javascript'});
     var url = URL.createObjectURL(blob);
