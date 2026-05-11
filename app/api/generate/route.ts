@@ -1702,13 +1702,21 @@ const SWIFT_SAFE_ERROR_BOUNDARY_PATH = "components/swift-safe-error-boundary.tsx
 
 function hardenGeneratedReactAppFiles(files: GeneratedFile[]): GeneratedFile[] {
   const normalized = files.map((file) => {
+    if (normalizeGeneratedPath(file.path) === SWIFT_SAFE_ERROR_BOUNDARY_PATH) {
+      return {
+        ...file,
+        content: buildSwiftSafeErrorBoundaryModuleWithAliases(),
+      }
+    }
+
     if (!isGeneratedReactFile(file.path)) {
       return file
     }
 
     const originalContent = String(file.content || "")
+    const hasGeneratedBoundary = isGeneratedErrorBoundaryFile(file.path) || containsGeneratedErrorBoundary(originalContent)
     const withoutInvalidMutations = removeInvalidReactObjectMutations(originalContent)
-    const safeContent = shouldReplaceGeneratedErrorBoundary(file.path, withoutInvalidMutations)
+    const safeContent = hasGeneratedBoundary
       ? buildSwiftSafeErrorBoundaryModuleWithAliases()
       : hasInvalidReactObjectMutation(withoutInvalidMutations)
         ? buildUnsafeReactFallbackModule(file.path, "Removed invalid React object mutation that could crash preview rendering.", originalContent)
@@ -1760,13 +1768,21 @@ function isGeneratedReactPage(path: string) {
   return GENERATED_REACT_PAGE_PATTERN.test(normalizeGeneratedPath(path))
 }
 
-function shouldReplaceGeneratedErrorBoundary(path: string, content: string) {
+function isGeneratedErrorBoundaryFile(path: string) {
   const normalizedPath = normalizeGeneratedPath(path).toLowerCase()
   return (
     normalizedPath.includes("error-boundary") ||
     normalizedPath.endsWith("/error.tsx") ||
-    /\b(getDerivedStateFromError|componentDidCatch|ErrorBoundary)\b/.test(content)
-  ) && hasInvalidReactObjectMutation(content)
+    normalizedPath.endsWith("/error.jsx")
+  )
+}
+
+function containsGeneratedErrorBoundary(content: string) {
+  const source = String(content || "")
+  const mentionsBoundary = /\bErrorBoundary\b/.test(source)
+  return /\b(function|const|let|var|class)\s+ErrorBoundary\b/.test(source) ||
+    /\b(getDerivedStateFromError|componentDidCatch)\b/.test(source) ||
+    (mentionsBoundary && /\bthis\.props\b/.test(source))
 }
 
 function hasInvalidReactObjectMutation(content: string) {
@@ -1890,7 +1906,7 @@ function extractGeneratedComponentExportNames(content: string) {
 }
 
 function buildSwiftSafeErrorBoundaryModule() {
-  return `"use client"\n\nimport React from "react"\n\ntype SwiftSafeErrorBoundaryProps = {\n  children: React.ReactNode\n  fallback?: React.ReactNode\n}\n\ntype SwiftSafeErrorBoundaryState = {\n  hasError: boolean\n  message: string\n}\n\nexport class SwiftSafeErrorBoundary extends React.Component<SwiftSafeErrorBoundaryProps, SwiftSafeErrorBoundaryState> {\n  state: SwiftSafeErrorBoundaryState = {\n    hasError: false,\n    message: "",\n  }\n\n  static getDerivedStateFromError(error: Error): SwiftSafeErrorBoundaryState {\n    return {\n      hasError: true,\n      message: error?.message || "Generated component failed to render.",\n    }\n  }\n\n  componentDidCatch(error: Error) {\n    console.error("[Swift preview] Generated component render failed", error)\n  }\n\n  render() {\n    if (this.state.hasError) {\n      if (this.props.fallback) {\n        return this.props.fallback\n      }\n\n      return (\n        <div className="flex min-h-[240px] items-center justify-center rounded-xl border border-dashed border-border bg-background p-6 text-center">\n          <div className="max-w-xl space-y-2">\n            <h2 className="text-base font-semibold text-foreground">Generated component failed safely</h2>\n            <p className="text-sm text-muted-foreground">{this.state.message}</p>\n          </div>\n        </div>\n      )\n    }\n\n    return this.props.children\n  }\n}\n\nexport default SwiftSafeErrorBoundary\n`
+  return `"use client"\n\nimport React from "react"\n\ntype SwiftSafeErrorBoundaryProps = {\n  children: React.ReactNode\n  fallback?: React.ReactNode\n}\n\ntype SwiftSafeErrorBoundaryState = {\n  hasError: boolean\n  message: string\n}\n\nexport class SwiftSafeErrorBoundary extends React.Component<SwiftSafeErrorBoundaryProps, SwiftSafeErrorBoundaryState> {\n  constructor(props: SwiftSafeErrorBoundaryProps) {\n    super(props)\n    this.state = {\n      hasError: false,\n      message: "",\n    }\n  }\n\n  static getDerivedStateFromError(error: Error): SwiftSafeErrorBoundaryState {\n    return {\n      hasError: true,\n      message: error?.message || "Generated component failed to render.",\n    }\n  }\n\n  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {\n    console.error("[Swift preview] Generated component render failed", error, errorInfo)\n  }\n\n  render(): React.ReactNode {\n    if (this.state.hasError) {\n      if (this.props.fallback) {\n        return this.props.fallback\n      }\n\n      return (\n        <div className="flex min-h-[240px] items-center justify-center rounded-xl border border-dashed border-border bg-background p-6 text-center">\n          <div className="max-w-xl space-y-2">\n            <h2 className="text-base font-semibold text-foreground">Generated component failed safely</h2>\n            <p className="text-sm text-muted-foreground">{this.state.message}</p>\n          </div>\n        </div>\n      )\n    }\n\n    return this.props.children\n  }\n}\n\nexport default SwiftSafeErrorBoundary\n`
 }
 
 function buildSwiftSafeErrorBoundaryModuleWithAliases() {
