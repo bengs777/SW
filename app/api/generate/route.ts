@@ -1425,7 +1425,6 @@ export async function POST(request: NextRequest) {
       const repairResult = autoRepairFullStackFiles(generatedFiles, scaffold.files)
       generatedFiles = repairResult.files
 
-      const validationAfterRepair = validateFullStackFiles(generatedFiles)
       const repairedCategoryText =
         repairResult.missingBeforeRepair.length > 0
           ? repairResult.missingBeforeRepair.join(", ")
@@ -1436,6 +1435,9 @@ export async function POST(request: NextRequest) {
       } else if (validationBeforeRepair.missingCategories.length > 0) {
         providerAssemblyMessage += `\n\nValidasi full-stack mendeteksi kekurangan [${repairedCategoryText}], namun tidak ada fallback file tambahan yang bisa diterapkan otomatis.`
       }
+
+      generatedFiles = hardenGeneratedReactAppFiles(generatedFiles)
+      const validationAfterRepair = validateFullStackFiles(generatedFiles)
 
       if (validationAfterRepair.missingCategories.length > 0) {
         throw new StrictFullStackValidationError({
@@ -1692,6 +1694,210 @@ export async function POST(request: NextRequest) {
     releaseGeneration?.()
     await releaseQueue?.()
   }
+}
+
+const GENERATED_REACT_FILE_PATTERN = /^(app|components|src\/app|src\/components)\/.+\.(tsx|jsx)$/i
+const GENERATED_REACT_PAGE_PATTERN = /^(app|src\/app)\/(?:.+\/)?page\.(tsx|jsx)$/i
+const SWIFT_SAFE_ERROR_BOUNDARY_PATH = "components/swift-safe-error-boundary.tsx"
+
+function hardenGeneratedReactAppFiles(files: GeneratedFile[]): GeneratedFile[] {
+  const normalized = files.map((file) => {
+    if (!isGeneratedReactFile(file.path)) {
+      return file
+    }
+
+    const originalContent = String(file.content || "")
+    const withoutInvalidMutations = removeInvalidReactObjectMutations(originalContent)
+    const safeContent = shouldReplaceGeneratedErrorBoundary(file.path, withoutInvalidMutations)
+      ? buildSwiftSafeErrorBoundaryModuleWithAliases()
+      : hasInvalidReactObjectMutation(withoutInvalidMutations)
+        ? buildUnsafeReactFallbackModule(file.path, "Removed invalid React object mutation that could crash preview rendering.", originalContent)
+        : withoutInvalidMutations
+
+    return {
+      ...file,
+      content: safeContent,
+    }
+  })
+
+  if (!normalized.some((file) => isGeneratedReactPage(file.path))) {
+    return normalized
+  }
+
+  const withBoundary = normalized.some((file) => normalizeGeneratedPath(file.path) === SWIFT_SAFE_ERROR_BOUNDARY_PATH)
+    ? normalized
+    : [
+        ...normalized,
+        {
+          path: SWIFT_SAFE_ERROR_BOUNDARY_PATH,
+          language: "tsx" as const,
+          content: buildSwiftSafeErrorBoundaryModuleWithAliases(),
+        },
+      ]
+
+  return withBoundary.map((file) => {
+    if (!isGeneratedReactPage(file.path)) {
+      return file
+    }
+
+    return {
+      ...file,
+      content: wrapGeneratedPageWithSafeBoundary(String(file.content || "")),
+    }
+  })
+}
+
+function normalizeGeneratedPath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
+}
+
+function isGeneratedReactFile(path: string) {
+  const normalized = normalizeGeneratedPath(path)
+  return GENERATED_REACT_FILE_PATTERN.test(normalized) && !normalized.includes("/api/")
+}
+
+function isGeneratedReactPage(path: string) {
+  return GENERATED_REACT_PAGE_PATTERN.test(normalizeGeneratedPath(path))
+}
+
+function shouldReplaceGeneratedErrorBoundary(path: string, content: string) {
+  const normalizedPath = normalizeGeneratedPath(path).toLowerCase()
+  return (
+    normalizedPath.includes("error-boundary") ||
+    normalizedPath.endsWith("/error.tsx") ||
+    /\b(getDerivedStateFromError|componentDidCatch|ErrorBoundary)\b/.test(content)
+  ) && hasInvalidReactObjectMutation(content)
+}
+
+function hasInvalidReactObjectMutation(content: string) {
+  const source = String(content || "")
+  return [
+    /\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.props\s*=/,
+    /\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.children\.props\s*=/,
+    /\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.prototype\.props\s*=/,
+    /\bObject\.assign\s*\(\s*[^)]*(?:\.props|children\.props|prototype\.props)/,
+  ].some((pattern) => pattern.test(source))
+}
+
+function removeInvalidReactObjectMutations(content: string) {
+  let output = String(content || "")
+
+  const dangerousLinePatterns = [
+    /^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.props\s*=\s*[^;\n]+;?\s*$/gm,
+    /^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.children\.props\s*=\s*[^;\n]+;?\s*$/gm,
+    /^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.prototype\.props\s*=\s*[^;\n]+;?\s*$/gm,
+    /^\s*Object\.assign\(\s*[^)]*(?:\.props|children\.props|prototype\.props)[^)]*\)\s*;?\s*$/gm,
+  ]
+
+  for (const pattern of dangerousLinePatterns) {
+    output = output.replace(pattern, "")
+  }
+
+  return output
+}
+
+function wrapGeneratedPageWithSafeBoundary(content: string) {
+  let source = String(content || "")
+
+  if (source.includes("SwiftSafeErrorBoundary")) {
+    return source
+  }
+
+  const importLine = `import { SwiftSafeErrorBoundary } from "@/components/swift-safe-error-boundary"\n`
+  source = insertImportAfterDirectives(source, importLine)
+
+  const namedDefaultFunction = source.match(/export\s+default\s+(async\s+)?function\s+([A-Z][A-Za-z0-9_]*)\s*\(/)
+  if (namedDefaultFunction?.[2]) {
+    const componentName = namedDefaultFunction[2]
+    source = source.replace(/export\s+default\s+(async\s+)?function\s+([A-Z][A-Za-z0-9_]*)\s*\(/, (_match, asyncKeyword = "", name) => `${asyncKeyword || ""}function ${name}(`)
+    return appendSafePageWrapper(source, componentName)
+  }
+
+  const anonymousDefaultFunction = /export\s+default\s+(async\s+)?function\s*\(/.test(source)
+  if (anonymousDefaultFunction) {
+    source = source.replace(/export\s+default\s+(async\s+)?function\s*\(/, (_match, asyncKeyword = "") => `${asyncKeyword || ""}function SwiftGeneratedPage(`)
+    return appendSafePageWrapper(source, "SwiftGeneratedPage")
+  }
+
+  const defaultIdentifier = source.match(/export\s+default\s+([A-Z][A-Za-z0-9_]*)\s*;?/)
+  if (defaultIdentifier?.[1]) {
+    const componentName = defaultIdentifier[1]
+    source = source.replace(/export\s+default\s+[A-Z][A-Za-z0-9_]*\s*;?/, "")
+    return appendSafePageWrapper(source, componentName)
+  }
+
+  return `${source}\n\nexport default function SwiftSafeGeneratedPage() {\n  return (\n    <SwiftSafeErrorBoundary>\n      <div className="min-h-screen bg-background text-foreground">\n        <div className="mx-auto max-w-3xl p-6">\n          <h1 className="text-2xl font-semibold">Preview ready</h1>\n          <p className="mt-2 text-sm text-muted-foreground">The generated page could not be wrapped automatically, so Swift rendered a safe fallback.</p>\n        </div>\n      </div>\n    </SwiftSafeErrorBoundary>\n  )\n}\n`
+}
+
+function insertImportAfterDirectives(source: string, importLine: string) {
+  const lines = source.split(/\r?\n/)
+  let insertAt = 0
+
+  while (insertAt < lines.length && /^\s*(['"])use (client|server)\1\s*;?\s*$/.test(lines[insertAt])) {
+    insertAt += 1
+  }
+
+  while (insertAt < lines.length && lines[insertAt].trim() === "") {
+    insertAt += 1
+  }
+
+  lines.splice(insertAt, 0, importLine.trimEnd())
+  return lines.join("\n")
+}
+
+function appendSafePageWrapper(source: string, componentName: string) {
+  return `${source.trimEnd()}\n\nexport default function SwiftSafeGeneratedPage(props: Record<string, unknown>) {\n  return (\n    <SwiftSafeErrorBoundary>\n      <${componentName} {...props} />\n    </SwiftSafeErrorBoundary>\n  )\n}\n`
+}
+
+function buildUnsafeReactFallbackModule(filePath: string, detail: string, originalContent = "") {
+  const namedExports = extractGeneratedComponentExportNames(originalContent)
+    .filter((name) => name !== "SwiftUnsafeReactFallback")
+    .map((name) => `export const ${name} = SwiftUnsafeReactFallback`)
+    .join("\n")
+
+  return `"use client"\n\nfunction SwiftUnsafeReactFallback() {\n  return (\n    <div className="flex min-h-[240px] items-center justify-center rounded-xl border border-dashed border-border bg-background p-6 text-center">\n      <div className="max-w-xl space-y-2">\n        <h2 className="text-base font-semibold text-foreground">Component fallback: ${JSON.stringify(filePath)}</h2>\n        <p className="text-sm text-muted-foreground">${JSON.stringify(detail)}</p>\n      </div>\n    </div>\n  )\n}\n\n${namedExports ? `${namedExports}\n\n` : ""}export default SwiftUnsafeReactFallback\n`
+}
+
+function extractGeneratedComponentExportNames(content: string) {
+  const source = String(content || "")
+  const names = new Set<string>()
+  const patterns = [
+    /export\s+function\s+([A-Z][A-Za-z0-9_]*)\s*\(/g,
+    /export\s+class\s+([A-Z][A-Za-z0-9_]*)\b/g,
+    /export\s+const\s+([A-Z][A-Za-z0-9_]*)\s*=/g,
+  ]
+
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(source)) !== null) {
+      names.add(match[1])
+    }
+  }
+
+  const namedExportBlocks = source.matchAll(/export\s*\{([^}]+)\}/g)
+  for (const block of namedExportBlocks) {
+    for (const item of block[1].split(",")) {
+      const alias = item.trim().match(/\bas\s+([A-Z][A-Za-z0-9_]*)$/)
+      const direct = item.trim().match(/^([A-Z][A-Za-z0-9_]*)$/)
+      const name = alias?.[1] || direct?.[1]
+      if (name) {
+        names.add(name)
+      }
+    }
+  }
+
+  return Array.from(names)
+}
+
+function buildSwiftSafeErrorBoundaryModule() {
+  return `"use client"\n\nimport React from "react"\n\ntype SwiftSafeErrorBoundaryProps = {\n  children: React.ReactNode\n  fallback?: React.ReactNode\n}\n\ntype SwiftSafeErrorBoundaryState = {\n  hasError: boolean\n  message: string\n}\n\nexport class SwiftSafeErrorBoundary extends React.Component<SwiftSafeErrorBoundaryProps, SwiftSafeErrorBoundaryState> {\n  state: SwiftSafeErrorBoundaryState = {\n    hasError: false,\n    message: "",\n  }\n\n  static getDerivedStateFromError(error: Error): SwiftSafeErrorBoundaryState {\n    return {\n      hasError: true,\n      message: error?.message || "Generated component failed to render.",\n    }\n  }\n\n  componentDidCatch(error: Error) {\n    console.error("[Swift preview] Generated component render failed", error)\n  }\n\n  render() {\n    if (this.state.hasError) {\n      if (this.props.fallback) {\n        return this.props.fallback\n      }\n\n      return (\n        <div className="flex min-h-[240px] items-center justify-center rounded-xl border border-dashed border-border bg-background p-6 text-center">\n          <div className="max-w-xl space-y-2">\n            <h2 className="text-base font-semibold text-foreground">Generated component failed safely</h2>\n            <p className="text-sm text-muted-foreground">{this.state.message}</p>\n          </div>\n        </div>\n      )\n    }\n\n    return this.props.children\n  }\n}\n\nexport default SwiftSafeErrorBoundary\n`
+}
+
+function buildSwiftSafeErrorBoundaryModuleWithAliases() {
+  return buildSwiftSafeErrorBoundaryModule().replace(
+    "\nexport default SwiftSafeErrorBoundary\n",
+    "\nexport { SwiftSafeErrorBoundary as ErrorBoundary }\nexport default SwiftSafeErrorBoundary\n"
+  )
 }
 
 // Sanitize generated files for browser preview: replace frontend files that
