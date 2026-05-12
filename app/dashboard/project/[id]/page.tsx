@@ -117,6 +117,12 @@ function mapJobStageToProgressStage(
     return stage
   }
 
+  if (stage === "generating") return "provider"
+  if (stage === "parsing" || stage === "normalizing") return "parse"
+  if (stage === "validating" || stage === "typechecking" || stage === "linting" || stage === "repairing") return "validate"
+  if (stage === "building" || stage === "compiling") return "preview"
+  if (stage === "persisting" || stage === "saving") return "save"
+
   return "context"
 }
 

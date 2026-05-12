@@ -16,7 +16,9 @@ function assert(name, condition, detail) {
 }
 
 const sandboxPreview = read("components/editor/sandbox-preview.tsx")
-const generateRoute = read("app/api/generate/route.ts")
+const generationOrchestrator = read("lib/services/generation-orchestrator.service.ts")
+const sandboxRuntime = read("lib/sandbox/runtime.ts")
+const generationJobService = read("lib/services/generation-job.service.ts")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -60,25 +62,46 @@ assert(
 )
 
 assert(
-  "generation quality gate is stage aware",
-  /validateGenerationQualityGate\(files: GeneratedFile\[\], stage: GenerationStage = "expansion"\)/.test(generateRoute) &&
-    /const shouldValidateImports = stage !== "scaffold"/.test(generateRoute),
-  "scaffold stage should run relaxed validation and expansion should validate imports"
+  "deterministic validation lifecycle exists",
+  /async function runValidationLifecycle/.test(generationOrchestrator) &&
+    /Normalizing generated artifacts/.test(generationOrchestrator) &&
+    /Checking static project invariants/.test(generationOrchestrator) &&
+    /Compiling preview module graph/.test(generationOrchestrator) &&
+    /Running typecheck, lint, and production build/.test(generationOrchestrator),
+  "orchestrator must run normalize -> static validation -> preview compile -> typecheck/lint/build"
 )
 
 assert(
-  "governance failures are separated from runtime errors",
-  /errorCode:\s*isQualityGateError/.test(generateRoute) &&
-    /GENERATION_INCOMPLETE_REPAIRING/.test(generateRoute),
-  "generation governance failures need a distinct error code"
+  "validation failure blocks persistence",
+  /if \(!validation\.ok\)[\s\S]*throw new Error\(validation\.failure\?\.message/.test(generationOrchestrator) &&
+    /ProjectFilePersistenceService\.saveBufferedArtifacts/.test(generationOrchestrator) &&
+    generationOrchestrator.indexOf("if (!validation.ok)") < generationOrchestrator.indexOf("ProjectFilePersistenceService.saveBufferedArtifacts"),
+  "invalid artifacts must fail before saveBufferedArtifacts"
 )
 
 assert(
-  "scaffold-first governance remains enabled",
-  /const generationStage: GenerationStage/.test(generateRoute) &&
-    /buildProjectFiles\(\{[\s\S]*providerMessage:\s*null/.test(generateRoute) &&
-    /mergeGeneratedFiles\(scaffold\.files, providerParsed\.files\)/.test(generateRoute),
-  "new generations should validate scaffold first and merge provider expansion onto it"
+  "repair retry is bounded and revalidated",
+  /while \(!validation\.ok && repairAttempt < MAX_REPAIR_ATTEMPTS\)/.test(generationOrchestrator) &&
+    /Revalidating repaired artifacts/.test(generationOrchestrator) &&
+    /repairAttempt \+= 1/.test(generationOrchestrator),
+  "repair loop must be capped and must re-run validation after each repair"
+)
+
+assert(
+  "sandbox gates typecheck lint and build",
+  /npm", \["run", "typecheck"\]/.test(sandboxRuntime) &&
+    /SWIFT_SANDBOX_LINT_POLICY/.test(sandboxRuntime) &&
+    /npm", \["run", "build"\]/.test(sandboxRuntime) &&
+    /policy: "required"[\s\S]*command: "npm run build"/.test(sandboxRuntime),
+  "sandbox must typecheck, define lint policy, and require production build before preview"
+)
+
+assert(
+  "job transitions lock terminal and cancelling states",
+  /GENERATION_TERMINAL_STATUSES\.has\(existing\.status\)/.test(generationJobService) &&
+    /existing\.cancelRequested/.test(generationJobService) &&
+    /requestedStatus !== "cancelled"/.test(generationJobService),
+  "late completion/failure must not overwrite terminal or cancellation-locked jobs"
 )
 
 console.log("[regression] all checks passed")

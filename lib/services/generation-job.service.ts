@@ -8,6 +8,8 @@ export type GenerationJobStage =
   | "generating"
   | "parsing"
   | "validating"
+  | "building"
+  | "persisting"
   | "saving"
   | "compiling"
   | "repairing"
@@ -182,9 +184,20 @@ export class GenerationJobService {
 
     const existing = await prisma.generationJob.findUnique({
       where: { id: jobId },
-      select: { version: true },
+      select: { version: true, status: true, cancelRequested: true },
     })
     if (!existing) return null
+    if (GENERATION_TERMINAL_STATUSES.has(existing.status)) return null
+
+    const requestedStatus = input.status
+    if (
+      existing.cancelRequested &&
+      requestedStatus &&
+      requestedStatus !== "cancelled" &&
+      requestedStatus !== "cancelling"
+    ) {
+      return null
+    }
 
     return prisma.generationJob.updateMany({
       where: { id: jobId, version: existing.version },
@@ -228,7 +241,11 @@ export class GenerationJobService {
     const stage = input.stage || "queued"
     const status = input.status || "queued"
 
-    await this.update(jobId, input)
+    const updated = await this.update(jobId, input)
+    if (!updated?.count) {
+      return this.findById(jobId)
+    }
+
     await this.appendEvent({
       jobId,
       type: input.type,

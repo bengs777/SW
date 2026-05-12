@@ -15,7 +15,7 @@ import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import { mergeGeneratedFiles } from "@/lib/ai/provider-output"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { compileProject } from "@/lib/preview/module-resolution"
-import { startRuntimeSandbox } from "@/lib/sandbox/runtime"
+import { startRuntimeSandbox, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
 import { log } from "@/lib/logging"
@@ -53,6 +53,39 @@ type ExecuteGenerationJobDeps = {
 }
 
 const MAX_REPAIR_ATTEMPTS = 2
+
+type ValidationLifecycleStep =
+  | "normalize"
+  | "static"
+  | "preview-compile"
+  | "typecheck"
+  | "lint"
+  | "build"
+
+type ValidationLifecycleStepResult = {
+  name: ValidationLifecycleStep
+  status: "passed" | "failed" | "skipped"
+  policy: "required" | "advisory"
+  durationMs: number
+  message?: string
+  data?: Record<string, unknown>
+}
+
+type ValidationLifecycleFailure = {
+  step: ValidationLifecycleStep
+  message: string
+  data?: Record<string, unknown>
+}
+
+type ValidationLifecycleResult = {
+  ok: boolean
+  files: GeneratedFile[]
+  previewUrl: string | null
+  previewStatus: string | null
+  steps: ValidationLifecycleStepResult[]
+  sandboxValidation: SandboxValidationStep[]
+  failure?: ValidationLifecycleFailure
+}
 
 function serializeError(error: unknown) {
   if (error instanceof Error) {
@@ -213,73 +246,315 @@ function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, 
     }
   }
 
-  const match = compileError.match(/in\s+([A-Za-z0-9_./-]+\.(?:tsx?|jsx?|json|css|prisma))/i)
-  if (match?.[1]) {
-    failing.add(match[1].replace(/\\/g, "/"))
+  for (const filePath of extractFilePathsFromError(compileError)) {
+    failing.add(filePath)
   }
 
-  return files.filter((file) => failing.has(file.path)).slice(0, 6)
+  const matchedFiles = files.filter((file) => failing.has(normalizePath(file.path))).slice(0, 8)
+  if (matchedFiles.length > 0) {
+    return matchedFiles
+  }
+
+  return files
+    .filter((file) =>
+      /^app\/(?:.+\/)?page\.(tsx|ts|jsx|js)$/i.test(normalizePath(file.path)) ||
+      /^components\//i.test(normalizePath(file.path)) ||
+      normalizePath(file.path) === "package.json"
+    )
+    .slice(0, 8)
+}
+
+function extractFilePathsFromError(message: string) {
+  const paths = new Set<string>()
+  const patterns = [
+    /in\s+([A-Za-z0-9_./-]+\.(?:tsx?|jsx?|json|css|prisma))/gi,
+    /(?:^|\s|\.\/)([A-Za-z0-9_./-]+\.(?:tsx?|jsx?|json|css|prisma))(?::\d+:\d+)?/gim,
+  ]
+
+  for (const pattern of patterns) {
+    for (const match of String(message || "").matchAll(pattern)) {
+      if (match[1]) {
+        paths.add(normalizePath(match[1]))
+      }
+    }
+  }
+
+  return Array.from(paths)
+}
+
+function normalizePath(value: string) {
+  return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function shouldRequireFullStackCoverage(plan: GenerationPlan) {
+  return ["fullstack_app", "architecture", "refactor", "runtime_debug"].includes(plan.objective)
+}
+
+function summarizeSandboxStep(step: SandboxValidationStep): ValidationLifecycleStepResult | null {
+  if (step.name !== "typecheck" && step.name !== "lint" && step.name !== "build") {
+    return null
+  }
+
+  return {
+    name: step.name,
+    status: step.status,
+    policy: step.policy,
+    durationMs: step.durationMs || 0,
+    message: step.reason,
+    data: {
+      command: step.command || null,
+      output: step.output || null,
+    },
+  }
+}
+
+function failureStepFromSandbox(validation: SandboxValidationStep[]): ValidationLifecycleStep {
+  const failed = validation.find((step) => step.status === "failed" && step.policy === "required")
+  if (failed?.name === "typecheck" || failed?.name === "lint" || failed?.name === "build") {
+    return failed.name
+  }
+
+  return "build"
+}
+
+async function runValidationLifecycle(input: {
+  jobId: string
+  projectId: string
+  prompt: string
+  files: GeneratedFile[]
+  plan: GenerationPlan
+  signal?: AbortSignal
+  emit: (stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) => Promise<void>
+}): Promise<ValidationLifecycleResult> {
+  let files = [...input.files]
+  const steps: ValidationLifecycleStepResult[] = []
+  const recordStep = (
+    name: ValidationLifecycleStep,
+    status: ValidationLifecycleStepResult["status"],
+    policy: ValidationLifecycleStepResult["policy"],
+    stepStartedAt: number,
+    message?: string,
+    data?: Record<string, unknown>
+  ) => {
+    steps.push({
+      name,
+      status,
+      policy,
+      durationMs: Math.max(0, Math.round(performance.now() - stepStartedAt)),
+      message,
+      data,
+    })
+  }
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  let stepStartedAt = performance.now()
+  await input.emit("validating", "Normalizing generated artifacts", 60)
+  const normalized = normalizeGeneratedDependencies(files)
+  files = normalized.files
+  recordStep("normalize", "passed", "required", stepStartedAt, undefined, {
+    fileCount: files.length,
+    addedPackages: normalized.addedPackages,
+    normalizedPackages: normalized.normalizedPackages,
+    conflictsPrevented: normalized.conflictsPrevented,
+  })
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("validating", "Checking static project invariants", 66)
+  const fullstack = validateFullStackFiles(files)
+  const dependencyMap = buildDependencyMap(files)
+  const staticFailures: string[] = []
+  const requiresFullStackCoverage = shouldRequireFullStackCoverage(input.plan)
+
+  if (dependencyMap.missingLocalImports.length > 0) {
+    staticFailures.push(`Missing local imports: ${dependencyMap.missingLocalImports.length}`)
+  }
+
+  if (dependencyMap.unsupportedPreviewImports.length > 0) {
+    staticFailures.push(`Unsupported preview imports: ${dependencyMap.unsupportedPreviewImports.length}`)
+  }
+
+  if (requiresFullStackCoverage && fullstack.missingCategories.length > 0) {
+    staticFailures.push(`Missing required full-stack categories: ${fullstack.missingCategories.join(", ")}`)
+  }
+
+  if (staticFailures.length > 0) {
+    const message = staticFailures.join("; ")
+    const data = {
+      coverage: fullstack.coverage,
+      missingCategories: fullstack.missingCategories,
+      fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
+      missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
+      unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
+    }
+    recordStep("static", "failed", "required", stepStartedAt, message, data)
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: null,
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "static",
+        message,
+        data,
+      },
+    }
+  }
+
+  recordStep("static", "passed", "required", stepStartedAt, undefined, {
+    coverage: fullstack.coverage,
+    missingCategories: fullstack.missingCategories,
+    fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
+    localImportCount: dependencyMap.localImports.length,
+    externalPackages: dependencyMap.externalPackages,
+  })
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("validating", "Compiling preview module graph", 74)
+  try {
+    compileProject(files)
+    recordStep("preview-compile", "passed", "required", stepStartedAt)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    recordStep("preview-compile", "failed", "required", stepStartedAt, message)
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: null,
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "preview-compile",
+        message,
+      },
+    }
+  }
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("building", "Running typecheck, lint, and production build", 84)
+  const preview = await startRuntimeSandbox(input.projectId, files, { signal: input.signal })
+  for (const sandboxStep of preview.validation) {
+    const lifecycleStep = summarizeSandboxStep(sandboxStep)
+    if (lifecycleStep) {
+      steps.push(lifecycleStep)
+    }
+  }
+
+  if (preview.error) {
+    const step = failureStepFromSandbox(preview.validation)
+    recordStep(step, "failed", "required", stepStartedAt, preview.error, {
+      sandboxStatus: preview.status,
+      sandboxValidation: preview.validation,
+      logs: preview.logs.slice(-80),
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: preview.previewUrl,
+      previewStatus: preview.status,
+      steps,
+      sandboxValidation: preview.validation,
+      failure: {
+        step,
+        message: preview.error,
+        data: {
+          sandboxStatus: preview.status,
+          sandboxValidation: preview.validation,
+          logs: preview.logs.slice(-80),
+        },
+      },
+    }
+  }
+
+  if (!preview.validation.some((step) => step.name === "build" && step.status === "passed")) {
+    const message = "Production build did not report a passing build gate."
+    recordStep("build", "failed", "required", stepStartedAt, message, {
+      sandboxStatus: preview.status,
+      sandboxValidation: preview.validation,
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: preview.previewUrl,
+      previewStatus: preview.status,
+      steps,
+      sandboxValidation: preview.validation,
+      failure: {
+        step: "build",
+        message,
+      },
+    }
+  }
+
+  return {
+    ok: true,
+    files,
+    previewUrl: preview.previewUrl,
+    previewStatus: preview.status,
+    steps,
+    sandboxValidation: preview.validation,
+  }
 }
 
 async function attemptTargetedRepair(input: {
   jobId: string
   prompt: string
   files: GeneratedFile[]
-  compileError: string
+  validationError: string
+  repairAttempt: number
+  maxRepairAttempts: number
   promptLanguage: "id" | "en"
   signal?: AbortSignal
 }) {
-  let currentFiles = [...input.files]
-  let lastError = input.compileError
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  const currentFiles = [...input.files]
+  const dependencyMap = buildDependencyMap(currentFiles)
+  const failingFiles = pickFailingFiles(currentFiles, dependencyMap, input.validationError)
+  const repairPrompt = [
+    buildStaticValidationPrompt({
+      prompt: input.prompt,
+      dependencyMap,
+      packageJson: currentFiles.find((file) => normalizePath(file.path) === "package.json") || null,
+      previewError: input.validationError,
+    }),
+    "",
+    "DETERMINISTIC_VALIDATION_FAILURE:",
+    input.validationError,
+    "",
+    "TARGETED_REPAIR_ONLY:",
+    "- Repair only the failing files or their direct imports.",
+    "- Do not regenerate the entire project.",
+    "- Return only changed files.",
+    "- The result will be revalidated through normalize -> static validation -> preview compile -> typecheck -> lint -> build before persistence.",
+    `- Repair attempt: ${input.repairAttempt} / ${input.maxRepairAttempts}`,
+    "",
+    "FAILING_FILES_CONTEXT:",
+    failingFiles.map((file) => `FILE ${file.path}\n${file.content}`).join("\n\n"),
+  ].join("\n")
 
-  for (let attempt = 0; attempt < MAX_REPAIR_ATTEMPTS; attempt += 1) {
-    await GenerationJobService.assertNotCancelled(input.jobId)
-    const dependencyMap = buildDependencyMap(currentFiles)
-    const failingFiles = pickFailingFiles(currentFiles, dependencyMap, lastError)
-    const repairPrompt = [
-      buildStaticValidationPrompt({
-        prompt: input.prompt,
-        dependencyMap,
-        packageJson: currentFiles.find((file) => file.path === "package.json") || null,
-        previewError: lastError,
-      }),
-      "",
-      "TARGETED_REPAIR_ONLY:",
-      "- Repair only the failing files or their direct imports.",
-      "- Do not regenerate the entire project.",
-      `- Repair attempt: ${attempt + 1} / ${MAX_REPAIR_ATTEMPTS}`,
-      "",
-      "FAILING_FILES_CONTEXT:",
-      failingFiles.map((file) => `FILE ${file.path}\n${file.content}`).join("\n\n"),
-    ].join("\n")
-
-    const response = await runProviderAttempt({
-      jobId: input.jobId,
-      prompt: repairPrompt,
-      purpose: "repair",
-      selectedModel: "repair",
-      promptLanguage: input.promptLanguage,
-      signal: input.signal,
-    })
-    const parsed = parseGeneratedArtifact(response.message)
-
-    currentFiles = mergeGeneratedFiles(currentFiles, parsed.files)
-
-    try {
-      compileProject(currentFiles)
-      return {
-        files: currentFiles,
-        repaired: true,
-      }
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error)
-    }
-  }
+  const response = await runProviderAttempt({
+    jobId: input.jobId,
+    prompt: repairPrompt,
+    purpose: "repair",
+    selectedModel: "repair",
+    promptLanguage: input.promptLanguage,
+    signal: input.signal,
+  })
+  const parsed = parseGeneratedArtifact(response.message)
+  const mergedFiles = mergeGeneratedFiles(currentFiles, parsed.files)
+  const normalized = normalizeGeneratedDependencies(mergedFiles)
 
   return {
-    files: currentFiles,
-    repaired: false,
-    error: lastError,
+    files: normalized.files,
+    repaired: parsed.files.length > 0,
+    parsedFileCount: parsed.files.length,
+    normalizedPackages: normalized.normalizedPackages,
+    addedPackages: normalized.addedPackages,
   }
 }
 
@@ -354,59 +629,97 @@ export async function executeGenerationJob(
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
-    await transition(input.jobId, "validating", "Validating generated artifacts", 60)
+    let validation = await runValidationLifecycle({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      prompt: input.prompt,
+      files: workingFiles,
+      plan,
+      signal: input.signal,
+      emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
+    })
 
-    const fullstack = validateFullStackFiles(workingFiles)
-    const dependencyMap = buildDependencyMap(workingFiles)
-    if (fullstack.missingCategories.length > 0 || dependencyMap.missingLocalImports.length > 0) {
-      await transition(input.jobId, "repairing", "Repairing failing files only", 70, {
-        missingCategories: fullstack.missingCategories,
-        missingLocalImports: dependencyMap.missingLocalImports.slice(0, 10),
-      })
-    }
+    let repairAttempt = 0
+    while (!validation.ok && repairAttempt < MAX_REPAIR_ATTEMPTS) {
+      repairAttempt += 1
+      await GenerationJobService.assertNotCancelled(input.jobId)
+      await transition(
+        input.jobId,
+        "repairing",
+        `Repairing validation failure ${repairAttempt}/${MAX_REPAIR_ATTEMPTS}`,
+        Math.min(88, 72 + repairAttempt * 5),
+        {
+          failure: validation.failure,
+          steps: validation.steps,
+        }
+      )
 
-    await transition(input.jobId, "compiling", "Compiling preview artifacts", 78)
-
-    let compileError = ""
-    try {
-      compileProject(workingFiles)
-    } catch (error) {
-      compileError = error instanceof Error ? error.message : String(error)
-    }
-
-    if (compileError) {
       const repaired = await attemptTargetedRepair({
         jobId: input.jobId,
         prompt: input.prompt,
-        files: workingFiles,
-        compileError,
+        files: validation.files,
+        validationError: validation.failure?.message || "Validation lifecycle failed",
+        repairAttempt,
+        maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
         promptLanguage,
         signal: input.signal,
       })
+
       workingFiles = repaired.files
-      if (!repaired.repaired) {
-        throw new Error(repaired.error || compileError)
-      }
-    }
+      await transition(
+        input.jobId,
+        "validating",
+        `Revalidating repaired artifacts ${repairAttempt}/${MAX_REPAIR_ATTEMPTS}`,
+        Math.min(90, 76 + repairAttempt * 5),
+        {
+          repaired: repaired.repaired,
+          parsedFileCount: repaired.parsedFileCount,
+          addedPackages: repaired.addedPackages,
+          normalizedPackages: repaired.normalizedPackages,
+        }
+      )
 
-    await GenerationJobService.assertNotCancelled(input.jobId)
-    await transition(input.jobId, "compiling", "Starting isolated preview sandbox", 88)
-
-    const preview = await startRuntimeSandbox(input.projectId, workingFiles, { signal: input.signal })
-    metrics.previewStatus = preview.status
-    metrics.previewError = preview.error || null
-
-    if (preview.error) {
-      log("warn", "Preview sandbox compile failed", {
+      validation = await runValidationLifecycle({
         jobId: input.jobId,
         projectId: input.projectId,
-        error: preview.error,
+        prompt: input.prompt,
+        files: workingFiles,
+        plan,
+        signal: input.signal,
+        emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
-      throw new Error(preview.error)
+    }
+
+    workingFiles = validation.files
+    metrics.previewStatus = validation.previewStatus
+    metrics.previewError = validation.failure?.message || null
+    metrics.validationLifecycle = {
+      ok: validation.ok,
+      repairAttempts: repairAttempt,
+      steps: validation.steps,
+      sandboxValidation: validation.sandboxValidation,
+      failure: validation.failure || null,
+    }
+
+    if (!validation.ok) {
+      log("warn", "Generation validation lifecycle failed", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        repairAttempts: repairAttempt,
+        failure: validation.failure,
+      })
+      throw new Error(validation.failure?.message || "Validation lifecycle failed")
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
-    await transition(input.jobId, "saving", "Saving project artifacts", 94)
+    await transition(input.jobId, "persisting", "Persisting validated project artifacts", 94, {
+      repairAttempts: repairAttempt,
+      validationSteps: validation.steps.map((step) => ({
+        name: step.name,
+        status: step.status,
+        policy: step.policy,
+      })),
+    })
 
     const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
       projectId: input.projectId,
@@ -416,14 +729,14 @@ export async function executeGenerationJob(
 
     await GenerationJobService.update(input.jobId, {
       metrics,
-      previewUrl: preview.previewUrl,
+      previewUrl: validation.previewUrl,
     })
-    await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, preview.previewUrl)
+    await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, validation.previewUrl)
 
     return {
       historyId: saveResult.historyId,
       files: workingFiles,
-      previewUrl: preview.previewUrl,
+      previewUrl: validation.previewUrl,
     }
   } catch (error) {
     const cancelledBySignal =

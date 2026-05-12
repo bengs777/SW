@@ -1,9 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process"
 import { createHash } from "crypto"
-import { mkdir, readFile, rm, stat, writeFile } from "fs/promises"
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import path from "path"
 import type { GeneratedFile } from "@/lib/types"
+import { verifyRuntimeSmoke, type RuntimeSmokeResult } from "@/lib/sandbox/runtime-smoke"
 
 type SandboxState = {
   projectId: string
@@ -11,11 +12,21 @@ type SandboxState = {
   port: number
   process: ChildProcessWithoutNullStreams | null
   logs: string[]
-  status: "idle" | "installing" | "building" | "running" | "error"
+  status: "idle" | "installing" | "typechecking" | "linting" | "building" | "verifying" | "running" | "error"
   previewUrl: string | null
   lastError: string | null
   fileHash: string | null
   packageHash: string | null
+}
+
+export type SandboxValidationStep = {
+  name: "install" | "typecheck" | "lint" | "build"
+  status: "passed" | "failed" | "skipped"
+  policy: "required" | "advisory"
+  command?: string
+  durationMs?: number
+  output?: string
+  reason?: string
 }
 
 type StartSandboxResult = {
@@ -23,6 +34,8 @@ type StartSandboxResult = {
   previewUrl: string | null
   logs: string[]
   error: string | null
+  validation: SandboxValidationStep[]
+  runtimeVerification: RuntimeSmokeResult | null
 }
 
 const SANDBOX_ROOT =
@@ -30,6 +43,10 @@ const SANDBOX_ROOT =
   path.join(process.env.VERCEL ? tmpdir() : process.cwd(), ".swift-sandboxes")
 const BASE_PORT = Number(process.env.SWIFT_SANDBOX_BASE_PORT || 4300)
 const MAX_LOG_LINES = 500
+const RUNTIME_CONFIG_VERSION = "validation-v2"
+const SANDBOX_MEMORY_MB = Math.max(128, Number(process.env.SWIFT_SANDBOX_MEMORY_MB || 768))
+const MAX_SANDBOX_SOURCE_BYTES = Number(process.env.SWIFT_SANDBOX_SOURCE_BYTES || 8 * 1024 * 1024)
+const MAX_SANDBOX_WORKSPACE_BYTES = Number(process.env.SWIFT_SANDBOX_WORKSPACE_BYTES || 160 * 1024 * 1024)
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL ||
   "file:./prisma/dev.db"
@@ -75,6 +92,8 @@ const ALLOWED_PACKAGES = new Set([
   "class-variance-authority",
   "clsx",
   "date-fns",
+  "eslint",
+  "eslint-config-next",
   "framer-motion",
   "lucide-react",
   "next",
@@ -93,10 +112,13 @@ const ALLOWED_PACKAGES = new Set([
 
 const globalForSandbox = globalThis as unknown as {
   swiftSandboxStates?: Map<string, SandboxState>
+  swiftSandboxLocks?: Map<string, Promise<void>>
 }
 
 const states = globalForSandbox.swiftSandboxStates ?? new Map<string, SandboxState>()
 globalForSandbox.swiftSandboxStates = states
+const sandboxLocks = globalForSandbox.swiftSandboxLocks ?? new Map<string, Promise<void>>()
+globalForSandbox.swiftSandboxLocks = sandboxLocks
 
 function getState(projectId: string): SandboxState {
   const existing = states.get(projectId)
@@ -161,6 +183,8 @@ function appendLog(state: SandboxState, message: string) {
 
 function hashFiles(files: GeneratedFile[]) {
   const hash = createHash("sha256")
+  hash.update(RUNTIME_CONFIG_VERSION)
+  hash.update("\0")
   for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
     hash.update(normalizePath(file.path))
     hash.update("\0")
@@ -170,8 +194,25 @@ function hashFiles(files: GeneratedFile[]) {
   return hash.digest("hex")
 }
 
+async function cleanSandboxRoot(state: SandboxState) {
+  await mkdir(state.rootDir, { recursive: true })
+  const entries = await readdir(state.rootDir, { withFileTypes: true })
+
+  await Promise.all(
+    entries
+      .filter((entry) => entry.name !== "node_modules")
+      .map((entry) => rm(path.join(state.rootDir, entry.name), { recursive: entry.isDirectory(), force: true }))
+  )
+}
+
 function commandName(command: string) {
   return process.platform === "win32" ? `${command}.cmd` : command
+}
+
+function sandboxNodeOptions() {
+  const existing = process.env.NODE_OPTIONS || ""
+  const withoutMemory = existing.replace(/--max-old-space-size=\S+/g, "").trim()
+  return `${withoutMemory} --max-old-space-size=${SANDBOX_MEMORY_MB}`.trim()
 }
 
 function sandboxProcessEnv(port: number): NodeJS.ProcessEnv {
@@ -187,12 +228,44 @@ function sandboxProcessEnv(port: number): NodeJS.ProcessEnv {
     npm_config_ignore_scripts: "true",
     npm_config_audit: "false",
     npm_config_fund: "false",
+    NEXT_TELEMETRY_DISABLED: "1",
+    NODE_OPTIONS: sandboxNodeOptions(),
     NODE_ENV: "production",
     DATABASE_URL: sandboxDatabaseUrl(),
     NEXTAUTH_SECRET: "swift-sandbox-local-secret",
     NEXTAUTH_URL: `http://localhost:${port}`,
     NEXT_PUBLIC_APP_URL: `http://localhost:${port}`,
     PORT: String(port),
+  }
+}
+
+async function killProcessTree(child: ChildProcessWithoutNullStreams | null) {
+  if (!child || child.killed) return
+
+  if (process.platform === "win32" && child.pid) {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+        shell: false,
+        windowsHide: true,
+      })
+      killer.on("close", () => resolve())
+      killer.on("error", () => resolve())
+    })
+    return
+  }
+
+  try {
+    if (child.pid) {
+      process.kill(-child.pid, "SIGKILL")
+    } else {
+      child.kill("SIGKILL")
+    }
+  } catch {
+    try {
+      child.kill("SIGKILL")
+    } catch {
+      // Process already exited.
+    }
   }
 }
 
@@ -205,9 +278,10 @@ function runCommand(
 ) {
   appendLog(state, `$ ${command} ${args.join(" ")}`)
 
-  return new Promise<{ code: number; output: string }>((resolve) => {
+  return new Promise<{ code: number; output: string; durationMs: number; timedOut: boolean; aborted: boolean }>((resolve) => {
+    const startedAt = Date.now()
     if (signal?.aborted) {
-      resolve({ code: 1, output: "Command aborted before start" })
+      resolve({ code: 1, output: "Command aborted before start", durationMs: 0, timedOut: false, aborted: true })
       return
     }
 
@@ -215,16 +289,22 @@ function runCommand(
       cwd: state.rootDir,
       env: sandboxProcessEnv(state.port),
       shell: false,
+      detached: process.platform !== "win32",
+      windowsHide: true,
     })
 
     let output = ""
+    let timedOut = false
+    let aborted = false
     const timer = setTimeout(() => {
+      timedOut = true
       appendLog(state, `Command timed out after ${Math.round(timeoutMs / 1000)}s`)
-      child.kill()
+      void killProcessTree(child)
     }, timeoutMs)
     const abort = () => {
+      aborted = true
       appendLog(state, "Command aborted")
-      child.kill()
+      void killProcessTree(child)
     }
     signal?.addEventListener("abort", abort, { once: true })
 
@@ -243,7 +323,13 @@ function runCommand(
     child.on("close", (code) => {
       clearTimeout(timer)
       signal?.removeEventListener("abort", abort)
-      resolve({ code: code ?? 1, output })
+      resolve({
+        code: code ?? 1,
+        output,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        aborted,
+      })
     })
   })
 }
@@ -254,6 +340,8 @@ function mergePackageJson(existingContent: string | null) {
       dev: "next dev",
       build: "next build",
       start: "next start",
+      typecheck: "tsc --noEmit",
+      lint: "eslint .",
       "db:generate": "prisma generate",
       "db:push": "prisma db push",
     },
@@ -276,6 +364,8 @@ function mergePackageJson(existingContent: string | null) {
       "@types/node": "^22",
       "@types/react": "19.2.14",
       "@types/react-dom": "19.2.3",
+      eslint: "^9.39.4",
+      "eslint-config-next": "^16.2.6",
       prisma: "^5.22.0",
       tailwindcss: "^4.2.0",
       typescript: "5.7.3",
@@ -306,6 +396,26 @@ function filterAllowedDependencies(dependencies: Record<string, unknown>) {
   )
 }
 
+function hasPackageScript(packageContent: string, scriptName: string) {
+  try {
+    const parsed = JSON.parse(packageContent) as { scripts?: Record<string, unknown> }
+    return typeof parsed.scripts?.[scriptName] === "string" && parsed.scripts[scriptName].trim().length > 0
+  } catch {
+    return false
+  }
+}
+
+function tailOutput(output: string, maxChars = 6000) {
+  const normalized = String(output || "").trim()
+  return normalized.length <= maxChars ? normalized : normalized.slice(-maxChars)
+}
+
+function commandFailureMessage(step: SandboxValidationStep) {
+  const output = step.output ? `\n\n${step.output}` : ""
+  const reason = step.reason ? ` (${step.reason})` : ""
+  return `${step.name} failed${reason}${output}`
+}
+
 async function fileExists(filePath: string) {
   try {
     await stat(filePath)
@@ -317,6 +427,7 @@ async function fileExists(filePath: string) {
 
 async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
   await mkdir(state.rootDir, { recursive: true })
+  assertFilesystemQuota(files)
 
   const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
   const packageJson = mergePackageJson(packageFile?.content || null)
@@ -335,6 +446,26 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
   const nextConfigPath = path.join(state.rootDir, "next.config.js")
   if (!(await fileExists(nextConfigPath))) {
     await writeFile(nextConfigPath, "/** @type {import('next').NextConfig} */\nmodule.exports = {}\n", "utf8")
+  }
+
+  const eslintConfigPath = path.join(state.rootDir, "eslint.config.mjs")
+  if (!(await fileExists(eslintConfigPath))) {
+    await writeFile(
+      eslintConfigPath,
+      [
+        'import { defineConfig, globalIgnores } from "eslint/config"',
+        'import nextVitals from "eslint-config-next/core-web-vitals"',
+        'import nextTs from "eslint-config-next/typescript"',
+        "",
+        "export default defineConfig([",
+        "  ...nextVitals,",
+        "  ...nextTs,",
+        '  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts"]),',
+        "])",
+        "",
+      ].join("\n"),
+      "utf8"
+    )
   }
 
   const tsconfigPath = path.join(state.rootDir, "tsconfig.json")
@@ -368,6 +499,21 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
         null,
         2
       ) + "\n",
+      "utf8"
+    )
+  }
+
+  const nextEnvPath = path.join(state.rootDir, "next-env.d.ts")
+  if (!(await fileExists(nextEnvPath))) {
+    await writeFile(
+      nextEnvPath,
+      [
+        "/// <reference types=\"next\" />",
+        "/// <reference types=\"next/image-types/global\" />",
+        "",
+        "// This file is generated by Swift runtime validation.",
+        "",
+      ].join("\n"),
       "utf8"
     )
   }
@@ -411,26 +557,28 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
 
 async function stopProcess(state: SandboxState) {
   if (!state.process || state.process.killed) return
-  appendLog(state, "Stopping previous dev server")
-  state.process.kill()
+  appendLog(state, "Stopping previous preview server")
+  await killProcessTree(state.process)
   state.process = null
 }
 
-function startDevServer(state: SandboxState) {
+function startPreviewServer(state: SandboxState) {
   if (state.process && !state.process.killed) {
     return
   }
 
-  const child = spawn(commandName("npm"), ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
+  const child = spawn(commandName("npm"), ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
     cwd: state.rootDir,
     env: sandboxProcessEnv(state.port),
     shell: false,
+    detached: process.platform !== "win32",
+    windowsHide: true,
   })
 
   state.process = child
   state.previewUrl = `http://127.0.0.1:${state.port}`
   state.status = "running"
-  appendLog(state, `$ npm run dev -- --hostname 127.0.0.1 --port ${state.port}`)
+  appendLog(state, `$ npm run start -- --hostname 127.0.0.1 --port ${state.port}`)
 
   child.stdout.on("data", (chunk) => appendLog(state, String(chunk)))
   child.stderr.on("data", (chunk) => appendLog(state, String(chunk)))
@@ -440,15 +588,21 @@ function startDevServer(state: SandboxState) {
       state.process = null
       if (state.status === "running") {
         state.status = "error"
-        state.lastError = `Dev server exited with code ${code ?? 1}`
+        state.lastError = `Preview server exited with code ${code ?? 1}`
       }
     }
   })
 }
 
 export async function startRuntimeSandbox(projectId: string, files: GeneratedFile[], options?: { signal?: AbortSignal }): Promise<StartSandboxResult> {
+  return withSandboxLock(projectId, () => startRuntimeSandboxUnlocked(projectId, files, options))
+}
+
+async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFile[], options?: { signal?: AbortSignal }): Promise<StartSandboxResult> {
   const state = getState(projectId)
   const nextFileHash = hashFiles(files)
+  const validation: SandboxValidationStep[] = []
+  let runtimeVerification: RuntimeSmokeResult | null = null
 
   try {
     state.lastError = null
@@ -456,6 +610,7 @@ export async function startRuntimeSandbox(projectId: string, files: GeneratedFil
 
     if (state.fileHash !== nextFileHash) {
       await stopProcess(state)
+      await cleanSandboxRoot(state)
       await ensureRuntimeFiles(state, files)
       state.fileHash = nextFileHash
     }
@@ -465,32 +620,118 @@ export async function startRuntimeSandbox(projectId: string, files: GeneratedFil
     if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
       const install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], 120_000, options?.signal)
+      validation.push({
+        name: "install",
+        status: install.code === 0 ? "passed" : "failed",
+        policy: "required",
+        command: "npm ci --ignore-scripts",
+        durationMs: install.durationMs,
+        output: install.code === 0 ? undefined : tailOutput(install.output),
+        reason: install.timedOut ? "timeout" : install.aborted ? "aborted" : undefined,
+      })
       if (options?.signal?.aborted) {
         throw new Error("GENERATION_JOB_CANCELLED")
       }
       if (install.code !== 0) {
-        throw new Error("npm ci failed")
+        throw new Error(commandFailureMessage(validation[validation.length - 1]))
       }
       state.packageHash = nextPackageHash
+    } else {
+      validation.push({
+        name: "install",
+        status: "skipped",
+        policy: "required",
+        reason: "node_modules and package hash are unchanged",
+      })
+    }
+
+    state.status = "typechecking"
+    const typecheck = await runCommand(state, "npm", ["run", "typecheck"], 90_000, options?.signal)
+    validation.push({
+      name: "typecheck",
+      status: typecheck.code === 0 ? "passed" : "failed",
+      policy: "required",
+      command: "npm run typecheck",
+      durationMs: typecheck.durationMs,
+      output: typecheck.code === 0 ? undefined : tailOutput(typecheck.output),
+      reason: typecheck.timedOut ? "timeout" : typecheck.aborted ? "aborted" : undefined,
+    })
+    if (options?.signal?.aborted) {
+      throw new Error("GENERATION_JOB_CANCELLED")
+    }
+    if (typecheck.code !== 0) {
+      throw new Error(commandFailureMessage(validation[validation.length - 1]))
+    }
+
+    state.status = "linting"
+    const packageHasLint = hasPackageScript(packageContent, "lint")
+    const lintPolicy = process.env.SWIFT_SANDBOX_LINT_POLICY === "fail" ? "required" : "advisory"
+    if (packageHasLint) {
+      const lint = await runCommand(state, "npm", ["run", "lint"], 90_000, options?.signal)
+      validation.push({
+        name: "lint",
+        status: lint.code === 0 ? "passed" : "failed",
+        policy: lintPolicy,
+        command: "npm run lint",
+        durationMs: lint.durationMs,
+        output: lint.code === 0 ? undefined : tailOutput(lint.output),
+        reason: lint.timedOut ? "timeout" : lint.aborted ? "aborted" : undefined,
+      })
+      if (options?.signal?.aborted) {
+        throw new Error("GENERATION_JOB_CANCELLED")
+      }
+      if (lint.code !== 0 && lintPolicy === "required") {
+        throw new Error(commandFailureMessage(validation[validation.length - 1]))
+      }
+    } else {
+      validation.push({
+        name: "lint",
+        status: "skipped",
+        policy: lintPolicy,
+        reason: "package.json has no lint script",
+      })
     }
 
     state.status = "building"
     const build = await runCommand(state, "npm", ["run", "build"], 150_000, options?.signal)
+    validation.push({
+      name: "build",
+      status: build.code === 0 ? "passed" : "failed",
+      policy: "required",
+      command: "npm run build",
+      durationMs: build.durationMs,
+      output: build.code === 0 ? undefined : tailOutput(build.output),
+      reason: build.timedOut ? "timeout" : build.aborted ? "aborted" : undefined,
+    })
     if (options?.signal?.aborted) {
       throw new Error("GENERATION_JOB_CANCELLED")
     }
 
     if (build.code !== 0) {
-      throw new Error("npm run build failed")
+      throw new Error(commandFailureMessage(validation[validation.length - 1]))
     }
 
-    startDevServer(state)
+    await assertWorkspaceQuota(state)
+    startPreviewServer(state)
+    state.status = "verifying"
+    runtimeVerification = await verifyRuntimeSmoke({
+      previewUrl: state.previewUrl || `http://127.0.0.1:${state.port}`,
+      files,
+      signal: options?.signal,
+    })
+    if (!runtimeVerification.ok) {
+      await stopProcess(state)
+      throw new Error(`runtime verification failed: ${runtimeVerification.failureCategory || "unknown"}${runtimeVerification.error ? ` - ${runtimeVerification.error}` : ""}`)
+    }
+    state.status = "running"
 
     return {
       status: state.status,
       previewUrl: state.previewUrl,
       logs: state.logs,
       error: null,
+      validation,
+      runtimeVerification,
     }
   } catch (error) {
     state.status = "error"
@@ -501,6 +742,8 @@ export async function startRuntimeSandbox(projectId: string, files: GeneratedFil
       previewUrl: state.previewUrl,
       logs: state.logs,
       error: state.lastError,
+      validation,
+      runtimeVerification,
     }
   }
 }
@@ -512,6 +755,8 @@ export function getRuntimeSandbox(projectId: string): StartSandboxResult {
     previewUrl: state.previewUrl,
     logs: state.logs,
     error: state.lastError,
+    validation: [],
+    runtimeVerification: null,
   }
 }
 
@@ -525,4 +770,57 @@ export async function resetRuntimeSandbox(projectId: string) {
   state.lastError = null
   state.fileHash = null
   state.packageHash = null
+}
+
+async function withSandboxLock<T>(projectId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = sandboxLocks.get(projectId) || Promise.resolve()
+  let release: () => void = () => {}
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const next = previous.then(() => current, () => current)
+  sandboxLocks.set(projectId, next)
+
+  await previous.catch(() => null)
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (sandboxLocks.get(projectId) === next) {
+      sandboxLocks.delete(projectId)
+    }
+  }
+}
+
+function assertFilesystemQuota(files: GeneratedFile[]) {
+  const totalBytes = files.reduce((sum, file) => sum + Buffer.byteLength(String(file.content || ""), "utf8"), 0)
+  if (totalBytes > MAX_SANDBOX_SOURCE_BYTES) {
+    throw new Error(`Sandbox source files exceed filesystem quota: ${totalBytes} > ${MAX_SANDBOX_SOURCE_BYTES}`)
+  }
+}
+
+async function assertWorkspaceQuota(state: SandboxState) {
+  const totalBytes = await directorySize(state.rootDir, {
+    ignore: new Set(["node_modules"]),
+  })
+  if (totalBytes > MAX_SANDBOX_WORKSPACE_BYTES) {
+    throw new Error(`Sandbox workspace exceeds filesystem quota: ${totalBytes} > ${MAX_SANDBOX_WORKSPACE_BYTES}`)
+  }
+}
+
+async function directorySize(rootDir: string, options: { ignore: Set<string> }): Promise<number> {
+  let total = 0
+  const entries = await readdir(rootDir, { withFileTypes: true }).catch(() => [])
+  for (const entry of entries) {
+    if (options.ignore.has(entry.name)) continue
+    const entryPath = path.join(rootDir, entry.name)
+    if (entry.isDirectory()) {
+      total += await directorySize(entryPath, options)
+      continue
+    }
+
+    const info = await stat(entryPath).catch(() => null)
+    total += info?.size || 0
+  }
+  return total
 }
