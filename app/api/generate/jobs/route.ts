@@ -2,10 +2,32 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
-import { enqueueGenerationTask, isGenerationQueueEnabled } from "@/lib/queue/generation-queue"
+import { enqueueGenerationTask } from "@/lib/queue/generation-queue"
+import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
+
+async function loadProjectFiles(projectId: string) {
+  const files = await prisma.projectFile.findMany({
+    where: { projectId },
+    orderBy: { path: "asc" },
+  })
+
+  return files.map((file) => ({
+    path: file.path,
+    content: file.content,
+    language: file.language as
+      | "tsx"
+      | "ts"
+      | "css"
+      | "json"
+      | "html"
+      | "prisma"
+      | "md"
+      | "env",
+  }))
+}
 
 const CreateJobSchema = z.object({
   projectId: z.string().min(1),
@@ -66,11 +88,6 @@ export async function POST(request: NextRequest) {
     plan: parsed.data.plan,
   })
 
-  if (!isGenerationQueueEnabled()) {
-    await GenerationJobService.markFailed(job.id, "Redis queue is not configured for generation jobs.")
-    return NextResponse.json({ error: "Generation queue is unavailable" }, { status: 503 })
-  }
-
   const queueJob = await enqueueGenerationTask({
     jobId: job.id,
     userId: user.id,
@@ -80,7 +97,23 @@ export async function POST(request: NextRequest) {
     provider: parsed.data.provider || "swift",
   })
 
-  await GenerationJobService.attachQueueJob(job.id, queueJob.id || job.id)
+  if (queueJob) {
+    await GenerationJobService.attachQueueJob(job.id, queueJob.id || job.id)
+  } else {
+    void executeGenerationJob(
+      {
+        jobId: job.id,
+        projectId: project.id,
+        prompt: parsed.data.prompt,
+        selectedModel: parsed.data.model,
+      },
+      {
+        loadProjectFiles,
+      }
+    ).catch((error) => {
+      console.error("[Generation Queue] Direct fallback generation failed:", error instanceof Error ? error.message : String(error))
+    })
+  }
 
   return NextResponse.json({
     job: GenerationJobService.toPublicJob(job),

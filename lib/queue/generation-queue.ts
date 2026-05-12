@@ -155,24 +155,8 @@ export async function enqueueGenerationTask(
     const queue = getGenerationQueue()
     
     if (!queue) {
-      // Fallback: create a mock job object for in-memory tracking
-      console.log("[Generation Queue] Queueing job in memory:", payload.jobId)
-      return {
-        id: payload.jobId,
-        name: "generation.execute",
-        data: payload,
-        progress: 0,
-        delay: 0,
-        timestamp: Date.now(),
-        attemptsMade: 0,
-        failedReason: null,
-        stacktrace: null,
-        returnvalue: null,
-        parentKey: null,
-        repeatJobKey: null,
-        _progress: 0,
-        _overwrite: true,
-      } as any
+      console.warn("[Generation Queue] Redis queue unavailable for:", payload.jobId)
+      return null
     }
     
     return queue.add("generation.execute", payload, {
@@ -182,12 +166,7 @@ export async function enqueueGenerationTask(
     })
   } catch (error) {
     console.error("[Generation Queue] Failed to enqueue task:", error instanceof Error ? error.message : String(error))
-    // Return a mock job so the API doesn't fail
-    return {
-      id: payload.jobId,
-      name: "generation.execute",
-      data: payload,
-    } as any
+    return null
   }
 }
 
