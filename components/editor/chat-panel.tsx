@@ -1334,11 +1334,13 @@ function GenerationProgressCard({
 
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = Math.max(1, Math.ceil(progress.timeoutMs / 1000))
+  const isTerminal = progress.stage === "timeout" || progress.stage === "error" || progress.stage === "cancelled"
+  const isOverdue = !isTerminal && elapsedMs > progress.timeoutMs
   const percent =
     typeof progress.progressPercent === "number"
-      ? Math.max(0, Math.min(100, progress.progressPercent))
-      : Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
-  const isTerminal = progress.stage === "timeout" || progress.stage === "error" || progress.stage === "cancelled"
+      ? Math.max(0, Math.min(isTerminal ? 100 : 95, progress.progressPercent))
+      : Math.min(isTerminal ? 100 : 95, Math.round((elapsedMs / progress.timeoutMs) * 100))
+  const elapsedLabel = isOverdue ? `${timeoutSeconds}s+` : `${elapsedSeconds}s`
   const steps = getGenerationSteps(progress.stage)
 
   return (
@@ -1350,7 +1352,7 @@ function GenerationProgressCard({
         <div className="min-w-0">
           <p className="text-sm font-medium text-foreground">{progress.label}</p>
           <p className="mt-1 text-muted-foreground">
-            {progress.modelKey || "Swift AI"} · {elapsedSeconds}s / {timeoutSeconds}s
+            {progress.modelKey || "Swift AI"} · {elapsedLabel} / {timeoutSeconds}s
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -1377,6 +1379,11 @@ function GenerationProgressCard({
           style={{ width: `${percent}%` }}
         />
       </div>
+      {isOverdue && (
+        <p className="mt-2 text-[11px] text-amber-300">
+          Job masih berjalan di backend. Estimasi awal terlewati, tapi proses belum berhenti.
+        </p>
+      )}
       {progress.prompt && (
         <p className="mt-2 line-clamp-2 text-muted-foreground">
           Prompt: {progress.prompt}
