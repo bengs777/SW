@@ -3,6 +3,7 @@ import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
+import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 
@@ -12,7 +13,7 @@ async function loadProjectFiles(projectId: string) {
     orderBy: { path: "asc" },
   })
 
-  return files.map((file) => ({
+  const normalizedFiles = files.map((file) => ({
     path: file.path,
     content: file.content,
     language: file.language as
@@ -25,6 +26,10 @@ async function loadProjectFiles(projectId: string) {
       | "md"
       | "env",
   }))
+
+  const { files: visibleFiles } = splitWorkspaceStateFiles(normalizedFiles)
+
+  return visibleFiles
 }
 
 const CreateJobSchema = z.object({

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import type { GeneratedFile } from "@/lib/types"
 import { UserService } from "@/lib/services/user.service"
+import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 
@@ -76,7 +77,11 @@ function ensureDeploymentFiles(files: GeneratedFile[], projectName: string) {
 
   for (const file of files) {
     const normalized = normalizeDeployPath(file.path)
-    if (!normalized || /\.preview\.(tsx?|jsx?)$/i.test(normalized)) {
+    if (
+      !normalized ||
+      /\.preview\.(tsx?|jsx?)$/i.test(normalized) ||
+      normalized === ".swift/workspace-state.json"
+    ) {
       continue
     }
 
@@ -587,7 +592,20 @@ export async function POST(
         { status: 400 }
       )
     }
-    const files = ensureDeploymentFiles(rawFiles, project.name)
+    const { files: visibleRawFiles } = splitWorkspaceStateFiles(rawFiles)
+    const files = ensureDeploymentFiles(visibleRawFiles, project.name)
+
+    const oversizedFile = files.find(
+      (file) => Buffer.byteLength(file.content || "", "utf8") > MAX_SINGLE_FILE_BYTES
+    )
+    if (oversizedFile) {
+      return NextResponse.json(
+        {
+          error: `File ${oversizedFile.path} exceeds the single-file size limit.`,
+        },
+        { status: 413 }
+      )
+    }
 
     // Payload sizing guard & request logging
     const contentLengthHeader = request.headers.get("content-length")

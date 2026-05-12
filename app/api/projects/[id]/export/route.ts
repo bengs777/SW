@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import type { GeneratedFile } from "@/lib/types"
+import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 
@@ -134,7 +135,8 @@ export async function GET(
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
     }
 
-    const files = normalizeFiles(project.files, [])
+    const { files: visibleProjectFiles } = splitWorkspaceStateFiles(project.files)
+    const files = normalizeFiles(visibleProjectFiles, [])
     if (files.length === 0) {
       return NextResponse.json(
         { error: "No generated files found to export." },
@@ -171,7 +173,9 @@ export async function POST(
     }
 
     const body = await request.json().catch(() => ({}))
-    const files = normalizeFiles((body as { files?: unknown }).files, project.files)
+    const normalizedFiles = normalizeFiles((body as { files?: unknown }).files, project.files)
+    const { files: visibleBodyFiles } = splitWorkspaceStateFiles(normalizedFiles)
+    const files = visibleBodyFiles
     if (files.length === 0) {
       return NextResponse.json(
         { error: "No generated files found to export." },

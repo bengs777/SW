@@ -3,6 +3,7 @@ import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import type { GeneratedFile } from "@/lib/types"
+import { readWorkspaceStateFile, splitWorkspaceStateFiles } from "@/lib/workspace-state"
 
 export async function GET(
   request: NextRequest,
@@ -48,7 +49,16 @@ export async function GET(
       )
     }
 
-    return NextResponse.json({ project })
+    const { files: visibleFiles, stateFile } = splitWorkspaceStateFiles(project.files)
+    const workspaceState = readWorkspaceStateFile(stateFile)
+
+    return NextResponse.json({
+      project: {
+        ...project,
+        files: visibleFiles,
+        workspaceState,
+      },
+    })
   } catch (error) {
     console.error("[v0] Error fetching project:", error)
     return NextResponse.json(

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
+import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { chooseModelForTask } from "@/lib/ai/model-router"
 import { buildContextForTask } from "@/lib/ai/context-builder"
 import { ProviderRouter } from "@/lib/ai/provider-router"
@@ -147,9 +148,16 @@ export async function POST(req: NextRequest) {
 
     // Load a small set of relevant files for context
     const projectFiles = await prisma.projectFile.findMany({ where: { projectId }, select: { path: true, content: true } })
+    const { files: visibleProjectFiles } = splitWorkspaceStateFiles(
+      projectFiles.map((projectFile) => ({
+        path: projectFile.path,
+        content: projectFile.content,
+        language: projectFile.path.endsWith(".tsx") ? ("tsx" as const) : ("ts" as const),
+      }))
+    )
 
     // Build inspect prompt
-    const contextFiles = projectFiles.slice(0, 8).map((projectFile) => ({
+    const contextFiles = visibleProjectFiles.slice(0, 8).map((projectFile) => ({
       ...projectFile,
       language: projectFile.path.endsWith(".tsx") ? "tsx" as const : "ts" as const,
     }))

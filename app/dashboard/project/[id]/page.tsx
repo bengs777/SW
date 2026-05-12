@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect, useRef } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import { useParams } from "next/navigation"
 import { EditorHeader } from "@/components/editor/header"
 import { ChatPanel } from "@/components/editor/chat-panel"
@@ -20,6 +20,13 @@ import { DEFAULT_MODEL_KEY, DEFAULT_MODEL_OPTIONS } from "@/lib/ai/models"
 import { buildPreviewContextPacket } from "@/lib/ai/preview-context"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
 import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, PromptAttachment } from "@/lib/types"
+import {
+  buildWorkspaceStateFile,
+  createWorkspaceStateSnapshot,
+  readWorkspaceStateFile,
+  splitWorkspaceStateFiles,
+  type WorkspaceState,
+} from "@/lib/workspace-state"
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
@@ -129,6 +136,118 @@ const normalizeLanguage = (value: unknown): GeneratedFile["language"] => {
     : "tsx"
 }
 
+const AUTOSAVE_DEBOUNCE_MS = 1200
+const WORKSPACE_DRAFT_STORAGE_PREFIX = "swift-workspace-draft"
+
+type WorkspaceDraft = {
+  files: GeneratedFile[]
+  workspaceState: WorkspaceState
+}
+
+const normalizeWorkspacePath = (path: string) => path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
+
+const normalizeWorkspaceFiles = (files: GeneratedFile[]) =>
+  splitWorkspaceStateFiles(files).files.map((file) => ({
+    path: normalizeWorkspacePath(file.path),
+    content: String(file.content || ""),
+    language: normalizeLanguage(file.language),
+  }))
+
+const buildWorkspaceDraftKey = (projectId: string) => `${WORKSPACE_DRAFT_STORAGE_PREFIX}:${projectId}`
+
+const buildWorkspaceFingerprint = (files: GeneratedFile[], lockedPaths: string[]) =>
+  `${files
+    .map((file) => `${normalizeWorkspacePath(file.path)}:${file.language}:${file.content}`)
+    .join("|")}::${Array.from(new Set(lockedPaths.map(normalizeWorkspacePath))).sort().join(",")}`
+
+const getActiveFilePath = (files: GeneratedFile[], activeFileIndex: number) =>
+  files[activeFileIndex]?.path || null
+
+const updateProtectedPathsForUserChange = (
+  previousFiles: GeneratedFile[],
+  nextFiles: GeneratedFile[],
+  existingProtectedPaths: string[]
+) => {
+  const previousByPath = new Map(previousFiles.map((file) => [normalizeWorkspacePath(file.path), file]))
+  const nextPaths = new Set(nextFiles.map((file) => normalizeWorkspacePath(file.path)))
+  const nextProtected = new Set(existingProtectedPaths.map(normalizeWorkspacePath).filter(Boolean))
+
+  for (const previous of previousFiles) {
+    const previousPath = normalizeWorkspacePath(previous.path)
+    if (!nextPaths.has(previousPath)) {
+      nextProtected.delete(previousPath)
+    }
+  }
+
+  for (const file of nextFiles) {
+    const normalizedPath = normalizeWorkspacePath(file.path)
+    const previous = previousByPath.get(normalizedPath)
+    const hasChanged =
+      !previous ||
+      previous.content !== file.content ||
+      normalizeLanguage(previous.language) !== normalizeLanguage(file.language)
+
+    if (hasChanged) {
+      nextProtected.add(normalizedPath)
+    }
+  }
+
+  return Array.from(nextProtected).sort()
+}
+
+const mergeGeneratedFilesIntoWorkspace = (
+  currentFiles: GeneratedFile[],
+  generatedFiles: GeneratedFile[],
+  protectedPaths: string[]
+) => {
+  const currentByPath = new Map(currentFiles.map((file) => [normalizeWorkspacePath(file.path), file]))
+  const generatedByPath = new Map(generatedFiles.map((file) => [normalizeWorkspacePath(file.path), file]))
+  const protectedPathSet = new Set(protectedPaths.map(normalizeWorkspacePath).filter(Boolean))
+  const merged: GeneratedFile[] = []
+
+  for (const file of generatedFiles) {
+    const normalizedPath = normalizeWorkspacePath(file.path)
+    const current = currentByPath.get(normalizedPath)
+
+    if (current && protectedPathSet.has(normalizedPath)) {
+      merged.push(current)
+      continue
+    }
+
+    merged.push({
+      path: normalizedPath,
+      content: String(file.content || ""),
+      language: normalizeLanguage(file.language),
+    })
+  }
+
+  for (const file of currentFiles) {
+    const normalizedPath = normalizeWorkspacePath(file.path)
+    if (protectedPathSet.has(normalizedPath) && !generatedByPath.has(normalizedPath)) {
+      merged.push({
+        path: normalizedPath,
+        content: String(file.content || ""),
+        language: normalizeLanguage(file.language),
+      })
+    }
+  }
+
+  return normalizeWorkspaceFiles(merged)
+}
+
+const buildWorkspaceStateSnapshot = (input: {
+  version: number
+  dirty: boolean
+  lockedPaths: string[]
+  activeFilePath: string | null
+}) =>
+  createWorkspaceStateSnapshot({
+    version: input.version,
+    dirty: input.dirty,
+    lockedPaths: input.lockedPaths,
+    activeFilePath: input.activeFilePath,
+  })
+
 export type Message = {
   id: string
   role: "user" | "assistant"
@@ -223,6 +342,7 @@ export default function EditorPage() {
   const [projectPrompt, setProjectPrompt] = useState<string | null>(null)
   const [shouldAutoGeneratePrompt, setShouldAutoGeneratePrompt] = useState(false)
   const [hasAutoGeneratedFromPrompt, setHasAutoGeneratedFromPrompt] = useState(false)
+  const [workspaceRestoreNotice, setWorkspaceRestoreNotice] = useState<string | null>(null)
   const activeGenerateControllerRef = useRef<AbortController | null>(null)
   const activeGenerateTimeoutRef = useRef<number | null>(null)
   const activeGenerateWasCancelledRef = useRef(false)
@@ -231,6 +351,22 @@ export default function EditorPage() {
   const activeGenerationReconnectAttemptsRef = useRef(0)
   const activeGenerationLastEventIdRef = useRef("0")
   const activeGenerationReconnectTimerRef = useRef<number | null>(null)
+  const workspaceProtectedPathsRef = useRef<string[]>([])
+  const workspaceAutosaveTimerRef = useRef<number | null>(null)
+  const workspaceDraftFingerprintRef = useRef<string | null>(null)
+  const workspaceSaveFingerprintRef = useRef<string | null>(null)
+  const workspaceDraftRef = useRef<WorkspaceDraft | null>(null)
+
+  const latestUserPrompt = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.role === "user" && message.content.trim()) {
+        return message.content.trim()
+      }
+    }
+
+    return projectPrompt || "Manual code edit save"
+  }, [messages, projectPrompt])
 
   const closeGenerationStream = useCallback(() => {
     if (activeGenerationReconnectTimerRef.current !== null) {
@@ -249,19 +385,33 @@ export default function EditorPage() {
       throw new Error(data.error || "Failed to refresh project")
     }
 
-    const files = Array.isArray(data.project?.files)
+    const serverFiles = Array.isArray(data.project?.files)
       ? data.project.files.map((file: GeneratedFile) => ({
           path: file.path,
           content: file.content,
           language: normalizeLanguage(file.language),
         }))
       : []
+    const { files } = splitWorkspaceStateFiles(serverFiles)
+    const serverWorkspaceState =
+      readWorkspaceStateFile(
+        data.project?.workspaceState
+          ? buildWorkspaceStateFile(data.project.workspaceState as WorkspaceState)
+          : null
+      ) ||
+      buildWorkspaceStateSnapshot({
+        version: data.project?.history?.length || (files.length > 0 ? 1 : 0),
+        dirty: false,
+        lockedPaths: [],
+        activeFilePath: files[0]?.path || null,
+      })
 
     setGeneratedFiles(files)
     setPreviewFiles(null)
-    setCurrentVersion(data.project?.history?.length || (files.length > 0 ? 1 : 0))
+    setCurrentVersion(serverWorkspaceState.version)
     setActiveFileIndex(0)
     setIsDirty(false)
+    workspaceProtectedPathsRef.current = serverWorkspaceState.lockedPaths
   }, [projectId])
 
   const applyJobProgress = useCallback((job: {
@@ -374,6 +524,10 @@ export default function EditorPage() {
     return () => {
       closeGenerationStream()
       activeGenerateControllerRef.current?.abort()
+      if (workspaceAutosaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceAutosaveTimerRef.current)
+        workspaceAutosaveTimerRef.current = null
+      }
     }
   }, [closeGenerationStream])
 
@@ -470,6 +624,15 @@ export default function EditorPage() {
       setProjectPrompt(null)
       setShouldAutoGeneratePrompt(false)
       setHasAutoGeneratedFromPrompt(false)
+      setWorkspaceRestoreNotice(null)
+      workspaceProtectedPathsRef.current = []
+      if (workspaceAutosaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceAutosaveTimerRef.current)
+        workspaceAutosaveTimerRef.current = null
+      }
+      workspaceDraftFingerprintRef.current = null
+      workspaceSaveFingerprintRef.current = null
+      workspaceDraftRef.current = null
 
       try {
         const response = await fetch(`/api/projects/${projectId}`)
@@ -481,17 +644,55 @@ export default function EditorPage() {
 
         if (!isMounted) return
 
-        const files = Array.isArray(data.project?.files)
+        const serverFiles = Array.isArray(data.project?.files)
           ? data.project.files.map((file: GeneratedFile) => ({
               path: file.path,
               content: file.content,
               language: normalizeLanguage(file.language),
             }))
           : []
+        const { files: visibleServerFiles } = splitWorkspaceStateFiles(serverFiles)
+        const serverWorkspaceState =
+          readWorkspaceStateFile(
+            data.project?.workspaceState
+              ? buildWorkspaceStateFile(data.project.workspaceState as WorkspaceState)
+              : null
+          ) ||
+          buildWorkspaceStateSnapshot({
+            version: data.project?.history?.length || (visibleServerFiles.length > 0 ? 1 : 0),
+            dirty: false,
+            lockedPaths: [],
+            activeFilePath: visibleServerFiles[0]?.path || null,
+          })
+        const localDraft = readWorkspaceDraft()
+        const serverFingerprint = buildWorkspaceFingerprint(
+          visibleServerFiles,
+          serverWorkspaceState.lockedPaths
+        )
+        const localFingerprint = localDraft
+          ? buildWorkspaceFingerprint(localDraft.files, localDraft.workspaceState.lockedPaths)
+          : null
+        const shouldRestoreDraft = Boolean(
+          localDraft && (localDraft.workspaceState.dirty || localFingerprint !== serverFingerprint)
+        )
+        const nextFiles = shouldRestoreDraft ? localDraft!.files : visibleServerFiles
+        const nextProtectedPaths = shouldRestoreDraft
+          ? localDraft!.workspaceState.lockedPaths
+          : serverWorkspaceState.lockedPaths
 
-        setGeneratedFiles(files)
+        workspaceProtectedPathsRef.current = nextProtectedPaths
+        workspaceDraftRef.current = shouldRestoreDraft ? localDraft : null
+        if (shouldRestoreDraft && localDraft) {
+          workspaceDraftFingerprintRef.current = buildWorkspaceFingerprint(
+            localDraft.files,
+            localDraft.workspaceState.lockedPaths
+          )
+          setWorkspaceRestoreNotice("Pulihkan perubahan lokal yang belum tersimpan.")
+        }
+
+        setGeneratedFiles(nextFiles)
         setActiveFileIndex(0)
-        setCurrentVersion(data.project?.history?.length || (files.length > 0 ? 1 : 0))
+        setCurrentVersion(serverWorkspaceState.version)
         setProjectName(data.project?.name || null)
         setProjectTemplateId(data.project?.templateId || null)
         setProjectPrompt(typeof data.project?.prompt === "string" ? data.project.prompt.trim() || null : null)
@@ -502,8 +703,9 @@ export default function EditorPage() {
         setShouldAutoGeneratePrompt(
           Boolean(data.project?.prompt?.trim()) &&
             (data.project?.history?.length || 0) === 0 &&
-            files.length === 0
+            visibleServerFiles.length === 0
         )
+        setIsDirty(Boolean(shouldRestoreDraft && localDraft?.workspaceState.dirty))
       } catch (error) {
         if (!isMounted) return
         const message = error instanceof Error ? error.message : "Failed to load project"
@@ -685,16 +887,96 @@ export default function EditorPage() {
     }
   }, [])
 
+  const readWorkspaceDraft = useCallback((): WorkspaceDraft | null => {
+    if (typeof window === "undefined") {
+      return null
+    }
+
+    const rawDraft = window.localStorage.getItem(buildWorkspaceDraftKey(projectId))
+    if (!rawDraft) {
+      return null
+    }
+
+    try {
+      const parsed = JSON.parse(rawDraft) as Partial<WorkspaceDraft>
+      const files = Array.isArray(parsed.files) ? normalizeWorkspaceFiles(parsed.files) : []
+      const workspaceState = readWorkspaceStateFile(
+        parsed.workspaceState
+          ? buildWorkspaceStateFile(parsed.workspaceState as WorkspaceState)
+          : null
+      )
+
+      if (!workspaceState || files.length === 0) {
+        return null
+      }
+
+      return {
+        files,
+        workspaceState,
+      }
+    } catch {
+      return null
+    }
+  }, [projectId])
+
+  const persistWorkspaceDraft = useCallback((input: WorkspaceDraft) => {
+    const fingerprint = buildWorkspaceFingerprint(
+      input.files,
+      input.workspaceState.lockedPaths
+    )
+
+    workspaceDraftRef.current = input
+    if (workspaceDraftFingerprintRef.current === fingerprint) {
+      return
+    }
+
+    workspaceDraftFingerprintRef.current = fingerprint
+
+    if (typeof window === "undefined") {
+      return
+    }
+
+    window.localStorage.setItem(
+      buildWorkspaceDraftKey(projectId),
+      JSON.stringify(input)
+    )
+  }, [projectId])
+
+  const clearWorkspaceDraft = useCallback(() => {
+    workspaceDraftRef.current = null
+    workspaceDraftFingerprintRef.current = null
+
+    if (typeof window === "undefined") {
+      return
+    }
+
+    window.localStorage.removeItem(buildWorkspaceDraftKey(projectId))
+  }, [projectId])
+
   const saveFiles = useCallback(async (files: GeneratedFile[], prompt: string) => {
     setIsSavingFiles(true)
-    let handoffToJobStream = false
+
+    if (workspaceAutosaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceAutosaveTimerRef.current)
+      workspaceAutosaveTimerRef.current = null
+    }
+
+    const workspaceState = buildWorkspaceStateSnapshot({
+      version: currentVersion + 1,
+      dirty: false,
+      lockedPaths: workspaceProtectedPathsRef.current,
+      activeFilePath: getActiveFilePath(files, activeFileIndex),
+    })
+    const payloadFiles = [...normalizeWorkspaceFiles(files), buildWorkspaceStateFile(workspaceState)]
+    const fingerprint = buildWorkspaceFingerprint(files, workspaceState.lockedPaths)
+    workspaceSaveFingerprintRef.current = fingerprint
 
     try {
       const response = await fetch(`/api/projects/${projectId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          files,
+          files: payloadFiles,
           prompt,
           tokensUsed: 0,
         }),
@@ -705,13 +987,72 @@ export default function EditorPage() {
         throw new Error(data.error || "Failed to save files")
       }
 
-      setIsDirty(false)
-      setCurrentVersion((v) => v + 1)
+      const isCurrentSnapshot = workspaceSaveFingerprintRef.current === fingerprint
+      if (isCurrentSnapshot) {
+        setIsDirty(false)
+        setCurrentVersion((version) => version + 1)
+        setWorkspaceRestoreNotice(null)
+        clearWorkspaceDraft()
+      }
+
       return data
     } finally {
       setIsSavingFiles(false)
     }
-  }, [projectId])
+  }, [activeFileIndex, clearWorkspaceDraft, currentVersion, projectId])
+
+  useEffect(() => {
+    if (isLoadingProject || !isDirty || generatedFiles.length === 0) {
+      if (workspaceAutosaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceAutosaveTimerRef.current)
+        workspaceAutosaveTimerRef.current = null
+      }
+      return
+    }
+
+    const workspaceState = buildWorkspaceStateSnapshot({
+      version: currentVersion,
+      dirty: true,
+      lockedPaths: workspaceProtectedPathsRef.current,
+      activeFilePath: getActiveFilePath(generatedFiles, activeFileIndex),
+    })
+    const draft: WorkspaceDraft = {
+      files: normalizeWorkspaceFiles(generatedFiles),
+      workspaceState,
+    }
+
+    persistWorkspaceDraft(draft)
+
+    if (workspaceAutosaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceAutosaveTimerRef.current)
+    }
+
+    const snapshotFiles = draft.files
+    const snapshotPrompt = latestUserPrompt
+    const snapshotFingerprint = buildWorkspaceFingerprint(snapshotFiles, workspaceState.lockedPaths)
+    workspaceSaveFingerprintRef.current = snapshotFingerprint
+
+    workspaceAutosaveTimerRef.current = window.setTimeout(() => {
+      void saveFiles(snapshotFiles, snapshotPrompt).catch((error) => {
+        const message = error instanceof Error ? error.message : "Failed to autosave workspace"
+        pushErrorLog("save", message)
+
+        workspaceAutosaveTimerRef.current = window.setTimeout(() => {
+          void saveFiles(snapshotFiles, snapshotPrompt).catch((retryError) => {
+            const retryMessage = retryError instanceof Error ? retryError.message : "Failed to autosave workspace"
+            pushErrorLog("save", retryMessage)
+          })
+        }, AUTOSAVE_DEBOUNCE_MS * 2)
+      })
+    }, AUTOSAVE_DEBOUNCE_MS)
+
+    return () => {
+      if (workspaceAutosaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceAutosaveTimerRef.current)
+        workspaceAutosaveTimerRef.current = null
+      }
+    }
+  }, [activeFileIndex, currentVersion, generatedFiles, isDirty, isLoadingProject, latestUserPrompt, persistWorkspaceDraft, pushErrorLog, saveFiles])
 
   const handleSendMessage = useCallback(async (
     content: string,
@@ -1028,12 +1369,11 @@ export default function EditorPage() {
         )
       )
 
-      // Update generated files only when the backend confirms that AI produced
-      // valid file output. Provider failures preserve the current Explorer state.
+      // Rebase AI output into the current workspace so manual edits remain intact.
       if (data.preserveFiles) {
         setIsDirty(false)
       } else if (Array.isArray(data.files)) {
-        const normalizedFiles: GeneratedFile[] = data.files.map(
+        const generatedFilesFromAi: GeneratedFile[] = data.files.map(
           (file: { path: string; content: string; language?: string }) => ({
             path: file.path,
             content: file.content,
@@ -1041,33 +1381,21 @@ export default function EditorPage() {
           })
         )
 
-        setGeneratedFiles(normalizedFiles)
+        const mergedFiles = mergeGeneratedFilesIntoWorkspace(
+          generatedFiles,
+          generatedFilesFromAi,
+          workspaceProtectedPathsRef.current
+        )
+
+        setGeneratedFiles(mergedFiles)
         setActiveFileIndex(0)
-        setCurrentVersion((v) => v + 1)
-        setIsDirty(false)
+        setIsDirty(true)
         setActivePreviewTab("code")
       } else {
         setGeneratedFiles([])
       }
 
-      const previewFilesPayload = data as {
-        previewFiles?: Array<{ path: string; content: string; language?: string }> | null
-      }
-
-      if (data.preserveFiles) {
-        setPreviewFiles(null)
-      } else if (Array.isArray(previewFilesPayload.previewFiles)) {
-        const normalizedPreview: GeneratedFile[] = previewFilesPayload.previewFiles.map(
-          (file: { path: string; content: string; language?: string }) => ({
-            path: file.path,
-            content: file.content,
-            language: normalizeLanguage(file.language),
-          })
-        )
-        setPreviewFiles(normalizedPreview)
-      } else {
-        setPreviewFiles(null)
-      }
+      setPreviewFiles(null)
       setGenerationProgress((current) =>
         current
           ? {
@@ -1212,8 +1540,8 @@ export default function EditorPage() {
   ])
 
   const handleUpdateFile = useCallback((index: number, content: string) => {
-    setGeneratedFiles((currentFiles) =>
-      currentFiles.map((file, fileIndex) =>
+    setGeneratedFiles((currentFiles) => {
+      const nextFiles = currentFiles.map((file, fileIndex) =>
         fileIndex === index
           ? {
               ...file,
@@ -1221,19 +1549,34 @@ export default function EditorPage() {
             }
           : file
       )
-    )
+
+      workspaceProtectedPathsRef.current = updateProtectedPathsForUserChange(
+        currentFiles,
+        nextFiles,
+        workspaceProtectedPathsRef.current
+      )
+
+      return nextFiles
+    })
     setIsDirty(true)
   }, [])
 
   const handleReplaceFiles = useCallback((files: GeneratedFile[]) => {
-    setGeneratedFiles(files)
+    setGeneratedFiles((currentFiles) => {
+      const nextFiles = normalizeWorkspaceFiles(files)
+      workspaceProtectedPathsRef.current = updateProtectedPathsForUserChange(
+        currentFiles,
+        nextFiles,
+        workspaceProtectedPathsRef.current
+      )
+
+      return nextFiles
+    })
     setIsDirty(true)
   }, [])
 
   const handleSaveFiles = useCallback(async () => {
-    const latestPrompt =
-      [...messages].reverse().find((message) => message.role === "user")?.content ||
-      "Manual code edit save"
+    const latestPrompt = latestUserPrompt || "Manual code edit save"
 
     try {
       await saveFiles(generatedFiles, latestPrompt)
@@ -1244,13 +1587,13 @@ export default function EditorPage() {
         ...prev,
         {
           id: Math.random().toString(36).substring(7),
-          role: "assistant",
           content: message,
+          role: "assistant",
           timestamp: new Date(),
         },
       ])
     }
-  }, [generatedFiles, messages, pushErrorLog, saveFiles])
+  }, [generatedFiles, latestUserPrompt, pushErrorLog, saveFiles])
 
   const applyLayoutPreset = useCallback((preset: "prompt" | "balanced" | "preview") => {
     setLayoutPreset(preset)
@@ -1465,6 +1808,12 @@ export default function EditorPage() {
         customDomain={customDomain}
         onDomainSaved={handleDomainSaved}
       />
+
+      {workspaceRestoreNotice && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+          {workspaceRestoreNotice}
+        </div>
+      )}
 
       {isMobile ? (
         <>
