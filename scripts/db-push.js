@@ -7,6 +7,9 @@ const REQUIRED_TABLES = [
   "Workspace",
   "WorkspaceMember",
   "Project",
+  "GenerationJob",
+  "GenerationEvent",
+  "GenerationAttempt",
   "UsageLog",
   "BillingTransaction",
   "Subscription",
@@ -82,6 +85,38 @@ async function listTables(client) {
   return result.rows.map((row) => String(row.name))
 }
 
+async function listColumns(client, tableName) {
+  const result = await client.execute(`PRAGMA table_info("${tableName}")`)
+  return new Set(result.rows.map((row) => String(row.name)))
+}
+
+async function ensureGenerationJobColumns(client) {
+  const existingColumns = await listColumns(client, "GenerationJob")
+  const columnStatements = [
+    ["version", 'ALTER TABLE "GenerationJob" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 0'],
+    ["retryCount", 'ALTER TABLE "GenerationJob" ADD COLUMN "retryCount" INTEGER NOT NULL DEFAULT 0'],
+    ["maxRetries", 'ALTER TABLE "GenerationJob" ADD COLUMN "maxRetries" INTEGER NOT NULL DEFAULT 2'],
+    ["attemptCount", 'ALTER TABLE "GenerationJob" ADD COLUMN "attemptCount" INTEGER NOT NULL DEFAULT 0'],
+    ["contextJson", 'ALTER TABLE "GenerationJob" ADD COLUMN "contextJson" TEXT'],
+    ["diagnosticsJson", 'ALTER TABLE "GenerationJob" ADD COLUMN "diagnosticsJson" TEXT'],
+    ["metricsJson", 'ALTER TABLE "GenerationJob" ADD COLUMN "metricsJson" TEXT'],
+    ["previewUrl", 'ALTER TABLE "GenerationJob" ADD COLUMN "previewUrl" TEXT'],
+    ["queueJobId", 'ALTER TABLE "GenerationJob" ADD COLUMN "queueJobId" TEXT'],
+    ["timedOutAt", 'ALTER TABLE "GenerationJob" ADD COLUMN "timedOutAt" DATETIME'],
+  ]
+
+  for (const [columnName, statement] of columnStatements) {
+    if (existingColumns.has(columnName)) {
+      continue
+    }
+
+    console.log(`[db-push] Adding missing GenerationJob column: ${columnName}`)
+    await client.execute(statement)
+  }
+
+  await client.execute('CREATE INDEX IF NOT EXISTS "GenerationJob_queueJobId_idx" ON "GenerationJob"("queueJobId")')
+}
+
 async function pushLocalDatabase() {
   env.DATABASE_URL = process.env.DATABASE_URL || "file:./dev.db"
 
@@ -124,6 +159,8 @@ async function pushTursoDatabase() {
   for (const statement of statements) {
     await client.execute(statement)
   }
+
+  await ensureGenerationJobColumns(client)
 
   const afterTables = await listTables(client)
   const afterTableSet = new Set(afterTables)
