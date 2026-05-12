@@ -56,7 +56,7 @@ function buildUpstashRedisUrl(): string | null {
 
 function getRedisConnection() {
   if (!redisConnection) {
-    let redisUrl = env.redisUrl
+    let redisUrl: string | null = env.redisUrl
     
     // If no native Redis URL, try to build from Upstash REST config
     if (!redisUrl) {
