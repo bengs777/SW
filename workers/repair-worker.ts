@@ -4,6 +4,7 @@
 
 import type { Job, Worker as BullWorker } from "bullmq"
 import type { GeneratedFile } from "@/lib/types"
+import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type RepairJobPayload = {
   jobId: string
@@ -50,7 +51,7 @@ export function createRepairWorker(): BullWorker<RepairJobPayload> {
         const mappedFiles: GeneratedFile[] = existingFiles.map((f: any) => ({
           path: f.path,
           content: f.content,
-          language: f.language as GeneratedFile["language"],
+          language: normalizeFileLanguage(f.language),
         }))
 
         // Import AI modules dynamically

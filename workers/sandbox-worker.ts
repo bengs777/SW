@@ -4,6 +4,7 @@
 
 import type { Job, Worker as BullWorker } from "bullmq"
 import type { GeneratedFile } from "@/lib/types"
+import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type SandboxJobPayload = {
   type: "start" | "stop" | "reset"
@@ -53,7 +54,7 @@ export function createSandboxWorker(): BullWorker<SandboxJobPayload> {
         const typedFiles: GeneratedFile[] = projectFiles.map((f: any) => ({
           path: f.path,
           content: f.content,
-          language: "tsx",
+          language: normalizeFileLanguage(f.language),
         }))
 
         switch (type) {

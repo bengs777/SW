@@ -1,23 +1,12 @@
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
+import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type ProviderOutputParseResult = {
   files: GeneratedFile[]
   parseMode: "json-object" | "json-array" | "json-fence" | "json-fragment" | "json-loose" | "code-fence-files" | "none"
 }
 
-const ALLOWED_LANGUAGES: GeneratedFile["language"][] = [
-  "tsx",
-  "ts",
-  "css",
-  "json",
-  "html",
-  "prisma",
-  "md",
-  "env",
-]
-
-const ALLOWED_LANGUAGE_SET = new Set(ALLOWED_LANGUAGES)
 const FILE_PATH_PATTERN = /[A-Za-z0-9._/-]+\.(tsx|ts|css|json|html|prisma|md|env)/i
 
 const PATH_CONTENT_FILE_SCHEMA = z.object({
@@ -40,7 +29,7 @@ const PROVIDER_OUTPUT_SCHEMA = z.union([
   }),
 ])
 
-const LANGUAGE_ALIASES: Record<string, GeneratedFile["language"]> = {
+const LANGUAGE_ALIASES: Record<string, ReturnType<typeof normalizeFileLanguage>> = {
   tsx: "tsx",
   jsx: "tsx",
   typescriptreact: "tsx",
@@ -462,7 +451,7 @@ function extractCodeFenceBlocks(message: string): CodeFenceBlock[] {
   return blocks
 }
 
-function inferLanguageFromFenceInfo(info: string): GeneratedFile["language"] | "" {
+function inferLanguageFromFenceInfo(info: string): ReturnType<typeof normalizeFileLanguage> | "" {
   const tokens = info
     .trim()
     .split(/\s+/)
@@ -540,7 +529,7 @@ function extractPathToken(value: string) {
   return ""
 }
 
-function selectFallbackPathForFence(language: GeneratedFile["language"] | "", index: number) {
+function selectFallbackPathForFence(language: ReturnType<typeof normalizeFileLanguage> | "", index: number) {
   if (!language) {
     return ""
   }
@@ -560,7 +549,7 @@ function selectFallbackPathForFence(language: GeneratedFile["language"] | "", in
   return `generated/file-${index + 1}.${extension}`
 }
 
-function extensionForLanguage(language: GeneratedFile["language"]) {
+function extensionForLanguage(language: ReturnType<typeof normalizeFileLanguage>) {
   if (language === "tsx") return "tsx"
   if (language === "ts") return "ts"
   if (language === "css") return "css"
@@ -632,10 +621,11 @@ function normalizePath(path: string) {
   return normalized
 }
 
-function normalizeLanguage(language: string, path: string): GeneratedFile["language"] {
+function normalizeLanguage(language: string, path: string): ValidLanguage {
   const normalized = language.trim().toLowerCase()
-  if (ALLOWED_LANGUAGE_SET.has(normalized as GeneratedFile["language"])) {
-    return normalized as GeneratedFile["language"]
+  if (normalized) {
+    const safe = normalizeFileLanguage(normalized)
+    if (safe !== "ts") return safe
   }
 
   if (path.endsWith(".tsx")) return "tsx"

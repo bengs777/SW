@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { getRuntimeSandbox, resetRuntimeSandbox, startRuntimeSandbox } from "@/lib/sandbox/runtime"
-import type { GeneratedFile } from "@/lib/types"
+import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -35,11 +35,10 @@ async function assertProjectAccess(projectId: string, userId: string) {
   return project
 }
 
-function normalizeLanguage(path: string, language?: string): GeneratedFile["language"] {
-  const normalized = (language || "").toLowerCase()
-  if (["tsx", "ts", "css", "json", "html", "prisma", "md", "env"].includes(normalized)) {
-    return normalized as GeneratedFile["language"]
-  }
+function normalizeLanguage(path: string, language?: string) {
+  const result = normalizeFileLanguage(language)
+  if (result !== "ts") return result
+
   if (path.endsWith(".tsx")) return "tsx"
   if (path.endsWith(".ts")) return "ts"
   if (path.endsWith(".css")) return "css"
@@ -51,7 +50,7 @@ function normalizeLanguage(path: string, language?: string): GeneratedFile["lang
   return "ts"
 }
 
-function validateSandboxFiles(files: GeneratedFile[]) {
+function validateSandboxFiles(files: Array<{ path: string; content: string; language: string }>) {
   if (files.length > MAX_SANDBOX_FILES) {
     return `Too many files for live preview. Maximum: ${MAX_SANDBOX_FILES}`
   }

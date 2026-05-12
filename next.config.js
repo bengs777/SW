@@ -23,9 +23,7 @@ const nextConfig = {
     return config
   },
   // Exclude bullmq and ioredis from server components bundling since they use Node.js native modules
-  experimental: {
-    serverComponentsExternalPackages: ['bullmq', 'ioredis'],
-  },
+  serverExternalPackages: ['bullmq', 'ioredis'],
 }
 
 module.exports = nextConfig

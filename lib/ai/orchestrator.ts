@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db/client'
 import type { ProviderName } from './provider-router'
 import type { GeneratedFile } from '@/lib/types'
+import { normalizeFileLanguage } from '@/lib/workspace-state'
 import buildPlan from '@/lib/orchestrator/planner'
 import { executePlan } from '@/lib/orchestrator/agent-loop'
 
@@ -31,6 +32,34 @@ type OrchestratorNew = {
   }
 }
 
+function parseStoredFiles(raw: string): GeneratedFile[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+
+  if (!Array.isArray(parsed)) return []
+
+  return parsed
+    .map((item: unknown) => {
+      if (!item || typeof item !== 'object') return null
+      const r = item as Record<string, unknown>
+      const path = typeof r.path === 'string' ? r.path : ''
+      const content = typeof r.content === 'string' ? r.content : ''
+      if (!path || !content) return null
+      return {
+        path,
+        content,
+        language: normalizeFileLanguage(
+          typeof r.language === 'string' ? r.language : undefined
+        ),
+      } as GeneratedFile
+    })
+    .filter((f: GeneratedFile | null) => f !== null)
+}
+
 export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<OrchestratorExisting | OrchestratorNew> {
   const { projectId, idempotencyKey, prompt } = opts
 
@@ -42,16 +71,14 @@ export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<Orc
       },
     })
 
-    if (existing) {
-      try {
-        const files = JSON.parse(existing.result) as GeneratedFile[]
+    if (existing && existing.result) {
+      const files = parseStoredFiles(existing.result)
+      if (files.length > 0) {
         return {
           alreadyExists: true,
           historyId: existing.id,
           files,
         }
-      } catch {
-        // continue to regenerate if parsing fails
       }
     }
   }

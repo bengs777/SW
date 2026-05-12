@@ -4,6 +4,7 @@
 
 import type { Job, Worker as BullWorker } from "bullmq"
 import type { GeneratedFile } from "@/lib/types"
+import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type GenerationJobPayload = {
   jobId: string
@@ -59,7 +60,7 @@ export function createGenerationWorker(): BullWorker<GenerationJobPayload> {
           return files.map((file: any) => ({
             path: file.path,
             content: file.content,
-            language: file.language as GeneratedFile["language"],
+            language: normalizeFileLanguage(file.language),
           }))
         }
 

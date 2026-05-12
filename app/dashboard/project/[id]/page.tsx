@@ -21,11 +21,10 @@ import { buildPreviewContextPacket } from "@/lib/ai/preview-context"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
 import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, PromptAttachment } from "@/lib/types"
 import {
-  buildWorkspaceStateFile,
-  createWorkspaceStateSnapshot,
-  readWorkspaceStateFile,
   splitWorkspaceStateFiles,
-  type WorkspaceState,
+  normalizeFileLanguage,
+  WORKSPACE_STATE_FILE_PATH,
+  type ValidLanguage,
 } from "@/lib/workspace-state"
 import { ChevronDown } from "lucide-react"
 
@@ -118,22 +117,9 @@ function mapJobStageToProgressStage(
   return "context"
 }
 
-const SUPPORTED_LANGUAGES: GeneratedFile["language"][] = [
-  "tsx",
-  "ts",
-  "css",
-  "json",
-  "html",
-  "prisma",
-  "md",
-  "env",
-]
-
-const normalizeLanguage = (value: unknown): GeneratedFile["language"] => {
+const normalizeLanguage = (value: unknown): ValidLanguage => {
   const candidate = typeof value === "string" ? value : ""
-  return SUPPORTED_LANGUAGES.includes(candidate as GeneratedFile["language"])
-    ? (candidate as GeneratedFile["language"])
-    : "tsx"
+  return normalizeFileLanguage(candidate) || "tsx"
 }
 
 const AUTOSAVE_DEBOUNCE_MS = 1200

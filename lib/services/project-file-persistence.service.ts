@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client"
 import { prisma } from "@/lib/db/client"
 import { withSqliteBusyRetry } from "@/lib/db/errors"
 import type { GeneratedFile } from "@/lib/types"
+import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type PersistProjectFilesOptions = {
   idempotencyKey?: string | null
@@ -21,9 +22,6 @@ type ProjectFileDiff = {
 const normalizeFilePath = (path: string) =>
   path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
 
-const normalizeLanguage = (language: GeneratedFile["language"] | string | null | undefined) =>
-  language || "ts"
-
 const dedupeFilesByPath = (files: GeneratedFile[]) => {
   const fileMap = new Map<string, GeneratedFile>()
 
@@ -36,7 +34,7 @@ const dedupeFilesByPath = (files: GeneratedFile[]) => {
     fileMap.set(path, {
       ...file,
       path,
-      language: normalizeLanguage(file.language) as GeneratedFile["language"],
+      language: normalizeFileLanguage(file.language),
       content: String(file.content ?? ""),
     })
   }
@@ -72,7 +70,7 @@ async function syncProjectFiles(
 
   for (const file of normalizedFiles) {
     const existing = existingByPath.get(file.path)
-    const language = normalizeLanguage(file.language)
+    const language = normalizeFileLanguage(file.language)
 
     if (existing && existing.content === file.content && existing.language === language) {
       unchanged += 1
@@ -96,7 +94,7 @@ async function syncProjectFiles(
 
     creates.push({
       ...file,
-      language: language as GeneratedFile["language"],
+      language,
     })
   }
 
@@ -107,7 +105,7 @@ async function syncProjectFiles(
         projectId,
         path: file.path,
         content: file.content,
-        language: normalizeLanguage(file.language),
+        language: normalizeFileLanguage(file.language),
       })),
     })
   }

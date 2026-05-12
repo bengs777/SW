@@ -2,6 +2,26 @@ import type { GeneratedFile } from "@/lib/types"
 
 export const WORKSPACE_STATE_FILE_PATH = ".swift/workspace-state.json"
 
+export const VALID_LANGUAGES = [
+  "tsx",
+  "ts",
+  "css",
+  "json",
+  "html",
+  "prisma",
+  "md",
+  "env",
+] as const
+
+export type ValidLanguage = (typeof VALID_LANGUAGES)[number]
+
+export function normalizeFileLanguage(value: unknown): ValidLanguage {
+  if (typeof value === "string" && VALID_LANGUAGES.includes(value as ValidLanguage)) {
+    return value as ValidLanguage
+  }
+  return "ts"
+}
+
 export type WorkspaceState = {
   version: number
   dirty: boolean
@@ -24,19 +44,32 @@ export const isWorkspaceStateFilePath = (input: string) =>
 export const isWorkspaceStateFile = (file: GeneratedFile) =>
   isWorkspaceStateFilePath(file.path)
 
-export function splitWorkspaceStateFiles(files: GeneratedFile[]): WorkspaceStateFileSplit {
+/**
+ * Accepts raw file arrays (e.g. from Prisma where language is plain string)
+ * and normalizes language to the valid union at runtime, removing the need
+ * for unsafe type assertions at call sites.
+ */
+export function splitWorkspaceStateFiles(
+  files: Array<{ path: string; content: string; language: string | null | undefined }>
+): WorkspaceStateFileSplit {
   const visibleFiles: GeneratedFile[] = []
   let stateFile: GeneratedFile | null = null
 
   for (const file of files) {
-    if (isWorkspaceStateFile(file)) {
+    const normalizedFile: GeneratedFile = {
+      path: normalizeWorkspacePath(file.path),
+      content: String(file.content ?? ""),
+      language: normalizeFileLanguage(file.language),
+    }
+
+    if (isWorkspaceStateFile(normalizedFile)) {
       if (!stateFile) {
-        stateFile = file
+        stateFile = normalizedFile
       }
       continue
     }
 
-    visibleFiles.push(file)
+    visibleFiles.push(normalizedFile)
   }
 
   return {

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import type { GeneratedFile } from "@/lib/types"
 import { UserService } from "@/lib/services/user.service"
-import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
+import { splitWorkspaceStateFiles, normalizeFileLanguage } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 
@@ -47,14 +47,13 @@ const normalizeFiles = (raw: unknown, fallback: FileLike[]) => {
   for (const entry of source) {
     const path = typeof entry?.path === "string" ? toSafePath(entry.path) : ""
     const content = typeof entry?.content === "string" ? entry.content : ""
-    const language = typeof entry?.language === "string" ? entry.language : "ts"
 
     if (!path) continue
 
     files.push({
       path,
       content,
-      language: language as GeneratedFile["language"],
+      language: normalizeFileLanguage(entry?.language),
     })
   }
 

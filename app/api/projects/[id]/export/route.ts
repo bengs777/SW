@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import type { GeneratedFile } from "@/lib/types"
-import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
+import { splitWorkspaceStateFiles, normalizeFileLanguage } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 
@@ -38,14 +38,14 @@ const normalizeFiles = (raw: unknown, fallback: FileLike[]) => {
   for (const entry of source) {
     const path = typeof entry?.path === "string" ? toSafePath(entry.path) : ""
     const content = typeof entry?.content === "string" ? entry.content : ""
-    const language = typeof entry?.language === "string" ? entry.language : "ts"
+    const language = normalizeFileLanguage(entry?.language)
 
     if (!path) continue
 
     files.push({
       path,
       content,
-      language: language as GeneratedFile["language"],
+      language,
     })
   }
 
@@ -135,7 +135,7 @@ export async function GET(
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
     }
 
-    const { files: visibleProjectFiles } = splitWorkspaceStateFiles(project.files)
+    const visibleProjectFiles = splitWorkspaceStateFiles(project.files).files
     const files = normalizeFiles(visibleProjectFiles, [])
     if (files.length === 0) {
       return NextResponse.json(
