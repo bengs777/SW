@@ -194,8 +194,13 @@ export async function enqueueGenerationTask(
 export function createGenerationWorker(
   processor: Processor<GenerationQueuePayload, unknown, GenerationQueueJobName>
 ) {
+  const connection = getRedisConnection()
   return new Worker<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, processor, {
-    connection: getRedisConnection(),
+    connection: connection ?? new IORedis({
+      host: "127.0.0.1",
+      port: 6379,
+      lazyConnect: true,
+    }),
     concurrency: Math.max(1, Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2)),
     stalledInterval: 30_000,
     lockDuration: 120_000,

@@ -37,9 +37,11 @@ export async function POST(
   const abortedInProcess = abortGenerationJob(jobId)
   const queue = getGenerationQueue()
   const queueJobId = job.queueJobId || job.id
-  const queueJob = await queue.getJob(queueJobId).catch(() => null)
-  if (queueJob) {
-    await queueJob.remove().catch(() => null)
+  if (queue) {
+    const queueJob = await queue.getJob(queueJobId).catch(() => null)
+    if (queueJob) {
+      await queueJob.remove().catch(() => null)
+    }
   }
 
   return NextResponse.json({
