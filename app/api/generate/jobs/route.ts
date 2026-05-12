@@ -3,7 +3,6 @@ import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { enqueueGenerationTask } from "@/lib/queue/generation-queue"
-import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
@@ -100,19 +99,26 @@ export async function POST(request: NextRequest) {
   if (queueJob) {
     await GenerationJobService.attachQueueJob(job.id, queueJob.id || job.id)
   } else {
-    void executeGenerationJob(
-      {
-        jobId: job.id,
-        projectId: project.id,
-        prompt: parsed.data.prompt,
-        selectedModel: parsed.data.model,
-      },
-      {
-        loadProjectFiles,
-      }
-    ).catch((error) => {
-      console.error("[Generation Queue] Direct fallback generation failed:", error instanceof Error ? error.message : String(error))
-    })
+    void import("@/lib/services/generation-orchestrator.service")
+      .then(({ executeGenerationJob }) =>
+        executeGenerationJob(
+          {
+            jobId: job.id,
+            projectId: project.id,
+            prompt: parsed.data.prompt,
+            selectedModel: parsed.data.model,
+          },
+          {
+            loadProjectFiles,
+          }
+        )
+      )
+      .catch((error) => {
+        console.error(
+          "[Generation Queue] Direct fallback generation failed:",
+          error instanceof Error ? error.message : String(error)
+        )
+      })
   }
 
   return NextResponse.json({
