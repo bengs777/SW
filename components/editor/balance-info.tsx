@@ -5,17 +5,14 @@ import { Coins, AlertCircle, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
 
+const COST_PER_GENERATION = 3000
+
 interface BalanceInfoProps {
   userId?: string
   showAlert?: boolean
 }
 
-interface BalanceData {
-  balance: number
-  email: string
-}
-
-export function BalanceInfo({ userId, showAlert = true }: BalanceInfoProps) {
+export function BalanceInfo({ showAlert = true }: BalanceInfoProps) {
   const [balance, setBalance] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -48,7 +45,7 @@ export function BalanceInfo({ userId, showAlert = true }: BalanceInfoProps) {
     return () => clearInterval(interval)
   }, [])
 
-  const costPerGeneration = 2000
+  const costPerGeneration = COST_PER_GENERATION
   const hasEnoughBalance = balance !== null && balance >= costPerGeneration
   const isLowBalance = balance !== null && balance < 50000
 

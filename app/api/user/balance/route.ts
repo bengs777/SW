@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
+import { SWIFT_PUBLIC_PRICE_IDR } from "@/lib/ai/model-tiers"
 
 export async function GET() {
   const session = await auth()
@@ -27,8 +28,8 @@ export async function GET() {
       userId: user.id,
       balance: user.balance,
       email: user.email,
-      costPerGeneration: 2000,
-      generationsAvailable: Math.floor(user.balance / 2000),
+      costPerGeneration: SWIFT_PUBLIC_PRICE_IDR,
+      generationsAvailable: Math.floor(user.balance / SWIFT_PUBLIC_PRICE_IDR),
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch balance"

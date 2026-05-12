@@ -63,15 +63,17 @@ export const USER_FRIENDLY_AI_ENGINE_ERROR =
 export const USER_FRIENDLY_QUEUE_OVERLOAD_ERROR =
   "Swift sedang ramai. Coba lagi sebentar lagi."
 
+export const SWIFT_PUBLIC_PRICE_IDR = 3000
+
 export function getSwiftTierConfigs(): SwiftTierConfig[] {
   const builderTier: SwiftTierConfig = {
     key: SWIFT_BUILDER_MODEL_KEY,
     label: "Swift Builder",
     shortLabel: "Builder",
     description: "Core engine untuk full-stack SaaS, dashboard, CRUD, Prisma, API route, dan arsitektur project.",
-    note: "Rute utama DeepSeek V3.2 untuk generasi full-stack yang butuh struktur stabil.",
-    priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || 22000),
-    price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || 22000),
+    note: "Rute utama Swift AI untuk generasi full-stack yang butuh struktur stabil.",
+    priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
+    price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     timeoutMs: 120_000,
     maxOutputTokens: 9000,
     rank: 2,
@@ -90,8 +92,8 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       shortLabel: "Fast",
       description: "Murah dan cepat untuk UI kecil, landing page, copywriting, komponen, formatting, dan edit ringan.",
       note: "Tidak dipakai untuk repair otonom, dependency debugging, atau refactor besar.",
-      priceIdr: Number(process.env.SWIFT_FAST_PRICE_IDR || 4000),
-      price: Number(process.env.SWIFT_FAST_PRICE_IDR || 4000),
+      priceIdr: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
+      price: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
       timeoutMs: 75_000,
       maxOutputTokens: 4500,
       rank: 1,
@@ -121,8 +123,8 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       shortLabel: "Premium Repair",
       description: "Repair runtime premium untuk crash berulang, dependency graph rusak, dan build error persisten.",
       note: "Hanya untuk eskalasi repair. Tidak pernah menjadi default generasi.",
-      priceIdr: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || 75000),
-      price: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || 75000),
+      priceIdr: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
+      price: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
       timeoutMs: 150_000,
       maxOutputTokens: 9000,
       rank: 100,

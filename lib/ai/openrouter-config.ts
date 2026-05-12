@@ -3,9 +3,9 @@ import { env } from "@/lib/env"
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 export const OPENROUTER_PROVIDER = "openrouter"
 export const PUBLIC_AI_NAME = "Swift AI"
-export const BASIC_PROMPT_FEE_IDR = 2000
-export const BUILD_PROMPT_FEE_IDR = 4000
-export const PRO_PROMPT_FEE_IDR = 10000
+export const BASIC_PROMPT_FEE_IDR = 3000
+export const BUILD_PROMPT_FEE_IDR = 3000
+export const PRO_PROMPT_FEE_IDR = 3000
 export const PROMPT_FEE_IDR = BASIC_PROMPT_FEE_IDR
 
 export function getOpenRouterConfig() {

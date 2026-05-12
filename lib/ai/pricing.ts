@@ -2,6 +2,7 @@ import { DEFAULT_MODEL_KEY, SWIFT_BUILD_MODEL_KEY } from "@/lib/ai/models"
 import {
   DEEPSEEK_V32_MODEL_ID,
   SWIFT_FAST_MODEL_KEY,
+  SWIFT_PUBLIC_PRICE_IDR,
   SWIFT_PREMIUM_REPAIR_MODEL_KEY,
 } from "@/lib/ai/model-tiers"
 
@@ -27,13 +28,13 @@ const MIN_PROFIT_MULTIPLIER = 4
 const DEFAULT_PROFIT_MULTIPLIER = 5
 
 const FIXED_MODEL_PRICES: Record<string, number> = {
-  [SWIFT_FAST_MODEL_KEY]: Number(process.env.SWIFT_FAST_PRICE_IDR || 4000),
-  [SWIFT_BUILD_MODEL_KEY]: Number(process.env.SWIFT_BUILDER_PRICE_IDR || 22000),
-  [SWIFT_PREMIUM_REPAIR_MODEL_KEY]: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || 50000),
+  [SWIFT_FAST_MODEL_KEY]: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
+  [SWIFT_BUILD_MODEL_KEY]: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
+  [SWIFT_PREMIUM_REPAIR_MODEL_KEY]: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
 }
 
 const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
-  [DEEPSEEK_V32_MODEL_ID]: { inputUsdPer1m: 0.252, outputUsdPer1m: 0.378, minimumCharge: 2000 },
+  [DEEPSEEK_V32_MODEL_ID]: { inputUsdPer1m: 0.252, outputUsdPer1m: 0.378, minimumCharge: SWIFT_PUBLIC_PRICE_IDR },
 }
 
 export function estimateRequestTokens(prompt: string) {
@@ -66,14 +67,13 @@ export function calculateModelRequestPrice({
   const fixedPrice = FIXED_MODEL_PRICES[modelKey]
 
   if (fixedPrice) {
-    const estimatedCost = Math.max(fixedPrice, enforceProfitFloor(rawCost))
     return {
       estimatedInputTokens,
       estimatedOutputTokens,
       estimatedTokens,
       estimatedRawCost: rawCost,
-      profitMultiplier: calculateMultiplier(estimatedCost, rawCost),
-      estimatedCost,
+      profitMultiplier: calculateMultiplier(fixedPrice, rawCost),
+      estimatedCost: fixedPrice,
       minimumCharge: fixedPrice,
       pricingMode: "fixed",
     }
@@ -81,7 +81,7 @@ export function calculateModelRequestPrice({
 
   const pricing = modelName ? TOKEN_PRICING_BY_MODEL[modelName] : null
   if (!pricing) {
-    const estimatedCost = Math.max(FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || 4000, enforceProfitFloor(rawCost))
+    const estimatedCost = Math.max(FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || SWIFT_PUBLIC_PRICE_IDR, enforceProfitFloor(rawCost))
     return {
       estimatedInputTokens,
       estimatedOutputTokens,
@@ -89,7 +89,7 @@ export function calculateModelRequestPrice({
       estimatedRawCost: rawCost,
       profitMultiplier: calculateMultiplier(estimatedCost, rawCost),
       estimatedCost,
-      minimumCharge: FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || 4000,
+      minimumCharge: FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || SWIFT_PUBLIC_PRICE_IDR,
       pricingMode: "fixed",
     }
   }

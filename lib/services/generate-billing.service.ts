@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client"
+import { SWIFT_PUBLIC_PRICE_IDR } from "@/lib/ai/model-tiers"
 
 interface BalanceCheckResult {
   hasBalance: boolean
@@ -114,24 +115,22 @@ export class GenerateBillingService {
    * Get cost breakdown for a model/provider combination
    */
   static getCostBreakdown(provider: string, model: string): CostBreakdown {
-    // V0 provider: 2000 IDR per request
     if (provider === "v0") {
       return {
         provider: "v0",
         model: model,
-        costPerRequest: 2000,
-        totalCost: 2000,
+        costPerRequest: SWIFT_PUBLIC_PRICE_IDR,
+        totalCost: SWIFT_PUBLIC_PRICE_IDR,
         currency: "IDR",
       }
     }
 
-    // Orchestrator provider: 2000 IDR per request
     if (provider === "orchestrator") {
       return {
         provider: "orchestrator",
         model: model,
-        costPerRequest: 2000,
-        totalCost: 2000,
+        costPerRequest: SWIFT_PUBLIC_PRICE_IDR,
+        totalCost: SWIFT_PUBLIC_PRICE_IDR,
         currency: "IDR",
       }
     }
