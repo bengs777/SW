@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { abortGenerationJob } from "@/lib/ai/generation-job-runtime"
+import { getGenerationQueue } from "@/lib/queue/generation-queue"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
@@ -34,10 +35,15 @@ export async function POST(
 
   await GenerationJobService.requestCancel(jobId)
   const abortedInProcess = abortGenerationJob(jobId)
+  const queue = getGenerationQueue()
+  const queueJobId = job.queueJobId || job.id
+  const queueJob = await queue.getJob(queueJobId).catch(() => null)
+  if (queueJob) {
+    await queueJob.remove().catch(() => null)
+  }
 
   return NextResponse.json({
     ok: true,
     abortedInProcess,
   })
 }
-

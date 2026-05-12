@@ -228,11 +228,41 @@ export default function EditorPage() {
   const activeGenerateWasCancelledRef = useRef(false)
   const activeGenerationJobIdRef = useRef<string | null>(null)
   const activeGenerationStreamRef = useRef<EventSource | null>(null)
+  const activeGenerationReconnectAttemptsRef = useRef(0)
+  const activeGenerationLastEventIdRef = useRef("0")
+  const activeGenerationReconnectTimerRef = useRef<number | null>(null)
 
   const closeGenerationStream = useCallback(() => {
+    if (activeGenerationReconnectTimerRef.current !== null) {
+      window.clearTimeout(activeGenerationReconnectTimerRef.current)
+      activeGenerationReconnectTimerRef.current = null
+    }
     activeGenerationStreamRef.current?.close()
     activeGenerationStreamRef.current = null
+    activeGenerationReconnectAttemptsRef.current = 0
   }, [])
+
+  const refreshProjectState = useCallback(async () => {
+    const response = await fetch(`/api/projects/${projectId}`)
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to refresh project")
+    }
+
+    const files = Array.isArray(data.project?.files)
+      ? data.project.files.map((file: GeneratedFile) => ({
+          path: file.path,
+          content: file.content,
+          language: normalizeLanguage(file.language),
+        }))
+      : []
+
+    setGeneratedFiles(files)
+    setPreviewFiles(null)
+    setCurrentVersion(data.project?.history?.length || (files.length > 0 ? 1 : 0))
+    setActiveFileIndex(0)
+    setIsDirty(false)
+  }, [projectId])
 
   const applyJobProgress = useCallback((job: {
     id: string
@@ -259,13 +289,22 @@ export default function EditorPage() {
     }))
   }, [])
 
-  const startGenerationStream = useCallback((jobId: string) => {
+  const startGenerationStream = useCallback((jobId: string, reconnectAttempt = 0) => {
     closeGenerationStream()
-    const stream = new EventSource(`/api/generate/jobs/${jobId}/stream`)
+    activeGenerationReconnectAttemptsRef.current = reconnectAttempt
+    const lastEventId = activeGenerationLastEventIdRef.current || "0"
+    const stream = new EventSource(`/api/generate/jobs/${jobId}/stream?lastEventId=${encodeURIComponent(lastEventId)}`)
     activeGenerationStreamRef.current = stream
+
+    const recordEventId = (event: MessageEvent) => {
+      if (event.lastEventId) {
+        activeGenerationLastEventIdRef.current = event.lastEventId
+      }
+    }
 
     stream.addEventListener("job", (event) => {
       try {
+        recordEventId(event as MessageEvent)
         const job = JSON.parse((event as MessageEvent).data)
         applyJobProgress(job)
         if (["completed", "failed", "cancelled"].includes(job.status)) {
@@ -273,6 +312,32 @@ export default function EditorPage() {
           if (activeGenerationStreamRef.current === stream) {
             activeGenerationStreamRef.current = null
           }
+          if (job.status === "completed") {
+            void refreshProjectState()
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.isGenerating
+                  ? {
+                      ...msg,
+                      content: "Swift menyelesaikan generation job. File project dan preview sudah diperbarui dari worker.",
+                      isGenerating: false,
+                    }
+                  : msg
+              )
+            )
+            setGenerationProgress((current) =>
+              current
+                ? {
+                    ...current,
+                    stage: "preview",
+                    label: "Preview siap",
+                    progressPercent: 100,
+                  }
+                : current
+            )
+          }
+          setIsGenerating(false)
+          window.setTimeout(() => setGenerationProgress(null), 1200)
         }
       } catch {
         // Ignore malformed progress events and keep the existing client-side state.
@@ -284,8 +349,26 @@ export default function EditorPage() {
       if (activeGenerationStreamRef.current === stream) {
         activeGenerationStreamRef.current = null
       }
+      const nextAttempt = activeGenerationReconnectAttemptsRef.current + 1
+      if (nextAttempt > 5) {
+        setGenerationProgress((current) =>
+          current
+            ? {
+                ...current,
+                stage: "error",
+                label: "Progress stream disconnected",
+              }
+            : current
+        )
+        setIsGenerating(false)
+        return
+      }
+      const delay = Math.min(10_000, 1000 * 2 ** (nextAttempt - 1))
+      activeGenerationReconnectTimerRef.current = window.setTimeout(() => {
+        startGenerationStream(jobId, nextAttempt)
+      }, delay)
     }
-  }, [applyJobProgress, closeGenerationStream])
+  }, [applyJobProgress, closeGenerationStream, refreshProjectState])
 
   useEffect(() => {
     return () => {
@@ -604,6 +687,8 @@ export default function EditorPage() {
 
   const saveFiles = useCallback(async (files: GeneratedFile[], prompt: string) => {
     setIsSavingFiles(true)
+    let handoffToJobStream = false
+
     try {
       const response = await fetch(`/api/projects/${projectId}`, {
         method: "POST",
@@ -715,6 +800,7 @@ export default function EditorPage() {
     }
 
     setMessages((prev) => [...prev, assistantMessage])
+    let handoffToJobStream = false
 
     try {
       const jobResponse = await fetch("/api/generate/jobs", {
@@ -832,6 +918,22 @@ export default function EditorPage() {
 
       const contentType = response.headers.get("content-type") || ""
       const responseText = await response.text()
+
+      if (response.status === 202) {
+        handoffToJobStream = true
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId
+              ? {
+                  ...msg,
+                  content: "Swift menerima request dan memindahkan generation ke worker. Progress akan terus masuk lewat event stream.",
+                  isGenerating: true,
+                }
+              : msg
+          )
+        )
+        return
+      }
 
       if (!response.ok) {
         let errorMessage = `Failed to generate (${response.status})`
@@ -1029,20 +1131,22 @@ export default function EditorPage() {
         )
       )
     } finally {
-      if (activeGenerationJobIdRef.current) {
+      if (!handoffToJobStream && activeGenerationJobIdRef.current) {
         activeGenerationJobIdRef.current = null
       }
-      if (activeGenerateTimeoutRef.current !== null) {
+      if (!handoffToJobStream && activeGenerateTimeoutRef.current !== null) {
         window.clearTimeout(activeGenerateTimeoutRef.current)
         activeGenerateTimeoutRef.current = null
       }
-      activeGenerateControllerRef.current = null
-      activeGenerateWasCancelledRef.current = false
-      setIsGenerating(false)
-      window.setTimeout(() => {
-        setGenerationProgress(null)
-        closeGenerationStream()
-      }, 1200)
+      if (!handoffToJobStream) {
+        activeGenerateControllerRef.current = null
+        activeGenerateWasCancelledRef.current = false
+        setIsGenerating(false)
+        window.setTimeout(() => {
+          setGenerationProgress(null)
+          closeGenerationStream()
+        }, 1200)
+      }
     }
   }, [
     activeFileIndex,

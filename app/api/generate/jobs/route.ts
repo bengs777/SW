@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
+import { enqueueGenerationTask, isGenerationQueueEnabled } from "@/lib/queue/generation-queue"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
@@ -65,8 +66,23 @@ export async function POST(request: NextRequest) {
     plan: parsed.data.plan,
   })
 
+  if (!isGenerationQueueEnabled()) {
+    await GenerationJobService.markFailed(job.id, "Redis queue is not configured for generation jobs.")
+    return NextResponse.json({ error: "Generation queue is unavailable" }, { status: 503 })
+  }
+
+  const queueJob = await enqueueGenerationTask({
+    jobId: job.id,
+    userId: user.id,
+    projectId: project.id,
+    prompt: parsed.data.prompt,
+    model: parsed.data.model,
+    provider: parsed.data.provider || "swift",
+  })
+
+  await GenerationJobService.attachQueueJob(job.id, queueJob.id || job.id)
+
   return NextResponse.json({
     job: GenerationJobService.toPublicJob(job),
-  })
+  }, { status: 202 })
 }
-

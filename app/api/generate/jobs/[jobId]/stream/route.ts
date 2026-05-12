@@ -1,15 +1,30 @@
 import { NextRequest } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
-import { GenerationJobService } from "@/lib/services/generation-job.service"
+import { GenerationJobService, GENERATION_TERMINAL_STATUSES } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"])
+const HEARTBEAT_MS = 15_000
+const POLL_MS = 1_000
+const IDLE_TIMEOUT_MS = 120_000
+const MAX_RETRY_MS = 10_000
+
+function parseLastEventSequence(request: NextRequest) {
+  const headerValue = request.headers.get("last-event-id")
+  const queryValue = request.nextUrl.searchParams.get("lastEventId")
+  const raw = headerValue || queryValue || "0"
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+function eventFrame(event: string, id: number | string, data: unknown, retryMs = MAX_RETRY_MS) {
+  return `id: ${id}\nretry: ${retryMs}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+}
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
 ) {
   const session = await auth()
@@ -35,45 +50,76 @@ export async function GET(
   }
 
   const encoder = new TextEncoder()
+  const startedAt = Date.now()
+  const abortSignal = request.signal
   let closed = false
+  let lastEventSequence = parseLastEventSequence(request)
+  let lastSentAt = 0
 
-  const stream = new ReadableStream({
+  const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: string, data: unknown) => {
+      const send = (event: string, id: number | string, data: unknown) => {
         if (closed) return
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+        controller.enqueue(encoder.encode(eventFrame(event, id, data)))
+        lastSentAt = Date.now()
       }
 
-      let lastUpdatedAt = ""
+      const close = () => {
+        if (closed) return
+        closed = true
+        controller.close()
+      }
 
-      const emitJob = async () => {
-        const job = await GenerationJobService.findForUser(jobId, user.id)
-        if (!job) {
-          send("error", { error: "Generation job not found" })
-          closed = true
-          controller.close()
+      abortSignal.addEventListener("abort", close, { once: true })
+
+      send("job", lastEventSequence, GenerationJobService.toPublicJob(initialJob))
+
+      while (!closed) {
+        const events = await GenerationJobService.listEvents(jobId, lastEventSequence)
+        for (const event of events) {
+          lastEventSequence = event.sequence
+          send(event.type, event.sequence, {
+            id: event.id,
+            type: event.type,
+            stage: event.stage,
+            status: event.status,
+            message: event.message,
+            createdAt: event.createdAt.toISOString(),
+            data: event.dataJson ? JSON.parse(event.dataJson) : null,
+          })
+        }
+
+        const freshJob = await GenerationJobService.findForUser(jobId, user.id)
+        if (!freshJob) {
+          send("generation.failed", lastEventSequence, { message: "Generation job not found" })
+          close()
           return
         }
 
-        const updatedAt = job.updatedAt.toISOString()
-        if (updatedAt !== lastUpdatedAt) {
-          lastUpdatedAt = updatedAt
-          send("job", GenerationJobService.toPublicJob(job))
-        } else {
-          send("heartbeat", { updatedAt: new Date().toISOString() })
+        send("job", lastEventSequence, GenerationJobService.toPublicJob(freshJob))
+
+        if (GENERATION_TERMINAL_STATUSES.has(freshJob.status)) {
+          close()
+          return
         }
 
-        if (TERMINAL_STATUSES.has(job.status)) {
-          closed = true
-          controller.close()
+        const now = Date.now()
+        if (now - lastSentAt >= HEARTBEAT_MS) {
+          send("heartbeat", lastEventSequence, {
+            at: new Date(now).toISOString(),
+            uptimeMs: now - startedAt,
+          })
         }
-      }
 
-      await emitJob()
+        if (now - startedAt >= IDLE_TIMEOUT_MS) {
+          send("timeout", lastEventSequence, {
+            message: "SSE stream idle timeout reached. Reconnect with backoff.",
+          })
+          close()
+          return
+        }
 
-      while (!closed) {
-        await new Promise((resolve) => setTimeout(resolve, 1000))
-        await emitJob()
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS))
       }
     },
     cancel() {
@@ -83,10 +129,10 @@ export async function GET(
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "text/event-stream",
+      "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   })
 }
-

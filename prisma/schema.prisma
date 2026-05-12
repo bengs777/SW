@@ -216,11 +216,21 @@ model GenerationJob {
   stage           String   @default("queued")
   label           String   @default("Prompt diterima")
   progress        Int      @default(0)
+  version         Int      @default(0)
+  retryCount      Int      @default(0)
+  maxRetries      Int      @default(2)
+  attemptCount    Int      @default(0)
   planJson        String?
+  contextJson     String?
+  diagnosticsJson String?
+  metricsJson     String?
+  previewUrl      String?
   error           String?
   resultHistoryId String?
+  queueJobId      String?
   cancelRequested Boolean  @default(false)
   cancelReason    String?
+  timedOutAt      DateTime?
   startedAt       DateTime?
   completedAt     DateTime?
   cancelledAt     DateTime?
@@ -230,12 +240,59 @@ model GenerationJob {
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  GenerationEvent[]
+  attempts GenerationAttempt[]
 
   @@index([userId, createdAt])
   @@index([projectId, createdAt])
   @@index([status])
   @@index([stage])
   @@index([cancelRequested])
+  @@index([queueJobId])
+}
+
+model GenerationEvent {
+  id        String   @id @default(cuid())
+  jobId      String
+  sequence   Int
+  type       String
+  stage      String
+  status     String
+  message    String
+  dataJson   String?
+  createdAt  DateTime @default(now())
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, sequence])
+  @@index([jobId, createdAt])
+  @@index([jobId, sequence])
+  @@index([type])
+}
+
+model GenerationAttempt {
+  id               String   @id @default(cuid())
+  jobId             String
+  sequence          Int
+  provider          String
+  model             String
+  purpose           String
+  status            String
+  startedAt         DateTime @default(now())
+  completedAt       DateTime?
+  latencyMs         Int      @default(0)
+  promptTokens      Int      @default(0)
+  completionTokens  Int      @default(0)
+  totalTokens       Int      @default(0)
+  error             String?
+  metadataJson      String?
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, sequence])
+  @@index([jobId, startedAt])
+  @@index([provider, model])
+  @@index([status])
 }
 
 // Request telemetry and diagnostics for AI operations

@@ -1,45 +1,41 @@
-import { Queue, Worker, type JobsOptions, type Processor } from "bullmq"
+import { Queue, QueueEvents, Worker, type JobsOptions, type Processor } from "bullmq"
 import IORedis from "ioredis"
+import { env } from "@/lib/env"
 
-type GenerationJobName = "generate" | "repair" | "sandbox"
+export type GenerationQueueJobName = "generation.execute"
 
-type GenerationJobPayload = {
+export type GenerationQueuePayload = {
+  jobId: string
+  userId: string
   projectId: string
-  prompt?: string
+  prompt: string
+  model: string
+  provider: string
+  collaborationMode?: string
+  promptLanguage?: "id" | "en"
   idempotencyKey?: string
-  taskType?: "generation" | "repair" | "sandbox"
+  previewContext?: unknown
+  attachments?: unknown[]
 }
 
-const QUEUE_NAME = "swift:generation"
+const QUEUE_NAME = "swift:generation:v2"
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
-  attempts: 3,
-  backoff: {
-    type: "exponential",
-    delay: 1000,
-  },
-  removeOnComplete: 100,
-  removeOnFail: 250,
+  attempts: 1,
+  removeOnComplete: 200,
+  removeOnFail: 500,
 }
 
 let redisConnection: IORedis | null = null
-let generationQueue: Queue<GenerationJobPayload, unknown, GenerationJobName> | null = null
-
-function getRedisUrl() {
-  return process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL || ""
-}
-
-export function isGenerationQueueEnabled() {
-  return Boolean(getRedisUrl())
-}
+let generationQueue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobName> | null = null
+let generationQueueEvents: QueueEvents | null = null
 
 function getRedisConnection() {
   if (!redisConnection) {
-    const redisUrl = getRedisUrl()
-    if (!redisUrl) {
+    if (!env.redisUrl) {
       throw new Error("REDIS_URL is required to use the Swift generation queue")
     }
 
-    redisConnection = new IORedis(redisUrl, {
+    redisConnection = new IORedis(env.redisUrl, {
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
     })
@@ -48,9 +44,13 @@ function getRedisConnection() {
   return redisConnection
 }
 
+export function isGenerationQueueEnabled() {
+  return Boolean(env.redisUrl)
+}
+
 export function getGenerationQueue() {
   if (!generationQueue) {
-    generationQueue = new Queue<GenerationJobPayload, unknown, GenerationJobName>(QUEUE_NAME, {
+    generationQueue = new Queue<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, {
       connection: getRedisConnection(),
       defaultJobOptions: DEFAULT_JOB_OPTIONS,
     })
@@ -59,24 +59,35 @@ export function getGenerationQueue() {
   return generationQueue
 }
 
+export function getGenerationQueueEvents() {
+  if (!generationQueueEvents) {
+    generationQueueEvents = new QueueEvents(QUEUE_NAME, {
+      connection: getRedisConnection(),
+    })
+  }
+
+  return generationQueueEvents
+}
+
 export async function enqueueGenerationTask(
-  name: GenerationJobName,
-  payload: GenerationJobPayload,
+  payload: GenerationQueuePayload,
   options?: JobsOptions
 ) {
   const queue = getGenerationQueue()
-  return queue.add(name, payload, {
+  return queue.add("generation.execute", payload, {
     ...DEFAULT_JOB_OPTIONS,
     ...options,
-    jobId: payload.idempotencyKey || `${name}:${payload.projectId}:${Date.now()}`,
+    jobId: payload.idempotencyKey || payload.jobId,
   })
 }
 
 export function createGenerationWorker(
-  processor: Processor<GenerationJobPayload, unknown, GenerationJobName>
+  processor: Processor<GenerationQueuePayload, unknown, GenerationQueueJobName>
 ) {
-  return new Worker<GenerationJobPayload, unknown, GenerationJobName>(QUEUE_NAME, processor, {
+  return new Worker<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, processor, {
     connection: getRedisConnection(),
     concurrency: Math.max(1, Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2)),
+    stalledInterval: 30_000,
+    lockDuration: 120_000,
   })
 }

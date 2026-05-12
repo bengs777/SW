@@ -64,6 +64,8 @@ async function syncProjectFiles(
   })
   const existingByPath = new Map(existingFiles.map((file) => [file.path, file]))
 
+  const creates: GeneratedFile[] = []
+  const updates: Array<{ id: string; content: string; language: string }> = []
   let created = 0
   let updated = 0
   let unchanged = 0
@@ -84,24 +86,39 @@ async function syncProjectFiles(
     }
 
     if (existing) {
-      await tx.projectFile.update({
-        where: { id: existing.id },
-        data: {
-          content: file.content,
-          language,
-          updatedAt: new Date(),
-        },
+      updates.push({
+        id: existing.id,
+        content: file.content,
+        language,
       })
       continue
     }
 
-    await tx.projectFile.create({
-      data: {
+    creates.push({
+      ...file,
+      language: language as GeneratedFile["language"],
+    })
+  }
+
+  if (creates.length > 0) {
+    await tx.projectFile.createMany({
+      data: creates.map((file) => ({
         id: crypto.randomUUID(),
         projectId,
         path: file.path,
         content: file.content,
-        language,
+        language: normalizeLanguage(file.language),
+      })),
+    })
+  }
+
+  for (const item of updates) {
+    await tx.projectFile.update({
+      where: { id: item.id },
+      data: {
+        content: item.content,
+        language: item.language,
+        updatedAt: new Date(),
       },
     })
   }
@@ -170,5 +187,22 @@ export class ProjectFilePersistenceService {
         fileDiff,
       }
     }))
+  }
+
+  static async saveBufferedArtifacts(input: {
+    projectId: string
+    prompt: string
+    files: GeneratedFile[]
+    projectMemoryJson?: string | null
+    idempotencyKey?: string | null
+    cost?: number | null
+    tokensUsed?: number | null
+  }) {
+    return this.saveGenerationSnapshot(input.projectId, input.prompt, input.files, {
+      projectMemoryJson: input.projectMemoryJson,
+      idempotencyKey: input.idempotencyKey,
+      cost: input.cost,
+      tokensUsed: input.tokensUsed,
+    })
   }
 }
