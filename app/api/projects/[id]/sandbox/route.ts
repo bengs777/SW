@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { getRuntimeSandbox, resetRuntimeSandbox, startRuntimeSandbox } from "@/lib/sandbox/runtime"
-import { normalizeFileLanguage } from "@/lib/workspace-state"
+import { normalizeFileLanguage, type ValidLanguage } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -35,7 +35,7 @@ async function assertProjectAccess(projectId: string, userId: string) {
   return project
 }
 
-function normalizeLanguage(path: string, language?: string) {
+function normalizeLanguage(path: string, language?: string): ValidLanguage {
   const result = normalizeFileLanguage(language)
   if (result !== "ts") return result
 

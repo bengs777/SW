@@ -24,7 +24,11 @@ import {
   splitWorkspaceStateFiles,
   normalizeFileLanguage,
   WORKSPACE_STATE_FILE_PATH,
+  readWorkspaceStateFile,
+  buildWorkspaceStateFile,
+  createWorkspaceStateSnapshot,
   type ValidLanguage,
+  type WorkspaceState,
 } from "@/lib/workspace-state"
 import { ChevronDown } from "lucide-react"
 

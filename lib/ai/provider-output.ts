@@ -1,6 +1,6 @@
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
-import { normalizeFileLanguage } from "@/lib/workspace-state"
+import { normalizeFileLanguage, type ValidLanguage } from "@/lib/workspace-state"
 
 type ProviderOutputParseResult = {
   files: GeneratedFile[]
