@@ -32,8 +32,64 @@ const BASE_PORT = Number(process.env.SWIFT_SANDBOX_BASE_PORT || 4300)
 const MAX_LOG_LINES = 500
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL ||
-  process.env.TURSO_DATABASE_URL ||
   "file:./prisma/dev.db"
+
+const ALLOWED_PACKAGES = new Set([
+  "@hookform/resolvers",
+  "@libsql/client",
+  "@prisma/adapter-libsql",
+  "@prisma/client",
+  "@radix-ui/react-accordion",
+  "@radix-ui/react-alert-dialog",
+  "@radix-ui/react-aspect-ratio",
+  "@radix-ui/react-avatar",
+  "@radix-ui/react-checkbox",
+  "@radix-ui/react-collapsible",
+  "@radix-ui/react-context-menu",
+  "@radix-ui/react-dialog",
+  "@radix-ui/react-dropdown-menu",
+  "@radix-ui/react-hover-card",
+  "@radix-ui/react-label",
+  "@radix-ui/react-menubar",
+  "@radix-ui/react-navigation-menu",
+  "@radix-ui/react-popover",
+  "@radix-ui/react-progress",
+  "@radix-ui/react-radio-group",
+  "@radix-ui/react-scroll-area",
+  "@radix-ui/react-select",
+  "@radix-ui/react-separator",
+  "@radix-ui/react-slider",
+  "@radix-ui/react-slot",
+  "@radix-ui/react-switch",
+  "@radix-ui/react-tabs",
+  "@radix-ui/react-toast",
+  "@radix-ui/react-toggle",
+  "@radix-ui/react-toggle-group",
+  "@radix-ui/react-tooltip",
+  "@supabase/supabase-js",
+  "@tailwindcss/postcss",
+  "@types/node",
+  "@types/react",
+  "@types/react-dom",
+  "autoprefixer",
+  "class-variance-authority",
+  "clsx",
+  "date-fns",
+  "framer-motion",
+  "lucide-react",
+  "next",
+  "postcss",
+  "prisma",
+  "react",
+  "react-dom",
+  "react-hook-form",
+  "recharts",
+  "sonner",
+  "tailwind-merge",
+  "tailwindcss",
+  "typescript",
+  "zod",
+])
 
 const globalForSandbox = globalThis as unknown as {
   swiftSandboxStates?: Map<string, SandboxState>
@@ -118,26 +174,46 @@ function commandName(command: string) {
   return process.platform === "win32" ? `${command}.cmd` : command
 }
 
+function sandboxProcessEnv(port: number): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH || "",
+    Path: process.env.Path || process.env.PATH || "",
+    SystemRoot: process.env.SystemRoot || "",
+    ComSpec: process.env.ComSpec || "",
+    HOME: process.env.HOME || "",
+    USERPROFILE: process.env.USERPROFILE || "",
+    TEMP: process.env.TEMP || process.env.TMP || "",
+    TMP: process.env.TMP || process.env.TEMP || "",
+    npm_config_ignore_scripts: "true",
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    NODE_ENV: "production",
+    DATABASE_URL: sandboxDatabaseUrl(),
+    NEXTAUTH_SECRET: "swift-sandbox-local-secret",
+    NEXTAUTH_URL: `http://localhost:${port}`,
+    NEXT_PUBLIC_APP_URL: `http://localhost:${port}`,
+    PORT: String(port),
+  }
+}
+
 function runCommand(
   state: SandboxState,
   command: string,
   args: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ) {
   appendLog(state, `$ ${command} ${args.join(" ")}`)
 
   return new Promise<{ code: number; output: string }>((resolve) => {
+    if (signal?.aborted) {
+      resolve({ code: 1, output: "Command aborted before start" })
+      return
+    }
+
     const child = spawn(commandName(command), args, {
       cwd: state.rootDir,
-      env: {
-        ...process.env,
-        DATABASE_URL: sandboxDatabaseUrl(),
-        TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL || "",
-        TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN || "",
-        NEXTAUTH_URL: `http://localhost:${state.port}`,
-        NEXT_PUBLIC_APP_URL: `http://localhost:${state.port}`,
-        PORT: String(state.port),
-      },
+      env: sandboxProcessEnv(state.port),
       shell: false,
     })
 
@@ -146,6 +222,11 @@ function runCommand(
       appendLog(state, `Command timed out after ${Math.round(timeoutMs / 1000)}s`)
       child.kill()
     }, timeoutMs)
+    const abort = () => {
+      appendLog(state, "Command aborted")
+      child.kill()
+    }
+    signal?.addEventListener("abort", abort, { once: true })
 
     child.stdout.on("data", (chunk) => {
       const text = String(chunk)
@@ -161,34 +242,10 @@ function runCommand(
 
     child.on("close", (code) => {
       clearTimeout(timer)
+      signal?.removeEventListener("abort", abort)
       resolve({ code: code ?? 1, output })
     })
   })
-}
-
-function inferMissingPackages(output: string) {
-  const packages = new Set<string>()
-  const patterns = [
-    /Module not found: Can't resolve ['"]([^.'"][^'"]+)['"]/g,
-    /Cannot find module ['"]([^.'"][^'"]+)['"]/g,
-    /Can't resolve ['"]([^.'"][^'"]+)['"]/g,
-  ]
-
-  for (const pattern of patterns) {
-    let match: RegExpExecArray | null
-    while ((match = pattern.exec(output)) !== null) {
-      const raw = match[1]
-      const packageName = raw.startsWith("@")
-        ? raw.split("/").slice(0, 2).join("/")
-        : raw.split("/")[0]
-
-      if (packageName && !["next", "react", "react-dom"].includes(packageName)) {
-        packages.add(packageName)
-      }
-    }
-  }
-
-  return Array.from(packages)
 }
 
 function mergePackageJson(existingContent: string | null) {
@@ -208,7 +265,7 @@ function mergePackageJson(existingContent: string | null) {
       "class-variance-authority": "^0.7.1",
       clsx: "^2.1.1",
       "lucide-react": "^0.564.0",
-      next: "^16.2.4",
+      next: "^16.2.6",
       react: "^19.2.5",
       "react-dom": "^19.2.5",
       "tailwind-merge": "^3.3.1",
@@ -229,19 +286,24 @@ function mergePackageJson(existingContent: string | null) {
   return {
     ...parsed,
     private: true,
-    scripts: {
-      ...base.scripts,
-      ...(parsed.scripts || {}),
-    },
-    dependencies: {
+    scripts: base.scripts,
+    dependencies: filterAllowedDependencies({
       ...base.dependencies,
       ...(parsed.dependencies || {}),
-    },
-    devDependencies: {
+    }),
+    devDependencies: filterAllowedDependencies({
       ...base.devDependencies,
       ...(parsed.devDependencies || {}),
-    },
+    }),
   }
+}
+
+function filterAllowedDependencies(dependencies: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(dependencies)
+      .filter(([name, version]) => ALLOWED_PACKAGES.has(name) && typeof version === "string" && version.trim())
+      .map(([name, version]) => [name, String(version)])
+  )
 }
 
 async function fileExists(filePath: string) {
@@ -263,6 +325,12 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
     `${JSON.stringify(packageJson, null, 2)}\n`,
     "utf8"
   )
+
+  const rootPackageLockPath = path.join(process.cwd(), "package-lock.json")
+  if (await fileExists(rootPackageLockPath)) {
+    const lockContent = await readFile(rootPackageLockPath, "utf8")
+    await writeFile(path.join(state.rootDir, "package-lock.json"), lockContent, "utf8")
+  }
 
   const nextConfigPath = path.join(state.rootDir, "next.config.js")
   if (!(await fileExists(nextConfigPath))) {
@@ -355,15 +423,7 @@ function startDevServer(state: SandboxState) {
 
   const child = spawn(commandName("npm"), ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
     cwd: state.rootDir,
-    env: {
-      ...process.env,
-      DATABASE_URL: sandboxDatabaseUrl(),
-      TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL || "",
-      TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN || "",
-      NEXTAUTH_URL: `http://localhost:${state.port}`,
-      NEXT_PUBLIC_APP_URL: `http://localhost:${state.port}`,
-      PORT: String(state.port),
-    },
+    env: sandboxProcessEnv(state.port),
     shell: false,
   })
 
@@ -386,7 +446,7 @@ function startDevServer(state: SandboxState) {
   })
 }
 
-export async function startRuntimeSandbox(projectId: string, files: GeneratedFile[]): Promise<StartSandboxResult> {
+export async function startRuntimeSandbox(projectId: string, files: GeneratedFile[], options?: { signal?: AbortSignal }): Promise<StartSandboxResult> {
   const state = getState(projectId)
   const nextFileHash = hashFiles(files)
 
@@ -404,24 +464,20 @@ export async function startRuntimeSandbox(projectId: string, files: GeneratedFil
     const nextPackageHash = createHash("sha256").update(packageContent).digest("hex")
     if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
-      const install = await runCommand(state, "npm", ["install"], 120_000)
+      const install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], 120_000, options?.signal)
+      if (options?.signal?.aborted) {
+        throw new Error("GENERATION_JOB_CANCELLED")
+      }
       if (install.code !== 0) {
-        throw new Error("npm install failed")
+        throw new Error("npm ci failed")
       }
       state.packageHash = nextPackageHash
     }
 
     state.status = "building"
-    let build = await runCommand(state, "npm", ["run", "build"], 150_000)
-    if (build.code !== 0) {
-      const missingPackages = inferMissingPackages(build.output)
-      if (missingPackages.length > 0) {
-        appendLog(state, `Detected missing packages: ${missingPackages.join(", ")}`)
-        const installMissing = await runCommand(state, "npm", ["install", ...missingPackages], 120_000)
-        if (installMissing.code === 0) {
-          build = await runCommand(state, "npm", ["run", "build"], 150_000)
-        }
-      }
+    const build = await runCommand(state, "npm", ["run", "build"], 150_000, options?.signal)
+    if (options?.signal?.aborted) {
+      throw new Error("GENERATION_JOB_CANCELLED")
     }
 
     if (build.code !== 0) {

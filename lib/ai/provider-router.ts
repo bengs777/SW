@@ -106,7 +106,7 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "Public pricing is fixed at Rp3.000 per generation.",
   "Optimize every response for token efficiency, generation cost, high correctness, deploy-ready structure, and minimal hallucination.",
   "Return ONLY a valid JSON object. No markdown, no code fences, no preamble, no chat.",
-  'JSON schema: {"message":"short summary","files":[{"path":"app/page.tsx","language":"tsx","content":"full file content"}]}',
+  'JSON schema: {"files":[{"path":"app/page.tsx","language":"tsx","content":"full file content"}],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}',
   "Never generate an entire application at once, never regenerate the whole repository, and never rewrite unrelated files.",
   "Pipeline: classify the prompt, score complexity, trim context, select a template first, generate with Swift AI, validate runtime safety, run focused repairs only when needed, then return the final patch.",
   "Analyze intent, create a small roadmap internally, then implement exactly one feature/module per response.",

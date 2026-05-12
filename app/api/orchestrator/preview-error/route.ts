@@ -6,7 +6,7 @@ import { chooseModelForTask } from "@/lib/ai/model-router"
 import { buildContextForTask } from "@/lib/ai/context-builder"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import type { ProviderName } from "@/lib/ai/provider-router"
-import { extractGeneratedFilesFromProviderMessage } from "@/lib/ai/provider-output"
+import { parseGeneratedArtifact, type GeneratedArtifact } from "@/lib/ai/generated-artifact"
 import { enforceUserRateLimit } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 import * as Executor from "@/lib/orchestrator/executor"
@@ -182,7 +182,7 @@ export async function POST(req: NextRequest) {
         repairAttempt: attempt,
       })
 
-      const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nRespond ONLY with a valid JSON array of files to PATCH. Each entry must be an object: {"path":"app/page.tsx","content":"<full file content>"}. No explanation, no markdown, no extra text.`
+      const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nRespond ONLY with a valid JSON object: {"files":[{"path":"app/page.tsx","language":"tsx","content":"<full file content>"}],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}. No explanation, no markdown, no extra text.`
 
       const fullPrompt = `${systemPrompt}\n\nError:\n${message}\n\nStack:\n${stack}\n\nContext:\n${inspectContext}`
 
@@ -205,13 +205,15 @@ export async function POST(req: NextRequest) {
         continue
       }
 
-      const parsed = extractGeneratedFilesFromProviderMessage(providerResp.message)
-      if (!parsed.files || parsed.files.length === 0) {
+      let parsed: GeneratedArtifact
+      try {
+        parsed = parseGeneratedArtifact(providerResp.message)
+      } catch (err: unknown) {
         attempts.push({
           attempt,
           ok: false,
-          reason: "no_files_parsed",
-          parseMode: parsed.parseMode,
+          reason: "malformed_generated_artifact",
+          error: getErrorMessage(err),
           model: routeDecision.modelName,
           layer: routeDecision.layer,
         })

@@ -1,4 +1,5 @@
 import type { GeneratedFile } from "@/lib/types"
+import { prisma } from "@/lib/db/client"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 
@@ -33,7 +34,27 @@ export async function applyFiles(
   prompt: string,
   files: GeneratedFile[]
 ): Promise<ApplyFilesResult> {
-  const op = () => ProjectFilePersistenceService.saveGenerationSnapshot(projectId, prompt, files)
+  const op = async () => {
+    const existingFiles = await prisma.projectFile.findMany({
+      where: { projectId },
+      orderBy: { path: "asc" },
+    })
+    const merged = new Map<string, GeneratedFile>()
+
+    for (const file of ProjectFilePersistenceService.normalizeFiles(existingFiles as GeneratedFile[])) {
+      merged.set(file.path, file)
+    }
+
+    for (const file of ProjectFilePersistenceService.normalizeFiles(files)) {
+      merged.set(file.path, file)
+    }
+
+    return ProjectFilePersistenceService.saveGenerationSnapshot(
+      projectId,
+      prompt,
+      Array.from(merged.values())
+    )
+  }
   // Save with retry to mitigate SQLITE_BUSY on local dev
   return runWithSqliteRetry(op)
 }

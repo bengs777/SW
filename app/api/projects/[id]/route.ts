@@ -192,6 +192,10 @@ export async function POST(
       tokensUsed?: number
     }
 
+    if (!Array.isArray(files) || typeof prompt !== "string") {
+      return NextResponse.json({ error: "Invalid project save payload" }, { status: 400 })
+    }
+
     // Check if user has access
     const project = await prisma.project.findFirst({
       where: {
@@ -227,9 +231,14 @@ export async function POST(
     })
   } catch (error) {
     console.error("[v0] Error saving generation:", error)
+    const message = error instanceof Error ? error.message : "Failed to save generation"
+    const status =
+      /generated file|generated files|unsafe|forbidden|too many|size limit/i.test(message)
+        ? 400
+        : 500
     return NextResponse.json(
-      { error: "Failed to save generation" },
-      { status: 500 }
+      { error: message },
+      { status }
     )
   }
 }

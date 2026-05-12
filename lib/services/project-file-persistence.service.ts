@@ -19,23 +19,69 @@ type ProjectFileDiff = {
   finalFileCount: number
 }
 
+const MAX_PROJECT_FILES = 240
+const MAX_TOTAL_FILE_BYTES = 6 * 1024 * 1024
+const MAX_SINGLE_FILE_BYTES = 512 * 1024
+const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
+const FORBIDDEN_EXACT_FILES = new Set([
+  ".env",
+  ".env.local",
+  ".env.production",
+  ".env.development",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+])
+
 const normalizeFilePath = (path: string) =>
-  path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
+  path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+
+function assertSafeProjectPath(path: string) {
+  if (!path || path.includes("\0") || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new Error(`Invalid generated file path: ${path}`)
+  }
+
+  const segments = path.split("/")
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Unsafe generated file path rejected: ${path}`)
+  }
+
+  const lower = path.toLowerCase()
+  if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
+    throw new Error(`Forbidden generated file path rejected: ${path}`)
+  }
+}
 
 const dedupeFilesByPath = (files: GeneratedFile[]) => {
+  if (files.length > MAX_PROJECT_FILES) {
+    throw new Error(`Too many generated files. Maximum: ${MAX_PROJECT_FILES}`)
+  }
+
   const fileMap = new Map<string, GeneratedFile>()
+  let totalBytes = 0
 
   for (const file of files) {
     const path = normalizeFilePath(file.path)
     if (!path) {
       continue
     }
+    assertSafeProjectPath(path)
+
+    const content = String(file.content ?? "")
+    const size = Buffer.byteLength(content, "utf8")
+    if (size > MAX_SINGLE_FILE_BYTES) {
+      throw new Error(`Generated file ${path} exceeds the single-file size limit.`)
+    }
+    totalBytes += size
+    if (totalBytes > MAX_TOTAL_FILE_BYTES) {
+      throw new Error(`Generated files exceed the total size limit.`)
+    }
 
     fileMap.set(path, {
       ...file,
       path,
       language: normalizeFileLanguage(file.language),
-      content: String(file.content ?? ""),
+      content,
     })
   }
 

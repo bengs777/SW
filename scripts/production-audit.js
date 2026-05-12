@@ -42,7 +42,11 @@ function run(command, args) {
 function staticChecks() {
   const packageJson = JSON.parse(read("package.json"))
   const gitignore = exists(".gitignore") ? read(".gitignore") : ""
-  const generateRoute = exists("app/api/generate/route.ts") ? read("app/api/generate/route.ts") : ""
+  const generateJobsRoute = exists("app/api/generate/jobs/route.ts") ? read("app/api/generate/jobs/route.ts") : ""
+  const generationOrchestrator = exists("lib/services/generation-orchestrator.service.ts")
+    ? read("lib/services/generation-orchestrator.service.ts")
+    : ""
+  const generatedArtifact = exists("lib/ai/generated-artifact.ts") ? read("lib/ai/generated-artifact.ts") : ""
   const sandboxRuntime = exists("lib/sandbox/runtime.ts") ? read("lib/sandbox/runtime.ts") : ""
   const preview = exists("components/editor/sandbox-preview.tsx") ? read("components/editor/sandbox-preview.tsx") : ""
   const prisma = exists("prisma/schema.prisma") ? read("prisma/schema.prisma") : ""
@@ -54,14 +58,14 @@ function staticChecks() {
     check("predeploy.lint-script", packageJson.scripts && packageJson.scripts.lint, "package.json exposes npm run lint"),
     check("predeploy.typecheck-script", packageJson.scripts && packageJson.scripts.typecheck, "package.json exposes npm run typecheck"),
     check("predeploy.build-script", packageJson.scripts && packageJson.scripts.build, "package.json exposes npm run build"),
-    check("ai.zod-input-validation", /z\.object\(/.test(generateRoute), "AI generate endpoint validates request input with Zod"),
-    check("ai.output-file-extraction", /extractGeneratedFilesFromProviderMessage/.test(generateRoute), "AI provider output is parsed into structured files"),
-    check("ai.fullstack-validation", /validateFullStackFiles|autoRepairFullStackFiles/.test(generateRoute), "Generated files pass full-stack coverage validation"),
-    check("ai.syntax-validation", /typescript|ts\.transpileModule|createSourceFile/i.test(generateRoute), "Generated executable files have TypeScript syntax validation signals"),
+    check("ai.zod-input-validation", /z\.object\(/.test(generateJobsRoute), "Canonical queued AI endpoint validates request input with Zod"),
+    check("ai.output-file-extraction", /parseGeneratedArtifact/.test(generationOrchestrator) && /generatedArtifactSchema/.test(generatedArtifact), "AI provider output is parsed into a strict GeneratedArtifact schema"),
+    check("ai.fullstack-validation", /validateFullStackFiles|attemptTargetedRepair/.test(generationOrchestrator), "Generated files pass full-stack coverage validation"),
+    check("ai.syntax-validation", /compileProject|validateFullStackFiles/.test(generationOrchestrator), "Generated executable files have TypeScript syntax validation signals"),
     check("sandbox.path-guard", /assertSafeFilePath/.test(sandboxRuntime) && /startsWith\(`\$\{root\}\$\{path\.sep\}`\)/.test(sandboxRuntime), "Sandbox rejects path traversal writes"),
     check("sandbox.command-timeout", /setTimeout\([\s\S]*child\.kill\(\)/.test(sandboxRuntime), "Sandbox commands have timeout cleanup"),
     check("sandbox.process-restart", /stopProcess/.test(sandboxRuntime) && /resetRuntimeSandbox/.test(sandboxRuntime), "Sandbox supports process stop and reset"),
-    check("sandbox.npm-install", /npm["'], \["install"/.test(sandboxRuntime), "Runtime sandbox runs npm install"),
+    check("sandbox.npm-ci-ignore-scripts", /npm["'], \["ci", "--ignore-scripts"/.test(sandboxRuntime), "Runtime sandbox installs deterministically without lifecycle scripts"),
     check("sandbox.build-before-preview", /npm["'], \["run", "build"/.test(sandboxRuntime), "Runtime sandbox runs build before preview"),
     check("preview.iframe-sandbox", /sandbox="[^"]*allow-scripts/.test(preview), "Preview iframe uses sandbox attribute"),
     check("preview.iframe-no-same-origin", !/sandbox="[^"]*allow-same-origin/.test(preview), "Preview iframe does not combine allow-scripts with allow-same-origin", "warn"),

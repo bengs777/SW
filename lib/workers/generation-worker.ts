@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client"
 import { createGenerationWorker, type GenerationQueuePayload } from "@/lib/queue/generation-queue"
 import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
+import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
 import { log } from "@/lib/logging"
 
@@ -46,8 +47,35 @@ export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>
         loadProjectFiles,
       }
     )
+    await BillingService.markCompleted(job.data.usageLogId, {
+      provider: job.data.provider,
+      model: job.data.model,
+    }).catch((billingError) => {
+      log("error", "Generation billing completion failed", {
+        jobId: job.data.jobId,
+        usageLogId: job.data.usageLogId,
+        error: billingError instanceof Error ? billingError.message : String(billingError),
+      })
+    })
   } catch (error) {
-    if (!(error instanceof GenerationJobCancelledError)) {
+    const isCancelled =
+      error instanceof GenerationJobCancelledError ||
+      (error instanceof Error && error.message === "GENERATION_JOB_CANCELLED")
+
+    await BillingService.refundReservation(
+      job.data.usageLogId,
+      job.data.userId,
+      job.data.reservedCost,
+      error instanceof Error ? error.message : String(error)
+    ).catch((refundError) => {
+      log("error", "Generation billing refund failed", {
+        jobId: job.data.jobId,
+        usageLogId: job.data.usageLogId,
+        error: refundError instanceof Error ? refundError.message : String(refundError),
+      })
+    })
+
+    if (!isCancelled) {
       log("error", "Generation worker failed", {
         jobId: job.data.jobId,
         queueJobId: job.id,
@@ -70,8 +98,11 @@ export function startGenerationWorker() {
 
   worker.on("failed", async (job, error) => {
     if (!job) return
-    if (error instanceof GenerationJobCancelledError) return
-    await GenerationJobService.markFailed(job.data.jobId, error.message || "Generation worker failed")
+    if (error instanceof GenerationJobCancelledError || error.message === "GENERATION_JOB_CANCELLED") return
+    const current = await GenerationJobService.findById(job.data.jobId)
+    if (current && current.status !== "failed" && current.status !== "cancelled") {
+      await GenerationJobService.markFailed(job.data.jobId, error.message || "Generation worker failed")
+    }
   })
 
   worker.on("completed", async (job) => {

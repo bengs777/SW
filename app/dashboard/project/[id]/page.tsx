@@ -23,7 +23,6 @@ import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, Promp
 import {
   splitWorkspaceStateFiles,
   normalizeFileLanguage,
-  WORKSPACE_STATE_FILE_PATH,
   readWorkspaceStateFile,
   buildWorkspaceStateFile,
   createWorkspaceStateSnapshot,
@@ -183,46 +182,6 @@ const updateProtectedPathsForUserChange = (
   }
 
   return Array.from(nextProtected).sort()
-}
-
-const mergeGeneratedFilesIntoWorkspace = (
-  currentFiles: GeneratedFile[],
-  generatedFiles: GeneratedFile[],
-  protectedPaths: string[]
-) => {
-  const currentByPath = new Map(currentFiles.map((file) => [normalizeWorkspacePath(file.path), file]))
-  const generatedByPath = new Map(generatedFiles.map((file) => [normalizeWorkspacePath(file.path), file]))
-  const protectedPathSet = new Set(protectedPaths.map(normalizeWorkspacePath).filter(Boolean))
-  const merged: GeneratedFile[] = []
-
-  for (const file of generatedFiles) {
-    const normalizedPath = normalizeWorkspacePath(file.path)
-    const current = currentByPath.get(normalizedPath)
-
-    if (current && protectedPathSet.has(normalizedPath)) {
-      merged.push(current)
-      continue
-    }
-
-    merged.push({
-      path: normalizedPath,
-      content: String(file.content || ""),
-      language: normalizeLanguage(file.language),
-    })
-  }
-
-  for (const file of currentFiles) {
-    const normalizedPath = normalizeWorkspacePath(file.path)
-    if (protectedPathSet.has(normalizedPath) && !generatedByPath.has(normalizedPath)) {
-      merged.push({
-        path: normalizedPath,
-        content: String(file.content || ""),
-        language: normalizeLanguage(file.language),
-      })
-    }
-  }
-
-  return normalizeWorkspaceFiles(merged)
 }
 
 const buildWorkspaceStateSnapshot = (input: {
@@ -1134,15 +1093,21 @@ export default function EditorPage() {
     let handoffToJobStream = false
 
     try {
+      const idempotencyKey = createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext)
       const jobResponse = await fetch("/api/generate/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId,
-          prompt: trimmedContent,
+          prompt: promptForGeneration,
           model: modelKey,
           provider: "swift",
           plan: workPlan,
+          attachments,
+          promptLanguage,
+          idempotencyKey,
+          previewContext,
+          collaborationMode,
         }),
       })
       const jobData = await jobResponse.json().catch(() => null)
@@ -1166,235 +1131,20 @@ export default function EditorPage() {
             }
           : current
       )
-      const controller = new AbortController()
-      activeGenerateControllerRef.current = controller
-      const timeout = window.setTimeout(() => {
-        activeGenerateWasCancelledRef.current = false
-        controller.abort()
-      }, GENERATE_CLIENT_TIMEOUT_MS)
-      activeGenerateTimeoutRef.current = timeout
-      const progressTimers = [
-        window.setTimeout(() => {
-          setGenerationProgress((current) =>
-            current && (current.stage === "request" || current.stage === "context")
-              ? {
-                  ...current,
-                  stage: "provider",
-                  label: "Swift mulai menulis struktur dan komponen",
-                }
-              : current
-          )
-        }, 2500),
-        window.setTimeout(() => {
-          setGenerationProgress((current) =>
-            current && (current.stage === "provider" || current.stage === "request")
-              ? {
-                  ...current,
-                  stage: "provider",
-                  label: "Swift masih membangun file. Kamu bisa stop bila arah rencana tidak cocok.",
-                }
-              : current
-          )
-        }, 9000),
-        window.setTimeout(() => {
-          setGenerationProgress((current) =>
-            current && current.stage === "provider"
-              ? {
-                  ...current,
-                  stage: "provider",
-                  label: "Menunggu output final dari Swift engine",
-                }
-              : current
-          )
-        }, 22000),
-      ]
-
-      // Call AI API
-      const response = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: promptForGeneration,
-            jobId,
-            attachments,
-            projectId,
-            history: messages,
-            selectedModel: modelKey,
-            promptLanguage,
-            idempotencyKey: createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext),
-            previewContext,
-            collaborationMode,
-          }),
-          signal: controller.signal,
-        }).finally(() => {
-          progressTimers.forEach((timer) => window.clearTimeout(timer))
-          window.clearTimeout(timeout)
-          if (activeGenerateTimeoutRef.current === timeout) {
-            activeGenerateTimeoutRef.current = null
-          }
-          if (activeGenerateControllerRef.current === controller) {
-            activeGenerateControllerRef.current = null
-          }
-        })
-
-      setGenerationProgress((current) =>
-        current
-          ? {
-              ...current,
-              stage: "parse",
-              label: "Membaca hasil kerja Swift",
-            }
-          : current
-      )
-
-      const contentType = response.headers.get("content-type") || ""
-      const responseText = await response.text()
-
-      if (response.status === 202) {
-        handoffToJobStream = true
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantId
-              ? {
-                  ...msg,
-                  content: "Swift menerima request dan memindahkan generation ke worker. Progress akan terus masuk lewat event stream.",
-                  isGenerating: true,
-                }
-              : msg
-          )
-        )
-        return
-      }
-
-      if (!response.ok) {
-        let errorMessage = `Failed to generate (${response.status})`
-
-        try {
-          const parsed = JSON.parse(responseText)
-          errorMessage = parsed.error || parsed.details || parsed.message || errorMessage
-        } catch {
-          // Keep fallback error message if the response was not JSON.
-        }
-
-        throw new Error(errorMessage)
-      }
-
-      if (!contentType.includes("application/json")) {
-        throw new Error("Generate API returned a non-JSON response. You may need to sign in again.")
-      }
-
-      const data = JSON.parse(responseText)
-      setGenerationProgress((current) =>
-        current
-          ? {
-              ...current,
-              stage: "validate",
-              label: "Mengecek relevansi dan struktur file",
-            }
-          : current
-      )
-
-      if (data.warning) {
-        pushErrorLog("provider", String(data.warning))
-        setProviderStatus(buildProviderStatusFromError(String(data.warning)))
-      } else {
-        setProviderStatus({
-          status: "connected",
-          issue: "healthy",
-          reason: "Request terakhir berhasil.",
-          action: "Swift siap dipakai.",
-          checkedAt: new Date().toISOString(),
-        })
-      }
-
-      if (data.mode === "chat" || data.mode === "clarify" || data.mode === "inspect") {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantId
-              ? {
-                  ...msg,
-                  content: data.message,
-                  isGenerating: false,
-                  metadata: {
-                    model: data.usage?.model,
-                    cost: data.usage?.cost,
-                    remainingBalance: data.usage?.remainingBalance,
-                  },
-                }
-              : msg
-          )
-        )
-        return
-      }
-
-      // Update assistant message with response
-      setGenerationProgress((current) =>
-        current
-          ? {
-              ...current,
-              stage: "save",
-              label: "Menyimpan hasil yang valid",
-            }
-          : current
-      )
+      handoffToJobStream = true
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantId
             ? {
                 ...msg,
-                content: data.message,
-                generatedCode: data.code,
-                isGenerating: false,
-                metadata: {
-                  model: data.usage?.model,
-                  cost: data.usage?.cost,
-                  remainingBalance: data.usage?.remainingBalance,
-                  failSafeType:
-                    data?.failSafe?.type === "strict-fullstack"
-                      ? "strict-fullstack"
-                      : undefined,
-                },
+                content: "Swift menerima request dan memindahkan generation ke worker. Progress akan terus masuk lewat event stream.",
+                isGenerating: true,
               }
             : msg
         )
       )
+      return
 
-      // Rebase AI output into the current workspace so manual edits remain intact.
-      if (data.preserveFiles) {
-        setIsDirty(false)
-      } else if (Array.isArray(data.files)) {
-        const generatedFilesFromAi: GeneratedFile[] = data.files.map(
-          (file: { path: string; content: string; language?: string }) => ({
-            path: file.path,
-            content: file.content,
-            language: normalizeLanguage(file.language),
-          })
-        )
-
-        const mergedFiles = mergeGeneratedFilesIntoWorkspace(
-          generatedFiles,
-          generatedFilesFromAi,
-          workspaceProtectedPathsRef.current
-        )
-
-        setGeneratedFiles(mergedFiles)
-        setActiveFileIndex(0)
-        setIsDirty(true)
-        setActivePreviewTab("code")
-      } else {
-        setGeneratedFiles([])
-      }
-
-      setPreviewFiles(null)
-      setGenerationProgress((current) =>
-        current
-          ? {
-              ...current,
-              stage: "preview",
-              label: "Menyiapkan preview agar bisa dicek",
-            }
-          : current
-      )
     } catch (error) {
       const wasCancelled =
         error instanceof DOMException &&
@@ -1474,7 +1224,6 @@ export default function EditorPage() {
     currentVersion,
     generatedFiles,
     latestPreviewError,
-    messages,
     previewFiles,
     previewViewport,
     projectId,

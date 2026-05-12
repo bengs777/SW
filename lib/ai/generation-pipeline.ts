@@ -61,7 +61,7 @@ export type TrimmedContext = {
 export const MAX_AUTOMATIC_REPAIR_ATTEMPTS = 2
 
 const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
-  next: "16.2.4",
+  next: "16.2.6",
   react: "19.2.5",
   "react-dom": "19.2.5",
   typescript: "5.7.3",
@@ -422,13 +422,12 @@ export function normalizeGeneratedDependencies(files: GeneratedFile[]): {
   const normalizedPackages: string[] = []
   const conflictsPrevented: string[] = []
 
-  packageJson.dependencies = normalizeRecord(packageJson.dependencies)
-  packageJson.devDependencies = normalizeRecord(packageJson.devDependencies)
+  packageJson.dependencies = filterAllowedPackageRecord(packageJson.dependencies)
+  packageJson.devDependencies = filterAllowedPackageRecord(packageJson.devDependencies)
   packageJson.scripts = {
     dev: "next dev",
     build: "next build",
     start: "next start",
-    ...(normalizeRecord(packageJson.scripts) as Record<string, string>),
   }
 
   for (const packageName of dependencyMap.externalPackages) {
@@ -667,6 +666,13 @@ function normalizeRecord(value: unknown): Record<string, string> {
     }
   }
   return output
+}
+
+function filterAllowedPackageRecord(value: unknown): Record<string, string> {
+  const record = normalizeRecord(value)
+  return Object.fromEntries(
+    Object.entries(record).filter(([packageName]) => Boolean(PACKAGE_VERSION_ALLOWLIST[packageName]))
+  )
 }
 
 function shouldNormalizeVersion(packageName: string, currentVersion: string) {

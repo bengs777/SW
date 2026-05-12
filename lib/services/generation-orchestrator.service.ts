@@ -11,7 +11,8 @@ import {
   type DependencyMap,
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
-import { extractGeneratedFilesFromProviderMessage, mergeGeneratedFiles } from "@/lib/ai/provider-output"
+import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
+import { mergeGeneratedFiles } from "@/lib/ai/provider-output"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { compileProject } from "@/lib/preview/module-resolution"
 import { startRuntimeSandbox } from "@/lib/sandbox/runtime"
@@ -260,10 +261,7 @@ async function attemptTargetedRepair(input: {
       promptLanguage: input.promptLanguage,
       signal: input.signal,
     })
-    const parsed = extractGeneratedFilesFromProviderMessage(response.message)
-    if (parsed.files.length === 0) {
-      break
-    }
+    const parsed = parseGeneratedArtifact(response.message)
 
     currentFiles = mergeGeneratedFiles(currentFiles, parsed.files)
 
@@ -336,10 +334,7 @@ export async function executeGenerationJob(
         signal: input.signal,
       })
 
-      const parsed = extractGeneratedFilesFromProviderMessage(response.message)
-      if (parsed.files.length === 0) {
-        continue
-      }
+      const parsed = parseGeneratedArtifact(response.message)
 
       workingFiles = mergeGeneratedFiles(workingFiles, parsed.files)
       const normalized = normalizeGeneratedDependencies(workingFiles)
@@ -395,18 +390,9 @@ export async function executeGenerationJob(
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
-    await transition(input.jobId, "saving", "Saving project artifacts", 88)
+    await transition(input.jobId, "compiling", "Starting isolated preview sandbox", 88)
 
-    const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
-      projectId: input.projectId,
-      prompt: input.prompt,
-      files: workingFiles,
-    })
-
-    await GenerationJobService.assertNotCancelled(input.jobId)
-    await transition(input.jobId, "compiling", "Starting isolated preview sandbox", 94)
-
-    const preview = await startRuntimeSandbox(input.projectId, workingFiles)
+    const preview = await startRuntimeSandbox(input.projectId, workingFiles, { signal: input.signal })
     metrics.previewStatus = preview.status
     metrics.previewError = preview.error || null
 
@@ -416,7 +402,17 @@ export async function executeGenerationJob(
         projectId: input.projectId,
         error: preview.error,
       })
+      throw new Error(preview.error)
     }
+
+    await GenerationJobService.assertNotCancelled(input.jobId)
+    await transition(input.jobId, "saving", "Saving project artifacts", 94)
+
+    const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
+      projectId: input.projectId,
+      prompt: input.prompt,
+      files: workingFiles,
+    })
 
     await GenerationJobService.update(input.jobId, {
       metrics,
@@ -430,7 +426,10 @@ export async function executeGenerationJob(
       previewUrl: preview.previewUrl,
     }
   } catch (error) {
-    if (error instanceof GenerationJobCancelledError) {
+    const cancelledBySignal =
+      error instanceof Error && error.message === "GENERATION_JOB_CANCELLED"
+
+    if (error instanceof GenerationJobCancelledError || cancelledBySignal) {
       await GenerationJobService.markCancelled(input.jobId, "Generation cancelled")
       throw error
     }

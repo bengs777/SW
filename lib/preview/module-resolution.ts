@@ -677,7 +677,7 @@ function resolveImport(fromPath: string, source: string, index: ReturnType<typeo
   const trimmed = source.trim()
 
   if (isRemoteSpecifier(trimmed)) {
-    return { kind: "external", packageName: trimmed, specifier: trimmed }
+    return { kind: "unsupported", specifier: trimmed, reason: "Remote module imports are not allowed in browser preview." }
   }
 
   const unsupportedReason = unsupportedReasonForSpecifier(trimmed)
@@ -700,6 +700,10 @@ function resolveImport(fromPath: string, source: string, index: ReturnType<typeo
     }
 
     return { kind: "missing", specifier: trimmed, candidates }
+  }
+
+  if (!hasCdnImport(trimmed)) {
+    return { kind: "unsupported", specifier: trimmed, reason: "External package is not allowlisted for browser preview." }
   }
 
   return { kind: "external", packageName: trimmed, specifier: trimmed }
@@ -781,8 +785,6 @@ function applyReplacements(code: string, replacements: Array<{ start: number; en
 }
 
 function resolveCdnUrl(specifier: string) {
-  if (isRemoteSpecifier(specifier)) return specifier
-
   if (CDN_IMPORTS[specifier]) return withReactSingletonDeps(CDN_IMPORTS[specifier], specifier)
 
   const rootPackage = getPackageRoot(specifier)
@@ -791,7 +793,12 @@ function resolveCdnUrl(specifier: string) {
     return withReactSingletonDeps(`${CDN_IMPORTS[rootPackage]}${suffix}`, specifier)
   }
 
-  return `https://esm.sh/${specifier}?${ESM_REACT_DEPS}`
+  throw new Error(`External package is not allowlisted for browser preview: ${specifier}`)
+}
+
+function hasCdnImport(specifier: string) {
+  if (CDN_IMPORTS[specifier]) return true
+  return Boolean(CDN_IMPORTS[getPackageRoot(specifier)])
 }
 
 function withReactSingletonDeps(url: string, specifier: string) {

@@ -23,11 +23,9 @@ const MAX_FILE_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_FILE_BYTES || 512 * 
 const PROJECT_IDLE_TTL_MS = Number(process.env.SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS || 30 * 60 * 1000)
 const PROCESS_MAX_UPTIME_MS = Number(process.env.SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS || 20 * 60 * 1000)
 const CLEANUP_INTERVAL_MS = Number(process.env.SWIFT_SANDBOX_CLEANUP_INTERVAL_MS || 60 * 1000)
-const ALLOW_UNSAFE_PACKAGE_INSTALL = process.env.SWIFT_SANDBOX_ALLOW_UNSAFE_PACKAGE_INSTALL === "1"
 const states = new Map()
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL ||
-  process.env.TURSO_DATABASE_URL ||
   "file:./prisma/dev.db"
 
 if (IS_PRODUCTION && !SERVICE_TOKEN) {
@@ -107,6 +105,27 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: "Unauthorized" })
   }
   return next()
+}
+
+function sandboxProcessEnv(port, publicBase) {
+  return {
+    PATH: process.env.PATH || "",
+    Path: process.env.Path || process.env.PATH || "",
+    SystemRoot: process.env.SystemRoot || "",
+    ComSpec: process.env.ComSpec || "",
+    HOME: process.env.HOME || "",
+    USERPROFILE: process.env.USERPROFILE || "",
+    TEMP: process.env.TEMP || process.env.TMP || "",
+    TMP: process.env.TMP || process.env.TEMP || "",
+    npm_config_ignore_scripts: "true",
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    DATABASE_URL: sandboxDatabaseUrl(),
+    NEXTAUTH_SECRET: process.env.SWIFT_SANDBOX_NEXTAUTH_SECRET || "swift-sandbox-local-secret",
+    NEXTAUTH_URL: publicBase || `http://127.0.0.1:${port}`,
+    NEXT_PUBLIC_APP_URL: publicBase || `http://127.0.0.1:${port}`,
+    PORT: String(port),
+  }
 }
 
 function safeSegment(value) {
@@ -229,7 +248,6 @@ function mergePackageJson(content) {
   const parsed = content ? JSON.parse(content) : {}
   const mergeDependencies = (...sources) => {
     const merged = Object.assign({}, ...sources)
-    if (ALLOW_UNSAFE_PACKAGE_INSTALL) return merged
 
     return Object.fromEntries(
       Object.entries(merged).filter(([name]) => allowedPackages.has(name))
@@ -255,7 +273,7 @@ function mergePackageJson(content) {
         "class-variance-authority": "^0.7.1",
         clsx: "^2.1.1",
         "lucide-react": "^0.564.0",
-        next: "^16.2.4",
+        next: "^16.2.6",
         react: "^19.2.5",
         "react-dom": "^19.2.5",
         "tailwind-merge": "^3.3.1",
@@ -284,6 +302,12 @@ async function ensureFiles(state, files) {
   const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
   const packageJson = mergePackageJson(packageFile?.content || null)
   await writeFile(path.join(state.rootDir, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`, "utf8")
+
+  const rootPackageLockPath = path.join(process.cwd(), "package-lock.json")
+  if (await fileExists(rootPackageLockPath)) {
+    const lockContent = await readFile(rootPackageLockPath, "utf8")
+    await writeFile(path.join(state.rootDir, "package-lock.json"), lockContent, "utf8")
+  }
 
   if (!(await fileExists(path.join(state.rootDir, "next.config.js")))) {
     await writeFile(path.join(state.rootDir, "next.config.js"), "/** @type {import('next').NextConfig} */\nmodule.exports = {}\n", "utf8")
@@ -339,19 +363,7 @@ function runCommand(state, command, args, timeoutMs) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: state.rootDir,
-      env: {
-        ...process.env,
-        npm_config_ignore_scripts: "true",
-        npm_config_audit: "false",
-        npm_config_fund: "false",
-        DATABASE_URL: sandboxDatabaseUrl(),
-        TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL || "",
-        TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN || "",
-        NEXTAUTH_SECRET: process.env.SWIFT_SANDBOX_NEXTAUTH_SECRET || "swift-sandbox-local-secret",
-        NEXTAUTH_URL: `http://127.0.0.1:${state.port}`,
-        NEXT_PUBLIC_APP_URL: `http://127.0.0.1:${state.port}`,
-        PORT: String(state.port),
-      },
+      env: sandboxProcessEnv(state.port),
       shell: false,
     })
 
@@ -376,33 +388,6 @@ function runCommand(state, command, args, timeoutMs) {
       resolve({ code: code ?? 1, output })
     })
   })
-}
-
-function inferMissingPackages(output) {
-  const packages = new Set()
-  const patterns = [
-    /Module not found: Can't resolve ['"]([^.'"][^'"]+)['"]/g,
-    /Cannot find module ['"]([^.'"][^'"]+)['"]/g,
-    /Can't resolve ['"]([^.'"][^'"]+)['"]/g,
-  ]
-
-  for (const pattern of patterns) {
-    let match
-    while ((match = pattern.exec(output)) !== null) {
-      const raw = match[1]
-      const packageName = raw.startsWith("@") ? raw.split("/").slice(0, 2).join("/") : raw.split("/")[0]
-      if (packageName && !["next", "react", "react-dom"].includes(packageName)) {
-        packages.add(packageName)
-      }
-    }
-  }
-
-  return Array.from(packages)
-}
-
-function filterInstallablePackages(packages) {
-  if (ALLOW_UNSAFE_PACKAGE_INSTALL) return packages
-  return packages.filter((name) => allowedPackages.has(name))
 }
 
 async function stopProcess(state) {
@@ -458,16 +443,10 @@ function startDevServer(state, req) {
 
   const child = spawn("npm", ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
     cwd: state.rootDir,
-    env: {
-      ...process.env,
-      DATABASE_URL: sandboxDatabaseUrl(),
-      TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL || "",
-      TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN || "",
-      NEXTAUTH_SECRET: process.env.SWIFT_SANDBOX_NEXTAUTH_SECRET || "swift-sandbox-local-secret",
-      NEXTAUTH_URL: `${publicBaseUrl(req)}/preview/${encodeURIComponent(state.projectId)}`,
-      NEXT_PUBLIC_APP_URL: `${publicBaseUrl(req)}/preview/${encodeURIComponent(state.projectId)}`,
-      PORT: String(state.port),
-    },
+    env: sandboxProcessEnv(
+      state.port,
+      `${publicBaseUrl(req)}/preview/${encodeURIComponent(state.projectId)}`
+    ),
     shell: false,
   })
 
@@ -516,26 +495,13 @@ async function startSandbox(projectId, files, req) {
     const packageHash = createHash("sha256").update(packageContent).digest("hex")
     if (state.packageHash !== packageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
-      const install = await runCommand(state, "npm", ["install", "--ignore-scripts"], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
-      if (install.code !== 0) throw new Error("npm install failed")
+      const install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
+      if (install.code !== 0) throw new Error("npm ci failed")
       state.packageHash = packageHash
     }
 
     state.status = "building"
-    let build = await runCommand(state, "npm", ["run", "build"], Number(process.env.SWIFT_SANDBOX_BUILD_TIMEOUT_MS || 150000))
-    if (build.code !== 0) {
-      const missing = inferMissingPackages(build.output)
-      const installableMissing = filterInstallablePackages(missing)
-      if (installableMissing.length > 0) {
-        appendLog(state, `Detected allowed missing packages: ${installableMissing.join(", ")}`)
-        const installMissing = await runCommand(state, "npm", ["install", "--ignore-scripts", ...installableMissing], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
-        if (installMissing.code === 0) {
-          build = await runCommand(state, "npm", ["run", "build"], Number(process.env.SWIFT_SANDBOX_BUILD_TIMEOUT_MS || 150000))
-        }
-      } else if (missing.length > 0) {
-        appendLog(state, `Blocked missing package auto-install: ${missing.join(", ")}`)
-      }
-    }
+    const build = await runCommand(state, "npm", ["run", "build"], Number(process.env.SWIFT_SANDBOX_BUILD_TIMEOUT_MS || 150000))
     if (build.code !== 0) throw new Error("npm run build failed")
 
     startDevServer(state, req)

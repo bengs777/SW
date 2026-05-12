@@ -11,6 +11,9 @@ export type GenerationQueuePayload = {
   prompt: string
   model: string
   provider: string
+  usageLogId: string
+  reservedCost: number
+  modelConfigId: string
   collaborationMode?: string
   promptLanguage?: "id" | "en"
   idempotencyKey?: string
@@ -28,7 +31,6 @@ const DEFAULT_JOB_OPTIONS: JobsOptions = {
 let redisConnection: IORedis | null = null
 let generationQueue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobName> | null = null
 let generationQueueEvents: QueueEvents | null = null
-let redisAvailable = false
 
 function buildUpstashRedisUrl(): string | null {
   if (!env.upstashRedisRestUrl) return null
@@ -61,7 +63,7 @@ function getRedisConnection() {
     }
     
     if (!redisUrl) {
-      console.warn("[Generation Queue] Redis URL not configured. Generation will be queued in memory only.")
+      console.warn("[Generation Queue] Redis URL not configured. Generation queue is disabled.")
       return null
     }
 
@@ -76,12 +78,10 @@ function getRedisConnection() {
       
       redisConnection.on("error", (err) => {
         console.error("[Generation Queue] Redis connection error:", err.message)
-        redisAvailable = false
       })
       
       redisConnection.on("connect", () => {
         console.log("[Generation Queue] Redis connected successfully")
-        redisAvailable = true
       })
       
       redisConnection.on("reconnecting", () => {
@@ -91,7 +91,6 @@ function getRedisConnection() {
       // Try to connect
       redisConnection.connect().catch((err) => {
         console.warn("[Generation Queue] Could not connect to Redis:", err.message)
-        redisAvailable = false
       })
     } catch (error) {
       console.warn("[Generation Queue] Failed to initialize Redis:", error instanceof Error ? error.message : String(error))
@@ -103,15 +102,14 @@ function getRedisConnection() {
 }
 
 export function isGenerationQueueEnabled() {
-  // Queue is always considered enabled - we have fallback to in-memory queuing
-  return true
+  return Boolean(getRedisConnection())
 }
 
 export function getGenerationQueue() {
   if (!generationQueue) {
     const connection = getRedisConnection()
     
-    if (connection && redisAvailable) {
+    if (connection) {
       try {
         generationQueue = new Queue<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, {
           connection,
@@ -119,10 +117,10 @@ export function getGenerationQueue() {
         })
         console.log("[Generation Queue] Using Redis-backed queue")
       } catch (error) {
-        console.warn("[Generation Queue] Failed to create Redis queue, falling back to in-memory:", error instanceof Error ? error.message : String(error))
+        console.warn("[Generation Queue] Failed to create Redis queue:", error instanceof Error ? error.message : String(error))
       }
     } else {
-      console.log("[Generation Queue] Redis not available, using in-memory queue")
+      console.log("[Generation Queue] Redis not available")
     }
   }
 
@@ -133,7 +131,7 @@ export function getGenerationQueueEvents() {
   if (!generationQueueEvents) {
     const connection = getRedisConnection()
     
-    if (connection && redisAvailable) {
+    if (connection) {
       try {
         generationQueueEvents = new QueueEvents(QUEUE_NAME, {
           connection,
@@ -158,11 +156,15 @@ export async function enqueueGenerationTask(
       console.warn("[Generation Queue] Redis queue unavailable for:", payload.jobId)
       return null
     }
+
+    const dedupeJobId = options?.jobId || (payload.idempotencyKey
+      ? ["generation", payload.userId, payload.projectId, payload.idempotencyKey].join(":")
+      : payload.jobId)
     
     return queue.add("generation.execute", payload, {
       ...DEFAULT_JOB_OPTIONS,
       ...options,
-      jobId: payload.idempotencyKey || payload.jobId,
+      jobId: dedupeJobId,
     })
   } catch (error) {
     console.error("[Generation Queue] Failed to enqueue task:", error instanceof Error ? error.message : String(error))
@@ -174,12 +176,12 @@ export function createGenerationWorker(
   processor: Processor<GenerationQueuePayload, unknown, GenerationQueueJobName>
 ) {
   const connection = getRedisConnection()
+  if (!connection) {
+    throw new Error("Generation worker requires REDIS_URL or UPSTASH Redis configuration")
+  }
+
   return new Worker<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, processor, {
-    connection: connection ?? new IORedis({
-      host: "127.0.0.1",
-      port: 6379,
-      lazyConnect: true,
-    }),
+    connection,
     concurrency: Math.max(1, Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2)),
     stalledInterval: 30_000,
     lockDuration: 120_000,

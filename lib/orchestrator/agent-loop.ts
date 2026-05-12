@@ -1,6 +1,6 @@
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import type { ProviderName } from "@/lib/ai/provider-router"
-import { extractGeneratedFilesFromProviderMessage } from "@/lib/ai/provider-output"
+import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import { chooseModelForTask } from "@/lib/ai/model-router"
 import { buildContextForTask } from "@/lib/ai/context-builder"
 import * as Executor from "@/lib/orchestrator/executor"
@@ -57,7 +57,7 @@ export async function executePlan(
           })
 
           lastProviderResult = providerResp
-          const parsed = extractGeneratedFilesFromProviderMessage(providerResp.message)
+          const parsed = parseGeneratedArtifact(providerResp.message)
 
           if (!parsed.files || parsed.files.length === 0) {
             throw new Error("No files parsed from provider response")

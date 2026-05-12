@@ -65,9 +65,9 @@ const normalizeDeployPath = (path: string) => path.replace(/\\/g, "/").replace(/
 function ensureDeploymentFiles(files: GeneratedFile[], projectName: string) {
   const byPath = new Map<string, GeneratedFile>()
 
-  const addFile = (path: string, content: string, language: GeneratedFile["language"] = "ts") => {
+  const addFile = (path: string, content: string, language: GeneratedFile["language"] = "ts", force = false) => {
     const normalized = normalizeDeployPath(path)
-    if (!normalized || byPath.has(normalized)) {
+    if (!normalized || (byPath.has(normalized) && !force)) {
       return
     }
 
@@ -79,7 +79,8 @@ function ensureDeploymentFiles(files: GeneratedFile[], projectName: string) {
     if (
       !normalized ||
       /\.preview\.(tsx?|jsx?)$/i.test(normalized) ||
-      normalized === ".swift/workspace-state.json"
+      normalized === ".swift/workspace-state.json" ||
+      /(^|\/)(\.env(?:\..*)?|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(normalized)
     ) {
       continue
     }
@@ -93,15 +94,15 @@ function ensureDeploymentFiles(files: GeneratedFile[], projectName: string) {
 
   const safeName = projectName.replace(/[^a-zA-Z0-9 _-]/g, "").trim() || "Swift Project"
 
-  addFile("package.json", buildDeployPackageJson(safeName), "json")
+  addFile("package.json", buildDeployPackageJson(safeName), "json", true)
   addFile("next.config.js", `/** @type {import('next').NextConfig} */
 const nextConfig = {
   reactCompiler: false,
 }
 
 module.exports = nextConfig
-`, "ts")
-  addFile("tsconfig.json", buildDeployTsConfig(), "json")
+`, "ts", true)
+  addFile("tsconfig.json", buildDeployTsConfig(), "json", true)
   addFile("postcss.config.mjs", `const config = {
   plugins: {
     "@tailwindcss/postcss": {},
@@ -109,9 +110,9 @@ module.exports = nextConfig
 }
 
 export default config
-`, "ts")
-  addFile("app/globals.css", buildDeployGlobalsCss(), "css")
-  addFile("public/favicon.ico", "", "ts")
+`, "ts", true)
+  addFile("app/globals.css", buildDeployGlobalsCss(), "css", true)
+  addFile("public/favicon.ico", "", "ts", true)
 
   const missingImports = collectMissingLocalImports(Array.from(byPath.values()), byPath)
   for (const missing of missingImports) {
@@ -137,7 +138,7 @@ function buildDeployPackageJson(projectName: string) {
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "lucide-react": "^0.564.0",
-        "next": "^16.2.4",
+        "next": "^16.2.6",
         "react": "^19.2.5",
         "react-dom": "^19.2.5",
         "tailwind-merge": "^3.3.1",
@@ -523,6 +524,9 @@ const resolveProjectFiles = async (projectId: string, userId: string) => {
         members: {
           some: {
             userId,
+            role: {
+              in: ["admin", "editor"],
+            },
           },
         },
       },
