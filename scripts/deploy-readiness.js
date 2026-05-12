@@ -86,6 +86,7 @@ const checks = [
   ),
   required("SUPABASE_SERVICE_ROLE_KEY", "Supabase service role key", value("SUPABASE_SERVICE_ROLE_KEY")),
   required("SUPABASE_STORAGE_BUCKET", "Supabase storage bucket", value("SUPABASE_STORAGE_BUCKET")),
+  required("VERCEL_TEAM_ID", "Vercel team scope for generated deployments", value("VERCEL_TEAM_ID")),
   recommended("VERCEL_ACCESS_TOKEN", "Generated-app deploy token", value("VERCEL_ACCESS_TOKEN", "verpro_akses_token")),
   recommended("PAKASIR_SLUG", "Payment merchant slug", value("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID")),
   recommended("PAKASIR_API_KEY", "Payment API key", value("PAKASIR_API_KEY")),

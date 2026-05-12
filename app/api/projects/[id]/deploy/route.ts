@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
-import { env, getEnv } from "@/lib/env"
+import { env } from "@/lib/env"
 import type { GeneratedFile } from "@/lib/types"
 import { UserService } from "@/lib/services/user.service"
 
@@ -631,11 +631,19 @@ export async function POST(
       })),
     }
 
-    const url = new URL("https://api.vercel.com/v13/deployments")
-    const teamId = getEnv("VERCEL_TEAM_ID")
-    if (teamId) {
-      url.searchParams.set("teamId", teamId)
+    const teamId = env.vercelTeamId
+    if (!teamId) {
+      return NextResponse.json(
+        {
+          error:
+            "VERCEL_TEAM_ID is required for Swift deployments. Set it to the Swift Vercel team instead of a personal account like bengs777.",
+        },
+        { status: 500 }
+      )
     }
+
+    const url = new URL("https://api.vercel.com/v13/deployments")
+    url.searchParams.set("teamId", teamId)
     // When creating a deployment for a project that doesn't exist yet,
     // Vercel may require `projectSettings`. Skip the auto-detection confirmation
     // to allow automatic framework detection instead.

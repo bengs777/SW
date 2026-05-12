@@ -70,6 +70,7 @@ const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
 const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
 const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
+const vercelTeamId = getEnv("VERCEL_TEAM_ID")
 const hasRedisConfig = Boolean(redisUrl || (upstashRedisRestUrl && upstashRedisRestToken))
 const isServerRuntime = typeof window === "undefined"
 
@@ -115,6 +116,7 @@ export const env = {
   pakasirSlug: getEnv("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID"),
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
   vercelAccessToken: getEnv("VERCEL_ACCESS_TOKEN", "verpro_akses_token"),
+  vercelTeamId,
   tursoAuthToken: getEnv("TURSO_AUTH_TOKEN"),
   // Crypto Payment
   cryptoPaymentPrivateKey: getEnv("CRYPTO_PAYMENT_PRIVATE_KEY"),
@@ -148,6 +150,7 @@ export function getMissingProductionEnvVars() {
   }
   if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
+  if (!env.vercelTeamId) missing.push("VERCEL_TEAM_ID")
 
   if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
 
