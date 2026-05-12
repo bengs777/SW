@@ -566,7 +566,7 @@ export async function POST(
       return NextResponse.json(
         {
           error:
-            "VERCEL_ACCESS_TOKEN is missing. Set it in your environment before deploying.",
+            "Vercel deploy token is missing. Set your server-side deploy token before deploying.",
         },
         { status: 500 }
       )

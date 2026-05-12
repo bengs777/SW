@@ -62,7 +62,7 @@ export function getProductionReadiness() {
     check("PAKASIR_SLUG", "Pakasir merchant slug", env.pakasirSlug, "recommended"),
     check("PAKASIR_API_KEY", "Pakasir API key", env.pakasirApiKey, "recommended"),
     check("VERCEL_TEAM_ID", "Vercel team scope for generated deployments", env.vercelTeamId, "required"),
-    check("VERCEL_ACCESS_TOKEN", "Generated app deploy token", env.vercelAccessToken, "recommended"),
+    check("verpro_akses_token", "Generated app deploy token", env.vercelAccessToken, "recommended"),
     check("DEV_OWNER_EMAIL", "Developer owner email", env.devOwnerEmail, "required"),
     check("AI_RATE_LIMIT_PER_MINUTE", "AI prompt rate limit per minute", aiRateLimitConfig.perMinute > 0, "required", `${aiRateLimitConfig.perMinute} prompts/minute`),
     check("AI_RATE_LIMIT_PER_DAY", "AI prompt rate limit per day", aiRateLimitConfig.perDay > 0, "required", `${aiRateLimitConfig.perDay} prompts/day`),
