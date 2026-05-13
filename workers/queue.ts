@@ -9,9 +9,9 @@ export type SandboxJobName = "sandbox.start" | "sandbox.stop" | "sandbox.reset"
 
 // Queue names with versioning for safe deployments
 export const QUEUE_NAMES = {
-  generation: "swift:generation:v2",
-  repair: "swift:repair:v1",
-  sandbox: "swift:sandbox:v1",
+  generation: "swift-generation-v2",
+  repair: "swift-repair-v1",
+  sandbox: "swift-sandbox-v1",
 } as const
 
 // Default job options with conservative retries

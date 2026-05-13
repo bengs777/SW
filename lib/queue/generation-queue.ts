@@ -22,7 +22,7 @@ export type GenerationQueuePayload = {
   attachments?: unknown[]
 }
 
-const QUEUE_NAME = "swift:generation:v2"
+const QUEUE_NAME = "swift-generation-v2"
 const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 1,
@@ -160,7 +160,7 @@ export async function enqueueGenerationTask(
     }
 
     const dedupeJobId = options?.jobId || (payload.idempotencyKey
-      ? ["generation", payload.userId, payload.projectId, payload.idempotencyKey].join(":")
+      ? ["generation", payload.userId, payload.projectId, payload.idempotencyKey].join("__")
       : payload.jobId)
     
     return queue.add("generation.execute", payload, {

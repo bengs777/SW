@@ -447,8 +447,8 @@ export async function POST(request: NextRequest) {
       requestHash,
     })
     const queueId = parsed.data.idempotencyKey
-      ? ["generation", user.id, project.id, parsed.data.idempotencyKey].join(":")
-      : ["generation", user.id, project.id, requestHash].join(":")
+      ? ["generation", user.id, project.id, parsed.data.idempotencyKey].join("__")
+      : ["generation", user.id, project.id, requestHash].join("__")
 
     currentStage = "queue_enqueue"
     console.info("[QUEUE_ENQUEUE]", {
