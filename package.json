@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node scripts/dev-start.js",
     "dev:next": "next dev",
-    "build": "node scripts/vercel-build.js",
+    "build": "prisma db push && next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
