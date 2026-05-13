@@ -51,6 +51,7 @@ function staticChecks() {
     ? read("lib/services/generation-quality.service.ts")
     : ""
   const editPlanner = exists("lib/ai/edit-planner.ts") ? read("lib/ai/edit-planner.ts") : ""
+  const importGraph = exists("lib/ai/import-graph.ts") ? read("lib/ai/import-graph.ts") : ""
   const healthRoute = exists("app/api/health/route.ts") ? read("app/api/health/route.ts") : ""
   const generationQueue = exists("lib/queue/generation-queue.ts") ? read("lib/queue/generation-queue.ts") : ""
   const generationWorker = exists("lib/workers/generation-worker.ts") ? read("lib/workers/generation-worker.ts") : ""
@@ -76,6 +77,7 @@ function staticChecks() {
     check("ai.template-seeded-generation", /buildBlueprintSeedFiles/.test(generationOrchestrator) && /Applying known-good starter architecture/.test(generationOrchestrator), "Generation seeds from deterministic starter architectures"),
     check("ai.partial-regeneration-contract", /buildPartialEditPlan/.test(editPlanner) && /filterFilesForPartialEdit/.test(generationOrchestrator), "Conversational edits are scoped to target files and allowed new files"),
     check("ai.edit-intent-classifier", /pricing_page/.test(editPlanner) && /schema_change/.test(editPlanner) && /upload_integration/.test(editPlanner), "Edit planner classifies common retention-driving edit intents"),
+    check("ai.import-graph", /buildImportGraph/.test(importGraph) && /importedBy/.test(importGraph) && /getTransitiveImpactPaths/.test(editPlanner), "Import graph powers reverse dependency lookup and transitive edit impact analysis"),
     check("ai.generation-quality-metrics", /model GenerationQualityMetric/.test(prisma) && /GenerationQualityService/.test(generationQualityService), "Generation success, build, runtime, repair, latency, and cost metrics are persisted"),
     check("ai.fullstack-validation", /validateFullStackFiles|attemptTargetedRepair/.test(generationOrchestrator), "Generated files pass full-stack coverage validation"),
     check("ai.syntax-validation", /compileProject|validateFullStackFiles/.test(generationOrchestrator), "Generated executable files have TypeScript syntax validation signals"),

@@ -1,4 +1,5 @@
 import type { GeneratedFile, PreviewContext } from "@/lib/types"
+import { buildImportGraph, getTransitiveImpactPaths } from "@/lib/ai/import-graph"
 
 export type EditIntent =
   | "full_generation"
@@ -41,6 +42,7 @@ const ALWAYS_ALLOWED_PATCH_FILES = new Set([
 
 export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan {
   const existingPaths = input.existingFiles.map((file) => normalizePath(file.path))
+  const importGraph = buildImportGraph(input.existingFiles)
   const prompt = String(input.prompt || "")
   const normalizedPrompt = prompt.toLowerCase()
   const mode = String(input.collaborationMode || "").toLowerCase()
@@ -94,6 +96,17 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
 
   if (targetPaths.size === 0) {
     for (const path of rankRelevantPaths(normalizedPrompt, existingPaths).slice(0, 4)) {
+      targetPaths.add(path)
+    }
+  }
+
+  const impactPaths = getTransitiveImpactPaths(importGraph, Array.from(targetPaths), {
+    direction: "both",
+    maxDepth: intent === "runtime_fix" || intent === "schema_change" ? 2 : 1,
+    maxFiles: maxSlicesForIntent(intent) + 4,
+  })
+  for (const path of impactPaths) {
+    if (fileExists(path, existingPaths) && targetPaths.size < maxSlicesForIntent(intent)) {
       targetPaths.add(path)
     }
   }

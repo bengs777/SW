@@ -1,5 +1,5 @@
-import path from "node:path"
 import type { GeneratedFile } from "@/lib/types"
+import { buildImportGraph } from "@/lib/ai/import-graph"
 import {
   SWIFT_BUILDER_MODEL_KEY,
   SWIFT_FAST_MODEL_KEY,
@@ -366,44 +366,32 @@ export function trimContextForGeneration(input: {
 }
 
 export function buildDependencyMap(files: GeneratedFile[]): DependencyMap {
-  const fileMap = new Map(files.map((file) => [normalizePath(file.path), file]))
+  const graph = buildImportGraph(files)
   const localImports: DependencyMap["localImports"] = []
-  const externalPackages = new Set<string>()
-  const missingLocalImports: DependencyMap["missingLocalImports"] = []
   const unsupportedPreviewImports: DependencyMap["unsupportedPreviewImports"] = []
 
-  for (const file of files) {
-    if (!/\.(tsx?|jsx?|mjs|cjs)$/i.test(file.path)) continue
-
-    for (const specifier of collectImportSpecifiers(file.content)) {
-      const unsupportedReason = unsupportedPreviewReason(specifier)
+  for (const node of graph.nodes) {
+    for (const edge of node.imports) {
+      const unsupportedReason = unsupportedPreviewReason(edge.specifier)
       if (unsupportedReason) {
-        unsupportedPreviewImports.push({ file: file.path, specifier, reason: unsupportedReason })
+        unsupportedPreviewImports.push({ file: node.file, specifier: edge.specifier, reason: unsupportedReason })
       }
 
-      if (isLocalImport(specifier)) {
-        const candidates = resolveLocalImportCandidates(file.path, specifier)
-        const resolvedPath = candidates.find((candidate) => fileMap.has(normalizePath(candidate)))
+      if (edge.kind === "local" || edge.kind === "unresolved") {
         localImports.push({
-          file: file.path,
-          specifier,
-          resolvedPath,
-          missing: !resolvedPath,
+          file: node.file,
+          specifier: edge.specifier,
+          resolvedPath: edge.resolvedPath,
+          missing: !edge.resolvedPath,
         })
-
-        if (!resolvedPath) {
-          missingLocalImports.push({ file: file.path, specifier, candidates })
-        }
-      } else if (!isTypeOnlyVirtualImport(specifier)) {
-        externalPackages.add(packageRoot(specifier))
       }
     }
   }
 
   return {
     localImports,
-    externalPackages: Array.from(externalPackages).sort(),
-    missingLocalImports,
+    externalPackages: graph.externalPackages,
+    missingLocalImports: graph.missingLocalImports,
     unsupportedPreviewImports,
   }
 }
@@ -564,54 +552,6 @@ function scoreFileRelevance(
   }
 
   return score
-}
-
-function collectImportSpecifiers(content: string) {
-  const imports = new Set<string>()
-  const source = String(content || "")
-  const patterns = [
-    /import(?:\s+type)?[\s\S]*?\s+from\s+["']([^"']+)["']/g,
-    /export[\s\S]*?\s+from\s+["']([^"']+)["']/g,
-    /import\s*\(\s*["']([^"']+)["']\s*\)/g,
-    /require\s*\(\s*["']([^"']+)["']\s*\)/g,
-    /import\s+["']([^"']+)["']/g,
-  ]
-
-  for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) {
-      if (match[1]) imports.add(match[1].trim())
-    }
-  }
-
-  return Array.from(imports)
-}
-
-function resolveLocalImportCandidates(fromPath: string, specifier: string) {
-  const normalizedSpecifier = specifier.replace(/\\/g, "/")
-  const base =
-    normalizedSpecifier.startsWith("@/") || normalizedSpecifier.startsWith("~/")
-      ? normalizedSpecifier.slice(2)
-      : path.posix.normalize(path.posix.join(path.posix.dirname(normalizePath(fromPath)), normalizedSpecifier))
-  const candidates = new Set<string>()
-  const normalizedBase = normalizePath(base)
-
-  candidates.add(normalizedBase)
-  for (const extension of ["", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".json", ".css"]) {
-    candidates.add(`${normalizedBase}${extension}`)
-  }
-  for (const extension of [".tsx", ".ts", ".jsx", ".js", ".json"]) {
-    candidates.add(path.posix.join(normalizedBase, `index${extension}`))
-  }
-
-  return Array.from(candidates).map(normalizePath)
-}
-
-function isLocalImport(specifier: string) {
-  return specifier.startsWith(".") || specifier.startsWith("@/") || specifier.startsWith("~/") || specifier.startsWith("/")
-}
-
-function isTypeOnlyVirtualImport(specifier: string) {
-  return specifier.startsWith("node:")
 }
 
 function unsupportedPreviewReason(specifier: string) {

@@ -34,6 +34,7 @@ Before marking a generation successful, the backend must complete:
 - deterministic starter architecture seeding
 - file-sliced code generation
 - conversational edit intent classification
+- import graph impact analysis
 - partial regeneration scope enforcement
 - dependency normalization
 - static validation
@@ -64,10 +65,21 @@ Existing projects should avoid full regeneration. Swift now classifies common ed
 For partial edits the engine should:
 
 - select target files from active file, preview error evidence, prompt-mentioned paths, and ranked relevant files
+- expand scope through `file -> imports -> importedBy` so direct dependencies and reverse dependents are considered
 - allow only explicit new files needed by the edit
 - preserve stable files outside the target scope
 - reject broad model output before merge
 - validate the full project after the targeted patch
+
+Import graph node shape:
+
+```json
+{
+  "file": "components/lead-form.tsx",
+  "imports": [],
+  "importedBy": []
+}
+```
 
 Developer endpoint:
 
