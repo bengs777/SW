@@ -57,15 +57,24 @@ export function getProductionReadiness() {
     check("OPENROUTER_SITE_URL", "OpenRouter attribution site URL", env.openRouterSiteUrl, "recommended"),
     check("OPENROUTER_APP_NAME", "OpenRouter attribution app name", env.openRouterAppName, "recommended"),
     check(
-      "REDIS_CONFIG",
-      "Redis queue protection config",
-      env.hasRedisConfig,
+      "REDIS_BULLMQ_CONFIG",
+      "Native Redis config for BullMQ jobs and workers",
+      env.hasNativeRedisConfig,
       "required",
       env.redisUrl
-        ? "TCP Redis configured"
+        ? env.hasNativeRedisConfig
+          ? "Native Redis configured"
+          : "REDIS_URL must use redis:// or rediss://"
         : env.upstashRedisRestUrl && env.upstashRedisRestToken
-          ? "Upstash REST configured"
-          : "REDIS_URL or Upstash REST URL/token required"
+          ? "Upstash REST is configured, but BullMQ workers still require native REDIS_URL"
+          : "Set REDIS_URL to a native redis:// or rediss:// connection string"
+    ),
+    check(
+      "UPSTASH_REDIS_REST",
+      "Optional Upstash REST config for request rate-limit fallback",
+      env.hasRedisRestConfig,
+      "recommended",
+      env.hasRedisRestConfig ? "REST Redis configured" : "Optional when native REDIS_URL is configured"
     ),
     check("SANDBOX_SERVICE_URL", "External sandbox runtime service URL", env.sandboxServiceUrl, "required"),
     check("SANDBOX_SERVICE_TOKEN", "External sandbox runtime bearer token", env.sandboxServiceToken, "required"),

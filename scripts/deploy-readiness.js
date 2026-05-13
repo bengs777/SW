@@ -66,6 +66,10 @@ function isNeonPooledUrl(input) {
   }
 }
 
+function isNativeRedisUrl(input) {
+  return /^rediss?:\/\//i.test(String(input || ""))
+}
+
 const nextAuthUrl = value("NEXTAUTH_URL")
 const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
 const databaseUrl = value("DATABASE_URL")
@@ -82,14 +86,16 @@ const checks = [
   required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", value("GOOGLE_CLIENT_SECRET")),
   required("OPENROUTER_API_KEY", "AI provider API key", value("OPENROUTER_API_KEY")),
   required(
-    "REDIS_CONFIG",
-    "Queue/rate-limit Redis config",
-    value("REDIS_URL") || (value("UPSTASH_REDIS_REST_URL") && value("UPSTASH_REDIS_REST_TOKEN")),
-    value("REDIS_URL")
-      ? "TCP Redis configured"
+    "REDIS_BULLMQ_CONFIG",
+    "Native Redis config for BullMQ jobs and workers",
+    isNativeRedisUrl(value("REDIS_URL", "UPSTASH_REDIS_URL")),
+    isNativeRedisUrl(value("REDIS_URL", "UPSTASH_REDIS_URL"))
+      ? "Native Redis configured"
+      : value("REDIS_URL", "UPSTASH_REDIS_URL")
+        ? "REDIS_URL must use redis:// or rediss://"
       : value("UPSTASH_REDIS_REST_URL") && value("UPSTASH_REDIS_REST_TOKEN")
-        ? "Upstash REST configured. BullMQ workers still require REDIS_URL."
-        : "Set REDIS_URL or UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN"
+        ? "Upstash REST is configured, but BullMQ workers still require native REDIS_URL."
+        : "Set REDIS_URL to a native redis:// or rediss:// connection string"
   ),
   required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
   required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),

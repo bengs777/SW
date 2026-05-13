@@ -34,38 +34,12 @@ let redisConnection: IORedis | null = null
 let generationQueue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobName> | null = null
 let generationQueueEvents: QueueEvents | null = null
 
-function buildUpstashRedisUrl(): string | null {
-  if (!env.upstashRedisRestUrl) return null
-  
-  // Convert REST URL to native Redis URL
-  // REST format: https://hostname.upstash.io
-  // Native format: redis://default:password@hostname:port
-  const restUrl = env.upstashRedisRestUrl
-  const match = restUrl.match(/https?:\/\/([^\.]+)\.upstash\.io/)
-  
-  if (!match) return null
-  
-  const hostname = match[1]
-  
-  // Use token as password for Redis AUTH
-  if (env.upstashRedisRestToken) {
-    return `redis://default:${env.upstashRedisRestToken}@${hostname}.upstash.io:31329`
-  }
-  
-  return null
-}
-
 function getRedisConnection() {
   if (!redisConnection) {
-    let redisUrl: string | null = env.redisUrl
-    
-    // If no native Redis URL, try to build from Upstash REST config
-    if (!redisUrl) {
-      redisUrl = buildUpstashRedisUrl()
-    }
-    
-    if (!redisUrl) {
-      console.warn("[Generation Queue] Redis URL not configured. Generation queue is disabled.")
+    const redisUrl = env.redisUrl
+
+    if (!env.hasNativeRedisConfig) {
+      console.warn("[Generation Queue] Native REDIS_URL is not configured. BullMQ requires redis:// or rediss://; REST URLs are not supported.")
       return null
     }
 
@@ -73,6 +47,7 @@ function getRedisConnection() {
       redisConnection = new IORedis(redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
+        ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
         retryStrategy: (times) => Math.min(times * 50, 2000),
         connectTimeout: 5000,
         lazyConnect: true,
@@ -231,7 +206,7 @@ export function createGenerationWorker(
 ) {
   const connection = getRedisConnection()
   if (!connection) {
-    throw new Error("Generation worker requires REDIS_URL or UPSTASH Redis configuration")
+    throw new Error("Generation worker requires native REDIS_URL using redis:// or rediss://")
   }
 
   return new Worker<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, processor, {

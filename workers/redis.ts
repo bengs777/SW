@@ -17,14 +17,15 @@ export function getRedisConnection(): IORedis {
 
   const redisUrl = env.redisUrl
 
-  if (!redisUrl) {
-    throw new Error("REDIS_URL is required for worker processes")
+  if (!env.hasNativeRedisConfig) {
+    throw new Error("Native REDIS_URL using redis:// or rediss:// is required for worker processes")
   }
 
   redisClient = new IORedis(redisUrl, {
     maxRetriesPerRequest: null,
     enableOfflineQueue: false,
     enableReadyCheck: false,
+    ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
     retryStrategy: (times) => {
       const delay = Math.min(times * 50, 2000)
       console.log(`[Redis] Retrying connection in ${delay}ms (attempt ${times})`)

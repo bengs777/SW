@@ -74,7 +74,10 @@ const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const vercelTeamId = getEnv("VERCEL_TEAM_ID")
 const vercelDeployToken = getEnv("verpro_akses_token", "VERCEL_ACCESS_TOKEN")
-const hasRedisConfig = Boolean(redisUrl || (upstashRedisRestUrl && upstashRedisRestToken))
+const nativeRedisUrlPattern = /^rediss?:\/\//i
+const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
+const hasRedisRestConfig = Boolean(upstashRedisRestUrl && upstashRedisRestToken)
+const hasRedisConfig = Boolean(hasNativeRedisConfig || hasRedisRestConfig)
 const isServerRuntime = typeof window === "undefined"
 
 const urlSchema = z.string().url()
@@ -127,6 +130,8 @@ export const env = {
   redisUrl,
   upstashRedisRestUrl,
   upstashRedisRestToken,
+  hasNativeRedisConfig,
+  hasRedisRestConfig,
   hasRedisConfig,
   sandboxServiceUrl,
   sandboxServiceToken,
@@ -164,9 +169,7 @@ export function getMissingProductionEnvVars() {
   }
   if (!env.supabaseServiceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY")
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
-  if (!env.hasRedisConfig) {
-    missing.push("REDIS_URL or UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN")
-  }
+  if (!env.hasNativeRedisConfig) missing.push("REDIS_URL (native redis:// or rediss:// for BullMQ)")
   if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
   if (!env.vercelTeamId) missing.push("VERCEL_TEAM_ID")
@@ -270,6 +273,33 @@ function validateOptionalNumber(
   }
 }
 
+function validateOptionalRedisUrl(
+  issues: EnvValidationIssue[],
+  key: string,
+  value: string,
+  isProduction: boolean
+) {
+  if (!value) return
+
+  if (!nativeRedisUrlPattern.test(value)) {
+    issues.push({
+      key,
+      severity: isProduction ? "error" : "warning",
+      message: `${key} must be a native Redis URL using redis:// or rediss://. REST HTTPS URLs cannot be used by BullMQ workers.`,
+    })
+    return
+  }
+
+  const parsed = urlSchema.safeParse(value)
+  if (!parsed.success) {
+    issues.push({
+      key,
+      severity: isProduction ? "error" : "warning",
+      message: `${key} must be a valid native Redis URL.`,
+    })
+  }
+}
+
 export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationReport {
   const environment = options.nodeEnv || env.nodeEnv
   const isProduction = environment === "production"
@@ -290,6 +320,7 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
   validateOptionalUrl(issues, "NEXT_PUBLIC_SUPABASE_URL", env.supabaseUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_SERVICE_URL", env.sandboxServiceUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_PUBLIC_BASE_URL", env.sandboxPublicBaseUrl, isProduction)
+  validateOptionalRedisUrl(issues, "REDIS_URL / UPSTASH_REDIS_URL", env.redisUrl, isProduction)
 
   validateOptionalNumber(issues, "AI_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_MAX_RETRIES", { min: 0, integer: true, isProduction })

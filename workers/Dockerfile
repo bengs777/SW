@@ -1,38 +1,34 @@
-# Swift AI Standalone Workers
-# This Dockerfile builds the worker process for Railway/Fly.io deployment
-# Run with: docker build -t swift-workers -f workers/Dockerfile .
-# Then: docker run -e REDIS_URL=xxx -e DATABASE_URL=xxx swift-workers
+# Swift AI persistent generation worker host.
+# This intentionally runs the Next.js Node server in a dedicated non-Vercel
+# process so instrumentation can start the BullMQ worker and keep it alive.
 
 FROM node:20-alpine AS base
-RUN apk add --no-cache libc6-compat git
+WORKDIR /app
+RUN apk add --no-cache libc6-compat
+
+FROM base AS deps
+COPY package*.json ./
+COPY prisma ./prisma
+RUN npm ci
 
 FROM base AS builder
-WORKDIR /app
-COPY package*.json ./
-COPY tsconfig.json ./tsconfig.json
-COPY prisma ./prisma
-COPY lib ./lib
-COPY workers ./workers
-RUN npm ci
-RUN npx tsc --project tsconfig.json --outDir /app/dist --module commonjs --moduleResolution bundler --target ES2022 --esModuleInterop --skipLibCheck --forceConsistentCasingInFileNames --resolveJsonModule workers/index.ts workers/redis.ts workers/queue.ts workers/generation-worker.ts workers/repair-worker.ts workers/sandbox-worker.ts workers/graceful-shutdown.ts
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
 
-FROM node:20-alpine AS runner
-WORKDIR /app
+FROM base AS runner
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV SWIFT_ENABLE_GENERATION_WORKER=true
+ENV PORT=4000
 
-# Copy production dependencies
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
-COPY prisma ./prisma
-
-# Create non-root user
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
-USER nextjs
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/next.config.js ./next.config.js
 
 EXPOSE 4000
-
-ENV NODE_ENV=production
-ENV SWIFT_WORKER_TYPE=generation
-
-CMD ["node", "dist/workers/index.js"]
+CMD ["npm", "run", "start"]

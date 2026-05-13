@@ -47,7 +47,7 @@ async function checkQueue(): Promise<HealthCheck> {
     }
   } catch (error) {
     return {
-      status: env.hasRedisConfig ? "unhealthy" : "disabled",
+      status: env.hasNativeRedisConfig ? "unhealthy" : "disabled",
       detail: error instanceof Error ? error.message : String(error),
     }
   }

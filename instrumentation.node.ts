@@ -33,11 +33,24 @@ async function warnMissingProductionEnv() {
   }
 }
 
+function shouldStartGenerationWorker() {
+  if (process.env.SWIFT_ENABLE_GENERATION_WORKER !== "true") {
+    return false
+  }
+
+  if (process.env.VERCEL === "1") {
+    console.warn("[INSTRUMENTATION_WARNING]", "SWIFT_ENABLE_GENERATION_WORKER ignored on Vercel serverless runtime. Run BullMQ workers in a dedicated Node process.")
+    return false
+  }
+
+  return true
+}
+
 export async function register() {
   await runFailOpen("environment", warnMissingProductionEnv)
 
   await runFailOpen("generation_worker", async () => {
-    if (process.env.SWIFT_ENABLE_GENERATION_WORKER === "true") {
+    if (shouldStartGenerationWorker()) {
       const globalState = globalThis as typeof globalThis & { swiftGenerationWorkerStarted?: boolean }
       if (!globalState.swiftGenerationWorkerStarted) {
         const { startGenerationWorker } = await import("@/lib/workers/generation-worker")
