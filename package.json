@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node scripts/dev-start.js",
     "dev:next": "next dev",
-    "build": "prisma db push && next build",
+    "build": "node scripts/vercel-build.js",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -24,9 +24,7 @@
   "dependencies": {
     "@babel/parser": "^7.29.3",
     "@hookform/resolvers": "^3.9.1",
-    "@libsql/client": "^0.8.1",
     "@monaco-editor/react": "^4.7.0",
-    "@prisma/adapter-libsql": "^5.22.0",
     "@prisma/client": "^5.22.0",
     "@radix-ui/react-accordion": "1.2.12",
     "@radix-ui/react-alert-dialog": "1.1.15",

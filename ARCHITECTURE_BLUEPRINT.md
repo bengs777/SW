@@ -110,7 +110,7 @@ experimental: {
 
 **CREATE: `lib/storage/supabase-storage.ts`**
 ```typescript
-// Store pointers in Turso, blobs in Supabase
+// Store pointers in PostgreSQL, blobs in Supabase
 async function storeProjectFiles(
   projectId: string,
   files: GeneratedFile[],
@@ -229,7 +229,7 @@ User Request
      │  - Call AI provider (with timeout)
      │  - Stream results, buffer in memory
      │  - Commit to Supabase (single transaction)
-     │  - Update Turso (storage pointer)
+     │  - Update PostgreSQL (storage pointer)
      │  - Start sandbox preview
      ▼
 [Response to Client via SSE]
@@ -265,8 +265,8 @@ export function getRedis(): IORedis {
 
 **Environment Variables Required:**
 ```bash
-DATABASE_URL=              # Turso connection string
-TURSO_AUTH_TOKEN=          # Turso auth token
+DATABASE_URL=              # Neon pooled PostgreSQL connection string
+DIRECT_DATABASE_URL=       # Neon direct PostgreSQL connection string for migrations
 REDIS_URL=                 # Upstash Redis URL
 SUPABASE_URL=              # Supabase project URL
 SUPABASE_SERVICE_ROLE_KEY= # For server-side uploads

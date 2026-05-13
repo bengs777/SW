@@ -18,6 +18,20 @@ function isProductionUrl(value: string | null | undefined) {
   return /^https:\/\//i.test(value) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(value)
 }
 
+function isPostgresUrl(value: string | null | undefined) {
+  return Boolean(value && /^postgres(?:ql)?:\/\//i.test(value))
+}
+
+function isNeonPooledUrl(value: string | null | undefined) {
+  if (!isPostgresUrl(value)) return false
+
+  try {
+    return /pooler\./i.test(new URL(String(value)).hostname)
+  } catch {
+    return false
+  }
+}
+
 function check(key: string, label: string, value: unknown, severity: ReadinessCheck["severity"], detail?: string): ReadinessCheck {
   return {
     key,
@@ -30,9 +44,9 @@ function check(key: string, label: string, value: unknown, severity: ReadinessCh
 
 export function getProductionReadiness() {
   const checks: ReadinessCheck[] = [
-    check("DATABASE_URL", "Prisma/libSQL database URL", env.databaseUrl, "required"),
-    check("TURSO_DATABASE_URL", "Turso/libSQL runtime database URL", env.tursoDatabaseUrl, "required"),
-    check("TURSO_AUTH_TOKEN", "Turso auth token", env.tursoAuthToken, "required"),
+    check("DATABASE_URL", "Neon pooled PostgreSQL app URL", isPostgresUrl(env.databaseUrl), "required", env.databaseUrl ? "Must be a PostgreSQL URL." : undefined),
+    check("DATABASE_URL_POOLING", "Neon pooled serverless connection", isNeonPooledUrl(env.databaseUrl), "recommended", env.databaseUrl ? "Use the Neon pooler host for app runtime traffic." : undefined),
+    check("DIRECT_DATABASE_URL", "Neon direct migration URL", isPostgresUrl(env.directDatabaseUrl), "recommended", "Use for migrations and administrative scripts, not request traffic."),
     check("NEXTAUTH_SECRET", "NextAuth secret", env.nextAuthSecret, "required"),
     check("NEXTAUTH_URL", "NextAuth canonical URL", isProductionUrl(env.nextAuthUrl), "required", env.nextAuthUrl ? "Must be an https production URL, not localhost." : undefined),
     check("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(env.appUrl), "required", env.appUrl ? "Must be an https production URL, not localhost." : undefined),

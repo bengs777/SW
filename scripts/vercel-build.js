@@ -9,6 +9,9 @@ env.NODE_ENV = "production"
 if (!process.env.DATABASE_URL || !process.env.DATABASE_URL.trim()) {
   throw new Error("[vercel-build] DATABASE_URL is required for production builds.")
 }
+if (!/^postgres(?:ql)?:\/\//i.test(process.env.DATABASE_URL)) {
+  throw new Error("[vercel-build] DATABASE_URL must be a PostgreSQL connection string.")
+}
 env.DATABASE_URL = process.env.DATABASE_URL
 
 const isWindows = process.platform === "win32"

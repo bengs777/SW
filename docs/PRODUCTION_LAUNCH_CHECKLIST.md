@@ -5,7 +5,7 @@ Swift is production-launchable only when the dashboard app and sandbox runtime a
 ## Required Services
 
 - Vercel: Swift dashboard and API routes.
-- Turso: primary application database through Prisma/libSQL.
+- Neon PostgreSQL: primary application database through Prisma.
 - Supabase Storage: uploaded assets and prompt attachments.
 - Redis: BullMQ generation queue and rate-limit scaling.
 - Railway or VPS: external sandbox runtime service.
@@ -15,8 +15,7 @@ Swift is production-launchable only when the dashboard app and sandbox runtime a
 Dashboard app:
 
 - `DATABASE_URL`
-- `TURSO_DATABASE_URL`
-- `TURSO_AUTH_TOKEN`
+- `DIRECT_DATABASE_URL` for migrations and administrative scripts
 - `NEXTAUTH_SECRET`
 - `NEXTAUTH_URL`
 - `NEXT_PUBLIC_APP_URL`
@@ -37,8 +36,8 @@ Sandbox runtime:
 
 - `SANDBOX_SERVICE_TOKEN`
 - `SANDBOX_PUBLIC_BASE_URL`
-- `TURSO_DATABASE_URL`
-- `TURSO_AUTH_TOKEN`
+- `SWIFT_SANDBOX_DATABASE_URL` if generated previews need database-backed routes
+- `SWIFT_SANDBOX_DIRECT_DATABASE_URL` if sandbox migration scripts are enabled
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`

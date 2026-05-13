@@ -1,31 +1,23 @@
-import { PrismaLibSQL } from '@prisma/adapter-libsql'
 import { PrismaClient } from '@prisma/client'
-import { createClient } from '@libsql/client'
 import { env } from '@/lib/env'
 
 const globalForPrisma = global as unknown as { prisma?: PrismaClient }
 let prismaSingleton: PrismaClient | undefined
 
-function resolveDatabaseUrl() {
-  return env.tursoDatabaseUrl || env.databaseUrl || (env.nodeEnv === 'production' ? '' : 'file:./dev.db')
+function assertPostgresDatabaseUrl() {
+  if (!env.databaseUrl) {
+    throw new Error('DATABASE_URL is required to initialize Prisma client')
+  }
+
+  if (!/^postgres(?:ql)?:\/\//i.test(env.databaseUrl)) {
+    throw new Error('DATABASE_URL must be a PostgreSQL connection string')
+  }
 }
 
 function createPrismaClient(): PrismaClient {
-  const databaseUrl = resolveDatabaseUrl()
-
-  if (!databaseUrl) {
-    throw new Error('TURSO_DATABASE_URL or DATABASE_URL is required to initialize Prisma client')
-  }
-
-  const prismaAdapter = new PrismaLibSQL(
-    createClient({
-      url: databaseUrl,
-      authToken: env.tursoAuthToken || undefined,
-    })
-  )
+  assertPostgresDatabaseUrl()
 
   return new PrismaClient({
-    adapter: prismaAdapter,
     log: ['warn', 'error'],
   })
 }

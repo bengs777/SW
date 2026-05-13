@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client"
 import { prisma } from "@/lib/db/client"
-import { withSqliteBusyRetry } from "@/lib/db/errors"
+import { withDatabaseWriteRetry } from "@/lib/db/errors"
 import type { GeneratedFile } from "@/lib/types"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
@@ -203,7 +203,7 @@ export class ProjectFilePersistenceService {
   ) {
     const normalizedFiles = dedupeFilesByPath(files)
 
-    return withSqliteBusyRetry(() => prisma.$transaction(async (tx) => {
+    return withDatabaseWriteRetry(() => prisma.$transaction(async (tx) => {
       const historyData = {
         prompt,
         result: JSON.stringify(normalizedFiles),

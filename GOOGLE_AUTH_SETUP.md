@@ -24,12 +24,12 @@
 | `NEXTAUTH_SECRET` | **WAJIB** | Generate atau copy dari `.env` | `eyJhbGciOiJIUzI1NiIsInR5c...` |
 | `GOOGLE_CLIENT_ID` | **WAJIB** | Google Console | `123456789-abc123def456.apps.googleusercontent.com` |
 | `GOOGLE_CLIENT_SECRET` | **WAJIB** | Google Console | `GOCSPX-1a2b3c4d5e6f...` |
-| `TURSO_DATABASE_URL` | **WAJIB** | From `.env` | `libsql://rapelit-...turso.io` |
-| `TURSO_AUTH_TOKEN` | **WAJIB** | From `.env` | `eyJhbGciOiJFZERTQSI...` |
+| `DATABASE_URL` | **WAJIB** | From `.env` | Neon pooled PostgreSQL URL |
+| `DIRECT_DATABASE_URL` | Recommended | From `.env` | Neon direct PostgreSQL URL |
 
 ⚠️ **IMPORTANT**: Paste nilai EXACT dari `.env` file lokal kamu untuk:
-- `TURSO_DATABASE_URL`
-- `TURSO_AUTH_TOKEN`
+- `DATABASE_URL`
+- `DIRECT_DATABASE_URL`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 
@@ -125,8 +125,8 @@ Pastikan:
 □ Set NEXTAUTH_SECRET di Vercel
 □ Set GOOGLE_CLIENT_ID di Vercel
 □ Set GOOGLE_CLIENT_SECRET di Vercel
-□ Set TURSO_DATABASE_URL di Vercel
-□ Set TURSO_AUTH_TOKEN di Vercel
+□ Set DATABASE_URL di Vercel
+□ Set DIRECT_DATABASE_URL di Vercel
 □ Verify redirect URI di Google Console: https://swift.jbb.my.id/api/auth/callback/google
 □ Redeploy di Vercel (atau tunggu auto-redeploy)
 □ Test login di https://swift.jbb.my.id
@@ -162,9 +162,9 @@ Redirect to: https://swift.jbb.my.id/dashboard
 
 - ✅ `/auth.ts` - NextAuth config dengan Google provider
 - ✅ `/lib/env.ts` - Environment variable validation
-- ✅ `/lib/db/client.ts` - Prisma client dengan libSQL adapter (Turso support)
-- ✅ `/prisma/schema.prisma` - Driver adapter preview feature
-- ✅ `/package.json` - Prisma libSQL adapter dependencies
+- ✅ `/lib/db/client.ts` - Prisma client for PostgreSQL
+- ✅ `/prisma/schema.prisma` - PostgreSQL datasource
+- ✅ `/package.json` - Prisma dependencies
 
 All code is ready. Only **environment variables** need to be set in Vercel.
 

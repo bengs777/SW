@@ -53,13 +53,28 @@ function isProductionUrl(input) {
   return /^https:\/\//i.test(current) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(current)
 }
 
+function isPostgresUrl(input) {
+  return /^postgres(?:ql)?:\/\//i.test(String(input || ""))
+}
+
+function isNeonPooledUrl(input) {
+  if (!isPostgresUrl(input)) return false
+  try {
+    return /pooler\./i.test(new URL(input).hostname)
+  } catch {
+    return false
+  }
+}
+
 const nextAuthUrl = value("NEXTAUTH_URL")
 const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
+const databaseUrl = value("DATABASE_URL")
+const directDatabaseUrl = value("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
 
 const checks = [
-  required("DATABASE_URL", "Production build and Prisma database URL", value("DATABASE_URL")),
-  required("TURSO_DATABASE_URL", "Runtime app database URL", value("TURSO_DATABASE_URL")),
-  required("TURSO_AUTH_TOKEN", "Runtime database auth token", value("TURSO_AUTH_TOKEN")),
+  required("DATABASE_URL", "Neon pooled PostgreSQL app URL", isPostgresUrl(databaseUrl), databaseUrl ? "Must be a PostgreSQL URL." : "Set the Neon pooled connection string."),
+  recommended("DATABASE_URL_POOLING", "Serverless pooled Neon host", isNeonPooledUrl(databaseUrl), "Use the Neon pooler host for app runtime traffic."),
+  recommended("DIRECT_DATABASE_URL", "Direct Neon URL for migrations/admin scripts", isPostgresUrl(directDatabaseUrl), "Set DIRECT_DATABASE_URL, DIRECT_URL, or POSTGRES_URL_NON_POOLING."),
   required("NEXTAUTH_SECRET", "Auth session secret", value("NEXTAUTH_SECRET")),
   required("NEXTAUTH_URL", "Canonical auth URL", isProductionUrl(nextAuthUrl), "Must be an https production URL, not localhost."),
   required("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(appUrl), "Must be an https production URL, not localhost."),

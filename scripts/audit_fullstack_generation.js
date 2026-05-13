@@ -64,21 +64,13 @@ function walkFiles(rootDir) {
 async function loadHistoryFiles() {
   const projectId = readArg('--project-id')
   const { PrismaClient } = require('@prisma/client')
-  const { PrismaLibSQL } = require('@prisma/adapter-libsql')
-  const { createClient } = require('@libsql/client')
 
-  const databaseUrl = process.env.TURSO_DATABASE_URL || ''
-  if (!databaseUrl) {
-    throw new Error('TURSO_DATABASE_URL is required for --history mode')
+  const databaseUrl = process.env.DATABASE_URL || ''
+  if (!/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
+    throw new Error('DATABASE_URL must be a PostgreSQL connection string for --history mode')
   }
 
   const prisma = new PrismaClient({
-    adapter: new PrismaLibSQL(
-      createClient({
-        url: databaseUrl,
-        authToken: process.env.TURSO_AUTH_TOKEN || undefined,
-      })
-    ),
     log: ['warn', 'error'],
   })
 
@@ -204,7 +196,7 @@ function audit(files, source) {
       key: 'env_and_deps',
       label: 'Project includes env/dependency hints needed to run',
       pass:
-        hasAny(fileByPath(normalizedFiles, /(^|\/)\.env\.example$/i), /DATABASE_URL|TURSO_DATABASE_URL|NEXTAUTH_SECRET|AUTH_SECRET/i) &&
+        hasAny(fileByPath(normalizedFiles, /(^|\/)\.env\.example$/i), /DATABASE_URL|NEXTAUTH_SECRET|AUTH_SECRET/i) &&
         hasAny(fileByPath(normalizedFiles, /(^|\/)package\.json$/i), /@prisma\/client|prisma|next-auth|bcrypt/i),
       evidence: fileByPath(normalizedFiles, /(^|\/)(\.env\.example|package\.json)$/i).map((file) => file.path),
     },

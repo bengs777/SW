@@ -1,11 +1,13 @@
 const { PrismaClient } = require("@prisma/client")
-const { PrismaLibSQL } = require("@prisma/adapter-libsql")
-const { createClient } = require("@libsql/client")
 
-process.env.DATABASE_URL = process.env.SWIFT_LOCAL_DATABASE_URL || "file:./prisma/dev.db"
+process.env.DATABASE_URL = process.env.SWIFT_LOCAL_DATABASE_URL || process.env.DATABASE_URL || ""
+
+if (!/^postgres(?:ql)?:\/\//i.test(process.env.DATABASE_URL)) {
+  throw new Error("DATABASE_URL or SWIFT_LOCAL_DATABASE_URL must be a PostgreSQL connection string")
+}
 
 const prisma = new PrismaClient({
-  adapter: new PrismaLibSQL(createClient({ url: process.env.DATABASE_URL })),
+  log: ["warn", "error"],
 })
 
 const runId = `chaos-${Date.now()}`

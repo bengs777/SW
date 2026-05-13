@@ -48,13 +48,10 @@ const SANDBOX_MEMORY_MB = Math.max(128, Number(process.env.SWIFT_SANDBOX_MEMORY_
 const MAX_SANDBOX_SOURCE_BYTES = Number(process.env.SWIFT_SANDBOX_SOURCE_BYTES || 8 * 1024 * 1024)
 const MAX_SANDBOX_WORKSPACE_BYTES = Number(process.env.SWIFT_SANDBOX_WORKSPACE_BYTES || 160 * 1024 * 1024)
 const sandboxDatabaseUrl = () =>
-  process.env.SWIFT_SANDBOX_DATABASE_URL ||
-  "file:./prisma/dev.db"
+  process.env.SWIFT_SANDBOX_DATABASE_URL || ""
 
 const ALLOWED_PACKAGES = new Set([
   "@hookform/resolvers",
-  "@libsql/client",
-  "@prisma/adapter-libsql",
   "@prisma/client",
   "@radix-ui/react-accordion",
   "@radix-ui/react-alert-dialog",
@@ -348,8 +345,6 @@ function mergePackageJson(existingContent: string | null) {
     dependencies: {
       "@prisma/client": "^5.22.0",
       "@supabase/supabase-js": "^2.104.0",
-      "@libsql/client": "^0.8.1",
-      "@prisma/adapter-libsql": "^5.22.0",
       "class-variance-authority": "^0.7.1",
       clsx: "^2.1.1",
       "lucide-react": "^0.564.0",
@@ -524,8 +519,7 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
       envPath,
       [
         `DATABASE_URL=${sandboxDatabaseUrl()}`,
-        `TURSO_DATABASE_URL=${process.env.TURSO_DATABASE_URL || ""}`,
-        `TURSO_AUTH_TOKEN=${process.env.TURSO_AUTH_TOKEN || ""}`,
+        `DIRECT_DATABASE_URL=${process.env.SWIFT_SANDBOX_DIRECT_DATABASE_URL || ""}`,
         "NEXTAUTH_SECRET=swift-sandbox-local-secret",
         `NEXTAUTH_URL=http://localhost:${state.port}`,
         `NEXT_PUBLIC_APP_URL=http://localhost:${state.port}`,

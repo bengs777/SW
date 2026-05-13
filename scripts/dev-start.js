@@ -1,13 +1,14 @@
 const { execSync, spawn } = require("child_process")
 const path = require("path")
 
-const LOCAL_PRISMA_DATABASE_URL = "file:./dev.db"
-const LOCAL_RUNTIME_DATABASE_URL = "file:./prisma/dev.db"
-
 const env = { ...process.env }
 env.NODE_ENV = "development"
-env.DATABASE_URL = process.env.DATABASE_URL || LOCAL_PRISMA_DATABASE_URL
-env.TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL || LOCAL_RUNTIME_DATABASE_URL
+env.DATABASE_URL = process.env.DATABASE_URL || ""
+
+if (!/^postgres(?:ql)?:\/\//i.test(env.DATABASE_URL)) {
+  console.error("[dev] DATABASE_URL must be a PostgreSQL connection string. Use a Neon development branch or local Postgres database.")
+  process.exit(1)
+}
 
 const nextCli = path.normalize(require.resolve("next/dist/bin/next"))
 

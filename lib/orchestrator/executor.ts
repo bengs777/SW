@@ -9,7 +9,7 @@ async function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms))
 }
 
-export async function runWithSqliteRetry<T>(fn: () => Promise<T>, maxAttempts = 5): Promise<T> {
+export async function runWithDatabaseRetry<T>(fn: () => Promise<T>, maxAttempts = 5): Promise<T> {
   let lastError: unknown = null
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
@@ -17,8 +17,7 @@ export async function runWithSqliteRetry<T>(fn: () => Promise<T>, maxAttempts = 
     } catch (err) {
       lastError = err
       const msg = err && (err instanceof Error ? err.message : String(err))
-      if (/SQLITE_BUSY/i.test(String(msg))) {
-        // backoff
+      if (/SQLITE_BUSY|database is locked|deadlock detected|could not serialize access|connection terminated|ECONNRESET|ETIMEDOUT/i.test(String(msg))) {
         await sleep(120 * (attempt + 1))
         continue
       }
@@ -55,8 +54,7 @@ export async function applyFiles(
       Array.from(merged.values())
     )
   }
-  // Save with retry to mitigate SQLITE_BUSY on local dev
-  return runWithSqliteRetry(op)
+  return runWithDatabaseRetry(op)
 }
 
 export async function validateFiles(files: GeneratedFile[]) {
@@ -67,6 +65,6 @@ export async function validateFiles(files: GeneratedFile[]) {
   }
 }
 
-const executor = { applyFiles, validateFiles, runWithSqliteRetry }
+const executor = { applyFiles, validateFiles, runWithDatabaseRetry }
 
 export default executor

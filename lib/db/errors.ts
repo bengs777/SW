@@ -31,7 +31,7 @@ export function shouldSoftFailMissingTable() {
   return process.env.NODE_ENV !== "production"
 }
 
-function isSqliteBusyError(error: unknown) {
+function isTransientDatabaseWriteError(error: unknown) {
   const message =
     error instanceof Prisma.PrismaClientKnownRequestError
       ? `${error.message} ${error.meta ? JSON.stringify(error.meta) : ""}`
@@ -39,14 +39,14 @@ function isSqliteBusyError(error: unknown) {
         ? error.message
         : String(error)
 
-  return /SQLITE_BUSY|database is locked/i.test(message)
+  return /SQLITE_BUSY|database is locked|deadlock detected|could not serialize access|canceling statement due to statement timeout|connection terminated|ECONNRESET|ETIMEDOUT/i.test(message)
 }
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export async function withSqliteBusyRetry<T>(
+export async function withDatabaseWriteRetry<T>(
   operation: () => Promise<T>,
   options: { attempts?: number; baseDelayMs?: number } = {}
 ): Promise<T> {
@@ -59,7 +59,7 @@ export async function withSqliteBusyRetry<T>(
       return await operation()
     } catch (error) {
       lastError = error
-      if (!isSqliteBusyError(error) || attempt === attempts - 1) {
+      if (!isTransientDatabaseWriteError(error) || attempt === attempts - 1) {
         throw error
       }
 

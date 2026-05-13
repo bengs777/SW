@@ -59,7 +59,7 @@ const normalizeAppUrl = (value: string) => {
 
 const DEV_OWNER_EMAIL = getEnv("DEV_OWNER_EMAIL") || "ibnualmugni1933@gmail.com"
 const databaseUrl = getEnv("DATABASE_URL")
-const tursoDatabaseUrl = getEnv("TURSO_DATABASE_URL")
+const directDatabaseUrl = getEnv("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
 const supabaseUrl = getEnv("NEXT_PUBLIC_SUPABASE_URL")
 const supabasePublicAnonKey = getEnv(
   "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY",
@@ -99,7 +99,7 @@ export type EnvValidationReport = {
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
   databaseUrl,
-  tursoDatabaseUrl,
+  directDatabaseUrl,
   nextAuthSecret: getEnv("NEXTAUTH_SECRET"),
   nextAuthUrl: getEnv("NEXTAUTH_URL"),
   googleClientId: getEnv("GOOGLE_CLIENT_ID"),
@@ -139,7 +139,6 @@ export const env = {
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
   vercelAccessToken: vercelDeployToken,
   vercelTeamId,
-  tursoAuthToken: getEnv("TURSO_AUTH_TOKEN"),
   // Crypto Payment
   cryptoPaymentPrivateKey: getEnv("CRYPTO_PAYMENT_PRIVATE_KEY"),
   cryptoPaymentAddress: getEnv("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS"),
@@ -156,8 +155,6 @@ export function getMissingProductionEnvVars() {
   const missing: string[] = []
 
   if (!env.databaseUrl) missing.push("DATABASE_URL")
-  if (!env.tursoDatabaseUrl) missing.push("TURSO_DATABASE_URL")
-  if (!env.tursoAuthToken) missing.push("TURSO_AUTH_TOKEN")
   if (!env.nextAuthSecret) missing.push("NEXTAUTH_SECRET")
   if (!env.googleClientId) missing.push("GOOGLE_CLIENT_ID")
   if (!env.googleClientSecret) missing.push("GOOGLE_CLIENT_SECRET")
@@ -195,6 +192,43 @@ function validateOptionalUrl(
     severity: isProduction ? "error" : "warning",
     message: `${key} must be a valid absolute URL.`,
   })
+}
+
+function validateOptionalPostgresUrl(
+  issues: EnvValidationIssue[],
+  key: string,
+  value: string,
+  isProduction: boolean,
+  options: { requirePooled?: boolean } = {}
+) {
+  if (!value) return
+
+  if (!/^postgres(?:ql)?:\/\//i.test(value)) {
+    issues.push({
+      key,
+      severity: "error",
+      message: `${key} must be a PostgreSQL connection string.`,
+    })
+    return
+  }
+
+  const parsed = urlSchema.safeParse(value)
+  if (!parsed.success) {
+    issues.push({
+      key,
+      severity: isProduction ? "error" : "warning",
+      message: `${key} must be a valid PostgreSQL URL.`,
+    })
+    return
+  }
+
+  if (options.requirePooled && isProduction && !/pooler\./i.test(new URL(value).hostname)) {
+    issues.push({
+      key,
+      severity: "warning",
+      message: `${key} should use Neon's pooled host for serverless runtime connections.`,
+    })
+  }
 }
 
 function validateOptionalNumber(
@@ -245,6 +279,9 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
     severity: "error",
     message: `${key} is required in production.`,
   }))
+
+  validateOptionalPostgresUrl(issues, "DATABASE_URL", env.databaseUrl, isProduction, { requirePooled: true })
+  validateOptionalPostgresUrl(issues, "DIRECT_DATABASE_URL / DIRECT_URL / POSTGRES_URL_NON_POOLING", env.directDatabaseUrl, isProduction)
 
   validateOptionalUrl(issues, "NEXTAUTH_URL", env.nextAuthUrl, isProduction)
   validateOptionalUrl(issues, "NEXT_PUBLIC_APP_URL / APP_URL / NEXTAUTH_URL / VERCEL_URL", env.appUrl, isProduction)

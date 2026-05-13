@@ -520,7 +520,7 @@ function buildProjectMemorySeed(draft: PromptDraft, plan: PromptWorkPlan): Promp
   return {
     framework: "next",
     uiStyle: draft.uiStyle[0] || null,
-    database: draft.dataModels.length > 0 ? "Prisma + SQLite" : null,
+    database: draft.dataModels.length > 0 ? "Prisma + PostgreSQL" : null,
     auth: draft.features.some((feature) => /auth|login|session/i.test(feature)) ? "session-ready" : null,
     folderRules: "Patch existing files first; keep browser-facing files preview-safe; prefer preview/ sibling files or .preview variants when the browser needs a safe entrypoint.",
     naming: draft.projectName,

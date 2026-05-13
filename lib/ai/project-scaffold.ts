@@ -342,8 +342,8 @@ export function useToast() {
       language: "ts",
       content: `export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
-  tursoDatabaseUrl: process.env.TURSO_DATABASE_URL || "",
-  tursoAuthToken: process.env.TURSO_AUTH_TOKEN || "",
+  databaseUrl: process.env.DATABASE_URL || "",
+  directDatabaseUrl: process.env.DIRECT_DATABASE_URL || "",
   openRouterApiKey: process.env.OPENROUTER_API_KEY || "",
 }
 `,
@@ -408,12 +408,11 @@ export function listProjects(): Project[] {
       language: "prisma",
       content: `generator client {
   provider = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("TURSO_DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Project {
@@ -442,8 +441,8 @@ model Project {
     {
       path: ".env.example",
       language: "env",
-      content: `TURSO_DATABASE_URL="libsql://your-turso-instance.turso.io"
-    TURSO_AUTH_TOKEN="replace-me"
+      content: `DATABASE_URL="postgresql://user:password@ep-example-pooler.region.aws.neon.tech/neondb?sslmode=require"
+DIRECT_DATABASE_URL="postgresql://user:password@ep-example.region.aws.neon.tech/neondb?sslmode=require"
 NEXTAUTH_SECRET="replace-me"
 OPENROUTER_API_KEY="replace-me"
 OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
@@ -972,12 +971,11 @@ export async function listProducts(): Promise<Product[]> {
       language: "prisma",
       content: `generator client {
   provider = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("TURSO_DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Product {

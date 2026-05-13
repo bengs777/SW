@@ -25,8 +25,7 @@ const PROCESS_MAX_UPTIME_MS = Number(process.env.SWIFT_SANDBOX_PROCESS_MAX_UPTIM
 const CLEANUP_INTERVAL_MS = Number(process.env.SWIFT_SANDBOX_CLEANUP_INTERVAL_MS || 60 * 1000)
 const states = new Map()
 const sandboxDatabaseUrl = () =>
-  process.env.SWIFT_SANDBOX_DATABASE_URL ||
-  "file:./prisma/dev.db"
+  process.env.SWIFT_SANDBOX_DATABASE_URL || ""
 
 if (IS_PRODUCTION && !SERVICE_TOKEN) {
   throw new Error("SANDBOX_SERVICE_TOKEN is required in production")
@@ -34,8 +33,6 @@ if (IS_PRODUCTION && !SERVICE_TOKEN) {
 
 const DEFAULT_ALLOWED_PACKAGES = [
   "@hookform/resolvers",
-  "@libsql/client",
-  "@prisma/adapter-libsql",
   "@prisma/client",
   "@radix-ui/react-accordion",
   "@radix-ui/react-alert-dialog",
@@ -268,8 +265,6 @@ function mergePackageJson(content) {
       {
         "@prisma/client": "^5.22.0",
         "@supabase/supabase-js": "^2.104.0",
-        "@libsql/client": "^0.8.1",
-        "@prisma/adapter-libsql": "^5.22.0",
         "class-variance-authority": "^0.7.1",
         clsx: "^2.1.1",
         "lucide-react": "^0.564.0",

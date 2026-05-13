@@ -1,7 +1,7 @@
 # Swift AI Standalone Workers
 # This Dockerfile builds the worker process for Railway/Fly.io deployment
 # Run with: docker build -t swift-workers -f workers/Dockerfile .
-# Then: docker run -e REDIS_URL=xxx -e DATABASE_URL=xxx -e TURSO_AUTH_TOKEN=xxx swift-workers
+# Then: docker run -e REDIS_URL=xxx -e DATABASE_URL=xxx swift-workers
 
 FROM node:20-alpine AS base
 RUN apk add --no-cache libc6-compat git

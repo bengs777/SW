@@ -1,7 +1,5 @@
 import nextEnv from "@next/env"
-import { PrismaLibSQL } from "@prisma/adapter-libsql"
 import { PrismaClient } from "@prisma/client"
-import { createClient } from "@libsql/client"
 
 const { loadEnvConfig } = nextEnv
 
@@ -13,22 +11,13 @@ const devOwnerEmail = normalizeEmail(process.env.DEV_OWNER_EMAIL || "ibnualmugni
 const seedReference = `developer-seed:${devOwnerEmail}`
 const seedAmount = 1_000_000
 
-const databaseUrl = process.env.TURSO_DATABASE_URL || ""
-const tursoAuthToken = process.env.TURSO_AUTH_TOKEN || ""
+const databaseUrl = process.env.DATABASE_URL || ""
 
-if (!databaseUrl) {
-  throw new Error("TURSO_DATABASE_URL is required")
+if (!/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
+  throw new Error("DATABASE_URL must be a PostgreSQL connection string")
 }
 
-const prismaAdapter = new PrismaLibSQL(
-  createClient({
-    url: databaseUrl,
-    authToken: tursoAuthToken || undefined,
-  })
-)
-
 const prisma = new PrismaClient({
-  adapter: prismaAdapter,
   log: ["warn", "error"],
 })
 

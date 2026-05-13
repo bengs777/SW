@@ -31,13 +31,11 @@ const STACK = [
   "Tailwind",
   "shadcn/ui-compatible primitives",
   "Prisma",
-  "Turso",
+  "Neon PostgreSQL",
   "Supabase storage",
 ]
 
 const BASE_ALLOWED_PACKAGES = [
-  "@libsql/client",
-  "@prisma/adapter-libsql",
   "@prisma/client",
   "@supabase/supabase-js",
   "class-variance-authority",
@@ -69,7 +67,7 @@ const BASE_REQUIRED_FILES = [
 ]
 
 const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
-  saas_dashboard: blueprint("saas_dashboard", "SaaS dashboard", "Build a SaaS dashboard with auth-ready layout, workspace metrics, activity feed, settings entry points, Prisma schema, Turso env template, and Supabase storage placeholders.", [
+  saas_dashboard: blueprint("saas_dashboard", "SaaS dashboard", "Build a SaaS dashboard with auth-ready layout, workspace metrics, activity feed, settings entry points, Prisma schema, Neon PostgreSQL env template, and Supabase storage placeholders.", [
     "app/dashboard/page.tsx",
     "app/api/projects/route.ts",
     "lib/services/project.service.ts",
@@ -133,7 +131,7 @@ function blueprint(appType: ControlledAppType, label: string, starterPrompt: str
     },
     architectureRules: [
       "Use App Router only; do not create pages/ routes.",
-      "Keep Prisma, Turso, Supabase, auth, and provider code on server boundaries.",
+      "Keep Prisma, Neon PostgreSQL, Supabase, auth, and provider code on server boundaries.",
       "Use mock data only behind explicit service/API placeholders.",
       "Keep route handlers small and validate request bodies with zod when accepting input.",
       "Keep package dependencies inside the allowed stack; prefer existing generated utilities.",

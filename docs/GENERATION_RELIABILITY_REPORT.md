@@ -23,7 +23,7 @@ Swift should only optimize these categories before expanding scope:
 - lightweight CRM
 - simple marketplace
 
-The generation stack is locked to Next.js App Router, TypeScript, Tailwind, shadcn/ui-compatible primitives, Prisma, Turso, and Supabase storage.
+The generation stack is locked to Next.js App Router, TypeScript, Tailwind, shadcn/ui-compatible primitives, Prisma, Neon PostgreSQL, and Supabase storage.
 
 ## Reliability Gates
 
@@ -92,7 +92,7 @@ GET /api/admin/generation-quality?days=7
 - Real deploy success rate still needs measurement after export/deploy runs are connected to `deployValidated`.
 - Playwright-backed runtime smoke requires the runtime package to be available in the sandbox environment.
 - Prompt categories outside the controlled list should be rejected, narrowed, or mapped to the nearest supported blueprint.
-- Billing chaos tests cover duplicate reservations/refunds locally; run them in staging with Turso before paid traffic.
+- Billing chaos tests cover duplicate reservations/refunds locally; run them in staging with Neon PostgreSQL before paid traffic.
 
 ## Pre-Launch Checklist
 
@@ -106,4 +106,4 @@ npm run build
 npm run audit:production
 ```
 
-Production env must include Turso, Supabase, Redis queue, provider keys, auth secrets, and Sentry DSN before public launch.
+Production env must include Neon PostgreSQL, Supabase, Redis queue, provider keys, auth secrets, and Sentry DSN before public launch.

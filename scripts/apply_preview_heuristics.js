@@ -4,21 +4,13 @@ loadEnvConfig(process.cwd())
 
 async function main() {
   const { PrismaClient } = require('@prisma/client')
-  const { PrismaLibSQL } = require('@prisma/adapter-libsql')
-  const { createClient } = require('@libsql/client')
 
-  const databaseUrl = process.env.TURSO_DATABASE_URL || ''
-  if (!databaseUrl) {
-    throw new Error('TURSO_DATABASE_URL is required')
+  const databaseUrl = process.env.DATABASE_URL || ''
+  if (!/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
+    throw new Error('DATABASE_URL must be a PostgreSQL connection string')
   }
 
   const prisma = new PrismaClient({
-    adapter: new PrismaLibSQL(
-      createClient({
-        url: databaseUrl,
-        authToken: process.env.TURSO_AUTH_TOKEN || undefined,
-      })
-    ),
     log: ['warn', 'error'],
   })
 
