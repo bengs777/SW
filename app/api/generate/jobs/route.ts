@@ -486,7 +486,14 @@ export async function POST(request: NextRequest) {
     if (!queueJob) {
       fallbackScheduled = true
       const fallbackQueueJobId = `serverless:${job.id}`
-      await GenerationJobService.attachQueueJob(job.id, fallbackQueueJobId)
+      void GenerationJobService.attachQueueJob(job.id, fallbackQueueJobId).catch((error) => {
+        log("warn", "generation_serverless_fallback_attach_failed", {
+          requestId,
+          jobId: job.id,
+          queueJobId: fallbackQueueJobId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
       after(async () => {
         log("warn", "generation_serverless_fallback_started", {
           requestId,
@@ -511,7 +518,6 @@ export async function POST(request: NextRequest) {
         }
       })
 
-      const publicJob = await GenerationJobService.findById(job.id)
       currentStage = "response_return"
       console.warn("[QUEUE_FALLBACK_SCHEDULED]", {
         stage: "queue_enqueue",
@@ -545,7 +551,7 @@ export async function POST(request: NextRequest) {
       })
 
       return NextResponse.json({
-        job: GenerationJobService.toPublicJob(publicJob || job),
+        job: GenerationJobService.toPublicJob(job),
         idempotent: false,
         requestId,
         queueFallback: true,
