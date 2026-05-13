@@ -105,6 +105,14 @@ function logStage(stage: string, success: boolean, detail?: Record<string, unkno
   })
 }
 
+function logEarlyStage(stage: string, requestId: string, detail?: Record<string, unknown>) {
+  console.info("[JOB_STAGE]", {
+    stage,
+    requestId,
+    ...(detail || {}),
+  })
+}
+
 function logFatal(stage: string, error: unknown, detail?: Record<string, unknown>) {
   console.error("[JOB_FATAL]", {
     stage,
@@ -116,6 +124,8 @@ function logFatal(stage: string, error: unknown, detail?: Record<string, unknown
 
 function probableRootCause(stage: string, error?: unknown) {
   const message = error instanceof Error ? error.message : String(error || "")
+  if (stage === "auth_start") return "Auth session lookup failed before request body parsing."
+  if (stage === "body_parse_start") return "Malformed JSON request body or request stream could not be read."
   if (stage === "request_body_parse") return "Malformed JSON request body."
   if (stage === "payload_validation") return "Client payload failed Zod validation."
   if (stage === "previewContext_normalization") return "Preview context shape is invalid or too large."
@@ -150,9 +160,9 @@ function generationRequestHash(input: z.infer<typeof CreateJobSchema>) {
 
 export async function POST(request: NextRequest) {
   const startedAt = Date.now()
-  const requestId = request.headers.get("x-request-id") || randomUUID()
-  const traceId = request.headers.get("x-vercel-id") || requestId
-  let currentStage = "request_received"
+  let requestId = "unassigned"
+  let traceId = requestId
+  let currentStage = "route_start"
   let failedStage: string | null = null
   let payloadSize = 0
   let previewContextSize = 0
@@ -199,6 +209,11 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  try {
+  requestId = request.headers.get("x-request-id") || randomUUID()
+  traceId = request.headers.get("x-vercel-id") || requestId
+  currentStage = "request_received"
+
   logStage("request_received", true, {
     requestId,
     traceId,
@@ -213,7 +228,21 @@ export async function POST(request: NextRequest) {
     })
   }
 
-  const session = await auth()
+  currentStage = "auth_start"
+  logEarlyStage("auth_start", requestId)
+  let session: { user?: { email?: string | null } } | null
+  try {
+    session = await auth()
+  } catch (error) {
+    console.error("[AUTH_FATAL]", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      requestId,
+    })
+    throw error
+  }
+  currentStage = "auth_success"
+  logEarlyStage("auth_success", requestId)
   const email = session?.user?.email
 
   if (!email) {
@@ -221,14 +250,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Authentication required", requestId }, { status: 401 })
   }
 
-  currentStage = "request_body_parse"
-  logStage("request_body_parse", false, { requestId })
+  currentStage = "body_parse_start"
+  logEarlyStage("body_parse_start", requestId)
   try {
     body = await request.json()
     payloadSize = byteSize(body)
-    logStage("request_body_parse", true, { requestId, payloadSize })
+    currentStage = "body_parse_success"
+    logEarlyStage("body_parse_success", requestId, { payloadSize })
   } catch (error) {
-    return fatalResponse("request_body_parse", error, 400, false)
+    console.error("[BODY_PARSE_FATAL]", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      contentType: request.headers.get("content-type"),
+      contentLength: request.headers.get("content-length"),
+      requestId,
+    })
+    return fatalResponse("body_parse_start", error, 400, false)
   }
 
   currentStage = "payload_validation"
@@ -657,7 +694,7 @@ export async function POST(request: NextRequest) {
       await GenerationJobService.markFailed(jobId, message).catch(() => null)
     }
 
-    auditSummary(error)
+    const summary = auditSummary(error)
 
     const status = /insufficient balance/i.test(message) ? 402 : 503
     return NextResponse.json(
@@ -666,8 +703,32 @@ export async function POST(request: NextRequest) {
         stage: failureStage,
         retryable: status !== 402,
         requestId,
+        probableRootCause: summary.probableRootCause,
       },
       { status }
+    )
+  }
+  } catch (error) {
+    const stage = failedStage || currentStage || "uncaught"
+    failedStage = stage
+    logFatal(stage, error, {
+      requestId,
+      traceId,
+      payloadSize,
+      previewContextSize,
+      hashCreated,
+      dbCreated,
+      enqueueSuccess,
+    })
+    const summary = auditSummary(error)
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        stage,
+        requestId,
+        probableRootCause: summary.probableRootCause,
+      },
+      { status: 500 }
     )
   }
 }
