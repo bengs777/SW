@@ -14,10 +14,27 @@ import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import { mergeGeneratedFiles } from "@/lib/ai/provider-output"
 import { ProviderRouter } from "@/lib/ai/provider-router"
+import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
 import { startRuntimeSandbox, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
+import { GenerationQualityService, type GenerationQualityStage } from "@/lib/services/generation-quality.service"
+import {
+  buildBlueprintInstructionBlock,
+  buildBlueprintSeedFiles,
+  classifyControlledAppType,
+  getControlledAppBlueprint,
+  validateBlueprintConstraints,
+  type ControlledAppBlueprint,
+  type ControlledAppType,
+} from "@/lib/ai/app-blueprints"
+import {
+  buildPartialEditInstructionBlock,
+  buildPartialEditPlan,
+  filterFilesForPartialEdit,
+  type PartialEditPlan,
+} from "@/lib/ai/edit-planner"
 import { log } from "@/lib/logging"
 
 type GenerationPlannerFile = {
@@ -28,7 +45,17 @@ type GenerationPlannerFile = {
 
 type GenerationPlan = {
   objective: string
+  appType: ControlledAppType
+  editPlan: PartialEditPlan
+  blueprint: {
+    label: string
+    requiredFiles: string[]
+    stack: string[]
+  }
   filePlan: GenerationPlannerFile[]
+  architecturePlan: string[]
+  dependencyPlan: string[]
+  fileGraphPlan: string[]
   contextBudget: {
     maxFiles: number
     maxCharsPerFile: number
@@ -45,6 +72,8 @@ type ExecuteGenerationJobInput = {
   selectedModel: string
   promptLanguage?: "id" | "en"
   collaborationMode?: string
+  previewContext?: unknown
+  persistenceKey?: string | null
   signal?: AbortSignal
 }
 
@@ -58,9 +87,11 @@ type ValidationLifecycleStep =
   | "normalize"
   | "static"
   | "preview-compile"
+  | "dependency-install"
   | "typecheck"
   | "lint"
   | "build"
+  | "runtime-smoke"
 
 type ValidationLifecycleStepResult = {
   name: ValidationLifecycleStep
@@ -103,37 +134,111 @@ function serializeError(error: unknown) {
   }
 }
 
-function buildGenerationPlan(prompt: string, existingFiles: GeneratedFile[]) {
-  const classification = classifyPrompt(prompt, { existingFiles })
+function buildGenerationPlan(input: {
+  prompt: string
+  existingFiles: GeneratedFile[]
+  collaborationMode?: string | null
+  previewContext?: unknown
+}) {
+  const previewContext = normalizePreviewContext(input.previewContext)
+  const classification = classifyPrompt(input.prompt, {
+    existingFiles: input.existingFiles,
+    collaborationMode: input.collaborationMode || undefined,
+    previewError: previewContext?.previewError?.message || null,
+  })
+  const editPlan = buildPartialEditPlan({
+    prompt: input.prompt,
+    existingFiles: input.existingFiles,
+    collaborationMode: input.collaborationMode,
+    previewContext,
+  })
+  const appType = classifyControlledAppType(input.prompt)
+  const blueprint = getControlledAppBlueprint(appType)
   const trimmed = trimContextForGeneration({
-    prompt,
-    files: existingFiles,
+    prompt: input.prompt,
+    files: input.existingFiles,
+    activeFilePath: previewContext?.activeFilePath || undefined,
+    previewErrorFile: previewContext?.previewError?.filename || undefined,
     layer: classification === "simple_ui" ? "fast" : "builder",
   })
 
-  const filePlan: GenerationPlannerFile[] = trimmed.files.slice(0, 8).map((file) => ({
-    path: file.path,
-    reason: "Relevant existing file selected by context ranking",
-    action: "create_or_update",
-  }))
+  const plannedByPath = new Map<string, GenerationPlannerFile>()
+
+  if (editPlan.mode === "partial") {
+    for (const filePath of [...editPlan.targetPaths, ...editPlan.allowedNewPaths]) {
+      const path = normalizePath(filePath)
+      plannedByPath.set(path, {
+        path,
+        reason: editPlan.targetPaths.includes(path)
+          ? `Partial ${editPlan.intent} target selected by edit planner`
+          : `Partial ${editPlan.intent} may create this file if needed`,
+        action: "create_or_update",
+      })
+    }
+  } else {
+    for (const filePath of blueprint.requiredFiles.slice(0, 10)) {
+      plannedByPath.set(normalizePath(filePath), {
+        path: normalizePath(filePath),
+        reason: `${blueprint.label} blueprint requires this file for deployable generation`,
+        action: "create_or_update",
+      })
+    }
+
+    for (const file of trimmed.files.slice(0, 8)) {
+      const path = normalizePath(file.path)
+      if (!plannedByPath.has(path)) {
+        plannedByPath.set(path, {
+          path,
+          reason: "Relevant existing file selected by context ranking",
+          action: "create_or_update",
+        })
+      }
+    }
+  }
+
+  const filePlan = Array.from(plannedByPath.values()).slice(0, editPlan.maxSlices)
 
   if (!filePlan.some((item) => /^app\/page\.(tsx|ts|jsx|js)$/i.test(item.path))) {
-    filePlan.unshift({
-      path: "app/page.tsx",
-      reason: "Primary visible entrypoint should be generated or refined first",
-      action: "create_or_update",
-    })
+    const shouldAddHomePage = editPlan.mode === "full" || input.existingFiles.length === 0
+    if (shouldAddHomePage) {
+      filePlan.unshift({
+        path: "app/page.tsx",
+        reason: "Primary visible entrypoint should be generated or refined first",
+        action: "create_or_update",
+      })
+    }
   }
 
   return {
     objective: classification,
+    appType,
+    editPlan,
+    blueprint: {
+      label: blueprint.label,
+      requiredFiles: blueprint.requiredFiles,
+      stack: blueprint.dependencyPolicy.stack,
+    },
     filePlan,
+    architecturePlan: blueprint.architectureRules,
+    dependencyPlan: [
+      "Use only the locked Swift stack.",
+      `Allowed packages: ${blueprint.dependencyPolicy.allowedExternalPackages.join(", ")}`,
+      "Do not introduce alternate frameworks, databases, routers, or package managers.",
+    ],
+    fileGraphPlan: filePlan.map((file) => `${file.path}: ${file.reason}`),
     contextBudget: {
       ...trimmed.budget,
       usedFiles: trimmed.files.length,
       usedChars: trimmed.totalChars,
     },
   } satisfies GenerationPlan
+}
+
+function shouldSeedBlueprint(existingFiles: GeneratedFile[]) {
+  if (existingFiles.length === 0) return true
+
+  const paths = new Set(existingFiles.map((file) => normalizePath(file.path)))
+  return !paths.has("app/page.tsx") || !paths.has("package.json") || !paths.has("prisma/schema.prisma")
 }
 
 async function transition(jobId: string, stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) {
@@ -213,6 +318,7 @@ async function runProviderAttempt(input: {
 function buildSlicePrompt(input: {
   prompt: string
   plan: GenerationPlan
+  blueprint: ControlledAppBlueprint
   existingFiles: GeneratedFile[]
   target: GenerationPlannerFile
 }) {
@@ -226,13 +332,20 @@ function buildSlicePrompt(input: {
   return [
     context,
     "",
+    buildBlueprintInstructionBlock(input.blueprint),
+    "",
+    buildPartialEditInstructionBlock(input.plan.editPlan),
+    "",
     "EXECUTION_RULES:",
     "- Work only on the requested file slice and directly related imports.",
     "- Return only changed files.",
     "- Prefer patch-safe, deterministic updates.",
+    "- Preserve stable files from the starter template unless this slice requires a focused update.",
+    "- Keep the app deployable after this slice: no unresolved imports, no forbidden stack drift.",
     `- Current file objective: ${input.target.path}`,
     `- Why this file matters: ${input.target.reason}`,
     `- Planned objective: ${input.plan.objective}`,
+    `- Controlled app type: ${input.plan.appType}`,
   ].join("\n")
 }
 
@@ -291,6 +404,20 @@ function shouldRequireFullStackCoverage(plan: GenerationPlan) {
 }
 
 function summarizeSandboxStep(step: SandboxValidationStep): ValidationLifecycleStepResult | null {
+  if (step.name === "install") {
+    return {
+      name: "dependency-install",
+      status: step.status,
+      policy: step.policy,
+      durationMs: step.durationMs || 0,
+      message: step.reason,
+      data: {
+        command: step.command || null,
+        output: step.output || null,
+      },
+    }
+  }
+
   if (step.name !== "typecheck" && step.name !== "lint" && step.name !== "build") {
     return null
   }
@@ -310,11 +437,14 @@ function summarizeSandboxStep(step: SandboxValidationStep): ValidationLifecycleS
 
 function failureStepFromSandbox(validation: SandboxValidationStep[]): ValidationLifecycleStep {
   const failed = validation.find((step) => step.status === "failed" && step.policy === "required")
+  if (failed?.name === "install") {
+    return "dependency-install"
+  }
   if (failed?.name === "typecheck" || failed?.name === "lint" || failed?.name === "build") {
     return failed.name
   }
 
-  return "build"
+  return "runtime-smoke"
 }
 
 async function runValidationLifecycle(input: {
@@ -323,6 +453,7 @@ async function runValidationLifecycle(input: {
   prompt: string
   files: GeneratedFile[]
   plan: GenerationPlan
+  blueprint: ControlledAppBlueprint
   signal?: AbortSignal
   emit: (stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) => Promise<void>
 }): Promise<ValidationLifecycleResult> {
@@ -363,6 +494,23 @@ async function runValidationLifecycle(input: {
   await input.emit("validating", "Checking static project invariants", 66)
   const fullstack = validateFullStackFiles(files)
   const dependencyMap = buildDependencyMap(files)
+  const partialRequiredFiles =
+    input.plan.editPlan.mode === "partial"
+      ? input.blueprint.requiredFiles.filter((filePath) => {
+          const normalized = normalizePath(filePath)
+          return (
+            normalized === "app/layout.tsx" ||
+            normalized === "app/page.tsx" ||
+            normalized === "package.json" ||
+            normalized === "prisma/schema.prisma" ||
+            input.plan.editPlan.targetPaths.includes(normalized) ||
+            input.plan.editPlan.allowedNewPaths.includes(normalized)
+          )
+        })
+      : input.blueprint.requiredFiles
+  const blueprintValidation = validateBlueprintConstraints(files, input.blueprint, {
+    requiredFiles: partialRequiredFiles,
+  })
   const staticFailures: string[] = []
   const requiresFullStackCoverage = shouldRequireFullStackCoverage(input.plan)
 
@@ -378,12 +526,26 @@ async function runValidationLifecycle(input: {
     staticFailures.push(`Missing required full-stack categories: ${fullstack.missingCategories.join(", ")}`)
   }
 
+  if (!blueprintValidation.ok) {
+    if (blueprintValidation.missingRequiredFiles.length > 0) {
+      staticFailures.push(`Missing blueprint files: ${blueprintValidation.missingRequiredFiles.join(", ")}`)
+    }
+    if (blueprintValidation.forbiddenFiles.length > 0) {
+      staticFailures.push(`Forbidden stack drift files: ${blueprintValidation.forbiddenFiles.join(", ")}`)
+    }
+  }
+
   if (staticFailures.length > 0) {
     const message = staticFailures.join("; ")
     const data = {
+      appType: input.plan.appType,
       coverage: fullstack.coverage,
       missingCategories: fullstack.missingCategories,
       fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
+      blueprint: {
+        missingRequiredFiles: blueprintValidation.missingRequiredFiles,
+        forbiddenFiles: blueprintValidation.forbiddenFiles,
+      },
       missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
       unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
     }
@@ -404,9 +566,11 @@ async function runValidationLifecycle(input: {
   }
 
   recordStep("static", "passed", "required", stepStartedAt, undefined, {
+    appType: input.plan.appType,
     coverage: fullstack.coverage,
     missingCategories: fullstack.missingCategories,
     fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
+    blueprintRequiredFiles: input.blueprint.requiredFiles.length,
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
   })
@@ -447,11 +611,27 @@ async function runValidationLifecycle(input: {
 
   if (preview.error) {
     const step = failureStepFromSandbox(preview.validation)
-    recordStep(step, "failed", "required", stepStartedAt, preview.error, {
-      sandboxStatus: preview.status,
-      sandboxValidation: preview.validation,
-      logs: preview.logs.slice(-80),
-    })
+    const runtimeFailed =
+      preview.runtimeVerification && !preview.runtimeVerification.ok
+          ? {
+            category: preview.runtimeVerification.failureCategory || "unknown",
+            error: preview.runtimeVerification.error || null,
+          }
+        : null
+    if (step === "runtime-smoke") {
+      recordStep("runtime-smoke", "failed", "required", stepStartedAt, preview.error, {
+        sandboxStatus: preview.status,
+        runtimeVerification: runtimeFailed,
+        logs: preview.logs.slice(-80),
+      })
+    } else {
+      recordStep(step, "failed", "required", stepStartedAt, preview.error, {
+        sandboxStatus: preview.status,
+        sandboxValidation: preview.validation,
+        runtimeVerification: runtimeFailed,
+        logs: preview.logs.slice(-80),
+      })
+    }
     return {
       ok: false,
       files,
@@ -491,6 +671,11 @@ async function runValidationLifecycle(input: {
     }
   }
 
+  recordStep("runtime-smoke", "passed", "required", stepStartedAt, undefined, {
+    sandboxStatus: preview.status,
+    runtimeVerification: preview.runtimeVerification,
+  })
+
   return {
     ok: true,
     files,
@@ -505,6 +690,8 @@ async function attemptTargetedRepair(input: {
   jobId: string
   prompt: string
   files: GeneratedFile[]
+  blueprint: ControlledAppBlueprint
+  editPlan: PartialEditPlan
   validationError: string
   repairAttempt: number
   maxRepairAttempts: number
@@ -522,6 +709,10 @@ async function attemptTargetedRepair(input: {
       packageJson: currentFiles.find((file) => normalizePath(file.path) === "package.json") || null,
       previewError: input.validationError,
     }),
+    "",
+    buildBlueprintInstructionBlock(input.blueprint),
+    "",
+    buildPartialEditInstructionBlock(input.editPlan),
     "",
     "DETERMINISTIC_VALIDATION_FAILURE:",
     input.validationError,
@@ -546,16 +737,94 @@ async function attemptTargetedRepair(input: {
     signal: input.signal,
   })
   const parsed = parseGeneratedArtifact(response.message)
-  const mergedFiles = mergeGeneratedFiles(currentFiles, parsed.files)
+  const scoped = filterFilesForPartialEdit(parsed.files, input.editPlan)
+  const mergedFiles = mergeGeneratedFiles(currentFiles, scoped.acceptedFiles)
   const normalized = normalizeGeneratedDependencies(mergedFiles)
 
   return {
     files: normalized.files,
-    repaired: parsed.files.length > 0,
+    repaired: scoped.acceptedFiles.length > 0,
     parsedFileCount: parsed.files.length,
+    acceptedFileCount: scoped.acceptedFiles.length,
+    rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 8),
     normalizedPackages: normalized.normalizedPackages,
     addedPackages: normalized.addedPackages,
   }
+}
+
+function mapLifecycleFailureToQualityStage(step?: ValidationLifecycleStep | null): GenerationQualityStage {
+  if (!step) return "unknown"
+  if (step === "static") return "static-validation"
+  if (step === "dependency-install") return "dependency-planning"
+  if (step === "preview-compile") return "preview-compile"
+  if (step === "typecheck") return "typecheck"
+  if (step === "lint") return "lint"
+  if (step === "build") return "build"
+  if (step === "runtime-smoke") return "runtime-smoke"
+  if (step === "normalize") return "code-generation"
+  return "unknown"
+}
+
+function sumStepDurations(steps: ValidationLifecycleStepResult[]) {
+  return steps.reduce((sum, step) => sum + Math.max(0, step.durationMs || 0), 0)
+}
+
+async function recordGenerationQuality(input: {
+  jobId: string
+  projectId: string
+  appType: ControlledAppType
+  status: "completed" | "failed" | "cancelled"
+  validation?: ValidationLifecycleResult | null
+  repairAttempts: number
+  providerLatencyMs: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  totalLatencyMs: number
+  failureStage?: GenerationQualityStage | string | null
+  failureCode?: string | null
+  metadata?: Record<string, unknown> | null
+}) {
+  const job = await GenerationJobService.findById(input.jobId)
+  if (!job) return
+
+  const steps = input.validation?.steps || []
+  const buildPassed = steps.some((step) => step.name === "build" && step.status === "passed")
+  const runtimePassed = steps.some((step) => step.name === "runtime-smoke" && step.status === "passed")
+  const validationLatencyMs = sumStepDurations(steps)
+
+  await GenerationQualityService.recordSummary({
+    jobId: input.jobId,
+    userId: job.userId,
+    projectId: input.projectId,
+    appType: input.appType,
+    status: input.status,
+    failureStage:
+      input.failureStage ||
+      (input.validation?.failure ? mapLifecycleFailureToQualityStage(input.validation.failure.step) : null),
+    failureCode: input.failureCode || input.validation?.failure?.message?.slice(0, 180) || null,
+    buildPassed,
+    runtimePassed,
+    repairSucceeded: input.repairAttempts > 0 && input.status === "completed",
+    deployValidated: false,
+    repairAttempts: input.repairAttempts,
+    providerLatencyMs: input.providerLatencyMs,
+    validationLatencyMs,
+    totalLatencyMs: input.totalLatencyMs,
+    promptTokens: input.promptTokens,
+    completionTokens: input.completionTokens,
+    totalTokens: input.totalTokens,
+    metadata: {
+      ...(input.metadata || {}),
+      lifecycleSteps: steps.map((step) => ({
+        name: step.name,
+        status: step.status,
+        policy: step.policy,
+        durationMs: step.durationMs,
+      })),
+      previewStatus: input.validation?.previewStatus || null,
+    },
+  })
 }
 
 export async function executeGenerationJob(
@@ -563,43 +832,90 @@ export async function executeGenerationJob(
   deps: ExecuteGenerationJobDeps
 ) {
   const promptLanguage = input.promptLanguage || "id"
+  const jobStartedAt = performance.now()
   const metrics: Record<string, unknown> = {
     startedAt: new Date().toISOString(),
   }
+  let plan: GenerationPlan | null = null
+  let blueprint: ControlledAppBlueprint | null = null
+  let validation: ValidationLifecycleResult | null = null
+  let repairAttempt = 0
+  let providerLatencyMs = 0
+  let promptTokens = 0
+  let completionTokens = 0
+  let totalTokens = 0
 
   try {
-    await GenerationJobService.markRunning(input.jobId, "Preparing generation plan")
+    await GenerationJobService.transition(input.jobId, {
+      type: "job.stage.planning",
+      status: "running",
+      stage: "planning",
+      label: "Planning app intent",
+      progress: 5,
+      startedAt: new Date(),
+      message: "Planning app intent",
+    })
     await GenerationJobService.assertNotCancelled(input.jobId)
 
     const existingFiles = await deps.loadProjectFiles(input.projectId)
-    const plan = buildGenerationPlan(input.prompt, existingFiles)
+    plan = buildGenerationPlan({
+      prompt: input.prompt,
+      existingFiles,
+      collaborationMode: input.collaborationMode,
+      previewContext: input.previewContext,
+    })
+    blueprint = getControlledAppBlueprint(plan.appType)
     await GenerationJobService.transition(input.jobId, {
       type: "job.plan.ready",
       status: "running",
-      stage: "generating",
-      label: "Generation plan ready",
+      stage: "planning",
+      label: "Architecture plan ready",
       progress: 10,
       plan,
       context: {
         fileCount: existingFiles.length,
       },
-      message: "Generation plan ready",
+      message: "Architecture plan ready",
       data: {
         objective: plan.objective,
+        appType: plan.appType,
+        blueprint: plan.blueprint,
+        editPlan: {
+          mode: plan.editPlan.mode,
+          intent: plan.editPlan.intent,
+          targetPaths: plan.editPlan.targetPaths,
+          allowedNewPaths: plan.editPlan.allowedNewPaths,
+        },
         filePlan: plan.filePlan,
       },
     })
 
-    let workingFiles = [...existingFiles]
+    const seededFiles = shouldSeedBlueprint(existingFiles)
+      ? buildBlueprintSeedFiles({
+          prompt: input.prompt,
+          appType: plan.appType,
+          projectName: plan.blueprint.label,
+        })
+      : []
+    let workingFiles = seededFiles.length > 0 ? mergeGeneratedFiles(seededFiles, existingFiles) : [...existingFiles]
+
+    if (seededFiles.length > 0) {
+      await transition(input.jobId, "scaffolding", "Applying known-good starter architecture", 14, {
+        appType: plan.appType,
+        seededFileCount: seededFiles.length,
+      })
+    }
 
     for (let index = 0; index < plan.filePlan.length; index += 1) {
       await GenerationJobService.assertNotCancelled(input.jobId)
       const target = plan.filePlan[index]
+      const providerStartedAt = performance.now()
       const response = await runProviderAttempt({
         jobId: input.jobId,
         prompt: buildSlicePrompt({
           prompt: input.prompt,
           plan,
+          blueprint,
           existingFiles: workingFiles,
           target,
         }),
@@ -608,38 +924,46 @@ export async function executeGenerationJob(
         promptLanguage,
         signal: input.signal,
       })
+      providerLatencyMs += Math.round(performance.now() - providerStartedAt)
+      promptTokens += Math.max(0, response.tokenUsage?.promptTokens || 0)
+      completionTokens += Math.max(0, response.tokenUsage?.completionTokens || 0)
+      totalTokens += Math.max(0, response.tokenUsage?.totalTokens || 0)
 
       const parsed = parseGeneratedArtifact(response.message)
+      const scoped = filterFilesForPartialEdit(parsed.files, plan.editPlan)
 
-      workingFiles = mergeGeneratedFiles(workingFiles, parsed.files)
+      workingFiles = mergeGeneratedFiles(workingFiles, scoped.acceptedFiles)
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
 
       await transition(
         input.jobId,
         "parsing",
-        `Parsed generation slice ${index + 1}/${plan.filePlan.length}`,
+        `Generating controlled file slice ${index + 1}/${plan.filePlan.length}`,
         Math.min(55, 15 + Math.round(((index + 1) / Math.max(1, plan.filePlan.length)) * 35)),
         {
           target: target.path,
           parseFileCount: parsed.files.length,
+          acceptedFileCount: scoped.acceptedFiles.length,
+          rejectedFileCount: scoped.rejectedFiles.length,
+          rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 8),
           addedPackages: normalized.addedPackages,
         }
       )
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
-    let validation = await runValidationLifecycle({
+    validation = await runValidationLifecycle({
       jobId: input.jobId,
       projectId: input.projectId,
       prompt: input.prompt,
       files: workingFiles,
       plan,
+      blueprint,
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
 
-    let repairAttempt = 0
     while (!validation.ok && repairAttempt < MAX_REPAIR_ATTEMPTS) {
       repairAttempt += 1
       await GenerationJobService.assertNotCancelled(input.jobId)
@@ -658,6 +982,8 @@ export async function executeGenerationJob(
         jobId: input.jobId,
         prompt: input.prompt,
         files: validation.files,
+        blueprint,
+        editPlan: plan.editPlan,
         validationError: validation.failure?.message || "Validation lifecycle failed",
         repairAttempt,
         maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
@@ -674,6 +1000,8 @@ export async function executeGenerationJob(
         {
           repaired: repaired.repaired,
           parsedFileCount: repaired.parsedFileCount,
+          acceptedFileCount: repaired.acceptedFileCount,
+          rejectedFiles: repaired.rejectedFiles,
           addedPackages: repaired.addedPackages,
           normalizedPackages: repaired.normalizedPackages,
         }
@@ -685,6 +1013,7 @@ export async function executeGenerationJob(
         prompt: input.prompt,
         files: workingFiles,
         plan,
+        blueprint,
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
@@ -699,6 +1028,17 @@ export async function executeGenerationJob(
       steps: validation.steps,
       sandboxValidation: validation.sandboxValidation,
       failure: validation.failure || null,
+    }
+    metrics.quality = {
+      appType: plan.appType,
+      editMode: plan.editPlan.mode,
+      editIntent: plan.editPlan.intent,
+      targetFileCount: plan.editPlan.targetPaths.length,
+      preservedFileCount: plan.editPlan.preservePaths.length,
+      providerLatencyMs,
+      promptTokens,
+      completionTokens,
+      totalTokens,
     }
 
     if (!validation.ok) {
@@ -725,11 +1065,36 @@ export async function executeGenerationJob(
       projectId: input.projectId,
       prompt: input.prompt,
       files: workingFiles,
+      idempotencyKey: input.persistenceKey,
     })
 
     await GenerationJobService.update(input.jobId, {
       metrics,
       previewUrl: validation.previewUrl,
+    })
+    await recordGenerationQuality({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      appType: plan.appType,
+      status: "completed",
+      validation,
+      repairAttempts: repairAttempt,
+      providerLatencyMs,
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      totalLatencyMs: performance.now() - jobStartedAt,
+      metadata: {
+        objective: plan.objective,
+        editPlan: {
+          mode: plan.editPlan.mode,
+          intent: plan.editPlan.intent,
+          targetPaths: plan.editPlan.targetPaths,
+          allowedNewPaths: plan.editPlan.allowedNewPaths,
+          preservedFileCount: plan.editPlan.preservePaths.length,
+        },
+        fileCount: workingFiles.length,
+      },
     })
     await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, validation.previewUrl)
 
@@ -743,6 +1108,21 @@ export async function executeGenerationJob(
       error instanceof Error && error.message === "GENERATION_JOB_CANCELLED"
 
     if (error instanceof GenerationJobCancelledError || cancelledBySignal) {
+      await recordGenerationQuality({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        appType: plan?.appType || classifyControlledAppType(input.prompt),
+        status: "cancelled",
+        validation,
+        repairAttempts: repairAttempt,
+        providerLatencyMs,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        totalLatencyMs: performance.now() - jobStartedAt,
+        failureStage: "code-generation",
+        failureCode: "cancelled",
+      }).catch(() => null)
       await GenerationJobService.markCancelled(input.jobId, "Generation cancelled")
       throw error
     }
@@ -752,6 +1132,32 @@ export async function executeGenerationJob(
       diagnostics: serialized,
       metrics,
     })
+    await recordGenerationQuality({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      appType: plan?.appType || classifyControlledAppType(input.prompt),
+      status: "failed",
+      validation,
+      repairAttempts: repairAttempt,
+      providerLatencyMs,
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      totalLatencyMs: performance.now() - jobStartedAt,
+      failureStage: validation?.failure ? mapLifecycleFailureToQualityStage(validation.failure.step) : "unknown",
+      failureCode: serialized.message,
+      metadata: {
+        errorName: serialized.name,
+        editPlan: plan
+          ? {
+              mode: plan.editPlan.mode,
+              intent: plan.editPlan.intent,
+              targetPaths: plan.editPlan.targetPaths,
+              allowedNewPaths: plan.editPlan.allowedNewPaths,
+            }
+          : null,
+      },
+    }).catch(() => null)
     await GenerationJobService.markFailed(input.jobId, serialized.message)
     throw error
   }

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import type { GeneratedFile } from "@/lib/types"
 import { UserService } from "@/lib/services/user.service"
+import { GenerationQualityService } from "@/lib/services/generation-quality.service"
 import { splitWorkspaceStateFiles, normalizeFileLanguage } from "@/lib/workspace-state"
 
 export const runtime = "nodejs"
@@ -559,6 +560,8 @@ export async function POST(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  let projectIdForMetric: string | null = null
+
   try {
     const user = await UserService.createUserWithWorkspaceIfMissing(
       session.user.email,
@@ -581,7 +584,8 @@ export async function POST(
     }
 
     const { id } = await params
-  const project = await resolveProjectFiles(id, user.id)
+    projectIdForMetric = id
+    const project = await resolveProjectFiles(id, user.id)
 
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
@@ -695,6 +699,14 @@ export async function POST(
         status: response.status,
         body: responseText,
       })
+      await GenerationQualityService.markLatestDeployOutcome({
+        projectId: project.id,
+        success: false,
+        failureCode: data?.error?.code || data?.error?.message || `vercel_${response.status}`,
+        metadata: {
+          status: response.status,
+        },
+      }).catch(() => null)
       return NextResponse.json(
         {
           error:
@@ -708,6 +720,15 @@ export async function POST(
     }
 
     const deploymentUrl = data.url ? `https://${data.url}` : null
+    await GenerationQualityService.markLatestDeployOutcome({
+      projectId: project.id,
+      success: true,
+      metadata: {
+        deploymentId: data.id || null,
+        readyState: data.readyState || "BUILDING",
+        url: deploymentUrl,
+      },
+    }).catch(() => null)
 
     return NextResponse.json({
       success: true,
@@ -722,6 +743,13 @@ export async function POST(
   } catch (error) {
     console.error("[v0] Error deploying project to Vercel:", error)
     const message = error instanceof Error ? error.message : "Failed to deploy project to Vercel"
+    if (projectIdForMetric) {
+      await GenerationQualityService.markLatestDeployOutcome({
+        projectId: projectIdForMetric,
+        success: false,
+        failureCode: message,
+      }).catch(() => null)
+    }
     return NextResponse.json(
       { error: message },
       { status: 500 }

@@ -33,63 +33,63 @@ type PromptSample = {
 
 const promptSamples: PromptSample[] = [
   {
-    prompt: "Build a dashboard with charts showing user analytics",
-    label: "Analytics dashboard",
-    summary: "Turns the prompt into KPI cards, a growth chart, and an activity table.",
+    prompt: "Buat dashboard analitik dengan grafik pertumbuhan pengguna",
+    label: "Dashboard analitik",
+    summary: "Mengubah prompt menjadi kartu KPI, grafik tren, dan tabel aktivitas.",
     preview: "dashboard",
-    sections: ["Hero metrics", "Growth chart", "Activity table", "Quick actions"],
+    sections: ["Metrik utama", "Grafik pertumbuhan", "Tabel aktivitas", "Aksi cepat"],
     files: [
       "app/dashboard/page.tsx",
       "components/dashboard/metric-card.tsx",
       "components/dashboard/activity-table.tsx",
     ],
-    deliverables: ["4 KPI cards", "Trend chart", "Recent activity table", "Action CTA"],
+    deliverables: ["4 kartu KPI", "Grafik tren", "Tabel aktivitas", "CTA aksi"],
     stats: [
-      { label: "Sections", value: "6" },
-      { label: "Components", value: "8" },
-      { label: "Files", value: "3" },
+      { label: "Bagian", value: "6" },
+      { label: "Komponen", value: "8" },
+      { label: "File", value: "3" },
     ],
   },
   {
-    prompt: "Create a pricing page with monthly and annual toggles",
-    label: "Pricing page",
-    summary: "Returns pricing cards, a comparison table, FAQ, and billing CTA.",
+    prompt: "Buat halaman harga dengan pilihan bulanan dan tahunan",
+    label: "Halaman harga",
+    summary: "Menghasilkan kartu harga, tabel perbandingan, FAQ, dan CTA billing.",
     preview: "pricing",
-    sections: ["Pricing cards", "Comparison table", "FAQ", "Billing CTA"],
+    sections: ["Kartu harga", "Tabel perbandingan", "FAQ", "CTA billing"],
     files: ["app/pricing/page.tsx", "components/pricing/pricing-card.tsx", "components/pricing/faq.tsx"],
-    deliverables: ["Credit packs", "Monthly toggle", "Billing copy", "FAQ answers"],
+    deliverables: ["Paket kredit", "Toggle bulanan", "Copy billing", "Jawaban FAQ"],
     stats: [
-      { label: "Plans", value: "3" },
-      { label: "Sections", value: "5" },
-      { label: "Files", value: "3" },
+      { label: "Paket", value: "3" },
+      { label: "Bagian", value: "5" },
+      { label: "File", value: "3" },
     ],
   },
   {
-    prompt: "Design a blog layout with featured posts sidebar",
-    label: "Blog layout",
-    summary: "Creates a content-led homepage with a featured story and sidebar stack.",
+    prompt: "Desain layout blog dengan sidebar artikel unggulan",
+    label: "Layout blog",
+    summary: "Membuat homepage editorial dengan cerita utama dan stack sidebar.",
     preview: "blog",
-    sections: ["Hero story", "Featured posts", "Sidebar", "Subscribe CTA"],
+    sections: ["Cerita utama", "Artikel unggulan", "Sidebar", "CTA langganan"],
     files: ["app/blog/page.tsx", "components/blog/featured-post.tsx", "components/blog/sidebar.tsx"],
-    deliverables: ["Featured article", "Post grid", "Categories", "Subscribe form"],
+    deliverables: ["Artikel utama", "Grid post", "Kategori", "Form langganan"],
     stats: [
-      { label: "Stories", value: "6" },
-      { label: "Components", value: "7" },
-      { label: "Files", value: "3" },
+      { label: "Artikel", value: "6" },
+      { label: "Komponen", value: "7" },
+      { label: "File", value: "3" },
     ],
   },
   {
-    prompt: "Make a contact form with validation and success state",
-    label: "Contact form",
-    summary: "Builds a validated form with helper text and a success confirmation state.",
+    prompt: "Buat form kontak dengan validasi dan state sukses",
+    label: "Form kontak",
+    summary: "Membangun form tervalidasi dengan helper text dan konfirmasi sukses.",
     preview: "contact",
-    sections: ["Form fields", "Validation", "Success state", "Support CTA"],
+    sections: ["Field form", "Validasi", "State sukses", "CTA support"],
     files: ["app/contact/page.tsx", "components/forms/contact-form.tsx", "components/ui/toast.tsx"],
-    deliverables: ["Validated form", "Success toast", "Helper copy", "Response state"],
+    deliverables: ["Form tervalidasi", "Toast sukses", "Helper copy", "State respons"],
     stats: [
-      { label: "Fields", value: "5" },
-      { label: "States", value: "3" },
-      { label: "Files", value: "3" },
+      { label: "Field", value: "5" },
+      { label: "State", value: "3" },
+      { label: "File", value: "3" },
     ],
   },
 ]
@@ -115,14 +115,14 @@ export function Demo() {
           <div className="space-y-6">
             <Badge className="gap-2 rounded-full border border-border bg-secondary px-4 py-1.5 text-xs font-medium text-muted-foreground">
               <Sparkles className="h-3.5 w-3.5" />
-              Prompt result explorer
+              Eksplorasi hasil prompt
             </Badge>
             <div className="space-y-4">
               <h2 className="text-balance text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
-                See exactly what each prompt produces.
+                Lihat jelas apa yang dihasilkan setiap prompt.
               </h2>
               <p className="text-pretty text-lg leading-7 text-muted-foreground">
-                Swift does not just accept a prompt. It returns a structured result pack with sections, files, states, and a visual preview so users know what they are getting before they continue.
+                Swift AI tidak hanya menerima prompt. Sistem mengembalikan paket hasil terstruktur berisi bagian, file, state, dan preview visual sebelum pengguna melanjutkan.
               </p>
             </div>
 
@@ -191,7 +191,7 @@ export function Demo() {
             <div className="rounded-3xl border border-border bg-card p-5 shadow-sm">
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
                 <Layers3 className="h-3.5 w-3.5" />
-                Result pack
+                Paket hasil
               </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-3">
                 {current.stats.map((stat) => (
@@ -214,16 +214,16 @@ export function Demo() {
                   {copied ? (
                     <>
                       <Check className="h-4 w-4" />
-                      Copied prompt
+                      Prompt tersalin
                     </>
                   ) : (
                     <>
                       <Copy className="h-4 w-4" />
-                      Copy prompt
+                      Salin prompt
                     </>
                   )}
                 </Button>
-                <div className="text-sm text-muted-foreground">Switch the prompt to change the output pack.</div>
+                <div className="text-sm text-muted-foreground">Ganti prompt untuk melihat paket output lain.</div>
               </div>
             </div>
           </div>
@@ -237,23 +237,23 @@ export function Demo() {
                   <div className="h-3 w-3 rounded-full bg-green-500/80" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">Output preview</div>
+                  <div className="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">Preview output</div>
                   <div className="truncate text-sm font-semibold text-foreground">{current.label}</div>
                 </div>
                 <Badge variant="secondary" className="rounded-full px-2.5 py-1 text-[11px]">
-                  {current.sections.length} outputs
+                  {current.sections.length} output
                 </Badge>
               </div>
 
               <div className="space-y-6 p-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-medium text-muted-foreground">Generated result</div>
+                    <div className="text-sm font-medium text-muted-foreground">Hasil generate</div>
                     <h3 className="mt-1 text-2xl font-semibold tracking-tight text-foreground">{current.label}</h3>
                   </div>
                   <Badge className="gap-2 rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-foreground">
                     <Sparkles className="h-3.5 w-3.5 text-primary" />
-                    Ready to review
+                    Siap ditinjau
                   </Badge>
                 </div>
 
@@ -270,13 +270,13 @@ export function Demo() {
                 <div className="rounded-[1.5rem] border border-border bg-secondary/30 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <div className="text-sm font-semibold text-foreground">What the user gets</div>
+                      <div className="text-sm font-semibold text-foreground">Yang diterima pengguna</div>
                       <div className="text-xs text-muted-foreground">
-                        Sections, files, and interaction states that ship with the output.
+                        Bagian, file, dan state interaksi yang ikut dikirim bersama output.
                       </div>
                     </div>
                     <Badge variant="secondary" className="rounded-full px-2.5 py-1 text-[11px]">
-                      {current.files.length} files
+                      {current.files.length} file
                     </Badge>
                   </div>
 

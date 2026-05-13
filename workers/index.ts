@@ -28,13 +28,11 @@ async function startWorker(workerType: SwiftWorkerType) {
   console.log(`[Worker] Starting ${workerType} worker...`)
 
   // Setup shutdown handlers
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { setupShutdownHandlers, registerWorker } = require("./graceful-shutdown")
   setupShutdownHandlers()
 
   switch (workerType) {
     case "generation": {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { createGenerationWorker } = require("./generation-worker")
       const worker = createGenerationWorker()
       registerWorker(worker)
@@ -42,7 +40,6 @@ async function startWorker(workerType: SwiftWorkerType) {
       break
     }
     case "repair": {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { createRepairWorker } = require("./repair-worker")
       const worker = createRepairWorker()
       registerWorker(worker)
@@ -50,7 +47,6 @@ async function startWorker(workerType: SwiftWorkerType) {
       break
     }
     case "sandbox": {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { createSandboxWorker } = require("./sandbox-worker")
       const worker = createSandboxWorker()
       registerWorker(worker)

@@ -100,7 +100,7 @@ async function main() {
 
     for (const h of histories) {
       let files
-      try { files = JSON.parse(h.result) } catch (e) {
+      try { files = JSON.parse(h.result) } catch {
         parseFailures += 1
         continue
       }

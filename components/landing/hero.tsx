@@ -1,108 +1,150 @@
 "use client"
 
 import Link from "next/link"
+import { ArrowRight, CheckCircle2, Code2, Play, Send, ShieldCheck, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { ArrowRight, Play } from "lucide-react"
+
+const trustItems = [
+  "Validasi build sebelum preview",
+  "Retry dan refund aman",
+  "Sandbox terisolasi",
+]
+
+const generatedFiles = [
+  "app/page.tsx",
+  "app/api/leads/route.ts",
+  "components/lead-form.tsx",
+  "prisma/schema.prisma",
+]
 
 export function Hero() {
   return (
-    <section className="relative overflow-hidden pt-40 pb-24 sm:pt-48 sm:pb-36">
-      {/* Background gradient - warm terracotta accent */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute -top-1/3 left-1/2 h-[900px] w-[900px] -translate-x-1/2 rounded-full bg-primary/8 blur-3xl" />
-        <div className="absolute -bottom-1/4 right-0 h-[700px] w-[700px] rounded-full bg-accent/5 blur-3xl" />
-      </div>
-
-      <div className="relative mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="mx-auto max-w-4xl text-center">
-          <div className="mb-8 inline-flex items-center gap-2.5 rounded-full border border-primary/30 bg-primary/10 px-4 py-2 text-sm font-medium text-primary">
-            <span className="flex h-2 w-2 rounded-full bg-primary animate-pulse" />
-            Didukung oleh AI Modern
+    <section className="relative border-b border-border bg-background pt-24 sm:pt-28">
+      <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-7xl items-center gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[0.9fr,1.1fr] lg:px-8 lg:py-14">
+        <div className="max-w-2xl">
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-secondary/70 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            Builder aplikasi AI untuk tim yang ingin rilis, bukan sekadar demo
           </div>
-          
-          <h1 className="text-balance text-5xl font-bold tracking-tight text-foreground sm:text-7xl lg:text-8xl">
-            Buat Web<br className="hidden sm:inline" /> dengan AI
+
+          <h1 className="text-balance text-5xl font-semibold tracking-tight text-foreground sm:text-6xl lg:text-7xl">
+            Bangun aplikasi web dari satu prompt.
           </h1>
-          
-          <p className="mx-auto mt-8 max-w-2xl text-pretty text-xl text-muted-foreground sm:text-2xl leading-relaxed">
-            Berdayakan seluruh tim Anda untuk menciptakan dengan kecepatan pikiran. Jelaskan apa yang Anda inginkan, saksikan menjadi kenyataan.
+
+          <p className="mt-6 max-w-xl text-pretty text-lg leading-8 text-muted-foreground sm:text-xl">
+            Swift AI mengubah ide menjadi project Next.js yang divalidasi, dipreview, diperbaiki otomatis, lalu siap disimpan dan dideploy.
           </p>
 
-          <div className="mt-12 flex flex-col items-center justify-center gap-4 sm:flex-row">
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Link href="/dashboard">
-              <Button size="lg" className="gap-2 text-base font-semibold px-8 py-6">
-                Mulai Membangun
-                <ArrowRight className="h-5 w-5" />
+              <Button size="lg" className="h-12 gap-2 rounded-lg px-5 text-sm font-semibold">
+                Mulai membangun
+                <ArrowRight className="h-4 w-4" />
               </Button>
             </Link>
-            <Button variant="outline" size="lg" className="gap-2 text-base font-semibold px-8 py-6">
-              <Play className="h-5 w-5" />
-              Tonton Demo
-            </Button>
+            <Link href="#demo">
+              <Button variant="outline" size="lg" className="h-12 gap-2 rounded-lg px-5 text-sm font-semibold">
+                <Play className="h-4 w-4" />
+                Lihat alur kerja
+              </Button>
+            </Link>
+          </div>
+
+          <div className="mt-8 grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
+            {trustItems.map((item) => (
+              <div key={item} className="flex items-start gap-2">
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                <span>{item}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Demo Preview */}
-        <div className="mt-24">
-          <div className="relative mx-auto max-w-5xl overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
-            <div className="flex items-center gap-2 border-b border-border bg-secondary/70 px-4 py-3">
-              <div className="flex gap-1.5">
-                <div className="h-3 w-3 rounded-full bg-red-500/80" />
-                <div className="h-3 w-3 rounded-full bg-yellow-500/80" />
-                <div className="h-3 w-3 rounded-full bg-green-500/80" />
+        <div className="w-full">
+          <div className="overflow-hidden rounded-xl border border-border bg-card shadow-2xl shadow-black/15">
+            <div className="flex items-center justify-between border-b border-border bg-secondary/55 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  Swift Builder
+                </span>
               </div>
-              <div className="flex-1 text-center">
-                <span className="text-xs text-muted-foreground">swift.dev/dashboard</span>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <ShieldCheck className="h-3.5 w-3.5 text-primary" />
+                  Gate produksi aktif
               </div>
             </div>
-            <div className="grid grid-cols-1 lg:grid-cols-2">
-              {/* Chat Panel */}
-              <div className="border-r border-border p-6 bg-background/50">
-                <div className="space-y-4">
-                  <div className="flex gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary">
-                      <span className="text-xs font-medium">A</span>
-                    </div>
-                    <div className="rounded-lg bg-secondary/70 px-4 py-2.5 text-sm text-foreground">
-                      Buat modal pendaftaran dengan form. Saat form dikirim, tampilkan notifikasi sukses.
-                    </div>
+
+            <div className="grid lg:grid-cols-[0.92fr,1.08fr]">
+              <div className="border-b border-border bg-background p-4 lg:border-b-0 lg:border-r">
+                <div className="rounded-lg border border-border bg-card p-3">
+                  <div className="mb-2 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                    Prompt
                   </div>
-                  <div className="flex gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary">
-                      <Zap className="h-4 w-4 text-primary-foreground" />
-                    </div>
-                    <div className="space-y-2 text-sm text-muted-foreground">
-                      <p>{"Saya akan membuat modal dengan form dan menampilkan notifikasi saat form dikirim. Menggunakan shadcn/ui, React dan Tailwind:"}</p>
-                      <div className="rounded-lg border border-border bg-card p-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-muted-foreground">Modal Pendaftaran</span>
-                          <span className="rounded bg-primary/20 px-2 py-0.5 text-xs text-primary font-medium">v1</span>
-                        </div>
-                        <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                          <div className="h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-                          Membuat...
-                        </div>
-                      </div>
-                    </div>
+                  <p className="min-h-28 text-sm leading-6 text-foreground">
+                    Buat SaaS dashboard untuk tim sales dengan login, tabel lead, form tambah lead, dan grafik pipeline mingguan.
+                  </p>
+                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
+                    <span className="text-xs text-muted-foreground">Mode: bangun</span>
+                    <Button size="sm" className="h-9 gap-2 rounded-md px-3">
+                      <Send className="h-3.5 w-3.5" />
+                      Buat
+                    </Button>
                   </div>
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  {["Rencana file", "Validasi import", "Build preview", "Repair otomatis"].map((step, index) => (
+                    <div key={step} className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+                        {index + 1}
+                      </span>
+                      <span className="text-sm text-foreground">{step}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
-              {/* Preview Panel */}
-              <div className="bg-background p-6">
-                <div className="mb-4 flex items-center gap-2">
-                  <span className="text-sm font-semibold text-foreground">Modal Pendaftaran</span>
+
+              <div className="bg-card p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                      Output
+                    </div>
+                    <div className="mt-1 text-sm font-semibold text-foreground">Aplikasi Pipeline Sales</div>
+                  </div>
+                  <div className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-300">
+                    Build lolos
+                  </div>
                 </div>
-                <div className="flex items-center gap-4 border-b border-border pb-3">
-                  <button className="text-sm font-medium text-foreground">Pratinjau</button>
-                  <button className="text-sm text-muted-foreground">modal.tsx</button>
+
+                <div className="rounded-lg border border-border bg-background p-4">
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Metric label="Lead" value="1.284" />
+                    <Metric label="Pipeline" value="Rp82M" />
+                    <Metric label="Rasio menang" value="32%" />
+                  </div>
+                  <div className="mt-4 h-32 rounded-lg border border-border bg-card p-3">
+                    <div className="flex h-full items-end gap-2">
+                      {[42, 58, 49, 70, 61, 84, 76].map((height, index) => (
+                        <div key={index} className="flex-1 rounded-t-md bg-primary/80" style={{ height: `${height}%` }} />
+                      ))}
+                    </div>
+                  </div>
                 </div>
-                <div className="mt-4 font-mono text-xs leading-relaxed">
-                  <div><span className="text-muted-foreground">1</span> <span className="code-string">{"'use client'"}</span></div>
-                  <div><span className="text-muted-foreground">2</span></div>
-                  <div><span className="text-muted-foreground">3</span> <span className="code-keyword">import</span> {"{ useFormStatus }"} <span className="code-keyword">from</span> <span className="code-string">{'"react-dom"'}</span></div>
-                  <div><span className="text-muted-foreground">4</span> <span className="code-keyword">import</span> {"{ Button }"} <span className="code-keyword">from</span> <span className="code-string">{'"@/components/ui/button"'}</span></div>
-                  <div><span className="text-muted-foreground">5</span> <span className="code-keyword">import</span> {"{ Input }"} <span className="code-keyword">from</span> <span className="code-string">{'"@/components/ui/input"'}</span></div>
-                  <div><span className="text-muted-foreground">6</span> <span className="code-keyword">import</span> {"{ Label }"} <span className="code-keyword">from</span> <span className="code-string">{'"@/components/ui/label"'}</span></div>
+
+                <div className="mt-4 rounded-lg border border-border bg-background">
+                  <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground">
+                    <Code2 className="h-3.5 w-3.5" />
+                    File yang dibuat
+                  </div>
+                  <div className="divide-y divide-border">
+                    {generatedFiles.map((file) => (
+                      <div key={file} className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                        {file}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -113,19 +155,11 @@ export function Hero() {
   )
 }
 
-function Zap({ className }: { className?: string }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
-    </svg>
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-foreground">{value}</div>
+    </div>
   )
 }

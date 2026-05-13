@@ -67,4 +67,6 @@ export async function validateFiles(files: GeneratedFile[]) {
   }
 }
 
-export default { applyFiles, validateFiles, runWithSqliteRetry }
+const executor = { applyFiles, validateFiles, runWithSqliteRetry }
+
+export default executor

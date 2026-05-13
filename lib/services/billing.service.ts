@@ -46,6 +46,27 @@ type TopUpFinalizationInput = {
   paidAt?: Date | null
 }
 
+type ReserveGenerationJobInput = {
+  userId: string
+  projectId: string
+  prompt: string
+  modelConfigId: string
+  model: string
+  provider: string
+  cost: number
+  idempotencyKey?: string | null
+  requestHash?: string | null
+  plan?: unknown
+  context?: Record<string, unknown> | null
+  maxRetries?: number
+}
+
+function safeStringify(value: unknown) {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  return JSON.stringify(value)
+}
+
 export class BillingService {
   static async recordBalanceTransaction(
     tx: Prisma.TransactionClient,
@@ -329,6 +350,132 @@ export class BillingService {
       })
 
       return usageLog
+    })
+  }
+
+  static async reserveGenerationJob(input: ReserveGenerationJobInput) {
+    return prisma.$transaction(async (tx) => {
+      const job = await tx.generationJob.create({
+        data: {
+          userId: input.userId,
+          projectId: input.projectId,
+          prompt: input.prompt,
+          model: input.model,
+          provider: input.provider,
+          idempotencyKey: input.idempotencyKey || null,
+          requestHash: input.requestHash || null,
+          status: "queued",
+          stage: "queued",
+          label: "Prompt diterima",
+          progress: 0,
+          maxRetries: Math.max(0, input.maxRetries ?? 2),
+          planJson: safeStringify(input.plan),
+          contextJson: safeStringify(input.context),
+        },
+      })
+
+      const user = await tx.user.findUnique({
+        where: { id: input.userId },
+        select: { id: true, balance: true },
+      })
+
+      if (!user) {
+        throw new Error("User not found")
+      }
+
+      if (user.balance < input.cost) {
+        throw new Error("Insufficient balance")
+      }
+
+      const balanceAfter = user.balance - input.cost
+      const balanceUpdate = await tx.user.updateMany({
+        where: {
+          id: input.userId,
+          balance: {
+            gte: input.cost,
+          },
+        },
+        data: {
+          balance: {
+            decrement: input.cost,
+          },
+        },
+      })
+
+      if (balanceUpdate.count !== 1) {
+        throw new Error("Insufficient balance")
+      }
+
+      const usageLog = await tx.usageLog.create({
+        data: {
+          userId: input.userId,
+          modelConfigId: input.modelConfigId,
+          model: input.model,
+          provider: input.provider,
+          cost: input.cost,
+          prompt: input.prompt,
+          status: "reserved",
+        },
+      })
+
+      await this.recordBalanceTransaction(tx, {
+        userId: input.userId,
+        kind: "usage",
+        direction: "debit",
+        amount: input.cost,
+        balanceBefore: user.balance,
+        balanceAfter,
+        reference: `usage:${usageLog.id}`,
+        provider: input.provider,
+        providerReference: usageLog.id,
+        description: `Reserved Rupiah balance for ${input.model}`,
+        metadata: JSON.stringify({
+          modelConfigId: input.modelConfigId,
+          model: input.model,
+          promptLength: input.prompt.length,
+          generationJobId: job.id,
+          requestHash: input.requestHash,
+        }),
+      })
+
+      const context = {
+        ...(input.context || {}),
+        billing: {
+          usageLogId: usageLog.id,
+          reservedCost: input.cost,
+          modelConfigId: input.modelConfigId,
+        },
+      }
+
+      const updatedJob = await tx.generationJob.update({
+        where: { id: job.id },
+        data: {
+          contextJson: safeStringify(context),
+        },
+      })
+
+      await tx.generationEvent.create({
+        data: {
+          jobId: updatedJob.id,
+          sequence: 1,
+          type: "job.created",
+          stage: "queued",
+          status: "queued",
+          message: "Generation job queued",
+          dataJson: safeStringify({
+            projectId: updatedJob.projectId,
+            provider: updatedJob.provider,
+            model: updatedJob.model,
+            usageLogId: usageLog.id,
+            requestHash: input.requestHash,
+          }),
+        },
+      })
+
+      return {
+        job: updatedJob,
+        usageLog,
+      }
     })
   }
 

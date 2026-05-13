@@ -202,7 +202,7 @@ model GenerationHistory {
 
   @@index([projectId])
   @@index([createdAt])
-  @@index([projectId, idempotencyKey])
+  @@unique([projectId, idempotencyKey])
 }
 
 model GenerationJob {
@@ -228,6 +228,8 @@ model GenerationJob {
   error           String?
   resultHistoryId String?
   queueJobId      String?
+  idempotencyKey  String?
+  requestHash     String?
   cancelRequested Boolean  @default(false)
   cancelReason    String?
   timedOutAt      DateTime?
@@ -242,6 +244,7 @@ model GenerationJob {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events  GenerationEvent[]
   attempts GenerationAttempt[]
+  qualityMetric GenerationQualityMetric?
 
   @@index([userId, createdAt])
   @@index([projectId, createdAt])
@@ -249,6 +252,43 @@ model GenerationJob {
   @@index([stage])
   @@index([cancelRequested])
   @@index([queueJobId])
+  @@unique([userId, projectId, idempotencyKey])
+  @@unique([userId, projectId, requestHash])
+}
+
+model GenerationQualityMetric {
+  id                 String   @id @default(cuid())
+  jobId              String   @unique
+  userId             String
+  projectId          String
+  appType            String
+  status             String
+  failureStage       String?
+  failureCode        String?
+  buildPassed        Boolean  @default(false)
+  runtimePassed      Boolean  @default(false)
+  repairSucceeded    Boolean  @default(false)
+  deployValidated    Boolean  @default(false)
+  repairAttempts     Int      @default(0)
+  userRetryCount     Int      @default(0)
+  providerLatencyMs  Int      @default(0)
+  validationLatencyMs Int     @default(0)
+  totalLatencyMs     Int      @default(0)
+  promptTokens       Int      @default(0)
+  completionTokens   Int      @default(0)
+  totalTokens        Int      @default(0)
+  estimatedCost      Int      @default(0)
+  metadataJson       String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([appType, createdAt])
+  @@index([status, createdAt])
+  @@index([failureStage])
 }
 
 model GenerationEvent {

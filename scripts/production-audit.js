@@ -46,6 +46,18 @@ function staticChecks() {
   const generationOrchestrator = exists("lib/services/generation-orchestrator.service.ts")
     ? read("lib/services/generation-orchestrator.service.ts")
     : ""
+  const appBlueprints = exists("lib/ai/app-blueprints.ts") ? read("lib/ai/app-blueprints.ts") : ""
+  const generationQualityService = exists("lib/services/generation-quality.service.ts")
+    ? read("lib/services/generation-quality.service.ts")
+    : ""
+  const editPlanner = exists("lib/ai/edit-planner.ts") ? read("lib/ai/edit-planner.ts") : ""
+  const healthRoute = exists("app/api/health/route.ts") ? read("app/api/health/route.ts") : ""
+  const generationQueue = exists("lib/queue/generation-queue.ts") ? read("lib/queue/generation-queue.ts") : ""
+  const generationWorker = exists("lib/workers/generation-worker.ts") ? read("lib/workers/generation-worker.ts") : ""
+  const billingService = exists("lib/services/billing.service.ts") ? read("lib/services/billing.service.ts") : ""
+  const persistenceService = exists("lib/services/project-file-persistence.service.ts")
+    ? read("lib/services/project-file-persistence.service.ts")
+    : ""
   const generatedArtifact = exists("lib/ai/generated-artifact.ts") ? read("lib/ai/generated-artifact.ts") : ""
   const sandboxRuntime = exists("lib/sandbox/runtime.ts") ? read("lib/sandbox/runtime.ts") : ""
   const preview = exists("components/editor/sandbox-preview.tsx") ? read("components/editor/sandbox-preview.tsx") : ""
@@ -60,13 +72,30 @@ function staticChecks() {
     check("predeploy.build-script", packageJson.scripts && packageJson.scripts.build, "package.json exposes npm run build"),
     check("ai.zod-input-validation", /z\.object\(/.test(generateJobsRoute), "Canonical queued AI endpoint validates request input with Zod"),
     check("ai.output-file-extraction", /parseGeneratedArtifact/.test(generationOrchestrator) && /generatedArtifactSchema/.test(generatedArtifact), "AI provider output is parsed into a strict GeneratedArtifact schema"),
+    check("ai.controlled-app-blueprints", /ControlledAppType/.test(appBlueprints) && /saas_dashboard/.test(appBlueprints) && /simple_marketplace/.test(appBlueprints), "Generation is constrained to controlled app categories"),
+    check("ai.template-seeded-generation", /buildBlueprintSeedFiles/.test(generationOrchestrator) && /Applying known-good starter architecture/.test(generationOrchestrator), "Generation seeds from deterministic starter architectures"),
+    check("ai.partial-regeneration-contract", /buildPartialEditPlan/.test(editPlanner) && /filterFilesForPartialEdit/.test(generationOrchestrator), "Conversational edits are scoped to target files and allowed new files"),
+    check("ai.edit-intent-classifier", /pricing_page/.test(editPlanner) && /schema_change/.test(editPlanner) && /upload_integration/.test(editPlanner), "Edit planner classifies common retention-driving edit intents"),
+    check("ai.generation-quality-metrics", /model GenerationQualityMetric/.test(prisma) && /GenerationQualityService/.test(generationQualityService), "Generation success, build, runtime, repair, latency, and cost metrics are persisted"),
     check("ai.fullstack-validation", /validateFullStackFiles|attemptTargetedRepair/.test(generationOrchestrator), "Generated files pass full-stack coverage validation"),
     check("ai.syntax-validation", /compileProject|validateFullStackFiles/.test(generationOrchestrator), "Generated executable files have TypeScript syntax validation signals"),
+    check("ai.runtime-smoke-required", /runtime-smoke/.test(generationOrchestrator) && /verifyRuntimeSmoke/.test(sandboxRuntime), "Generation success requires runtime smoke validation"),
+    check("ai.atomic-generation-billing", /reserveGenerationJob/.test(generateJobsRoute) && /reserveGenerationJob/.test(billingService), "Generation job creation and billing reservation are atomic"),
+    check("ai.request-hash-dedupe", /requestHash/.test(prisma) && /@@unique\(\[userId,\s*projectId,\s*requestHash\]\)/.test(prisma), "Request hash dedupe is enforced at the database level"),
+    check("ai.persistence-idempotency", /@@unique\(\[projectId,\s*idempotencyKey\]\)/.test(prisma) && /upsert/.test(persistenceService), "Generation persistence is replay-safe"),
     check("sandbox.path-guard", /assertSafeFilePath/.test(sandboxRuntime) && /startsWith\(`\$\{root\}\$\{path\.sep\}`\)/.test(sandboxRuntime), "Sandbox rejects path traversal writes"),
-    check("sandbox.command-timeout", /setTimeout\([\s\S]*child\.kill\(\)/.test(sandboxRuntime), "Sandbox commands have timeout cleanup"),
+    check(
+      "sandbox.command-timeout",
+      /setTimeout\([\s\S]*(child\.kill\(\)|killProcessTree\(child\))/.test(sandboxRuntime),
+      "Sandbox commands have timeout cleanup"
+    ),
     check("sandbox.process-restart", /stopProcess/.test(sandboxRuntime) && /resetRuntimeSandbox/.test(sandboxRuntime), "Sandbox supports process stop and reset"),
     check("sandbox.npm-ci-ignore-scripts", /npm["'], \["ci", "--ignore-scripts"/.test(sandboxRuntime), "Runtime sandbox installs deterministically without lifecycle scripts"),
     check("sandbox.build-before-preview", /npm["'], \["run", "build"/.test(sandboxRuntime), "Runtime sandbox runs build before preview"),
+    check("ops.health-route", /getGenerationQueueHealth/.test(healthRoute) && /ProviderRouter/.test(healthRoute), "Health endpoint reports database, queue, env, and provider status"),
+    check("ops.worker-heartbeat", /recordGenerationWorkerHeartbeat/.test(generationQueue) && /recordGenerationWorkerHeartbeat/.test(generationWorker), "Queue health includes worker heartbeat reporting"),
+    check("ops.sentry-config", exists("instrumentation.ts") && exists("instrumentation-client.ts") && exists("sentry.server.config.ts"), "Sentry instrumentation exists for client and server runtimes"),
+    check("ops.chaos-script", packageJson.scripts && packageJson.scripts["test:chaos"] && exists("scripts/chaos-concurrency.js"), "Concurrency chaos test script is available"),
     check("preview.iframe-sandbox", /sandbox="[^"]*allow-scripts/.test(preview), "Preview iframe uses sandbox attribute"),
     check("preview.iframe-no-same-origin", !/sandbox="[^"]*allow-same-origin/.test(preview), "Preview iframe does not combine allow-scripts with allow-same-origin", "warn"),
     check("preview.error-boundary", /ErrorBoundary/.test(preview), "Preview contains an error boundary"),

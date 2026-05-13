@@ -17,11 +17,13 @@ export type GenerationQueuePayload = {
   collaborationMode?: string
   promptLanguage?: "id" | "en"
   idempotencyKey?: string
+  requestHash?: string
   previewContext?: unknown
   attachments?: unknown[]
 }
 
 const QUEUE_NAME = "swift:generation:v2"
+const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 1,
   removeOnComplete: 200,
@@ -169,6 +171,58 @@ export async function enqueueGenerationTask(
   } catch (error) {
     console.error("[Generation Queue] Failed to enqueue task:", error instanceof Error ? error.message : String(error))
     return null
+  }
+}
+
+export async function recordGenerationWorkerHeartbeat(workerId: string) {
+  const connection = getRedisConnection()
+  if (!connection) return null
+
+  const payload = JSON.stringify({
+    workerId,
+    pid: process.pid,
+    at: new Date().toISOString(),
+  })
+
+  await connection.set(GENERATION_WORKER_HEARTBEAT_KEY, payload, "PX", 120_000)
+  return payload
+}
+
+export async function getGenerationQueueHealth() {
+  const queue = getGenerationQueue()
+  if (!queue) {
+    return {
+      enabled: false,
+      status: "disabled",
+      counts: null,
+      workerHeartbeat: null,
+    }
+  }
+
+  const counts = await queue.getJobCounts("waiting", "active", "delayed", "failed", "completed", "paused")
+  const connection = getRedisConnection()
+  const rawHeartbeat = connection ? await connection.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null) : null
+  const workerHeartbeat = rawHeartbeat
+    ? (() => {
+        try {
+          return JSON.parse(rawHeartbeat) as { workerId: string; pid: number; at: string }
+        } catch {
+          return null
+        }
+      })()
+    : null
+  const heartbeatAgeMs = workerHeartbeat ? Date.now() - Date.parse(workerHeartbeat.at) : null
+
+  return {
+    enabled: true,
+    status: heartbeatAgeMs === null ? "degraded" : heartbeatAgeMs > 90_000 ? "stale" : "healthy",
+    counts,
+    workerHeartbeat: workerHeartbeat
+      ? {
+          ...workerHeartbeat,
+          ageMs: heartbeatAgeMs,
+        }
+      : null,
   }
 }
 

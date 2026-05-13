@@ -23,6 +23,16 @@ function eventFrame(event: string, id: number | string, data: unknown, retryMs =
   return `id: ${id}\nretry: ${retryMs}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 }
 
+function safeJsonParse(value: string | null) {
+  if (!value) return null
+
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
@@ -75,7 +85,17 @@ export async function GET(
       send("job", lastEventSequence, GenerationJobService.toPublicJob(initialJob))
 
       while (!closed) {
-        const events = await GenerationJobService.listEvents(jobId, lastEventSequence)
+        let events: Awaited<ReturnType<typeof GenerationJobService.listEvents>> = []
+        try {
+          events = await GenerationJobService.listEvents(jobId, lastEventSequence)
+        } catch (error) {
+          send("generation.stream_error", lastEventSequence, {
+            message: error instanceof Error ? error.message : "Failed to read generation events",
+          })
+          close()
+          return
+        }
+
         for (const event of events) {
           lastEventSequence = event.sequence
           send(event.type, event.sequence, {
@@ -85,11 +105,11 @@ export async function GET(
             status: event.status,
             message: event.message,
             createdAt: event.createdAt.toISOString(),
-            data: event.dataJson ? JSON.parse(event.dataJson) : null,
+            data: safeJsonParse(event.dataJson),
           })
         }
 
-        const freshJob = await GenerationJobService.findForUser(jobId, user.id)
+        const freshJob = await GenerationJobService.findForUser(jobId, user.id).catch(() => null)
         if (!freshJob) {
           send("generation.failed", lastEventSequence, { message: "Generation job not found" })
           close()

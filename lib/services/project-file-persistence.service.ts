@@ -204,16 +204,34 @@ export class ProjectFilePersistenceService {
     const normalizedFiles = dedupeFilesByPath(files)
 
     return withSqliteBusyRetry(() => prisma.$transaction(async (tx) => {
-      const createdHistory = await tx.generationHistory.create({
-        data: {
-          projectId,
-          prompt,
-          result: JSON.stringify(normalizedFiles),
-          tokensUsed: opts?.tokensUsed ?? 0,
-          ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
-          cost: opts?.cost ?? 0,
-        },
-      })
+      const historyData = {
+        prompt,
+        result: JSON.stringify(normalizedFiles),
+        tokensUsed: opts?.tokensUsed ?? 0,
+        cost: opts?.cost ?? 0,
+      }
+
+      const createdHistory = opts?.idempotencyKey
+        ? await tx.generationHistory.upsert({
+            where: {
+              projectId_idempotencyKey: {
+                projectId,
+                idempotencyKey: opts.idempotencyKey,
+              },
+            },
+            create: {
+              projectId,
+              idempotencyKey: opts.idempotencyKey,
+              ...historyData,
+            },
+            update: historyData,
+          })
+        : await tx.generationHistory.create({
+            data: {
+              projectId,
+              ...historyData,
+            },
+          })
 
       const fileDiff = await syncProjectFiles(tx, projectId, normalizedFiles)
 

@@ -19,6 +19,7 @@ export async function buildPlan(
   prompt: string,
   options?: { projectId?: string; files?: GeneratedFile[]; promptLanguage?: string }
 ): Promise<OrchestratorPlan> {
+  void options
   // Use local heuristic-based prompt enhancer to build a lightweight plan
   // This intentionally does not call external AI providers.
   const enhanced = await enhancePromptForSwift({ prompt, modelName: "local" })

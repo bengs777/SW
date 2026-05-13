@@ -115,4 +115,6 @@ export async function executePlan(
   return { success: true, files: contextFiles, providerResult: lastProviderResult }
 }
 
-export default { executePlan }
+const agentLoop = { executePlan }
+
+export default agentLoop

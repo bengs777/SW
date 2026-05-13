@@ -10,7 +10,6 @@ import { Separator } from "@/components/ui/separator"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Badge } from "@/components/ui/badge"
 import { User, Key, Bell, Palette, CreditCard, Shield } from "lucide-react"
 import { BillingPanel } from "@/components/dashboard/billing-panel"
 

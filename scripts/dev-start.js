@@ -13,7 +13,7 @@ const nextCli = path.normalize(require.resolve("next/dist/bin/next"))
 
 function runPrismaDbPush() {
   try {
-    const output = execSync("npx prisma db push --skip-generate", {
+    const output = execSync("node scripts/db-push.js local", {
       env,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

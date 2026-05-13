@@ -133,7 +133,6 @@ function collectImportedFiles(activeFile: GeneratedFile | null, files: Generated
 }
 
 function collectNearbyFiles(activeFile: GeneratedFile | null, files: GeneratedFile[]) {
-  const fileMap = buildFileMap(files)
   const nearby = new Map<string, GeneratedFile>()
 
   if (activeFile) {

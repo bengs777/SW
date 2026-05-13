@@ -10,6 +10,7 @@ const REQUIRED_TABLES = [
   "GenerationJob",
   "GenerationEvent",
   "GenerationAttempt",
+  "GenerationQualityMetric",
   "UsageLog",
   "BillingTransaction",
   "Subscription",
@@ -77,6 +78,14 @@ function splitSqlStatements(sql) {
     )
 }
 
+function isCreateTableStatement(statement) {
+  return /^CREATE TABLE\b/i.test(statement)
+}
+
+function isIndexStatement(statement) {
+  return /^CREATE (?:UNIQUE )?INDEX\b/i.test(statement)
+}
+
 async function listTables(client) {
   const result = await client.execute(
     "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
@@ -102,6 +111,8 @@ async function ensureGenerationJobColumns(client) {
     ["metricsJson", 'ALTER TABLE "GenerationJob" ADD COLUMN "metricsJson" TEXT'],
     ["previewUrl", 'ALTER TABLE "GenerationJob" ADD COLUMN "previewUrl" TEXT'],
     ["queueJobId", 'ALTER TABLE "GenerationJob" ADD COLUMN "queueJobId" TEXT'],
+    ["idempotencyKey", 'ALTER TABLE "GenerationJob" ADD COLUMN "idempotencyKey" TEXT'],
+    ["requestHash", 'ALTER TABLE "GenerationJob" ADD COLUMN "requestHash" TEXT'],
     ["timedOutAt", 'ALTER TABLE "GenerationJob" ADD COLUMN "timedOutAt" DATETIME'],
   ]
 
@@ -117,8 +128,83 @@ async function ensureGenerationJobColumns(client) {
   await client.execute('CREATE INDEX IF NOT EXISTS "GenerationJob_queueJobId_idx" ON "GenerationJob"("queueJobId")')
 }
 
+async function assertNoDuplicateGenerationJobKey(client, columnName) {
+  const columns = await listColumns(client, "GenerationJob")
+  if (!columns.has(columnName)) {
+    return
+  }
+
+  const result = await client.execute(`
+    SELECT "userId", "projectId", "${columnName}", COUNT(*) AS "count"
+    FROM "GenerationJob"
+    WHERE "${columnName}" IS NOT NULL AND trim("${columnName}") <> ''
+    GROUP BY "userId", "projectId", "${columnName}"
+    HAVING COUNT(*) > 1
+    LIMIT 20
+  `)
+
+  if (result.rows.length === 0) {
+    return
+  }
+
+  const details = result.rows
+    .map((row) => `${row.userId}/${row.projectId}/${row[columnName]} (${row.count} rows)`)
+    .join(", ")
+
+  throw new Error(
+    `Duplicate GenerationJob ${columnName} values found. Resolve these before creating the production unique index: ${details}`
+  )
+}
+
+async function ensureGenerationJobDedupeIndexes(client) {
+  await assertNoDuplicateGenerationJobKey(client, "idempotencyKey")
+  await assertNoDuplicateGenerationJobKey(client, "requestHash")
+  await client.execute(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "GenerationJob_userId_projectId_idempotencyKey_key" ON "GenerationJob"("userId", "projectId", "idempotencyKey")'
+  )
+  await client.execute(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "GenerationJob_userId_projectId_requestHash_key" ON "GenerationJob"("userId", "projectId", "requestHash")'
+  )
+}
+
+async function ensureGenerationHistoryDedupeIndex(client) {
+  const tables = await listTables(client)
+  if (!tables.includes("GenerationHistory")) {
+    return
+  }
+
+  const columns = await listColumns(client, "GenerationHistory")
+  if (!columns.has("idempotencyKey")) {
+    return
+  }
+
+  const result = await client.execute(`
+    SELECT "projectId", "idempotencyKey", COUNT(*) AS "count"
+    FROM "GenerationHistory"
+    WHERE "idempotencyKey" IS NOT NULL AND trim("idempotencyKey") <> ''
+    GROUP BY "projectId", "idempotencyKey"
+    HAVING COUNT(*) > 1
+    LIMIT 20
+  `)
+
+  if (result.rows.length > 0) {
+    const details = result.rows
+      .map((row) => `${row.projectId}/${row.idempotencyKey} (${row.count} rows)`)
+      .join(", ")
+
+    throw new Error(
+      `Duplicate GenerationHistory idempotency keys found. Resolve these before creating the production unique index: ${details}`
+    )
+  }
+
+  await client.execute(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "GenerationHistory_projectId_idempotencyKey_key" ON "GenerationHistory"("projectId", "idempotencyKey")'
+  )
+}
+
 async function pushLocalDatabase() {
-  env.DATABASE_URL = process.env.DATABASE_URL || "file:./dev.db"
+  env.DATABASE_URL = process.env.SWIFT_LOCAL_DATABASE_URL || "file:./dev.db"
+  env.TURSO_DATABASE_URL = process.env.SWIFT_LOCAL_TURSO_DATABASE_URL || "file:./prisma/dev.db"
 
   const output = execSync("npx prisma db push --skip-generate --accept-data-loss", {
     env,
@@ -155,12 +241,21 @@ async function pushTursoDatabase() {
 
   const sql = getCreateSchemaSql()
   const statements = splitSqlStatements(sql)
+  const tableStatements = statements.filter(isCreateTableStatement)
+  const indexStatements = statements.filter(isIndexStatement)
+  const otherStatements = statements.filter((statement) => !isCreateTableStatement(statement) && !isIndexStatement(statement))
 
-  for (const statement of statements) {
+  for (const statement of tableStatements) {
     await client.execute(statement)
   }
 
   await ensureGenerationJobColumns(client)
+  await ensureGenerationJobDedupeIndexes(client)
+  await ensureGenerationHistoryDedupeIndex(client)
+
+  for (const statement of [...otherStatements, ...indexStatements]) {
+    await client.execute(statement)
+  }
 
   const afterTables = await listTables(client)
   const afterTableSet = new Set(afterTables)

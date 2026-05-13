@@ -46,4 +46,6 @@ export function buildContextForTask(input: {
   return parts.join("\n\n")
 }
 
-export default { buildContextForTask }
+const contextBuilder = { buildContextForTask }
+
+export default contextBuilder

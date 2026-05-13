@@ -66,7 +66,7 @@ export function setupShutdownHandlers() {
     gracefulShutdown("uncaughtException")
   })
 
-  process.on("unhandledRejection", (reason, promise) => {
+  process.on("unhandledRejection", (reason) => {
     console.error("[Unhandled] Unhandled rejection:", reason)
   })
 }

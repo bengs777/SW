@@ -5,6 +5,8 @@ export const GENERATION_TERMINAL_STATUSES = new Set(["completed", "failed", "can
 
 export type GenerationJobStage =
   | "queued"
+  | "planning"
+  | "scaffolding"
   | "generating"
   | "parsing"
   | "validating"
@@ -16,6 +18,7 @@ export type GenerationJobStage =
   | "completed"
   | "failed"
   | "cancelled"
+  | "timeout"
 
 export type GenerationJobStatus =
   | "queued"
@@ -31,6 +34,8 @@ type CreateGenerationJobInput = {
   prompt: string
   model: string
   provider?: string
+  idempotencyKey?: string | null
+  requestHash?: string | null
   plan?: unknown
   maxRetries?: number
   context?: Record<string, unknown> | null
@@ -101,6 +106,8 @@ export class GenerationJobService {
           prompt: input.prompt,
           model: input.model,
           provider: input.provider || "swift",
+          idempotencyKey: input.idempotencyKey || null,
+          requestHash: input.requestHash || null,
           status: "queued",
           stage: "queued",
           label: "Prompt diterima",
@@ -149,6 +156,40 @@ export class GenerationJobService {
   static async findById(jobId: string) {
     return prisma.generationJob.findUnique({
       where: { id: jobId },
+    })
+  }
+
+  static async findIdempotentJob(input: {
+    userId: string
+    projectId: string
+    idempotencyKey?: string | null
+    requestHash?: string | null
+  }) {
+    const clauses = [
+      input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : null,
+      input.requestHash ? { requestHash: input.requestHash } : null,
+    ].filter((clause): clause is { idempotencyKey: string } | { requestHash: string } => Boolean(clause))
+
+    if (clauses.length === 0) return null
+
+    return prisma.generationJob.findFirst({
+      where: {
+        userId: input.userId,
+        projectId: input.projectId,
+        OR: clauses,
+      },
+      orderBy: { createdAt: "desc" },
+    })
+  }
+
+  static async countActiveForUser(userId: string) {
+    return prisma.generationJob.count({
+      where: {
+        userId,
+        status: {
+          in: ["queued", "running", "cancelling"],
+        },
+      },
     })
   }
 
@@ -412,6 +453,8 @@ export class GenerationJobService {
     error?: string | null
     resultHistoryId?: string | null
     cancelRequested: boolean
+    idempotencyKey?: string | null
+    requestHash?: string | null
     createdAt: Date
     updatedAt: Date
     startedAt?: Date | null

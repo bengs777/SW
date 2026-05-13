@@ -109,7 +109,6 @@ function buildLocalPromptDraft(prompt: string): PromptDraft {
   const looksLikeSalon = hasAny(normalized, ["salon", "barbershop", "spa", "kecantikan", "haircut", "massage"])
   const looksLikeRental = hasAny(normalized, ["rental", "sewa", "booking kendaraan", "car rental", "bike rental"])
   const looksLikeSaaS = hasAny(normalized, ["saas", "software as a service", "subscription", "langganan"])
-  const looksLikeLandingPage = hasAny(normalized, ["landing", "marketing"]) && !looksLikeBooking && !looksLikeLanding
 
   const projectName = inferProjectName(compactPrompt)
   const productType =
@@ -568,24 +567,6 @@ function hasAny(value: string, signals: string[]) {
   return signals.some((signal) => value.includes(signal))
 }
 
-function normalizeText(value: unknown) {
-  if (typeof value !== "string") {
-    return ""
-  }
-
-  return value.replace(/\s+/g, " ").trim()
-}
-
-function normalizeList(value: unknown) {
-  if (!Array.isArray(value)) {
-    return []
-  }
-
-  return value
-    .map((item) => normalizeText(item))
-    .filter(Boolean)
-}
-
 function dedupeItems(items: string[]) {
   return items.filter(Boolean).filter((item, index, list) => list.indexOf(item) === index)
 }
@@ -624,25 +605,4 @@ function inferFallbackSummary(prompt: string) {
   }
 
   return compactPrompt
-}
-
-function buildFallbackEnhancement(prompt: string): PromptEnhancementResult {
-  return {
-    prompt,
-    summary: inferFallbackSummary(prompt),
-    sourcesUsed: [],
-    usedEnhancement: false,
-    plan: {
-      mode: "build",
-      objective: inferFallbackSummary(prompt),
-      focusSlice: inferFallbackSummary(prompt),
-      filePriority: [],
-      previewChecks: [],
-      repairLoop: [],
-      constraints: [],
-    },
-    projectMemory: {
-      notes: [],
-    },
-  }
 }

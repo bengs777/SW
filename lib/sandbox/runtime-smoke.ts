@@ -31,6 +31,28 @@ export type RuntimeSmokeResult = {
   apiRoutes: string[]
 }
 
+type SmokePage = {
+  goto: (url: string, options?: Record<string, unknown>) => Promise<{ status: () => number } | null>
+  locator: (selector: string) => {
+    innerText: (options?: Record<string, unknown>) => Promise<string>
+  }
+  on: (event: "console" | "pageerror", handler: (value: unknown) => void) => void
+  evaluate: <T>(fn: (value: T) => void, value: T) => Promise<unknown>
+  waitForTimeout: (milliseconds: number) => Promise<void>
+  url: () => string
+}
+
+type SmokeBrowser = {
+  newPage: () => Promise<SmokePage>
+  close: () => Promise<void>
+}
+
+type SmokePlaywright = {
+  chromium: {
+    launch: (options: Record<string, unknown>) => Promise<SmokeBrowser>
+  }
+}
+
 const SMOKE_TIMEOUT_MS = Number(process.env.SWIFT_RUNTIME_SMOKE_TIMEOUT_MS || 45_000)
 const ROUTE_TIMEOUT_MS = Number(process.env.SWIFT_RUNTIME_ROUTE_TIMEOUT_MS || 12_000)
 const MAX_ROUTE_CHECKS = Number(process.env.SWIFT_RUNTIME_MAX_ROUTE_CHECKS || 8)
@@ -104,10 +126,10 @@ export async function verifyRuntimeSmoke(input: {
           })
         }
       })
-      page.on("pageerror", (error: Error) => {
+      page.on("pageerror", (error: unknown) => {
         runtimeErrors.push({
           type: "unhandled_exception",
-          message: error.message,
+          message: error instanceof Error ? error.message : String(error),
         })
       })
 
@@ -223,10 +245,10 @@ export async function verifyRuntimeSmoke(input: {
   }
 }
 
-async function loadPlaywright(): Promise<{ chromium: { launch: (options: Record<string, unknown>) => Promise<any> } } | null> {
+async function loadPlaywright(): Promise<SmokePlaywright | null> {
   try {
     const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>
-    return await dynamicImport("playwright") as { chromium: { launch: (options: Record<string, unknown>) => Promise<any> } }
+    return await dynamicImport("playwright") as SmokePlaywright
   } catch {
     return null
   }
@@ -259,7 +281,7 @@ async function waitForHttp(url: string, signal?: AbortSignal) {
   }
 }
 
-async function verifyBrowserNavigation(page: any, previewUrl: string, routes: string[]) {
+async function verifyBrowserNavigation(page: SmokePage, previewUrl: string, routes: string[]) {
   const secondRoute = routes.find((route) => route !== "/")
   if (!secondRoute) {
     return { ok: true, data: { skipped: true, reason: "No secondary static route available." } }

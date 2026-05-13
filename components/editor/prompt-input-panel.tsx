@@ -11,7 +11,6 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Zap, Send, Loader, AlertCircle } from "lucide-react"
-import { cn } from "@/lib/utils"
 import type { ModelOption } from "@/lib/types"
 import type { GenerationMode } from "@/lib/ai/code-parser"
 

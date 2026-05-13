@@ -1425,13 +1425,13 @@ function GenerationProgressCard({
 
 function getGenerationSteps(stage: GenerationProgress["stage"]) {
   const order: Array<{ stage: GenerationProgress["stage"]; label: string }> = [
-    { stage: "context", label: "Membaca konteks editor" },
-    { stage: "request", label: "Mengirim prompt dan membuat arah kerja" },
-    { stage: "provider", label: "Menulis file dengan Swift AI" },
-    { stage: "parse", label: "Membaca hasil output" },
-    { stage: "validate", label: "Validasi relevansi dan struktur" },
-    { stage: "save", label: "Menyimpan file valid" },
-    { stage: "preview", label: "Menyiapkan preview" },
+    { stage: "context", label: "Planning app intent" },
+    { stage: "request", label: "Selecting architecture or edit scope" },
+    { stage: "provider", label: "Applying targeted file slices" },
+    { stage: "parse", label: "Normalizing generated artifacts" },
+    { stage: "validate", label: "Validating build and runtime" },
+    { stage: "save", label: "Persisting validated project" },
+    { stage: "preview", label: "Launching runnable preview" },
   ]
   const currentIndex = order.findIndex((item) => item.stage === stage)
 

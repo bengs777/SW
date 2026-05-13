@@ -31,18 +31,14 @@ function getRpcUrl(chainId: number): string {
   throw new Error(`Unsupported chain ID: ${chainId}`)
 }
 
-function getChainName(chainId: number): string {
+function getTokenSymbol(chainId: number): string {
   if (chainId === 56 || chainId === env.bnbChainId) {
-    return "BNB Chain"
+    return "BNB"
   }
   if (chainId === 8453 || chainId === env.baseChainId) {
-    return "Base"
+    return "ETH"
   }
   throw new Error(`Unsupported chain ID: ${chainId}`)
-}
-
-function getTokenSymbol(chainId: number): string {
-  return "Native" // ETH for Base, BNB for BSC
 }
 
 async function getPriceInUsd(chainId: number): Promise<number> {

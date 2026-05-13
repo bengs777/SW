@@ -80,17 +80,25 @@ function buildClientWorkPlan(prompt: string, mode: CollaborationMode, language: 
   if (language === "en") {
     return [
       `Confirm direction: ${shortPrompt}`,
-      mode === "fix" ? "Find the smallest likely root cause before editing." : "Create the main visible page first.",
-      "Keep generated files aligned with the prompt keywords.",
-      "Validate structure before saving and opening preview.",
+      mode === "fix"
+        ? "Find the smallest likely root cause before editing."
+        : mode === "edit"
+          ? "Select the smallest file scope that can satisfy the edit."
+          : "Create the main visible page first.",
+      mode === "build" ? "Keep generated files aligned with the prompt keywords." : "Preserve stable files outside the edit scope.",
+      "Validate build and runtime before saving and opening preview.",
     ]
   }
 
   return [
     `Tangkap arah prompt: ${shortPrompt}`,
-    mode === "fix" ? "Cari akar masalah terkecil sebelum patch." : "Bangun halaman utama yang langsung terlihat.",
-    "Jaga file tetap sesuai keyword prompt.",
-    "Validasi struktur sebelum disimpan dan dipreview.",
+    mode === "fix"
+      ? "Cari akar masalah terkecil sebelum patch."
+      : mode === "edit"
+        ? "Pilih scope file terkecil yang cukup untuk edit ini."
+        : "Bangun halaman utama yang langsung terlihat.",
+    mode === "build" ? "Jaga file tetap sesuai keyword prompt." : "Pertahankan file stabil di luar scope edit.",
+    "Validasi build dan runtime sebelum disimpan dan dipreview.",
   ]
 }
 
@@ -118,6 +126,8 @@ function mapJobStageToProgressStage(
   }
 
   if (stage === "generating") return "provider"
+  if (stage === "planning") return "request"
+  if (stage === "scaffolding") return "provider"
   if (stage === "parsing" || stage === "normalizing") return "parse"
   if (stage === "validating" || stage === "typechecking" || stage === "linting" || stage === "repairing") return "validate"
   if (stage === "building" || stage === "compiling") return "preview"
@@ -149,6 +159,38 @@ const normalizeWorkspaceFiles = (files: GeneratedFile[]) =>
   }))
 
 const buildWorkspaceDraftKey = (projectId: string) => `${WORKSPACE_DRAFT_STORAGE_PREFIX}:${projectId}`
+
+function readWorkspaceDraftFromStorage(projectId: string): WorkspaceDraft | null {
+  if (typeof window === "undefined") {
+    return null
+  }
+
+  const rawDraft = window.localStorage.getItem(buildWorkspaceDraftKey(projectId))
+  if (!rawDraft) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(rawDraft) as Partial<WorkspaceDraft>
+    const files = Array.isArray(parsed.files) ? normalizeWorkspaceFiles(parsed.files) : []
+    const workspaceState = readWorkspaceStateFile(
+      parsed.workspaceState
+        ? buildWorkspaceStateFile(parsed.workspaceState as WorkspaceState)
+        : null
+    )
+
+    if (!workspaceState || files.length === 0) {
+      return null
+    }
+
+    return {
+      files,
+      workspaceState,
+    }
+  } catch {
+    return null
+  }
+}
 
 const buildWorkspaceFingerprint = (files: GeneratedFile[], lockedPaths: string[]) =>
   `${files
@@ -619,7 +661,7 @@ export default function EditorPage() {
             lockedPaths: [],
             activeFilePath: visibleServerFiles[0]?.path || null,
           })
-        const localDraft = readWorkspaceDraft()
+          const localDraft = readWorkspaceDraftFromStorage(projectId)
         const serverFingerprint = buildWorkspaceFingerprint(
           visibleServerFiles,
           serverWorkspaceState.lockedPaths
@@ -841,38 +883,6 @@ export default function EditorPage() {
       checkedAt: new Date().toISOString(),
     }
   }, [])
-
-  const readWorkspaceDraft = useCallback((): WorkspaceDraft | null => {
-    if (typeof window === "undefined") {
-      return null
-    }
-
-    const rawDraft = window.localStorage.getItem(buildWorkspaceDraftKey(projectId))
-    if (!rawDraft) {
-      return null
-    }
-
-    try {
-      const parsed = JSON.parse(rawDraft) as Partial<WorkspaceDraft>
-      const files = Array.isArray(parsed.files) ? normalizeWorkspaceFiles(parsed.files) : []
-      const workspaceState = readWorkspaceStateFile(
-        parsed.workspaceState
-          ? buildWorkspaceStateFile(parsed.workspaceState as WorkspaceState)
-          : null
-      )
-
-      if (!workspaceState || files.length === 0) {
-        return null
-      }
-
-      return {
-        files,
-        workspaceState,
-      }
-    } catch {
-      return null
-    }
-  }, [projectId])
 
   const persistWorkspaceDraft = useCallback((input: WorkspaceDraft) => {
     const fingerprint = buildWorkspaceFingerprint(

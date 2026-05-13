@@ -124,7 +124,6 @@ export function validateArtifactIntegrity(input: {
   const issues: ArtifactIntegrityIssue[] = []
   const manifest = buildArtifactManifest({ ...input, files })
   const dependencyMap = buildDependencyMap(files)
-  const fileByPath = new Map(files.map((file) => [file.path, file]))
 
   for (const duplicate of findDuplicatePaths(input.files)) {
     issues.push({

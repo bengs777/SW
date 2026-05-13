@@ -75,7 +75,6 @@ async function main() {
       const replacements = []
 
       while ((m = declRegex.exec(src)) !== null) {
-        const varName = m[1]
         const bracketPos = src.indexOf('[', m.index)
         if (bracketPos === -1) continue
         const endPos = findMatchingBracket(src, bracketPos)
@@ -140,12 +139,12 @@ async function main() {
       // Apply inline-array sanitizer first
       try {
         s = sanitizeInlineArrays(s)
-      } catch (e) {
+      } catch {
         // ignore
       }
       try {
         s = repairCommonObjectLiteralMistakes(s)
-      } catch (e) {}
+      } catch {}
       return s
     }
 
@@ -153,7 +152,7 @@ async function main() {
       let files
       try {
         files = JSON.parse(history.result)
-      } catch (e) {
+      } catch {
         continue
       }
 
