@@ -1,17 +1,18 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
-import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { enqueueGenerationTask } from "@/lib/queue/generation-queue"
 import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
+import { log } from "@/lib/logging"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
+import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/services/generation-job-request.service"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 
 export const runtime = "nodejs"
@@ -30,75 +31,8 @@ const CreateJobSchema = z.object({
   attachments: z.array(z.unknown()).optional().default([]),
 })
 
-function stableJson(value: unknown): string {
-  if (typeof value === "undefined") {
-    return "null"
-  }
-
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value) ?? "null"
-  }
-
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`
-  }
-
-  return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
-    .join(",")}}`
-}
-
-function byteSize(value: unknown) {
-  try {
-    return Buffer.byteLength(JSON.stringify(value), "utf8")
-  } catch {
-    return 0
-  }
-}
-
-function objectKeys(value: unknown) {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? Object.keys(value as Record<string, unknown>).sort()
-    : []
-}
-
-function previewContextAudit(value: unknown) {
-  const context = normalizePreviewContext(value)
-  const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null
-  const files = Array.isArray(raw?.files) ? raw.files : []
-  const previewFiles = Array.isArray(raw?.previewFiles) ? raw.previewFiles : []
-  const diagnostics = raw && Array.isArray(raw.diagnostics) ? raw.diagnostics : []
-  const selectedPaths = new Set<string>()
-
-  if (context?.activeFilePath) {
-    selectedPaths.add(context.activeFilePath)
-  }
-
-  for (const file of [...files, ...previewFiles]) {
-    if (file && typeof file === "object" && "isActive" in file && (file as { isActive?: unknown }).isActive) {
-      const path = (file as { path?: unknown }).path
-      if (typeof path === "string") {
-        selectedPaths.add(path)
-      }
-    }
-  }
-
-  return {
-    normalized: context,
-    hasPreviewContext: Boolean(value),
-    keys: objectKeys(value),
-    activeFile: context?.activeFilePath || null,
-    diagnosticsCount: diagnostics.length,
-    filesCount: files.length,
-    previewFilesCount: previewFiles.length,
-    selectedPathsCount: selectedPaths.size,
-    sizeBytes: byteSize(value ?? null),
-  }
-}
-
 function logStage(stage: string, success: boolean, detail?: Record<string, unknown>) {
-  console.info("[JOB_STAGE]", {
+  log("info", "generation_job_stage", {
     stage,
     success,
     ...(detail || {}),
@@ -106,7 +40,7 @@ function logStage(stage: string, success: boolean, detail?: Record<string, unkno
 }
 
 function logEarlyStage(stage: string, requestId: string, detail?: Record<string, unknown>) {
-  console.info("[JOB_STAGE]", {
+  log("info", "generation_job_stage", {
     stage,
     requestId,
     ...(detail || {}),
@@ -114,7 +48,7 @@ function logEarlyStage(stage: string, requestId: string, detail?: Record<string,
 }
 
 function logFatal(stage: string, error: unknown, detail?: Record<string, unknown>) {
-  console.error("[JOB_FATAL]", {
+  log("error", "generation_job_fatal", {
     stage,
     error: error instanceof Error ? error.message : String(error),
     stack: error instanceof Error ? error.stack : undefined,
@@ -136,26 +70,6 @@ function probableRootCause(stage: string, error?: unknown) {
   if (stage === "queue_enqueue") return "Redis/BullMQ generation queue is unavailable or rejected the job."
   if (stage === "response_return") return "Response serialization failed after job creation."
   return "Unknown route failure; inspect stack and previous stage logs."
-}
-
-function generationRequestHash(input: z.infer<typeof CreateJobSchema>) {
-  const now = new Date()
-  const dedupeBucket = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}T${String(now.getUTCHours()).padStart(2, "0")}`
-  const payload = {
-    dedupeBucket,
-    projectId: input.projectId,
-    prompt: input.prompt.replace(/\s+/g, " ").trim(),
-    model: input.model,
-    provider: input.provider || "swift",
-    promptLanguage: input.promptLanguage,
-    collaborationMode: input.collaborationMode || "",
-    previewContext: createHash("sha256").update(stableJson(input.previewContext || null)).digest("hex"),
-    attachments: input.attachments.map((attachment) =>
-      createHash("sha256").update(stableJson(attachment)).digest("hex")
-    ),
-  }
-
-  return createHash("sha256").update(stableJson(payload)).digest("hex")
 }
 
 export async function POST(request: NextRequest) {
@@ -181,7 +95,7 @@ export async function POST(request: NextRequest) {
       enqueueSuccess,
       probableRootCause: probableRootCause(failedStage || currentStage, error),
     }
-    console.info("[JOB_AUDIT_SUMMARY]", summary)
+    log("info", "generation_job_audit_summary", summary)
     return summary
   }
 

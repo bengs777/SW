@@ -30,10 +30,14 @@ async function warnMissingProductionEnv() {
     return
   }
 
-  const { getMissingProductionEnvVars } = await import("@/lib/env")
-  const missing = getMissingProductionEnvVars()
-  for (const key of missing) {
-    console.warn("[INSTRUMENTATION_WARNING]", `${key} missing`)
+  const { validateEnv } = await import("@/lib/env")
+  const report = validateEnv()
+  for (const issue of report.issues) {
+    console.warn("[INSTRUMENTATION_WARNING]", {
+      key: issue.key,
+      severity: issue.severity,
+      message: issue.message,
+    })
   }
 }
 

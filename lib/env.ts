@@ -1,3 +1,5 @@
+import { z } from "zod"
+
 const getEnv = (...keys: string[]) => {
   for (const key of keys) {
     const value = process.env[key]
@@ -74,6 +76,25 @@ const vercelTeamId = getEnv("VERCEL_TEAM_ID")
 const vercelDeployToken = getEnv("verpro_akses_token", "VERCEL_ACCESS_TOKEN")
 const hasRedisConfig = Boolean(redisUrl || (upstashRedisRestUrl && upstashRedisRestToken))
 const isServerRuntime = typeof window === "undefined"
+
+const urlSchema = z.string().url()
+const finiteNumberSchema = z.coerce.number().finite()
+
+export type EnvValidationSeverity = "error" | "warning"
+
+export type EnvValidationIssue = {
+  key: string
+  severity: EnvValidationSeverity
+  message: string
+}
+
+export type EnvValidationReport = {
+  ok: boolean
+  environment: string
+  isProduction: boolean
+  missing: string[]
+  issues: EnvValidationIssue[]
+}
 
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
@@ -158,16 +179,118 @@ export function getMissingProductionEnvVars() {
   return missing
 }
 
+function validateOptionalUrl(
+  issues: EnvValidationIssue[],
+  key: string,
+  value: string,
+  isProduction: boolean
+) {
+  if (!value) return
+
+  const parsed = urlSchema.safeParse(value)
+  if (parsed.success) return
+
+  issues.push({
+    key,
+    severity: isProduction ? "error" : "warning",
+    message: `${key} must be a valid absolute URL.`,
+  })
+}
+
+function validateOptionalNumber(
+  issues: EnvValidationIssue[],
+  key: string,
+  options: {
+    min?: number
+    integer?: boolean
+    isProduction: boolean
+  }
+) {
+  const raw = process.env[key]
+  if (!raw || !raw.trim()) return
+
+  const parsed = finiteNumberSchema.safeParse(raw)
+  if (!parsed.success) {
+    issues.push({
+      key,
+      severity: options.isProduction ? "error" : "warning",
+      message: `${key} must be a finite number.`,
+    })
+    return
+  }
+
+  if (typeof options.min === "number" && parsed.data < options.min) {
+    issues.push({
+      key,
+      severity: options.isProduction ? "error" : "warning",
+      message: `${key} must be greater than or equal to ${options.min}.`,
+    })
+  }
+
+  if (options.integer && !Number.isInteger(parsed.data)) {
+    issues.push({
+      key,
+      severity: options.isProduction ? "error" : "warning",
+      message: `${key} must be an integer.`,
+    })
+  }
+}
+
+export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationReport {
+  const environment = options.nodeEnv || env.nodeEnv
+  const isProduction = environment === "production"
+  const missing = isProduction ? getMissingProductionEnvVars() : []
+  const issues: EnvValidationIssue[] = missing.map((key) => ({
+    key,
+    severity: "error",
+    message: `${key} is required in production.`,
+  }))
+
+  validateOptionalUrl(issues, "NEXTAUTH_URL", env.nextAuthUrl, isProduction)
+  validateOptionalUrl(issues, "NEXT_PUBLIC_APP_URL / APP_URL / NEXTAUTH_URL / VERCEL_URL", env.appUrl, isProduction)
+  validateOptionalUrl(issues, "OPENROUTER_BASE_URL", env.openRouterBaseUrl, isProduction)
+  validateOptionalUrl(issues, "OPENROUTER_SITE_URL", env.openRouterSiteUrl, isProduction)
+  validateOptionalUrl(issues, "NEXT_PUBLIC_SUPABASE_URL", env.supabaseUrl, isProduction)
+  validateOptionalUrl(issues, "SANDBOX_SERVICE_URL", env.sandboxServiceUrl, isProduction)
+  validateOptionalUrl(issues, "SANDBOX_PUBLIC_BASE_URL", env.sandboxPublicBaseUrl, isProduction)
+
+  validateOptionalNumber(issues, "AI_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })
+  validateOptionalNumber(issues, "AI_MAX_RETRIES", { min: 0, integer: true, isProduction })
+  validateOptionalNumber(issues, "AI_MAX_OUTPUT_TOKENS", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "OPENROUTER_MAX_TOKENS", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "PROVIDER_STATUS_CACHE_TTL_MS", { min: 1_000, integer: true, isProduction })
+  validateOptionalNumber(issues, "AI_MAX_CONCURRENT_GENERATIONS", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "AI_QUEUE_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })
+  validateOptionalNumber(issues, "SWIFT_SANDBOX_BASE_PORT", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "NEXT_PUBLIC_BNB_CHAIN_ID", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "NEXT_PUBLIC_BASE_CHAIN_ID", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "CRYPTO_PAYMENT_TIMEOUT_MINUTES", { min: 1, integer: true, isProduction })
+  validateOptionalNumber(issues, "CRYPTO_PAYMENT_CONFIRMATIONS_REQUIRED", { min: 0, integer: true, isProduction })
+
+  return {
+    ok: !issues.some((issue) => issue.severity === "error"),
+    environment,
+    isProduction,
+    missing,
+    issues,
+  }
+}
+
+export const getEnvValidationReport = validateEnv
+
 export function assertProductionEnvReady() {
   if (!isServerRuntime || env.nodeEnv !== "production") {
     return
   }
 
-  const missing = getMissingProductionEnvVars()
+  const report = validateEnv()
 
-  if (missing.length > 0) {
+  if (!report.ok) {
     throw new Error(
-      `Missing required environment variables: ${missing.join(", ")}`
+      `Invalid production environment: ${report.issues
+        .filter((issue) => issue.severity === "error")
+        .map((issue) => issue.message)
+        .join(" ")}`
     )
   }
 }

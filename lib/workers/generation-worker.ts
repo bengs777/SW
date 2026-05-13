@@ -5,18 +5,13 @@ import {
   recordGenerationWorkerHeartbeat,
   type GenerationQueuePayload,
 } from "@/lib/queue/generation-queue"
-import { env } from "@/lib/env"
 import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
+import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
 import { captureException } from "@/lib/observability"
-
-const STALE_GENERATION_TIMEOUT_MS = Math.max(
-  env.aiQueueTimeoutMs,
-  Number(process.env.SWIFT_STALE_GENERATION_TIMEOUT_MS || 15 * 60_000)
-)
 
 async function loadProjectFiles(projectId: string) {
   const files = await prisma.projectFile.findMany({
@@ -37,78 +32,6 @@ async function loadProjectFiles(projectId: string) {
       | "md"
       | "env",
   }))
-}
-
-function parseBillingContext(contextJson: string | null) {
-  if (!contextJson) return null
-
-  try {
-    const context = JSON.parse(contextJson) as {
-      billing?: {
-        usageLogId?: unknown
-        reservedCost?: unknown
-      }
-    }
-    const usageLogId = context.billing?.usageLogId
-    const reservedCost = context.billing?.reservedCost
-
-    if (typeof usageLogId !== "string" || typeof reservedCost !== "number") {
-      return null
-    }
-
-    return { usageLogId, reservedCost }
-  } catch {
-    return null
-  }
-}
-
-async function reconcileStaleGenerationJobs() {
-  const cutoff = new Date(Date.now() - STALE_GENERATION_TIMEOUT_MS)
-  const staleJobs = await prisma.generationJob.findMany({
-    where: {
-      status: {
-        in: ["queued", "running", "cancelling"],
-      },
-      updatedAt: {
-        lt: cutoff,
-      },
-    },
-    take: 25,
-    orderBy: { updatedAt: "asc" },
-  })
-
-  for (const job of staleJobs) {
-    const message = `Generation timed out after worker recovery window (${Math.round(STALE_GENERATION_TIMEOUT_MS / 1000)}s)`
-    await GenerationJobService.markFailed(job.id, message, "timeout")
-    const billing = parseBillingContext(job.contextJson)
-    if (billing) {
-      await BillingService.refundReservation(
-        billing.usageLogId,
-        job.userId,
-        billing.reservedCost,
-        message
-      ).catch((error) => {
-        log("error", "Stale generation refund failed", {
-          jobId: job.id,
-          usageLogId: billing.usageLogId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-        captureException(error, {
-          jobId: job.id,
-          usageLogId: billing.usageLogId,
-          source: "stale_generation_reconcile",
-        })
-      })
-    }
-
-    log("warn", "Stale generation reconciled", {
-      jobId: job.id,
-      userId: job.userId,
-      projectId: job.projectId,
-      previousStatus: job.status,
-      updatedAt: job.updatedAt.toISOString(),
-    })
-  }
 }
 
 export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>) {

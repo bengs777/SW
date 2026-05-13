@@ -145,6 +145,7 @@ model Project {
   requestLogs RequestLog[]
   projectAssets ProjectAsset[]
   generationJobs GenerationJob[]
+  artifacts Artifact[]
 
   @@index([workspaceId])
   @@index([templateId])
@@ -199,6 +200,7 @@ model GenerationHistory {
   createdAt      DateTime @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  artifact Artifact?
 
   @@index([projectId])
   @@index([createdAt])
@@ -245,6 +247,7 @@ model GenerationJob {
   events  GenerationEvent[]
   attempts GenerationAttempt[]
   qualityMetric GenerationQualityMetric?
+  artifact Artifact?
 
   @@index([userId, createdAt])
   @@index([projectId, createdAt])
@@ -254,6 +257,47 @@ model GenerationJob {
   @@index([queueJobId])
   @@unique([userId, projectId, idempotencyKey])
   @@unique([userId, projectId, requestHash])
+}
+
+model Artifact {
+  id                  String   @id @default(cuid())
+  projectId           String
+  generationJobId     String?  @unique
+  generationHistoryId String?  @unique
+  source              String   @default("generation")
+  status              String   @default("candidate")
+  version             Int      @default(1)
+  prompt              String?
+  metadataJson        String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  project           Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  generationJob     GenerationJob?     @relation(fields: [generationJobId], references: [id], onDelete: SetNull)
+  generationHistory GenerationHistory? @relation(fields: [generationHistoryId], references: [id], onDelete: SetNull)
+  files             ArtifactFile[]
+
+  @@index([projectId, createdAt])
+  @@index([status, createdAt])
+  @@index([source])
+}
+
+model ArtifactFile {
+  id          String   @id @default(cuid())
+  artifactId  String
+  path        String
+  content     String
+  language    String   @default("typescript")
+  sizeBytes   Int      @default(0)
+  contentHash String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  artifact Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+
+  @@unique([artifactId, path])
+  @@index([artifactId])
+  @@index([contentHash])
 }
 
 model GenerationQualityMetric {
