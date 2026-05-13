@@ -34,56 +34,57 @@ async function loadProjectFiles(projectId: string) {
   }))
 }
 
-export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>) {
+export async function processGenerationPayload(payload: GenerationQueuePayload, queueJobId?: string | number) {
   const abortController = new AbortController()
-  const unregisterAbort = registerGenerationAbortController(job.data.jobId, abortController)
+  const unregisterAbort = registerGenerationAbortController(payload.jobId, abortController)
   const startedAt = Date.now()
+  const resolvedQueueJobId = queueJobId ? String(queueJobId) : payload.jobId
 
   try {
     log("info", "Generation worker started", {
-      jobId: job.data.jobId,
-      queueJobId: job.id,
-      projectId: job.data.projectId,
-      userId: job.data.userId,
-      requestHash: job.data.requestHash,
+      jobId: payload.jobId,
+      queueJobId: resolvedQueueJobId,
+      projectId: payload.projectId,
+      userId: payload.userId,
+      requestHash: payload.requestHash,
     })
 
     await executeGenerationJob(
       {
-        jobId: job.data.jobId,
-        projectId: job.data.projectId,
-        prompt: job.data.prompt,
-        selectedModel: job.data.model,
-        promptLanguage: job.data.promptLanguage,
-        collaborationMode: job.data.collaborationMode,
-        previewContext: job.data.previewContext,
-        persistenceKey: job.data.idempotencyKey || job.data.requestHash || job.data.jobId,
+        jobId: payload.jobId,
+        projectId: payload.projectId,
+        prompt: payload.prompt,
+        selectedModel: payload.model,
+        promptLanguage: payload.promptLanguage,
+        collaborationMode: payload.collaborationMode,
+        previewContext: payload.previewContext,
+        persistenceKey: payload.idempotencyKey || payload.requestHash || payload.jobId,
         signal: abortController.signal,
       },
       {
         loadProjectFiles,
       }
     )
-    await BillingService.markCompleted(job.data.usageLogId, {
-      provider: job.data.provider,
-      model: job.data.model,
+    await BillingService.markCompleted(payload.usageLogId, {
+      provider: payload.provider,
+      model: payload.model,
     }).catch((billingError) => {
       log("error", "Generation billing completion failed", {
-        jobId: job.data.jobId,
-        usageLogId: job.data.usageLogId,
+        jobId: payload.jobId,
+        usageLogId: payload.usageLogId,
         error: billingError instanceof Error ? billingError.message : String(billingError),
       })
       captureException(billingError, {
-        jobId: job.data.jobId,
-        usageLogId: job.data.usageLogId,
+        jobId: payload.jobId,
+        usageLogId: payload.usageLogId,
         source: "billing_completion",
       })
     })
     log("info", "Generation worker finished", {
-      jobId: job.data.jobId,
-      queueJobId: job.id,
-      projectId: job.data.projectId,
-      userId: job.data.userId,
+      jobId: payload.jobId,
+      queueJobId: resolvedQueueJobId,
+      projectId: payload.projectId,
+      userId: payload.userId,
       durationMs: Date.now() - startedAt,
     })
   } catch (error) {
@@ -92,35 +93,35 @@ export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>
       (error instanceof Error && error.message === "GENERATION_JOB_CANCELLED")
 
     await BillingService.refundReservation(
-      job.data.usageLogId,
-      job.data.userId,
-      job.data.reservedCost,
+      payload.usageLogId,
+      payload.userId,
+      payload.reservedCost,
       error instanceof Error ? error.message : String(error)
     ).catch((refundError) => {
       log("error", "Generation billing refund failed", {
-        jobId: job.data.jobId,
-        usageLogId: job.data.usageLogId,
+        jobId: payload.jobId,
+        usageLogId: payload.usageLogId,
         error: refundError instanceof Error ? refundError.message : String(refundError),
       })
       captureException(refundError, {
-        jobId: job.data.jobId,
-        usageLogId: job.data.usageLogId,
+        jobId: payload.jobId,
+        usageLogId: payload.usageLogId,
         source: "billing_refund",
       })
     })
 
     if (!isCancelled) {
       log("error", "Generation worker failed", {
-        jobId: job.data.jobId,
-        queueJobId: job.id,
+        jobId: payload.jobId,
+        queueJobId: resolvedQueueJobId,
         error: error instanceof Error ? error.message : String(error),
         durationMs: Date.now() - startedAt,
       })
       captureException(error, {
-        jobId: job.data.jobId,
-        queueJobId: job.id,
-        projectId: job.data.projectId,
-        userId: job.data.userId,
+        jobId: payload.jobId,
+        queueJobId: resolvedQueueJobId,
+        projectId: payload.projectId,
+        userId: payload.userId,
         source: "generation_worker",
       })
     }
@@ -128,6 +129,10 @@ export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>
   } finally {
     unregisterAbort()
   }
+}
+
+export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>) {
+  return processGenerationPayload(job.data, job.id)
 }
 
 export function startGenerationWorker() {

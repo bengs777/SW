@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server"
+import { after, NextRequest, NextResponse } from "next/server"
 import { randomUUID } from "node:crypto"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
@@ -8,6 +8,7 @@ import { env } from "@/lib/env"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { enqueueGenerationTask } from "@/lib/queue/generation-queue"
+import { processGenerationPayload } from "@/lib/workers/generation-worker"
 import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 import { BillingService } from "@/lib/services/billing.service"
@@ -16,6 +17,7 @@ import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/serv
 import { ModelConfigService } from "@/lib/services/model-config.service"
 
 export const runtime = "nodejs"
+export const maxDuration = 300
 const routeRuntime: string = runtime
 
 const CreateJobSchema = z.object({
@@ -83,6 +85,7 @@ export async function POST(request: NextRequest) {
   let hashCreated = false
   let dbCreated = false
   let enqueueSuccess = false
+  let fallbackScheduled = false
   let requestHash: string | null = null
   let body: unknown = null
 
@@ -93,6 +96,7 @@ export async function POST(request: NextRequest) {
       hashCreated,
       dbCreated,
       enqueueSuccess,
+      fallbackScheduled,
       probableRootCause: probableRootCause(failedStage || currentStage, error),
     }
     log("info", "generation_job_audit_summary", summary)
@@ -109,6 +113,7 @@ export async function POST(request: NextRequest) {
       hashCreated,
       dbCreated,
       enqueueSuccess,
+      fallbackScheduled,
     })
     const summary = auditSummary(error)
     return NextResponse.json(
@@ -453,31 +458,105 @@ export async function POST(request: NextRequest) {
       jobId,
       queueId,
     })
+    const generationPayload = {
+      jobId: job.id,
+      userId: user.id,
+      projectId: project.id,
+      prompt: parsed.data.prompt,
+      model: modelConfig.key,
+      provider: "swift",
+      usageLogId,
+      reservedCost: pricing.estimatedCost,
+      modelConfigId: modelConfig.id,
+      promptLanguage: parsed.data.promptLanguage,
+      collaborationMode: parsed.data.collaborationMode,
+      idempotencyKey: parsed.data.idempotencyKey,
+      requestHash,
+      previewContext: parsed.data.previewContext,
+      attachments: parsed.data.attachments,
+    }
+
     const queueJob = await enqueueGenerationTask(
-      {
-        jobId: job.id,
-        userId: user.id,
-        projectId: project.id,
-        prompt: parsed.data.prompt,
-        model: modelConfig.key,
-        provider: "swift",
-        usageLogId,
-        reservedCost: pricing.estimatedCost,
-        modelConfigId: modelConfig.id,
-        promptLanguage: parsed.data.promptLanguage,
-        collaborationMode: parsed.data.collaborationMode,
-        idempotencyKey: parsed.data.idempotencyKey,
-        requestHash,
-        previewContext: parsed.data.previewContext,
-        attachments: parsed.data.attachments,
-      },
+      generationPayload,
       {
         jobId: queueId,
       }
     )
 
     if (!queueJob) {
-      throw new Error("Generation queue is unavailable")
+      fallbackScheduled = true
+      const fallbackQueueJobId = `serverless:${job.id}`
+      await GenerationJobService.attachQueueJob(job.id, fallbackQueueJobId)
+      after(async () => {
+        log("warn", "generation_serverless_fallback_started", {
+          requestId,
+          jobId: job.id,
+          queueJobId: fallbackQueueJobId,
+          reason: "queue_unavailable",
+        })
+        try {
+          await processGenerationPayload(generationPayload, fallbackQueueJobId)
+          log("info", "generation_serverless_fallback_completed", {
+            requestId,
+            jobId: job.id,
+            queueJobId: fallbackQueueJobId,
+          })
+        } catch (error) {
+          log("error", "generation_serverless_fallback_failed", {
+            requestId,
+            jobId: job.id,
+            queueJobId: fallbackQueueJobId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })
+
+      const publicJob = await GenerationJobService.findById(job.id)
+      currentStage = "response_return"
+      console.warn("[QUEUE_FALLBACK_SCHEDULED]", {
+        stage: "queue_enqueue",
+        success: false,
+        fallbackScheduled,
+        requestId,
+        jobId,
+        queueJobId: fallbackQueueJobId,
+      })
+      console.info("[JOB_AUDIT_SUMMARY]", {
+        failedStage,
+        payloadSize,
+        hashCreated,
+        dbCreated,
+        enqueueSuccess,
+        fallbackScheduled,
+        probableRootCause: "queue_unavailable_serverless_fallback_scheduled",
+      })
+      logStage("response_return", true, {
+        requestId,
+        traceId,
+        jobId: job.id,
+        queueJobId: fallbackQueueJobId,
+        usageLogId,
+        projectId: project.id,
+        userId: user.id,
+        requestHash,
+        reservedCost: pricing.estimatedCost,
+        queueFallback: true,
+        durationMs: Date.now() - startedAt,
+      })
+
+      return NextResponse.json({
+        job: GenerationJobService.toPublicJob(publicJob || job),
+        idempotent: false,
+        requestId,
+        queueFallback: true,
+        billing: {
+          usageLogId,
+          reservedCost: pricing.estimatedCost,
+        },
+      }, {
+        status: 202,
+        headers: { "X-Request-Id": requestId },
+      })
     }
     enqueueSuccess = true
     console.info("[QUEUE_ENQUEUE]", {
@@ -498,6 +577,7 @@ export async function POST(request: NextRequest) {
       hashCreated,
       dbCreated,
       enqueueSuccess,
+      fallbackScheduled,
       probableRootCause: "none_job_created_and_enqueued",
     })
     logStage("response_return", true, {
@@ -577,6 +657,7 @@ export async function POST(request: NextRequest) {
           hashCreated,
           dbCreated,
           enqueueSuccess,
+          fallbackScheduled,
           probableRootCause: "database_unique_constraint_deduped_existing_job",
         })
         logStage("response_return", true, {
@@ -633,6 +714,7 @@ export async function POST(request: NextRequest) {
       hashCreated,
       dbCreated,
       enqueueSuccess,
+      fallbackScheduled,
     })
     const summary = auditSummary(error)
     return NextResponse.json(
