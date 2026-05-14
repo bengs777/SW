@@ -906,8 +906,43 @@ export async function executeGenerationJob(
       })
     }
 
-    for (let index = 0; index < plan.filePlan.length; index += 1) {
+    // RELIABILITY/COST: hard cap on slices and aggregate completion tokens.
+    // A single generation must never exceed these regardless of how many
+    // files the planner suggested. Prevents runaway token cost from a
+    // misclassified large-app prompt.
+    const MAX_SLICES_PER_JOB = Math.max(1, Number(process.env.SWIFT_MAX_SLICES_PER_JOB || 6))
+    const MAX_AGGREGATE_COMPLETION_TOKENS = Math.max(
+      4_000,
+      Number(process.env.SWIFT_MAX_COMPLETION_TOKENS_PER_JOB || 30_000)
+    )
+    const sliceLimit = Math.min(plan.filePlan.length, MAX_SLICES_PER_JOB)
+    if (sliceLimit < plan.filePlan.length) {
+      log("warn", "generation_slice_cap_applied", {
+        jobId: input.jobId,
+        plannedSlices: plan.filePlan.length,
+        sliceLimit,
+        cap: MAX_SLICES_PER_JOB,
+      })
+    }
+
+    for (let index = 0; index < sliceLimit; index += 1) {
       await GenerationJobService.assertNotCancelled(input.jobId)
+
+      // Abort early if aggregate token budget exceeded — this is a cost
+      // circuit breaker. Refund happens automatically because the worker
+      // catches and refunds on any thrown error.
+      if (completionTokens >= MAX_AGGREGATE_COMPLETION_TOKENS) {
+        log("error", "generation_token_budget_exceeded", {
+          jobId: input.jobId,
+          completionTokens,
+          cap: MAX_AGGREGATE_COMPLETION_TOKENS,
+          sliceIndex: index,
+        })
+        throw new Error(
+          `Generation aborted: aggregate completion tokens ${completionTokens} exceeded cap ${MAX_AGGREGATE_COMPLETION_TOKENS}`
+        )
+      }
+
       const target = plan.filePlan[index]
       const providerStartedAt = performance.now()
       const response = await runProviderAttempt({

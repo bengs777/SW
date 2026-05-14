@@ -1,6 +1,7 @@
-import IORedis from "ioredis"
 import { env } from "@/lib/env"
 import { USER_FRIENDLY_QUEUE_OVERLOAD_ERROR, getSwiftTierConfig, type SwiftTierKey } from "@/lib/ai/swift-tiers"
+
+type IORedisClient = import("ioredis").default
 
 type QueueLeaseInput = {
   userId: string
@@ -29,7 +30,7 @@ export class SwiftQueueError extends Error {
 
 const memoryActive = new Map<string, number>()
 const memoryDuplicates = new Set<string>()
-let redisClient: IORedis | null = null
+let redisClient: IORedisClient | null = null
 
 function getRedis() {
   const hasRedisConfig =
@@ -55,6 +56,9 @@ function getRedis() {
   }
 
   if (!redisClient) {
+    // Dynamic import resolved at first call — avoids pulling ioredis into the
+    // webpack bundle graph during static analysis / build.
+    const IORedis = require("ioredis") as typeof import("ioredis").default
     redisClient = new IORedis(env.redisUrl, {
       maxRetriesPerRequest: 2,
       enableReadyCheck: true,

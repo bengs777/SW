@@ -4,6 +4,7 @@ import { env } from "@/lib/env"
 import { BillingService } from "@/lib/services/billing.service"
 import { PakasirService } from "@/lib/services/pakasir.service"
 import { verifyWebhookSignature, verifyWebhookSourceIp } from "@/lib/security/webhook-signature"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 type PakasirWebhookBody = Record<string, unknown> & {
   order_id?: string
@@ -84,6 +85,17 @@ function pendingVerificationStatus(status: string) {
 }
 
 export async function POST(request: NextRequest) {
+  // --- Defense in depth: per-IP rate limit ---
+  // Even with IP allowlist + signature, cap inbound to prevent a compromised
+  // signature secret from being used as an unbounded write amplifier.
+  const ipHeader = request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip") || "unknown"
+  const ip = ipHeader.split(",")[0].trim() || "unknown"
+  try {
+    await enforceRouteRateLimit(`pakasir-webhook:${ip}`, { maxPerMinute: 60, maxPerHour: 1_200 })
+  } catch {
+    return NextResponse.json({ error: "Too many webhook deliveries" }, { status: 429 })
+  }
+
   // --- Security: IP allowlist check ---
   if (!verifyWebhookSourceIp(request)) {
     console.warn("[webhook-security] Rejected webhook from unauthorized IP")

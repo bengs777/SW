@@ -54,11 +54,23 @@ const nextConfig = {
   serverExternalPackages: ['bullmq', 'ioredis'],
 }
 
-module.exports = withSentryConfig(nextConfig, {
-  org: process.env.SENTRY_ORG,
-  project: process.env.SENTRY_PROJECT,
-  authToken: process.env.SENTRY_AUTH_TOKEN,
-  silent: true,
-  widenClientFileUpload: true,
-  hideSourceMaps: true,
-})
+// Only apply Sentry build plugin when Sentry is actually configured.
+// When unconfigured, withSentryConfig is a no-op wrapper but this makes intent explicit.
+const hasSentryBuildConfig = Boolean(
+  process.env.SENTRY_ORG &&
+  process.env.SENTRY_PROJECT &&
+  process.env.SENTRY_AUTH_TOKEN
+)
+
+if (hasSentryBuildConfig) {
+  module.exports = withSentryConfig(nextConfig, {
+    org: process.env.SENTRY_ORG,
+    project: process.env.SENTRY_PROJECT,
+    authToken: process.env.SENTRY_AUTH_TOKEN,
+    silent: true,
+    widenClientFileUpload: true,
+    hideSourceMaps: true,
+  })
+} else {
+  module.exports = nextConfig
+}
