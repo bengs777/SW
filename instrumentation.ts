@@ -26,7 +26,13 @@ async function runFailOpen(stage: string, task: () => Promise<void> | void) {
 }
 
 async function warnMissingProductionEnv() {
-  if (typeof window !== "undefined" || process.env.NODE_ENV !== "production") {
+  // Skip during build phase — env vars won't be available until runtime.
+  // NEXT_PHASE is "phase-production-build" during `next build`.
+  if (
+    typeof window !== "undefined" ||
+    process.env.NODE_ENV !== "production" ||
+    process.env.NEXT_PHASE === "phase-production-build"
+  ) {
     return
   }
 
@@ -64,7 +70,12 @@ export async function register() {
       await import("./sentry.edge.config")
     }
 
-    if (!process.env.SENTRY_DSN && !process.env.NEXT_PUBLIC_SENTRY_DSN) {
+    // Only warn about missing DSN at runtime, not during build
+    if (
+      process.env.NEXT_PHASE !== "phase-production-build" &&
+      !process.env.SENTRY_DSN &&
+      !process.env.NEXT_PUBLIC_SENTRY_DSN
+    ) {
       console.warn("[INSTRUMENTATION_WARNING]", "SENTRY_DSN missing")
     }
   })
@@ -85,8 +96,9 @@ export async function register() {
   // Initialize AI warmup (keep-alive socket + Redis cache) so the AI subsystem
   // is always in standby and ready to respond fast on first request.
   // Only runs in nodejs runtime (not edge) since it uses keep-alive HTTP agents.
+  // Skip during build phase — no runtime services available.
   await runFailOpen("ai_warmup", async () => {
-    if (process.env.NEXT_RUNTIME === "nodejs") {
+    if (process.env.NEXT_RUNTIME === "nodejs" && process.env.NEXT_PHASE !== "phase-production-build") {
       const { initializeAiWarmup } = await import("@/lib/ai/warmup")
       initializeAiWarmup()
     }
