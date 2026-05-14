@@ -6,6 +6,9 @@ const { loadEnvConfig } = require("@next/env")
 loadEnvConfig(process.cwd())
 const env = { ...process.env }
 env.NODE_ENV = "production"
+// Signal to instrumentation.ts that we are in the build phase so it skips
+// runtime-only checks (missing Redis, Vercel tokens, Sentry DSN, etc.)
+env.NEXT_PHASE = "phase-production-build"
 if (!process.env.DATABASE_URL || !process.env.DATABASE_URL.trim()) {
   throw new Error("[vercel-build] DATABASE_URL is required for production builds.")
 }
