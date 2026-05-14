@@ -1,5 +1,6 @@
 import { env } from "@/lib/env"
 import { SwiftAiError, SwiftAiTimeoutError, reasonFromStatus, redactAiSecret } from "@/lib/ai/errors"
+import { getAgentForUrl } from "@/lib/ai/connection-pool"
 
 type ChatMessage = {
   role: "system" | "user" | "assistant"
@@ -138,10 +139,17 @@ async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean
   }
 
   try {
-    const response = await fetch(`${getOpenRouterBaseUrl()}/chat/completions`, {
+    const url = `${getOpenRouterBaseUrl()}/chat/completions`
+    // Keep-alive agent for connection reuse — reduces TCP/TLS handshake overhead.
+    // Note: undici (default Node 18+ fetch) ignores the agent option and uses
+    // its own pool. We pass it anyway for older runtimes / future compatibility.
+    const agent = getAgentForUrl(url)
+    const response = await fetch(url, {
       method: "POST",
       headers: buildOpenRouterHeaders(),
       signal: controller.signal,
+      // @ts-expect-error - agent is honored by node-fetch / older runtimes; ignored by undici
+      agent,
       body: JSON.stringify({
         model: input.model,
         messages: input.messages,

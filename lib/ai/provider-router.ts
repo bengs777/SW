@@ -14,6 +14,8 @@ import { createOpenRouterChatCompletion } from "@/lib/ai/openrouter-client"
 import { SwiftAiError, redactAiSecret } from "@/lib/ai/errors"
 import { getHealthSnapshot, isModelTemporarilyUnavailable, markModelFailure, markModelSuccess } from "@/lib/ai/provider-health"
 import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
+import { buildCacheKey, getCachedResponse, setCachedResponse } from "@/lib/ai/response-cache"
+import { buildDomainAnchorDirective } from "@/lib/ai/prompt-guard"
 import { log } from "@/lib/logging"
 
 export type ProviderName = string
@@ -176,6 +178,52 @@ export class ProviderRouter {
       throw new SwiftProviderFailureError(tier.key, attempts)
     }
 
+    // --- Inject domain anchor for files mode to keep AI directionally accurate ---
+    const groundedPrompt =
+      mode === "files" ? `${prompt}${buildDomainAnchorDirective(prompt, promptLanguage)}` : prompt
+
+    // --- Cache lookup for cacheable modes (chat, inspect) ---
+    // Files mode is NEVER cached because outputs depend on per-request project state.
+    const cacheable = mode === "chat" || mode === "inspect"
+    const systemPrompt = this.getSystemPrompt(mode, promptLanguage)
+    const temperature = this.getTemperature(mode, temperatureOverride)
+    const primaryModelId = tier.targets[0]?.modelId || tier.key
+    const cacheKey = cacheable
+      ? buildCacheKey({
+          mode,
+          modelId: primaryModelId,
+          prompt: groundedPrompt,
+          systemPrompt,
+          temperature,
+        })
+      : null
+
+    if (cacheKey) {
+      const cached = await getCachedResponse(cacheKey)
+      if (cached) {
+        attempts.push({
+          provider: "swift",
+          modelName: tier.key,
+          status: "success",
+          latencyMs: 0,
+        })
+        log("info", "ai_cache_hit", {
+          mode,
+          tier: tier.key,
+          cachedAt: cached.cachedAt,
+        })
+        return {
+          message: cached.message,
+          providerUsed: "swift",
+          modelUsed: tier.key,
+          selectedTier: tier.key,
+          usedFallback: false,
+          attempts,
+          tokenUsage: cached.tokenUsage,
+        }
+      }
+    }
+
     let totalAttempts = 0
     let firstError: string | undefined
 
@@ -203,7 +251,7 @@ export class ProviderRouter {
 
         try {
           const result = await this.callOpenRouterTarget(target, {
-            prompt,
+            prompt: groundedPrompt,
             mode,
             promptLanguage,
             tier,
@@ -219,6 +267,14 @@ export class ProviderRouter {
             requestId: result.requestId,
           })
           markModelSuccess(target.modelId, latencyMs)
+
+          // Persist to cache (fire and forget, never blocks response)
+          if (cacheKey) {
+            void setCachedResponse(cacheKey, mode as "chat" | "inspect", {
+              message: result.message,
+              tokenUsage: result.tokenUsage,
+            }).catch(() => null)
+          }
 
           return {
             message: result.message,

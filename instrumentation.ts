@@ -81,4 +81,14 @@ export async function register() {
       }
     }
   })
+
+  // Initialize AI warmup (keep-alive socket + Redis cache) so the AI subsystem
+  // is always in standby and ready to respond fast on first request.
+  // Only runs in nodejs runtime (not edge) since it uses keep-alive HTTP agents.
+  await runFailOpen("ai_warmup", async () => {
+    if (process.env.NEXT_RUNTIME === "nodejs") {
+      const { initializeAiWarmup } = await import("@/lib/ai/warmup")
+      initializeAiWarmup()
+    }
+  })
 }
