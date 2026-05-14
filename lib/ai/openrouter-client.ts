@@ -125,9 +125,16 @@ export async function* streamOpenRouterChatCompletion(
   }
 }
 
+// RELIABILITY: hard wall-clock fudge above the AbortController timeout.
+// undici DNS/TLS phases have been observed to outlast AbortController in
+// production (root cause of 540s+ latencies in Vercel logs even though the
+// per-call timeout was 95s).
+const WALL_CLOCK_FUDGE_MS = 2_000
+
 async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs)
+  if (timeout.unref) timeout.unref()
   const upstreamAbort = () => controller.abort()
 
   if (input.signal) {
@@ -138,12 +145,25 @@ async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean
     }
   }
 
-  try {
-    const url = `${getOpenRouterBaseUrl()}/chat/completions`
-    // Keep-alive agent for connection reuse — reduces TCP/TLS handshake overhead.
-    // Note: undici (default Node 18+ fetch) ignores the agent option and uses
-    // its own pool. We pass it anyway for older runtimes / future compatibility.
-    const agent = getAgentForUrl(url)
+  // Wall-clock guard. We race the actual fetch against a hard timer that fires
+  // slightly after the abort timer. If the abort is honored we never see this
+  // promise; if undici stalls past abort we get a deterministic timeout error.
+  let wallClockTimer: NodeJS.Timeout | null = null
+  const wallClockGuard = new Promise<never>((_, reject) => {
+    wallClockTimer = setTimeout(() => {
+      controller.abort()
+      reject(new SwiftAiTimeoutError(input.timeoutMs, input.model))
+    }, input.timeoutMs + WALL_CLOCK_FUDGE_MS)
+    if (wallClockTimer.unref) wallClockTimer.unref()
+  })
+
+  const url = `${getOpenRouterBaseUrl()}/chat/completions`
+  // Keep-alive agent for connection reuse — reduces TCP/TLS handshake overhead.
+  // Note: undici (default Node 18+ fetch) ignores the agent option and uses
+  // its own pool. We pass it anyway for older runtimes / future compatibility.
+  const agent = getAgentForUrl(url)
+
+  const fetchPromise = (async () => {
     const response = await fetch(url, {
       method: "POST",
       headers: buildOpenRouterHeaders(),
@@ -167,6 +187,10 @@ async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean
     }
 
     return response
+  })()
+
+  try {
+    return await Promise.race([fetchPromise, wallClockGuard])
   } catch (error) {
     if (error instanceof SwiftAiError) throw error
 
@@ -180,6 +204,7 @@ async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean
     })
   } finally {
     clearTimeout(timeout)
+    if (wallClockTimer) clearTimeout(wallClockTimer)
     input.signal?.removeEventListener("abort", upstreamAbort)
   }
 }

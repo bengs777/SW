@@ -38,11 +38,31 @@ async function loadProjectFiles(projectId: string) {
   }))
 }
 
+// RELIABILITY: hard deadline for a single generation job execution.
+// Ensures the lambda never runs longer than this even if every probe inside
+// passes its own timeout. Aligned to maxDuration (300s) on the route minus a
+// 10s safety budget for billing reconciliation + final logging.
+const JOB_EXECUTION_DEADLINE_MS = 290_000
+
 export async function processGenerationPayload(payload: GenerationQueuePayload, queueJobId?: string | number) {
   const abortController = new AbortController()
   const unregisterAbort = registerGenerationAbortController(payload.jobId, abortController)
   const startedAt = Date.now()
   const resolvedQueueJobId = queueJobId ? String(queueJobId) : payload.jobId
+
+  // Outer deadline — if the job runs past its budget for ANY reason
+  // (orchestrator loop, hung probe, stuck DB call), abort the controller so
+  // every downstream call sees the abort and unwinds. The .unref() means the
+  // timer never keeps the worker process alive on its own.
+  const deadlineTimer = setTimeout(() => {
+    log("error", "generation_worker_deadline_exceeded", {
+      jobId: payload.jobId,
+      queueJobId: resolvedQueueJobId,
+      deadlineMs: JOB_EXECUTION_DEADLINE_MS,
+    })
+    abortController.abort(new Error("GENERATION_JOB_DEADLINE_EXCEEDED"))
+  }, JOB_EXECUTION_DEADLINE_MS)
+  if (deadlineTimer.unref) deadlineTimer.unref()
 
   // RELIABILITY: Idempotency guard. If BullMQ re-delivers a job whose DB
   // record is already in a terminal state (completed/failed/cancelled), we
@@ -58,6 +78,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         queueJobId: resolvedQueueJobId,
         status: existing.status,
       })
+      clearTimeout(deadlineTimer)
       unregisterAbort()
       return
     }
@@ -157,6 +178,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     }
     throw error
   } finally {
+    clearTimeout(deadlineTimer)
     unregisterAbort()
   }
 }

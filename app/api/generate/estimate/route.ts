@@ -5,6 +5,7 @@ import { ModelConfigService } from "@/lib/services/model-config.service"
 import type { PromptAttachment } from "@/lib/types"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 import { z } from "zod"
 
 const MAX_PROMPT_LENGTH = 12000
@@ -40,6 +41,13 @@ export async function POST(request: NextRequest) {
 
   if (!email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
+  }
+
+  // Rate limit: cheap probe but adds DB+routing cost; cap at 60/min/user
+  try {
+    await enforceRouteRateLimit(`estimate:${email}`, { maxPerMinute: 60, maxPerHour: 1_200 })
+  } catch {
+    return NextResponse.json({ error: "Too many estimate requests. Please slow down." }, { status: 429 })
   }
 
   try {

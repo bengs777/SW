@@ -8,6 +8,7 @@ import {
   detectAttachmentKind,
   uploadProjectAssetToStorage,
 } from "@/lib/supabase/storage"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 import type { PromptAttachment, StoredProjectAsset } from "@/lib/types"
 
 export const runtime = "nodejs"
@@ -60,6 +61,14 @@ export async function POST(
 
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Rate limit: file uploads hit Supabase Storage + Prisma writes; cap to
+  // prevent storage-quota DOS / cost amplification.
+  try {
+    await enforceRouteRateLimit(`attachments:${userId}`, { maxPerMinute: 20, maxPerHour: 200 })
+  } catch {
+    return NextResponse.json({ error: "Too many uploads. Please slow down." }, { status: 429 })
   }
 
   try {
