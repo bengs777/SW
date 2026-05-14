@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import { BillingService } from "@/lib/services/billing.service"
 import { PakasirService } from "@/lib/services/pakasir.service"
+import { verifyWebhookSignature, verifyWebhookSourceIp } from "@/lib/security/webhook-signature"
 
 type PakasirWebhookBody = Record<string, unknown> & {
   order_id?: string
@@ -83,7 +84,29 @@ function pendingVerificationStatus(status: string) {
 }
 
 export async function POST(request: NextRequest) {
+  // --- Security: IP allowlist check ---
+  if (!verifyWebhookSourceIp(request)) {
+    console.warn("[webhook-security] Rejected webhook from unauthorized IP")
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+
   const rawBody = await request.text()
+
+  // --- Security: Request size guard (max 1MB for webhooks) ---
+  if (rawBody.length > 1_048_576) {
+    return NextResponse.json({ error: "Payload too large" }, { status: 413 })
+  }
+
+  // --- Security: Signature verification ---
+  const signatureResult = verifyWebhookSignature(rawBody, request.headers)
+  if (!signatureResult.verified) {
+    console.warn("[webhook-security] Signature verification failed:", signatureResult.reason)
+    return NextResponse.json({ error: "Invalid webhook signature" }, { status: 401 })
+  }
+
+  if (signatureResult.method === "api_confirmation") {
+    console.info("[webhook-security] No signature header; will verify via API confirmation before crediting")
+  }
 
   let body: PakasirWebhookBody
   try {

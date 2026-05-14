@@ -96,7 +96,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    enforceUserRateLimit(`preview-error:${userId}`)
+    await enforceUserRateLimit(`preview-error:${userId}`)
   } catch (error) {
     log("warn", "preview-error rate limited", { userId })
     return NextResponse.json({ error: getErrorMessage(error) }, { status: 429 })

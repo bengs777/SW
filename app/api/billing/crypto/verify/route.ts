@@ -3,6 +3,7 @@ import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { CryptoPaymentService } from "@/lib/services/crypto-payment.service"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 const VerifySchema = z.object({
   topUpOrderId: z.string().cuid(),
@@ -13,6 +14,13 @@ export async function POST(request: NextRequest) {
   const session = await auth()
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Rate limit: max 10 verification attempts per minute per user
+  try {
+    await enforceRouteRateLimit(`crypto-verify:${session.user.email}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many verification attempts. Please wait." }, { status: 429 })
   }
 
   try {

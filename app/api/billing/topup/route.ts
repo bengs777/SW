@@ -9,6 +9,7 @@ import { prisma } from "@/lib/db/client"
 import { BillingService } from "@/lib/services/billing.service"
 import { PakasirService } from "@/lib/services/pakasir.service"
 import { UserService } from "@/lib/services/user.service"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 const TOPUP_MINIMUM = TOPUP_MINIMUM_IDR
 const TOPUP_MAXIMUM = 50_000_000
@@ -40,6 +41,13 @@ export async function POST(request: NextRequest) {
   const session = await auth()
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Rate limit: max 5 topup attempts per minute to prevent abuse
+  try {
+    await enforceRouteRateLimit(`topup:${session.user.email}`, { maxPerMinute: 5, maxPerHour: 30 })
+  } catch {
+    return NextResponse.json({ error: "Too many top-up requests. Please wait." }, { status: 429 })
   }
 
   try {

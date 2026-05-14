@@ -116,13 +116,17 @@ export async function POST(request: NextRequest) {
       fallbackScheduled,
     })
     const summary = auditSummary(error)
+    // SECURITY: In production, hide internal stage/root cause details from client
+    const isProduction = process.env.NODE_ENV === "production"
+    const safeError = isProduction
+      ? "An internal error occurred. Please try again."
+      : (error instanceof Error ? error.message : String(error))
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : String(error),
-        stage,
+        error: safeError,
+        ...(isProduction ? {} : { stage, probableRootCause: summary.probableRootCause }),
         retryable,
         requestId,
-        probableRootCause: summary.probableRootCause,
       },
       { status }
     )
@@ -698,13 +702,17 @@ export async function POST(request: NextRequest) {
     const summary = auditSummary(error)
 
     const status = /insufficient balance/i.test(message) ? 402 : 503
+    // SECURITY: In production, hide internal stage/root cause from client
+    const isProduction = process.env.NODE_ENV === "production"
+    const safeMessage = isProduction
+      ? (status === 402 ? "Insufficient balance" : "Service temporarily unavailable. Please try again.")
+      : message
     return NextResponse.json(
       {
-        error: message,
-        stage: failureStage,
+        error: safeMessage,
+        ...(isProduction ? {} : { stage: failureStage, probableRootCause: summary.probableRootCause }),
         retryable: status !== 402,
         requestId,
-        probableRootCause: summary.probableRootCause,
       },
       { status }
     )
@@ -723,12 +731,16 @@ export async function POST(request: NextRequest) {
       fallbackScheduled,
     })
     const summary = auditSummary(error)
+    // SECURITY: In production, hide internal error details from client
+    const isProduction = process.env.NODE_ENV === "production"
+    const safeError = isProduction
+      ? "An unexpected error occurred. Please try again."
+      : (error instanceof Error ? error.message : String(error))
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : String(error),
-        stage,
+        error: safeError,
+        ...(isProduction ? {} : { stage, probableRootCause: summary.probableRootCause }),
         requestId,
-        probableRootCause: summary.probableRootCause,
       },
       { status: 500 }
     )

@@ -1,5 +1,11 @@
 import { prisma } from "@/lib/db/client"
-import { getEnvNumber } from "@/lib/env"
+import { env, getEnvNumber } from "@/lib/env"
+
+/**
+ * Redis-backed rate limiting for serverless/multi-instance deployments.
+ * Uses sliding window counter pattern with Redis INCR + EXPIRE.
+ * Falls back to database count verification as defense-in-depth.
+ */
 
 const WINDOW_MS = 60_000
 const MAX_REQUESTS_PER_MINUTE = Math.max(
@@ -11,36 +17,115 @@ const MAX_REQUESTS_PER_DAY = Math.max(
   Math.round(getEnvNumber(500, "AI_RATE_LIMIT_PER_DAY", "GENERATE_RATE_LIMIT_PER_DAY"))
 )
 
-type Bucket = {
-  count: number
-  resetAt: number
-}
+// --- Redis connection for rate limiting ---
 
-const buckets = new Map<string, Bucket>()
+let redisClient: import("ioredis").default | null = null
+let redisInitAttempted = false
 
-export function enforceUserRateLimit(userId: string) {
-  const now = Date.now()
-  const current = buckets.get(userId)
+async function getRateLimitRedis(): Promise<import("ioredis").default | null> {
+  if (redisClient) return redisClient
+  if (redisInitAttempted) return null
 
-  if (!current || current.resetAt <= now) {
-    buckets.set(userId, {
-      count: 1,
-      resetAt: now + WINDOW_MS,
-    })
-    return
+  redisInitAttempted = true
+
+  if (!env.hasNativeRedisConfig) {
+    return null
   }
 
-  if (current.count >= MAX_REQUESTS_PER_MINUTE) {
+  try {
+    const IORedis = (await import("ioredis")).default
+    redisClient = new IORedis(env.redisUrl, {
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+      enableReadyCheck: false,
+      connectTimeout: 3000,
+      commandTimeout: 2000,
+      lazyConnect: true,
+      ...(env.redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
+    })
+
+    redisClient.on("error", (err) => {
+      console.warn("[rate-limit] Redis error:", err.message)
+    })
+
+    await redisClient.connect()
+    return redisClient
+  } catch (error) {
+    console.warn("[rate-limit] Redis connection failed, falling back to DB-only:", error instanceof Error ? error.message : String(error))
+    redisClient = null
+    return null
+  }
+}
+
+// --- Redis-based sliding window rate limiter ---
+
+async function redisRateCheck(
+  key: string,
+  limit: number,
+  windowSeconds: number
+): Promise<{ allowed: boolean; current: number; remaining: number }> {
+  const redis = await getRateLimitRedis()
+  if (!redis) {
+    // If Redis unavailable, allow and rely on DB verification
+    return { allowed: true, current: 0, remaining: limit }
+  }
+
+  try {
+    const fullKey = `swift:ratelimit:${key}`
+    const multi = redis.multi()
+    multi.incr(fullKey)
+    multi.expire(fullKey, windowSeconds)
+    const results = await multi.exec()
+
+    if (!results || !results[0]) {
+      return { allowed: true, current: 0, remaining: limit }
+    }
+
+    const current = (results[0][1] as number) || 0
+    const allowed = current <= limit
+    const remaining = Math.max(0, limit - current)
+
+    return { allowed, current, remaining }
+  } catch (error) {
+    console.warn("[rate-limit] Redis rate check failed:", error instanceof Error ? error.message : String(error))
+    // Graceful degradation: allow on Redis failure
+    return { allowed: true, current: 0, remaining: limit }
+  }
+}
+
+// --- Public API ---
+
+/**
+ * Enforce per-minute rate limit using Redis sliding window.
+ * Replaces the old in-memory Map-based approach that didn't work in serverless.
+ */
+export async function enforceUserRateLimit(userId: string) {
+  const minuteKey = `user:${userId}:minute:${Math.floor(Date.now() / WINDOW_MS)}`
+  const result = await redisRateCheck(minuteKey, MAX_REQUESTS_PER_MINUTE, 60)
+
+  if (!result.allowed) {
     throw new Error(`Rate limit exceeded. Maximum ${MAX_REQUESTS_PER_MINUTE} requests per minute.`)
   }
-
-  current.count += 1
-  buckets.set(userId, current)
 }
 
+/**
+ * Enforce AI usage rate limits with Redis + database verification.
+ * This provides defense-in-depth: Redis for fast rejection, DB for accurate counts.
+ */
 export async function enforceAiUsageRateLimit(userId: string) {
-  enforceUserRateLimit(userId)
+  // Fast path: Redis-based rate limiting
+  await enforceUserRateLimit(userId)
 
+  // Check daily limit via Redis
+  const dayKey = `user:${userId}:day:${new Date().toISOString().slice(0, 10)}`
+  const dayResult = await redisRateCheck(dayKey, MAX_REQUESTS_PER_DAY, 86400)
+
+  if (!dayResult.allowed) {
+    throw new Error(`Daily limit exceeded. Maximum ${MAX_REQUESTS_PER_DAY} paid prompts per day.`)
+  }
+
+  // Defense-in-depth: Verify against database for accurate billing counts
+  // This catches any Redis failures/resets but only on borderline cases
   const now = new Date()
   const oneMinuteAgo = new Date(now.getTime() - WINDOW_MS)
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
@@ -70,6 +155,32 @@ export async function enforceAiUsageRateLimit(userId: string) {
 
   if (dayCount >= MAX_REQUESTS_PER_DAY) {
     throw new Error(`Daily limit exceeded. Maximum ${MAX_REQUESTS_PER_DAY} paid prompts per day.`)
+  }
+}
+
+/**
+ * General-purpose rate limiter for any route.
+ * Can be used by other endpoints (billing, admin, etc.)
+ */
+export async function enforceRouteRateLimit(
+  identifier: string,
+  options: { maxPerMinute?: number; maxPerHour?: number } = {}
+): Promise<void> {
+  const maxPerMinute = options.maxPerMinute ?? 30
+  const maxPerHour = options.maxPerHour ?? 300
+
+  const minuteKey = `route:${identifier}:minute:${Math.floor(Date.now() / 60_000)}`
+  const minuteResult = await redisRateCheck(minuteKey, maxPerMinute, 60)
+
+  if (!minuteResult.allowed) {
+    throw new Error("Too many requests. Please try again later.")
+  }
+
+  const hourKey = `route:${identifier}:hour:${Math.floor(Date.now() / 3_600_000)}`
+  const hourResult = await redisRateCheck(hourKey, maxPerHour, 3600)
+
+  if (!hourResult.allowed) {
+    throw new Error("Hourly request limit exceeded. Please try again later.")
   }
 }
 

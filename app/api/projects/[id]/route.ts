@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
@@ -77,10 +78,25 @@ export async function PATCH(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  const UpdateProjectSchema = z.object({
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().max(2000).optional(),
+    prompt: z.string().trim().max(12000).optional(),
+  }).strict() // SECURITY: reject unknown fields to prevent mass assignment
+
   try {
     const { id } = await params
     const body = await request.json()
-    const { name, description, prompt } = body
+    const parsed = UpdateProjectSchema.safeParse(body)
+
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: parsed.error.issues[0]?.message || "Invalid project update payload" },
+        { status: 400 }
+      )
+    }
+
+    const { name, description, prompt } = parsed.data
 
     // Check if user has access
     const project = await prisma.project.findFirst({
@@ -106,9 +122,9 @@ export async function PATCH(
     const updatedProject = await prisma.project.update({
       where: { id },
       data: {
-        ...(name && { name }),
-        ...(description && { description }),
-        ...(prompt && { prompt }),
+        ...(name ? { name } : {}),
+        ...(description !== undefined ? { description } : {}),
+        ...(prompt !== undefined ? { prompt } : {}),
       },
       include: {
         files: true,

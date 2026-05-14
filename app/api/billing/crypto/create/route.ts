@@ -7,6 +7,7 @@ import { isBillingPlanId } from "@/lib/billing/plans"
 import { env } from "@/lib/env"
 import { prisma } from "@/lib/db/client"
 import { CryptoPaymentService } from "@/lib/services/crypto-payment.service"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 const CreateCryptoPaymentSchema = z.object({
   amountInUsd: z.number().int().min(MIN_CRYPTO_PAYMENT_USD_CENTS).max(50_000_000),
@@ -26,6 +27,13 @@ export async function POST(request: NextRequest) {
   const session = await auth()
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Rate limit: max 5 crypto payment creation attempts per minute
+  try {
+    await enforceRouteRateLimit(`crypto-create:${session.user.email}`, { maxPerMinute: 5, maxPerHour: 30 })
+  } catch {
+    return NextResponse.json({ error: "Too many payment requests. Please wait." }, { status: 429 })
   }
 
   try {

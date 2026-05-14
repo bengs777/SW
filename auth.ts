@@ -59,18 +59,41 @@ setInterval(() => {
 }, 5 * 60 * 1000)
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  trustHost: true,
+  // SECURITY: Only trust host in non-production or when explicitly configured via NEXTAUTH_URL
+  trustHost: process.env.NODE_ENV !== "production" || Boolean(process.env.NEXTAUTH_URL),
   secret: env.nextAuthSecret,
   providers: [
     Google({
       clientId: env.googleClientId,
       clientSecret: env.googleClientSecret,
-      allowDangerousEmailAccountLinking: true,
+      // SECURITY: Removed allowDangerousEmailAccountLinking to prevent account takeover
+      // via email address reuse across OAuth providers.
     }),
   ],
   pages: {
     signIn: "/login",
     error: "/auth/error",
+  },
+  cookies: {
+    // SECURITY: Enforce secure cookie settings in production
+    sessionToken: {
+      name: process.env.NODE_ENV === "production" ? "__Secure-authjs.session-token" : "authjs.session-token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: process.env.NODE_ENV === "production",
+      },
+    },
+    csrfToken: {
+      name: process.env.NODE_ENV === "production" ? "__Host-authjs.csrf-token" : "authjs.csrf-token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: process.env.NODE_ENV === "production",
+      },
+    },
   },
   callbacks: {
     async jwt({ token, user }) {
