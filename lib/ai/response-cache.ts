@@ -40,22 +40,42 @@ async function getCacheRedis(): Promise<import("ioredis").default | null> {
 
   try {
     const IORedis = (await import("ioredis")).default
-    redisClient = new IORedis(env.redisUrl, {
+    const client = new IORedis(env.redisUrl, {
       maxRetriesPerRequest: 1,
       enableOfflineQueue: false,
       enableReadyCheck: false,
       connectTimeout: 2000,
       commandTimeout: 1500,
       lazyConnect: true,
+      // RELIABILITY: cap reconnect backoff so a sick Redis doesn't produce
+      // unbounded retry storms (cause of "cacheOk:false" log spam).
+      retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 2_000)),
       ...(env.redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
     })
 
-    redisClient.on("error", (err) => {
+    client.on("error", (err) => {
       // Soft-fail: log but don't block
       console.warn("[ai-cache] Redis error:", err.message)
     })
 
-    await redisClient.connect()
+    // Hard wall-clock race — ioredis.connect() has been observed to hang past
+    // connectTimeout on TLS handshake failures.
+    const connected = await Promise.race([
+      client.connect().then(() => true).catch(() => false),
+      new Promise<false>((resolve) => {
+        const t = setTimeout(() => resolve(false), 3_000)
+        if (t.unref) t.unref()
+      }),
+    ])
+
+    if (!connected) {
+      void client.quit().catch(() => undefined)
+      console.warn("[ai-cache] Cache disabled: connect timed out")
+      redisClient = null
+      return null
+    }
+
+    redisClient = client
     return redisClient
   } catch (error) {
     console.warn(

@@ -24,10 +24,24 @@ export type GenerationQueuePayload = {
 
 const QUEUE_NAME = "swift-generation-v2"
 const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
+
+// RELIABILITY: lockDuration MUST exceed the longest legitimate generation.
+// Previous value (120_000) was shorter than executeGenerationJob's worst case
+// (~5 min), causing BullMQ to mark in-flight jobs stalled, requeue them, and
+// produce DUPLICATE billing + duplicate file writes. Set to 7 min with a
+// stalledInterval that probes well within the lock window.
+const LOCK_DURATION_MS = 7 * 60_000
+const STALLED_INTERVAL_MS = 30_000
+const MAX_STALLED_COUNT = 1 // give up after 1 stall — don't infinite-retry
+
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
-  attempts: 1,
-  removeOnComplete: 200,
-  removeOnFail: 500,
+  // RELIABILITY: 1 attempt = no retries on transient failures (network blips,
+  // Redis flap). Bump to 2 with exponential backoff so a single transient
+  // failure doesn't lose a paid job. Idempotency on jobId prevents duplicates.
+  attempts: 2,
+  backoff: { type: "exponential", delay: 5_000 },
+  removeOnComplete: { count: 200, age: 24 * 3600 },
+  removeOnFail: { count: 500, age: 7 * 24 * 3600 },
 }
 
 let redisConnection: IORedis | null = null
@@ -210,7 +224,11 @@ export function createGenerationWorker(
   return new Worker<GenerationQueuePayload, unknown, GenerationQueueJobName>(QUEUE_NAME, processor, {
     connection,
     concurrency: Math.max(1, Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2)),
-    stalledInterval: 30_000,
-    lockDuration: 120_000,
+    stalledInterval: STALLED_INTERVAL_MS,
+    lockDuration: LOCK_DURATION_MS,
+    maxStalledCount: MAX_STALLED_COUNT,
+    // Drain in flight jobs gracefully on SIGTERM rather than letting BullMQ
+    // forcefully release locks.
+    drainDelay: 5,
   })
 }

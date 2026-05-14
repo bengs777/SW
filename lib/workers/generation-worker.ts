@@ -8,7 +8,11 @@ import {
 import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { BillingService } from "@/lib/services/billing.service"
-import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
+import {
+  GENERATION_TERMINAL_STATUSES,
+  GenerationJobCancelledError,
+  GenerationJobService,
+} from "@/lib/services/generation-job.service"
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
 import { captureException } from "@/lib/observability"
@@ -40,8 +44,34 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   const startedAt = Date.now()
   const resolvedQueueJobId = queueJobId ? String(queueJobId) : payload.jobId
 
+  // RELIABILITY: Idempotency guard. If BullMQ re-delivers a job whose DB
+  // record is already in a terminal state (completed/failed/cancelled), we
+  // MUST NOT re-execute it. Re-execution would double-charge the user and
+  // produce duplicate file writes. This is the single most important
+  // safeguard against re-delivery bugs (lock expiry, worker crash + restart,
+  // BullMQ retry).
   try {
-    log("info", "Generation worker started", {
+    const existing = await GenerationJobService.findById(payload.jobId)
+    if (existing && GENERATION_TERMINAL_STATUSES.has(existing.status)) {
+      log("warn", "generation_worker_skipped_terminal", {
+        jobId: payload.jobId,
+        queueJobId: resolvedQueueJobId,
+        status: existing.status,
+      })
+      unregisterAbort()
+      return
+    }
+  } catch (error) {
+    log("warn", "generation_worker_terminal_check_failed", {
+      jobId: payload.jobId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    // Continue — better to risk a retry than to silently lose a job on a
+    // transient DB blip.
+  }
+
+  try {
+    log("info", "generation_worker_started", {
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
@@ -80,7 +110,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         source: "billing_completion",
       })
     })
-    log("info", "Generation worker finished", {
+    log("info", "generation_worker_finished", {
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
@@ -111,7 +141,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     })
 
     if (!isCancelled) {
-      log("error", "Generation worker failed", {
+      log("error", "generation_worker_failed", {
         jobId: payload.jobId,
         queueJobId: resolvedQueueJobId,
         error: error instanceof Error ? error.message : String(error),
@@ -156,11 +186,22 @@ export function startGenerationWorker() {
   }
   heartbeat()
   const heartbeatTimer = setInterval(heartbeat, 30_000)
+  // Don't keep the process alive just for heartbeats during shutdown.
+  if (heartbeatTimer.unref) heartbeatTimer.unref()
   worker.on("closed", () => clearInterval(heartbeatTimer))
+  worker.on("closing", () => clearInterval(heartbeatTimer))
 
   worker.on("active", async (job) => {
     if (!job) return
-    await GenerationJobService.attachQueueJob(job.data.jobId, job.id || job.data.jobId)
+    await GenerationJobService.attachQueueJob(job.data.jobId, job.id || job.data.jobId).catch(
+      (error) => {
+        log("warn", "Generation worker attach_queue_job failed", {
+          jobId: job.data.jobId,
+          queueJobId: job.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    )
   })
 
   worker.on("failed", async (job, error) => {
@@ -179,10 +220,30 @@ export function startGenerationWorker() {
 
   worker.on("completed", async (job) => {
     if (!job) return
-    log("info", "Generation worker completed", {
+    log("info", "generation_worker_completed", {
       jobId: job.data.jobId,
       queueJobId: job.id,
     })
+  })
+
+  // RELIABILITY: log stalled jobs so we can see lock-expiry events. A spike
+  // here means lockDuration is still too small or workers are starving.
+  worker.on("stalled", (jobId) => {
+    log("warn", "generation_worker_stalled", { queueJobId: jobId })
+    captureException(new Error("BullMQ generation job stalled"), {
+      queueJobId: jobId,
+      source: "generation_worker_stalled_event",
+    })
+  })
+
+  // Worker-level errors (Redis connection drop, etc) — must not crash
+  // the process. Logged + reported to Sentry, BullMQ will reconnect.
+  worker.on("error", (error) => {
+    log("error", "generation_worker_error", {
+      workerId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    captureException(error, { source: "generation_worker_error_event", workerId })
   })
 
   return worker

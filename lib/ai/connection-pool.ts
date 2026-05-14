@@ -69,28 +69,71 @@ export function getAgentForUrl(url: string): HttpsAgent | HttpAgent | undefined 
 /**
  * Periodic warmup ping to keep the connection pool ready.
  * Called from the warmup module on app startup.
+ *
+ * RELIABILITY: Uses both AbortController AND a hard wall-clock timeout race.
+ * AbortSignal.timeout() alone has been observed to allow undici DNS/TLS phases
+ * to outlast the signal in production (root cause of 200s+ latencies in logs).
  */
-export async function pingOpenRouter(baseUrl: string, apiKey: string): Promise<{ ok: boolean; latencyMs: number }> {
-  if (!apiKey) return { ok: false, latencyMs: 0 }
+export async function pingOpenRouter(
+  baseUrl: string,
+  apiKey: string,
+  timeoutMs = 4_000
+): Promise<{ ok: boolean; latencyMs: number; status?: number; error?: string }> {
+  if (!apiKey) return { ok: false, latencyMs: 0, error: "no_api_key" }
 
   const startedAt = Date.now()
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/auth/key`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(5_000),
-    })
-    return {
-      ok: response.ok,
-      latencyMs: Date.now() - startedAt,
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  if (timer.unref) timer.unref()
+
+  // Hard wall-clock race — guarantees the function resolves no later than
+  // timeoutMs + a small fudge factor, even if undici hangs in DNS/TLS.
+  const wallClock = new Promise<{ ok: false; latencyMs: number; error: string }>(
+    (resolve) => {
+      const t = setTimeout(
+        () =>
+          resolve({
+            ok: false,
+            latencyMs: Date.now() - startedAt,
+            error: "wall_clock_timeout",
+          }),
+        timeoutMs + 500
+      )
+      if (t.unref) t.unref()
     }
-  } catch {
-    return {
-      ok: false,
-      latencyMs: Date.now() - startedAt,
+  )
+
+  const fetchAttempt = (async () => {
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/auth/key`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+        cache: "no-store",
+      })
+      // Drain the body so the connection can be released back to the pool.
+      // Without this the keep-alive socket stays "in use" and future probes
+      // open new connections, which is what produced socket-pool exhaustion
+      // on cold starts.
+      await response.body?.cancel().catch(() => undefined)
+      return {
+        ok: response.ok,
+        status: response.status,
+        latencyMs: Date.now() - startedAt,
+      }
+    } catch (error) {
+      return {
+        ok: false as const,
+        latencyMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    } finally {
+      clearTimeout(timer)
     }
-  }
+  })()
+
+  return Promise.race([fetchAttempt, wallClock])
 }

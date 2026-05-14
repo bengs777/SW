@@ -9,7 +9,7 @@ import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { enqueueGenerationTask } from "@/lib/queue/generation-queue"
 import { processGenerationPayload } from "@/lib/workers/generation-worker"
-import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
+import { enforceAiUsageRateLimit, RateLimitError } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
@@ -34,6 +34,12 @@ const CreateJobSchema = z.object({
 })
 
 function logStage(stage: string, success: boolean, detail?: Record<string, unknown>) {
+  // OBSERVABILITY: in production, only log success/failure at stage exit, not
+  // entry. The "false" calls were used as breadcrumbs but doubled log volume
+  // for no real diagnostic gain in steady state.
+  if (process.env.NODE_ENV === "production" && !success) {
+    return
+  }
   log("info", "generation_job_stage", {
     stage,
     success,
@@ -242,26 +248,31 @@ export async function POST(request: NextRequest) {
     return fatalResponse("previewContext_normalization", error, 400, false)
   }
 
-  console.info("[HASH_AUDIT]", {
-    hasPreviewContext: previewAudit.hasPreviewContext,
-    activeFile: previewAudit.activeFile,
-    diagnosticsCount: previewAudit.diagnosticsCount,
-    selectedPathsCount: previewAudit.selectedPathsCount,
-  })
-  console.info("[PAYLOAD_SIZE_AUDIT]", {
-    payloadSize,
-    previewContextSize,
-    diagnosticsCount: previewAudit.diagnosticsCount,
-    filesCount: previewAudit.filesCount,
-    payloadWarning: payloadSize > 500 * 1024,
-    previewContextWarning: previewContextSize > 250 * 1024,
-  })
+  // OBSERVABILITY: only emit verbose audit logs in non-production. Previously
+  // these fired on every request and generated ~3 noisy lines per call.
+  if (process.env.NODE_ENV !== "production") {
+    console.info("[HASH_AUDIT]", {
+      hasPreviewContext: previewAudit.hasPreviewContext,
+      activeFile: previewAudit.activeFile,
+      diagnosticsCount: previewAudit.diagnosticsCount,
+      selectedPathsCount: previewAudit.selectedPathsCount,
+    })
+    console.info("[PAYLOAD_SIZE_AUDIT]", {
+      payloadSize,
+      previewContextSize,
+      diagnosticsCount: previewAudit.diagnosticsCount,
+      filesCount: previewAudit.filesCount,
+      payloadWarning: payloadSize > 500 * 1024,
+      previewContextWarning: previewContextSize > 250 * 1024,
+    })
+  }
   if (payloadSize > 500 * 1024 || previewContextSize > 250 * 1024) {
-    console.warn("[JOB_PAYLOAD_SIZE_WARNING]", {
+    log("warn", "generation_payload_size_warning", {
       payloadSize,
       previewContextSize,
       payloadLimit: 500 * 1024,
       previewContextLimit: 250 * 1024,
+      requestId,
     })
   }
   logStage("previewContext_normalization", true, {
@@ -334,18 +345,11 @@ export async function POST(request: NextRequest) {
   })
 
   if (existingJob) {
-    console.info("[JOB_AUDIT_SUMMARY]", {
-      failedStage,
-      payloadSize,
-      hashCreated,
-      dbCreated,
-      enqueueSuccess,
-      probableRootCause: "none_deduped_existing_job",
-    })
     logStage("response_return", true, {
       requestId,
       traceId,
       jobId: existingJob.id,
+      idempotent: true,
     })
     return NextResponse.json({
       job: GenerationJobService.toPublicJob(existingJob),
@@ -402,14 +406,26 @@ export async function POST(request: NextRequest) {
     await enforceAiUsageRateLimit(user.id)
   } catch (error) {
     auditSummary(error)
+    const isRateLimit = error instanceof RateLimitError
+    const retryAfterSeconds = isRateLimit
+      ? Math.max(1, Math.ceil(error.retryAfterMs / 1000))
+      : 60
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Rate limit exceeded",
         stage: "rate_limit",
+        scope: isRateLimit ? error.scope : undefined,
         retryable: true,
+        retryAfterSeconds,
         requestId,
       },
-      { status: 429 }
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(retryAfterSeconds),
+          "X-Request-Id": requestId,
+        },
+      }
     )
   }
 
@@ -436,15 +452,6 @@ export async function POST(request: NextRequest) {
 
   try {
     currentStage = "db_job_creation"
-    console.info("[JOB_DB_CREATE]", {
-      stage: "db_job_creation",
-      success: false,
-      requestId,
-      projectId: project.id,
-      userId: user.id,
-      requestHash,
-      cost: pricing.estimatedCost,
-    })
     const reservation = await BillingService.reserveGenerationJob({
       userId: user.id,
       projectId: project.id,
@@ -473,26 +480,11 @@ export async function POST(request: NextRequest) {
     usageLogId = usageLog.id
     jobId = job.id
     dbCreated = true
-    console.info("[JOB_DB_CREATE]", {
-      stage: "db_job_creation",
-      success: true,
-      requestId,
-      jobId,
-      usageLogId,
-      requestHash,
-    })
     const queueId = parsed.data.idempotencyKey
       ? ["generation", user.id, project.id, parsed.data.idempotencyKey].join("__")
       : ["generation", user.id, project.id, requestHash].join("__")
 
     currentStage = "queue_enqueue"
-    console.info("[QUEUE_ENQUEUE]", {
-      stage: "queue_enqueue",
-      success: false,
-      requestId,
-      jobId,
-      queueId,
-    })
     const generationPayload = {
       jobId: job.id,
       userId: user.id,
@@ -554,23 +546,6 @@ export async function POST(request: NextRequest) {
       })
 
       currentStage = "response_return"
-      console.warn("[QUEUE_FALLBACK_SCHEDULED]", {
-        stage: "queue_enqueue",
-        success: false,
-        fallbackScheduled,
-        requestId,
-        jobId,
-        queueJobId: fallbackQueueJobId,
-      })
-      console.info("[JOB_AUDIT_SUMMARY]", {
-        failedStage,
-        payloadSize,
-        hashCreated,
-        dbCreated,
-        enqueueSuccess,
-        fallbackScheduled,
-        probableRootCause: "queue_unavailable_serverless_fallback_scheduled",
-      })
       logStage("response_return", true, {
         requestId,
         traceId,
@@ -600,27 +575,11 @@ export async function POST(request: NextRequest) {
       })
     }
     enqueueSuccess = true
-    console.info("[QUEUE_ENQUEUE]", {
-      stage: "queue_enqueue",
-      success: true,
-      requestId,
-      jobId,
-      queueJobId: queueJob.id || job.id,
-    })
 
     await GenerationJobService.attachQueueJob(job.id, queueJob.id || job.id)
     const publicJob = await GenerationJobService.findById(job.id)
 
     currentStage = "response_return"
-    console.info("[JOB_AUDIT_SUMMARY]", {
-      failedStage,
-      payloadSize,
-      hashCreated,
-      dbCreated,
-      enqueueSuccess,
-      fallbackScheduled,
-      probableRootCause: "none_job_created_and_enqueued",
-    })
     logStage("response_return", true, {
       requestId,
       traceId,
@@ -692,19 +651,12 @@ export async function POST(request: NextRequest) {
       })
 
       if (existing) {
-        console.info("[JOB_AUDIT_SUMMARY]", {
-          failedStage,
-          payloadSize,
-          hashCreated,
-          dbCreated,
-          enqueueSuccess,
-          fallbackScheduled,
-          probableRootCause: "database_unique_constraint_deduped_existing_job",
-        })
         logStage("response_return", true, {
           requestId,
           traceId,
           jobId: existing.id,
+          idempotent: true,
+          deduplicatedBy: "db_unique_constraint",
         })
         return NextResponse.json({
           job: GenerationJobService.toPublicJob(existing),
