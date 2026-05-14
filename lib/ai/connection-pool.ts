@@ -2,13 +2,14 @@ import { Agent as HttpAgent } from "node:http"
 import { Agent as HttpsAgent } from "node:https"
 
 /**
- * Persistent HTTP/HTTPS keep-alive agent for OpenRouter calls.
+ * Persistent HTTP/HTTPS keep-alive agents for OpenRouter calls.
  *
  * Why this matters for "standby" + cost:
- * - Without keep-alive, every request opens a new TCP + TLS handshake (~150-300ms overhead).
- * - With keep-alive, established connections are reused → first byte arrives much sooner.
- * - Reduces compute time (Vercel/Railway charge by execution duration).
- * - Reduces tail latency on cold starts after the first warm hit.
+ *   - Without keep-alive, every request opens a new TCP + TLS handshake
+ *     (~150-300ms overhead).
+ *   - With keep-alive, established connections are reused → first byte
+ *     arrives much sooner.
+ *   - Reduces compute time (Vercel/Railway charge by execution duration).
  *
  * Singleton agents persist across the process lifetime.
  */
@@ -55,25 +56,40 @@ export function getHttpAgent(): HttpAgent {
 
 /**
  * Pick the right agent based on URL protocol.
- * Note: Next.js/Node 18+ fetch uses undici by default which does its own pooling,
- * but explicitly providing an agent ensures consistent behavior across runtimes.
+ *
+ * Note: Next.js / Node 18+ fetch uses undici by default which does its own
+ * pooling. Undici ignores the `agent` option but we still pass it for
+ * consistency on older runtimes (returning undefined is fine for undici).
  */
 export function getAgentForUrl(url: string): HttpsAgent | HttpAgent | undefined {
-  // undici (default Node 18+ fetch) ignores the agent option — but on older runtimes
-  // (pre-undici, polyfills) this still helps. Returning undefined is fine for undici.
   if (url.startsWith("https://")) return getHttpsAgent()
   if (url.startsWith("http://")) return getHttpAgent()
   return undefined
 }
 
 /**
- * Periodic warmup ping to keep the connection pool ready.
- * Called from the warmup module on app startup.
+ * Warmup ping to OpenRouter `/auth/key`.
  *
- * RELIABILITY: Uses both AbortController AND a hard wall-clock timeout race.
- * AbortSignal.timeout() alone has been observed to allow undici DNS/TLS phases
- * to outlast the signal in production (root cause of 200s+ latencies in logs).
+ * RELIABILITY (post-audit):
+ *
+ * Previous bug: `Promise.race(fetch, wallClock)` resolved early on wall-clock
+ * fire, but the fetch promise kept running in the background, holding the
+ * undici socket and pinning event-loop work. Production logs showed 200s+
+ * "completed" warmup cycles where the wall-clock had already returned but
+ * the underlying request was still in DNS/TLS.
+ *
+ * New invariants:
+ *   1. ONE authoritative timer. When it fires we abort the controller, the
+ *      fetch rejects, and we resolve with a deterministic timeout result.
+ *   2. We `await response.body?.cancel()` so the socket is released back to
+ *      the keep-alive pool. Skipping this leaks a busy socket per failed
+ *      probe → pool exhaustion → cascading hang on the next probe.
+ *   3. The function ALWAYS resolves within `timeoutMs + GUARD_MS` regardless
+ *      of what undici does internally — the guard fires `controller.abort()`
+ *      and synthesizes a timeout result if the fetch hasn't already settled.
  */
+const WARMUP_GUARD_MS = 500
+
 export async function pingOpenRouter(
   baseUrl: string,
   apiKey: string,
@@ -83,57 +99,73 @@ export async function pingOpenRouter(
 
   const startedAt = Date.now()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  if (timer.unref) timer.unref()
 
-  // Hard wall-clock race — guarantees the function resolves no later than
-  // timeoutMs + a small fudge factor, even if undici hangs in DNS/TLS.
-  const wallClock = new Promise<{ ok: false; latencyMs: number; error: string }>(
-    (resolve) => {
-      const t = setTimeout(
-        () =>
-          resolve({
-            ok: false,
-            latencyMs: Date.now() - startedAt,
-            error: "wall_clock_timeout",
-          }),
-        timeoutMs + 500
-      )
-      if (t.unref) t.unref()
+  return new Promise((resolve) => {
+    let settled = false
+    const settle = (result: { ok: boolean; latencyMs: number; status?: number; error?: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(abortTimer)
+      clearTimeout(guardTimer)
+      // Make sure the request is aborted if the resolve was the wall-clock
+      // path; ignore any abort-cascade error.
+      try {
+        controller.abort()
+      } catch {
+        /* already aborted */
+      }
+      resolve(result)
     }
-  )
 
-  const fetchAttempt = (async () => {
-    try {
-      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/auth/key`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: "application/json",
-        },
-        signal: controller.signal,
-        cache: "no-store",
+    const abortTimer = setTimeout(() => {
+      try {
+        controller.abort()
+      } catch {
+        /* already aborted */
+      }
+    }, timeoutMs)
+    if (abortTimer.unref) abortTimer.unref()
+
+    // Hard guard: even if undici ignores the abort signal during DNS/TLS, we
+    // synthesize a deterministic timeout result.
+    const guardTimer = setTimeout(() => {
+      settle({
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        error: "wall_clock_timeout",
       })
-      // Drain the body so the connection can be released back to the pool.
-      // Without this the keep-alive socket stays "in use" and future probes
-      // open new connections, which is what produced socket-pool exhaustion
-      // on cold starts.
-      await response.body?.cancel().catch(() => undefined)
-      return {
-        ok: response.ok,
-        status: response.status,
-        latencyMs: Date.now() - startedAt,
-      }
-    } catch (error) {
-      return {
-        ok: false as const,
-        latencyMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      }
-    } finally {
-      clearTimeout(timer)
-    }
-  })()
+    }, timeoutMs + WARMUP_GUARD_MS)
+    if (guardTimer.unref) guardTimer.unref()
 
-  return Promise.race([fetchAttempt, wallClock])
+    void (async () => {
+      try {
+        const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/auth/key`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            Accept: "application/json",
+          },
+          signal: controller.signal,
+          cache: "no-store",
+        })
+
+        // Drain the body so the connection can be released back to the pool.
+        // Without this the keep-alive socket stays "in use" and future probes
+        // open new connections (cause of socket-pool exhaustion on cold start).
+        await response.body?.cancel().catch(() => undefined)
+
+        settle({
+          ok: response.ok,
+          status: response.status,
+          latencyMs: Date.now() - startedAt,
+        })
+      } catch (error) {
+        settle({
+          ok: false,
+          latencyMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
+  })
 }

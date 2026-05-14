@@ -26,9 +26,8 @@ type StageOutcome = {
 
 /**
  * Run a registration stage but never throw — instrumentation MUST NOT crash
- * the process. We collect outcomes so register() can emit a single summary
- * log instead of one log per stage (which produced [INSTRUMENTATION_INIT]
- * spam in production).
+ * the process. Outcomes are collected for a single summary log emitted by
+ * register() once at the end.
  */
 async function runStage(
   outcomes: StageOutcome[],
@@ -47,8 +46,6 @@ async function runStage(
       durationMs: Date.now() - startedAt,
       error: payload.error,
     })
-    // Errors still get their own log line so they can't be filtered out.
-    console.error("[INSTRUMENTATION_INIT_FAILED]", { stage, ...payload })
   }
 }
 
@@ -57,12 +54,10 @@ async function runStage(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function validateRuntimeEnv() {
-  // Never run during build phase — env vars aren't available at build time
   if (typeof window !== "undefined" || isBuildPhase()) {
     return
   }
 
-  // Only validate in production runtime
   if (process.env.NODE_ENV !== "production") {
     return
   }
@@ -70,10 +65,8 @@ async function validateRuntimeEnv() {
   const { validateEnv, getFeatureGatedIssues } = await import("@/lib/env")
   const report = validateEnv()
 
-  // Only log CORE errors — things that will actually break the app
-  const coreErrors = report.issues.filter(
-    (issue) => issue.severity === "error"
-  )
+  // Only log CORE errors — things that will actually break the app.
+  const coreErrors = report.issues.filter((issue) => issue.severity === "error")
 
   for (const issue of coreErrors) {
     console.error("[ENV_VALIDATION]", {
@@ -84,7 +77,7 @@ async function validateRuntimeEnv() {
     })
   }
 
-  // Feature-gated issues logged at warn level (not error)
+  // Feature-gated issues at warn level (not error).
   const featureIssues = getFeatureGatedIssues()
   for (const issue of featureIssues) {
     console.warn("[ENV_VALIDATION]", {
@@ -105,8 +98,9 @@ function shouldStartGenerationWorker() {
   }
 
   if (process.env.VERCEL === "1") {
-    // Worker on Vercel serverless is unsupported; warn once at register()
-    // time, not on every stage iteration.
+    // Worker on Vercel serverless is unsupported — silently skip. The very
+    // first cold start logs this once via the summary; subsequent calls do
+    // not.
     return false
   }
 
@@ -116,23 +110,31 @@ function shouldStartGenerationWorker() {
 // ─────────────────────────────────────────────────────────────────────────────
 // register() — idempotent across re-imports of this module.
 //
-// Next.js calls register() once per runtime context. We add a process-level
-// guard so even if the module is loaded twice (HMR edge cases, dual runtime
-// builds), the instrumentation work only runs once.
+// LOG NOISE POLICY (Fix 6):
+//   - Production: emit a single summary line ONLY on the first successful
+//     register() per process. Subsequent register() calls (Next.js may invoke
+//     once per runtime context per cold start) are silent.
+//   - Production with stage failures: always log, but as one line containing
+//     the failed stages. Errors with full stack are also routed to Sentry.
+//   - Non-production: log every register() so dev / CI sees lifecycle.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const REGISTER_FLAG = Symbol.for("swift.instrumentation.registered")
-type GlobalWithFlag = typeof globalThis & { [REGISTER_FLAG]?: boolean }
+const SUMMARY_LOGGED_FLAG = Symbol.for("swift.instrumentation.summary_logged")
+type GlobalWithFlags = typeof globalThis & {
+  [REGISTER_FLAG]?: boolean
+  [SUMMARY_LOGGED_FLAG]?: boolean
+}
 
 export async function register() {
-  const g = globalThis as GlobalWithFlag
+  const g = globalThis as GlobalWithFlags
   if (g[REGISTER_FLAG]) return
   g[REGISTER_FLAG] = true
 
   const startedAt = Date.now()
   const outcomes: StageOutcome[] = []
 
-  // Sentry — only initialize when DSN is configured (optional integration)
+  // Sentry — only initialize when DSN is configured (optional integration).
   await runStage(outcomes, "sentry", async () => {
     const hasSentryDsn = Boolean(
       process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN
@@ -149,10 +151,8 @@ export async function register() {
     }
   })
 
-  // Environment validation — only at runtime, never during build
   await runStage(outcomes, "environment", validateRuntimeEnv)
 
-  // Generation worker — feature-gated, requires explicit opt-in
   await runStage(outcomes, "generation_worker", async () => {
     if (!shouldStartGenerationWorker()) return
 
@@ -168,22 +168,52 @@ export async function register() {
     globalState.swiftGenerationWorkerStarted = true
   })
 
-  // AI warmup — only at runtime in nodejs (not during build, not on edge).
-  // Note: warmup module itself short-circuits on Vercel serverless.
   await runStage(outcomes, "ai_warmup", async () => {
     if (process.env.NEXT_RUNTIME !== "nodejs" || isBuildPhase()) return
     const { initializeAiWarmup } = await import("@/lib/ai/warmup")
     initializeAiWarmup()
   })
 
-  // SINGLE summary line for the entire register() lifecycle.
-  // This replaces the previous per-stage [INSTRUMENTATION_INIT] log spam.
-  const failed = outcomes.filter((o) => !o.ok).map((o) => o.stage)
-  console.info("[INSTRUMENTATION_INIT_SUMMARY]", {
-    runtime: process.env.NEXT_RUNTIME || "unknown",
-    durationMs: Date.now() - startedAt,
-    stages: outcomes.map((o) => `${o.stage}:${o.ok ? "ok" : "fail"}:${o.durationMs}ms`).join(","),
-    failedCount: failed.length,
-    ...(failed.length > 0 ? { failed } : {}),
-  })
+  const failed = outcomes.filter((o) => !o.ok)
+  const isProduction = process.env.NODE_ENV === "production"
+  const alreadyLogged = g[SUMMARY_LOGGED_FLAG]
+
+  // Production policy: one summary on first successful init, plus any failure.
+  // Non-production: always log so devs see the lifecycle.
+  const shouldLogSummary = !isProduction || !alreadyLogged || failed.length > 0
+
+  if (shouldLogSummary) {
+    const payload = {
+      runtime: process.env.NEXT_RUNTIME || "unknown",
+      durationMs: Date.now() - startedAt,
+      stages: outcomes
+        .map((o) => `${o.stage}:${o.ok ? "ok" : "fail"}:${o.durationMs}ms`)
+        .join(","),
+      failedCount: failed.length,
+      ...(failed.length > 0
+        ? {
+            failed: failed.map((f) => ({ stage: f.stage, error: f.error })),
+          }
+        : {}),
+    }
+
+    if (failed.length > 0) {
+      console.error("[INSTRUMENTATION_INIT_SUMMARY]", payload)
+      // Also surface to Sentry if it initialized.
+      try {
+        for (const stage of failed) {
+          Sentry.captureMessage(
+            `Instrumentation stage failed: ${stage.stage}`,
+            { level: "error", extra: stage }
+          )
+        }
+      } catch {
+        /* Sentry not initialized — not critical */
+      }
+    } else {
+      console.info("[INSTRUMENTATION_INIT_SUMMARY]", payload)
+    }
+
+    g[SUMMARY_LOGGED_FLAG] = true
+  }
 }

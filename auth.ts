@@ -1,11 +1,22 @@
 import NextAuth from "next-auth"
-import Google from "next-auth/providers/google"
 import type { Session } from "next-auth"
 import type { JWT } from "next-auth/jwt"
 import { prisma } from "@/lib/db/client"
 import { isMissingRequiredTableError, shouldSoftFailMissingTable } from "@/lib/db/errors"
 import { UserService } from "@/lib/services/user.service"
-import { env } from "@/lib/env"
+import { authConfig } from "./auth.config"
+
+/**
+ * Full Node.js-runtime NextAuth handler.
+ *
+ * MUST NOT be imported by `proxy.ts` (middleware/edge). The middleware imports
+ * `auth.config.ts` directly and constructs its own slim `NextAuth(...)` from
+ * that config — see `proxy.ts` for the pattern.
+ *
+ * This file extends `authConfig` with callbacks that touch Prisma and Node-only
+ * services (UserService, db client). Anything that needs a database call
+ * belongs here, not in `auth.config.ts`.
+ */
 
 const userIdCache = new Map<string, string | null>()
 
@@ -68,43 +79,9 @@ if (typeof globalThis !== "undefined" && process.env.NEXT_PHASE !== "phase-produ
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  // SECURITY: Only trust host in non-production or when explicitly configured via NEXTAUTH_URL
-  trustHost: process.env.NODE_ENV !== "production" || Boolean(process.env.NEXTAUTH_URL),
-  secret: env.nextAuthSecret,
-  providers: [
-    Google({
-      clientId: env.googleClientId,
-      clientSecret: env.googleClientSecret,
-      // SECURITY: Removed allowDangerousEmailAccountLinking to prevent account takeover
-      // via email address reuse across OAuth providers.
-    }),
-  ],
-  pages: {
-    signIn: "/login",
-    error: "/auth/error",
-  },
-  cookies: {
-    // SECURITY: Enforce secure cookie settings in production
-    sessionToken: {
-      name: process.env.NODE_ENV === "production" ? "__Secure-authjs.session-token" : "authjs.session-token",
-      options: {
-        httpOnly: true,
-        sameSite: "lax" as const,
-        path: "/",
-        secure: process.env.NODE_ENV === "production",
-      },
-    },
-    csrfToken: {
-      name: process.env.NODE_ENV === "production" ? "__Host-authjs.csrf-token" : "authjs.csrf-token",
-      options: {
-        httpOnly: true,
-        sameSite: "lax" as const,
-        path: "/",
-        secure: process.env.NODE_ENV === "production",
-      },
-    },
-  },
+  ...authConfig,
   callbacks: {
+    ...authConfig.callbacks,
     async jwt({ token, user }) {
       const currentToken = token as AuthToken
 
@@ -150,11 +127,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       }
 
       return session
-    },
-    async redirect({ url, baseUrl }) {
-      if (url.startsWith("/")) return `${baseUrl}${url}`
-      if (url.startsWith(baseUrl)) return url
-      return baseUrl
     },
     async signIn({ user, account }) {
       try {

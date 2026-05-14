@@ -6,22 +6,35 @@ import { log } from "@/lib/logging"
 /**
  * AI warmup module.
  *
- * Goal: keep the AI subsystem in "standby" — ready to respond fast — without
- * burning compute when no one is actively using it.
+ * Purpose: keep the AI subsystem in "standby" — connection pool warm, cache
+ * connected — without burning compute when no one is actively using it.
  *
  * RELIABILITY GUARANTEES (post-audit):
- * - Each cycle has a HARD ceiling of WARMUP_CYCLE_TIMEOUT_MS (cannot hang).
- * - Cycles cannot overlap (re-entrancy guard prevents fan-out under stalls).
- * - After repeated failures, interval backs off exponentially (no retry storm).
- * - Disabled on Vercel serverless (per-invocation lifecycle, not long-running).
+ *
+ *   1. Each cycle has a HARD ceiling of WARMUP_CYCLE_TIMEOUT_MS. The
+ *      individual probes (`pingOpenRouter`, `warmCacheConnection`) ALSO
+ *      enforce their own per-call ceilings. The cycle timeout is the
+ *      ultimate guarantee — even if every probe lies about its deadline,
+ *      the cycle promise resolves within this budget.
+ *
+ *   2. Cycles cannot overlap. If a previous cycle is still in-flight when
+ *      the interval fires, the new tick is dropped. Without this, a slow
+ *      upstream + interval timer = exponential fan-out + socket exhaustion
+ *      (the original 200s+ latency symptom).
+ *
+ *   3. Exponential backoff after sustained failure. Without this we'd
+ *      hammer a sick upstream with 4-min retries forever (the original
+ *      `openRouterOk:false` log spam).
+ *
+ *   4. Disabled on Vercel serverless. Each lambda instance is short-lived
+ *      so a 4-min interval rarely fires before the instance is recycled —
+ *      net cost: negative.
  */
 
-// Tighter ceilings — production logs showed 200s+ "warmup" latencies because
-// individual probes had per-request timeouts but the cycle itself did not.
 const WARMUP_INTERVAL_MS = 4 * 60 * 1000 // 4 minutes
 const STARTUP_DELAY_MS = 5_000
-const WARMUP_CYCLE_TIMEOUT_MS = 8_000 // hard wall on a full cycle
-const PROBE_TIMEOUT_MS = 4_000 // hard wall on a single probe
+const WARMUP_CYCLE_TIMEOUT_MS = 10_000 // Hard wall on a full cycle
+const PROBE_TIMEOUT_MS = 4_000 // Forwarded to each probe
 const BACKOFF_AFTER_FAILURES = 3
 const MAX_BACKOFF_MS = 30 * 60 * 1000 // 30 min
 
@@ -54,19 +67,32 @@ function getState(): WarmupState {
   return globalRef.__swiftAiWarmupState
 }
 
-/** Wrap any promise with a hard timeout that rejects on overrun. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+/**
+ * Wrap any promise with a hard wall-clock timeout. Resolves with the original
+ * value, or rejects with a deterministic timeout error after `ms`. Crucially
+ * this never settles twice.
+ */
+function withHardTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    let settled = false
+
     const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
       reject(new Error(`warmup_timeout:${label}:${ms}ms`))
     }, ms)
     if (timer.unref) timer.unref()
+
     promise.then(
       (value) => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         resolve(value)
       },
       (error) => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         reject(error)
       }
@@ -77,9 +103,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 async function performWarmup() {
   const state = getState()
 
-  // Re-entrancy guard: if a previous cycle is still in flight, skip this tick.
-  // Without this, a slow upstream + interval timer = fan-out of overlapping
-  // requests + exhausted socket pool + escalating latency (the production symptom).
+  // Re-entrancy guard: drop overlapping ticks.
   if (state.inFlight) {
     log("warn", "ai_warmup_skipped_overlap", {
       lastWarmupAt: state.lastWarmupAt ? new Date(state.lastWarmupAt).toISOString() : null,
@@ -92,22 +116,21 @@ async function performWarmup() {
   const cycleStart = Date.now()
 
   try {
-    const [openRouterResult, cacheResult] = await withTimeout(
+    // Each probe enforces its own ceiling. The cycle timeout is the upper
+    // bound on the whole `Promise.allSettled`. We never nest a second
+    // `withHardTimeout` around a probe — that would just hide bugs in the
+    // probe's own timer logic. The probes themselves are the source of
+    // truth for their own timing.
+    const settled = await withHardTimeout(
       Promise.allSettled([
-        withTimeout(
-          pingOpenRouter(env.openRouterBaseUrl, env.openRouterApiKey),
-          PROBE_TIMEOUT_MS,
-          "openrouter"
-        ).catch((error) => ({
-          ok: false as const,
-          latencyMs: Date.now() - cycleStart,
-          error: error instanceof Error ? error.message : String(error),
-        })),
-        withTimeout(warmCacheConnection(), PROBE_TIMEOUT_MS, "cache").catch(() => false),
+        pingOpenRouter(env.openRouterBaseUrl, env.openRouterApiKey, PROBE_TIMEOUT_MS),
+        warmCacheConnection(),
       ]),
       WARMUP_CYCLE_TIMEOUT_MS,
       "cycle"
     )
+
+    const [openRouterResult, cacheResult] = settled
 
     const openRouterOk =
       openRouterResult.status === "fulfilled" && openRouterResult.value.ok
@@ -120,14 +143,13 @@ async function performWarmup() {
       openRouterOk,
       openRouterLatencyMs:
         openRouterResult.status === "fulfilled" ? openRouterResult.value.latencyMs : null,
+      openRouterError:
+        openRouterResult.status === "fulfilled" ? openRouterResult.value.error : null,
       cacheOk,
       consecutiveFailures: state.consecutiveFailures,
       cycleDurationMs: Date.now() - cycleStart,
     })
 
-    // Exponential backoff after sustained failures so we don't hammer a sick
-    // upstream with 4-min retries forever (which is what produced repeated
-    // "openRouterOk:false" log spam in production).
     applyBackoff(state)
   } catch (error) {
     state.lastSuccess = false
@@ -173,10 +195,9 @@ function applyBackoff(state: WarmupState) {
 /**
  * Initialize the warmup loop. Idempotent across calls.
  *
- * IMPORTANT: warmup is a long-running concern. On Vercel serverless each
- * invocation is short-lived, so a periodic `setInterval` provides no real
- * benefit and pays per-cold-start cost. We therefore skip warmup entirely
- * on Vercel by default. Set SWIFT_FORCE_WARMUP=1 to re-enable for testing.
+ * On Vercel serverless, periodic warmup provides no benefit (each invocation
+ * is short-lived) and pays per-cold-start cost. We skip warmup entirely on
+ * Vercel by default. Set SWIFT_FORCE_WARMUP=1 to re-enable for testing.
  */
 export function initializeAiWarmup(): void {
   const state = getState()
@@ -185,10 +206,6 @@ export function initializeAiWarmup(): void {
   if (process.env.NEXT_PHASE === "phase-production-build") return
   if (!env.openRouterApiKey) return
 
-  // Vercel serverless: don't run periodic warmup. Each function instance lives
-  // for at most one request burst, so the interval rarely fires before the
-  // instance is recycled. This was the source of "AI warmup initialized" log
-  // spam on every cold start.
   const isVercelServerless = process.env.VERCEL === "1"
   const forceWarmup = process.env.SWIFT_FORCE_WARMUP === "1"
   if (isVercelServerless && !forceWarmup) {
