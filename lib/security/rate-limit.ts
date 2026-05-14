@@ -10,7 +10,7 @@ import { env, getEnvNumber } from "@/lib/env"
 const WINDOW_MS = 60_000
 const MAX_REQUESTS_PER_MINUTE = Math.max(
   1,
-  Math.round(getEnvNumber(6, "AI_RATE_LIMIT_PER_MINUTE", "GENERATE_RATE_LIMIT_PER_MINUTE"))
+  Math.round(getEnvNumber(12, "AI_RATE_LIMIT_PER_MINUTE", "GENERATE_RATE_LIMIT_PER_MINUTE"))
 )
 const MAX_REQUESTS_PER_DAY = Math.max(
   MAX_REQUESTS_PER_MINUTE,

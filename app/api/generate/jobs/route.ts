@@ -359,12 +359,43 @@ export async function POST(request: NextRequest) {
 
   const activeGenerationCount = await GenerationJobService.countActiveForUser(user.id)
   if (activeGenerationCount >= env.aiMaxConcurrentGenerations) {
-    return NextResponse.json({
-      error: "Too many active generation jobs. Wait for an existing job to finish before starting another.",
-      requestId,
-      activeGenerationCount,
-      limit: env.aiMaxConcurrentGenerations,
-    }, { status: 429 })
+    // Auto-cleanup: check if any "active" jobs are actually stale (stuck > 5 min).
+    // This handles the case where worker crashed or serverless timed out, leaving
+    // orphaned jobs that block new submissions forever.
+    const STUCK_THRESHOLD_MS = 5 * 60_000 // 5 minutes
+    const stuckCutoff = new Date(Date.now() - STUCK_THRESHOLD_MS)
+    const stuckJobs = await prisma.generationJob.findMany({
+      where: {
+        userId: user.id,
+        status: { in: ["queued", "running", "cancelling"] },
+        updatedAt: { lt: stuckCutoff },
+      },
+      select: { id: true },
+      take: 5,
+    })
+
+    if (stuckJobs.length > 0) {
+      // Mark stuck jobs as failed so user can proceed
+      for (const stuckJob of stuckJobs) {
+        await GenerationJobService.markFailed(
+          stuckJob.id,
+          "Generation timed out (auto-recovered)"
+        ).catch(() => null)
+      }
+      log("warn", "auto_recovered_stuck_jobs", {
+        userId: user.id,
+        stuckJobIds: stuckJobs.map((j) => j.id),
+        requestId,
+      })
+      // Don't return 429 — let the user's current request proceed
+    } else {
+      return NextResponse.json({
+        error: "Too many active generation jobs. Wait for an existing job to finish before starting another.",
+        requestId,
+        activeGenerationCount,
+        limit: env.aiMaxConcurrentGenerations,
+      }, { status: 429 })
+    }
   }
 
   try {
