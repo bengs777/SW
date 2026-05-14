@@ -65,10 +65,8 @@ function getRedisConnection() {
         console.log("[Generation Queue] Redis reconnecting...")
       })
       
-      // Try to connect
-      redisConnection.connect().catch((err) => {
-        console.warn("[Generation Queue] Could not connect to Redis:", err.message)
-      })
+      // Connection will be established on first command (lazyConnect: true).
+      // Do NOT call .connect() eagerly — it can fire during module resolution at build time.
     } catch (error) {
       console.warn("[Generation Queue] Failed to initialize Redis:", error instanceof Error ? error.message : String(error))
       return null

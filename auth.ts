@@ -54,9 +54,18 @@ async function resolveDatabaseUserId(email?: string | null) {
   }
 }
 
-setInterval(() => {
-  userIdCache.clear()
-}, 5 * 60 * 1000)
+// Clear user ID cache periodically to prevent stale data.
+// Only start the interval at runtime (not during build phase).
+if (typeof globalThis !== "undefined" && process.env.NEXT_PHASE !== "phase-production-build") {
+  const interval = setInterval(() => {
+    userIdCache.clear()
+  }, 5 * 60 * 1000)
+
+  // Don't keep the process alive just for cache clearing
+  if (interval.unref) {
+    interval.unref()
+  }
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   // SECURITY: Only trust host in non-production or when explicitly configured via NEXTAUTH_URL

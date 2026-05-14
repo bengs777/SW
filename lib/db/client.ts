@@ -5,6 +5,11 @@ const globalForPrisma = global as unknown as { prisma?: PrismaClient }
 let prismaSingleton: PrismaClient | undefined
 
 function assertPostgresDatabaseUrl() {
+  // During build phase, DATABASE_URL may not be available (handled by vercel-build.js separately)
+  if (process.env.NEXT_PHASE === "phase-production-build") {
+    return
+  }
+
   if (!env.databaseUrl) {
     throw new Error('DATABASE_URL is required to initialize Prisma client')
   }
