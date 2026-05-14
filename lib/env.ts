@@ -1,5 +1,9 @@
 import { z } from "zod"
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 const getEnv = (...keys: string[]) => {
   for (const key of keys) {
     const value = process.env[key]
@@ -57,6 +61,10 @@ const normalizeAppUrl = (value: string) => {
   return `https://${normalized}`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Env values
+// ─────────────────────────────────────────────────────────────────────────────
+
 const DEV_OWNER_EMAIL = getEnv("DEV_OWNER_EMAIL") || "ibnualmugni1933@gmail.com"
 const databaseUrl = getEnv("DATABASE_URL")
 const directDatabaseUrl = getEnv("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
@@ -83,13 +91,20 @@ const isServerRuntime = typeof window === "undefined"
 const urlSchema = z.string().url()
 const finiteNumberSchema = z.coerce.number().finite()
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type EnvValidationSeverity = "error" | "warning"
 
 export type EnvValidationIssue = {
   key: string
   severity: EnvValidationSeverity
   message: string
+  category?: EnvCategory
 }
+
+export type EnvCategory = "core" | "optional" | "feature-gated"
 
 export type EnvValidationReport = {
   ok: boolean
@@ -98,6 +113,10 @@ export type EnvValidationReport = {
   missing: string[]
   issues: EnvValidationIssue[]
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exported env object
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
@@ -156,28 +175,112 @@ export const env = {
   cryptoPaymentConfirmationsRequired: getEnvNumber(2, "CRYPTO_PAYMENT_CONFIRMATIONS_REQUIRED"),
 }
 
-export function getMissingProductionEnvVars() {
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature flags — determine which optional subsystems are enabled
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** True when the BullMQ generation worker is explicitly enabled */
+export const isGenerationWorkerEnabled =
+  process.env.SWIFT_ENABLE_GENERATION_WORKER === "true"
+
+/** True when Sentry DSN is configured (optional integration) */
+export const isSentryEnabled =
+  Boolean(process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN)
+
+/** True when Vercel deploy feature has required config */
+export const isVercelDeployEnabled =
+  Boolean(vercelTeamId && vercelDeployToken)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tiered validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * CORE REQUIRED — variables absolutely needed for the app to function.
+ * Missing any of these in production is a hard error.
+ */
+export function getMissingCoreEnvVars(): string[] {
   const missing: string[] = []
 
   if (!env.databaseUrl) missing.push("DATABASE_URL")
   if (!env.nextAuthSecret) missing.push("NEXTAUTH_SECRET")
   if (!env.googleClientId) missing.push("GOOGLE_CLIENT_ID")
   if (!env.googleClientSecret) missing.push("GOOGLE_CLIENT_SECRET")
+  if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
   if (!env.supabaseUrl) missing.push("NEXT_PUBLIC_SUPABASE_URL")
   if (!env.supabasePublicAnonKey) {
     missing.push("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY")
   }
   if (!env.supabaseServiceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY")
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
-  if (!env.hasNativeRedisConfig) missing.push("REDIS_URL (native redis:// or rediss:// for BullMQ)")
   if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
-  if (!env.vercelTeamId) missing.push("VERCEL_TEAM_ID")
-
-  if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
 
   return missing
 }
+
+/**
+ * FEATURE-GATED — only validated when the corresponding feature is enabled.
+ * Returns issues (not hard errors) so they surface only when relevant.
+ */
+export function getFeatureGatedIssues(): EnvValidationIssue[] {
+  const issues: EnvValidationIssue[] = []
+
+  // Redis is only required when the generation worker is enabled
+  if (isGenerationWorkerEnabled && !env.hasNativeRedisConfig) {
+    issues.push({
+      key: "REDIS_URL",
+      severity: "error",
+      message: "REDIS_URL (native redis:// or rediss://) is required when SWIFT_ENABLE_GENERATION_WORKER=true.",
+      category: "feature-gated",
+    })
+  }
+
+  // Vercel deploy vars only matter when deploy feature is actively used
+  // (handled at request-time in deploy/route.ts — no startup error needed)
+
+  return issues
+}
+
+/**
+ * OPTIONAL INTEGRATIONS — never cause startup failures.
+ * Returns info-level issues for diagnostics only.
+ */
+export function getOptionalIntegrationIssues(): EnvValidationIssue[] {
+  const issues: EnvValidationIssue[] = []
+
+  if (!isSentryEnabled) {
+    issues.push({
+      key: "SENTRY_DSN",
+      severity: "warning",
+      message: "SENTRY_DSN not configured — error reporting disabled.",
+      category: "optional",
+    })
+  }
+
+  if (!env.vercelTeamId) {
+    issues.push({
+      key: "VERCEL_TEAM_ID",
+      severity: "warning",
+      message: "VERCEL_TEAM_ID not configured — Vercel deployments will be unavailable.",
+      category: "optional",
+    })
+  }
+
+  return issues
+}
+
+/**
+ * @deprecated Use getMissingCoreEnvVars() + getFeatureGatedIssues() instead.
+ * Kept for backward compatibility with any callers.
+ */
+export function getMissingProductionEnvVars() {
+  return getMissingCoreEnvVars()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Format validators (only validate when a value IS present)
+// ─────────────────────────────────────────────────────────────────────────────
 
 function validateOptionalUrl(
   issues: EnvValidationIssue[],
@@ -300,16 +403,29 @@ function validateOptionalRedisUrl(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Main validation entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationReport {
   const environment = options.nodeEnv || env.nodeEnv
   const isProduction = environment === "production"
-  const missing = isProduction ? getMissingProductionEnvVars() : []
+
+  // Core required — only in production
+  const missing = isProduction ? getMissingCoreEnvVars() : []
   const issues: EnvValidationIssue[] = missing.map((key) => ({
     key,
-    severity: "error",
+    severity: "error" as const,
     message: `${key} is required in production.`,
+    category: "core" as const,
   }))
 
+  // Feature-gated — only when corresponding features are enabled
+  if (isProduction) {
+    issues.push(...getFeatureGatedIssues())
+  }
+
+  // Format validation (validates shape of values that ARE present)
   validateOptionalPostgresUrl(issues, "DATABASE_URL", env.databaseUrl, isProduction, { requirePooled: true })
   validateOptionalPostgresUrl(issues, "DIRECT_DATABASE_URL / DIRECT_URL / POSTGRES_URL_NON_POOLING", env.directDatabaseUrl, isProduction)
 
