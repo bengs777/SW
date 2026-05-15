@@ -213,6 +213,7 @@ export function createGenerationWorker(
     connection,
     concurrency: Math.max(1, Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2)),
     stalledInterval: 30_000,
-    lockDuration: 120_000,
+    lockDuration: 180_000,
+    lockRenewTime: 60_000,
   })
 }

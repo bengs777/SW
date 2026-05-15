@@ -40,9 +40,29 @@ export function BalanceInfo({ showAlert = true }: BalanceInfoProps) {
 
   useEffect(() => {
     fetchBalance()
-    // Refresh balance every 30 seconds
-    const interval = setInterval(fetchBalance, 30000)
-    return () => clearInterval(interval)
+
+    const BALANCE_POLL_MS = 120_000
+
+    const smartFetch = () => {
+      if (document.hidden) return
+      fetchBalance()
+    }
+
+    const interval = setInterval(smartFetch, BALANCE_POLL_MS)
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        // Refresh immediately when tab becomes visible again
+        fetchBalance()
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
   }, [])
 
   const costPerGeneration = COST_PER_GENERATION

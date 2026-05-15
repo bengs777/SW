@@ -75,8 +75,8 @@ type AppendGenerationEventInput = {
 }
 
 export class GenerationJobCancelledError extends Error {
-  constructor() {
-    super("GENERATION_JOB_CANCELLED")
+  constructor(message?: string) {
+    super(message || "GENERATION_JOB_CANCELLED")
     this.name = "GenerationJobCancelledError"
   }
 }

@@ -65,21 +65,29 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         loadProjectFiles,
       }
     )
-    await BillingService.markCompleted(payload.usageLogId, {
-      provider: payload.provider,
-      model: payload.model,
-    }).catch((billingError) => {
-      log("error", "Generation billing completion failed", {
-        jobId: payload.jobId,
-        usageLogId: payload.usageLogId,
-        error: billingError instanceof Error ? billingError.message : String(billingError),
+    // Idempotency guard: skip if already completed (prevents double-billing on retries)
+    const usageLog = await prisma.usageLog.findUnique({
+      where: { id: payload.usageLogId },
+      select: { status: true },
+    }).catch(() => null)
+
+    if (usageLog?.status !== "completed") {
+      await BillingService.markCompleted(payload.usageLogId, {
+        provider: payload.provider,
+        model: payload.model,
+      }).catch((billingError) => {
+        log("error", "Generation billing completion failed", {
+          jobId: payload.jobId,
+          usageLogId: payload.usageLogId,
+          error: billingError instanceof Error ? billingError.message : String(billingError),
+        })
+        captureException(billingError, {
+          jobId: payload.jobId,
+          usageLogId: payload.usageLogId,
+          source: "billing_completion",
+        })
       })
-      captureException(billingError, {
-        jobId: payload.jobId,
-        usageLogId: payload.usageLogId,
-        source: "billing_completion",
-      })
-    })
+    }
     log("info", "Generation worker finished", {
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,

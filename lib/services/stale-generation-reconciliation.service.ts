@@ -7,7 +7,7 @@ import { GenerationJobService } from "@/lib/services/generation-job.service"
 
 const STALE_GENERATION_TIMEOUT_MS = Math.max(
   env.aiQueueTimeoutMs,
-  Number(process.env.SWIFT_STALE_GENERATION_TIMEOUT_MS || 15 * 60_000)
+  Number(process.env.SWIFT_STALE_GENERATION_TIMEOUT_MS || 5 * 60_000)
 )
 
 function parseBillingContext(contextJson: string | null) {

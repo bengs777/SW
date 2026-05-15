@@ -67,7 +67,7 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
       targetPaths: [],
       allowedNewPaths: [],
       preservePaths: [],
-      maxSlices: 10,
+      maxSlices: 6,
       requiresFullValidation: true,
     }
   }
