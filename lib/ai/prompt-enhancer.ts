@@ -35,7 +35,7 @@ export type PromptEnhancementResult = {
   projectMemory: PromptMemorySeed
 }
 
-const MAX_ITEMS_PER_SECTION = 5
+const MAX_ITEMS_PER_SECTION = 3
 
 export async function enhancePromptForSwift({
   prompt,
@@ -546,9 +546,9 @@ function serializeDraft(originalPrompt: string, draft: PromptDraft, plan: Prompt
     formatSection("Micro-task focus", draft.microTasks),
     formatSection("Delivery rules", draft.deliveryRules),
     "WORKPLAN_JSON (source of truth for execution order; do not skip patch-first steps or invent new scope):",
-    JSON.stringify(plan, null, 2),
-    "PROJECT_MEMORY_SEED (persist these decisions across future iterations):",
-    JSON.stringify(projectMemory, null, 2),
+    `Focus slice: ${plan.focusSlice}`,
+    `Mode: ${plan.mode}`,
+    plan.constraints.length > 0 ? `Constraints: ${plan.constraints.slice(0, 3).join("; ")}` : "",
     "Preview rule: keep browser-facing files self-contained, preview-safe, and aligned with the user brief.",
   ].filter(Boolean)
 

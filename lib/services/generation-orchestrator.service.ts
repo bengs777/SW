@@ -37,6 +37,8 @@ import {
 } from "@/lib/ai/edit-planner"
 import { log } from "@/lib/logging"
 
+const GENERATION_HARD_TIMEOUT_MS = 150_000
+
 type GenerationPlannerFile = {
   path: string
   reason: string
@@ -196,7 +198,7 @@ function buildGenerationPlan(input: {
     }
   }
 
-  const filePlan = Array.from(plannedByPath.values()).slice(0, editPlan.maxSlices)
+  const filePlan = Array.from(plannedByPath.values()).slice(0, Math.min(editPlan.maxSlices, 6))
 
   if (!filePlan.some((item) => /^app\/page\.(tsx|ts|jsx|js)$/i.test(item.path))) {
     const shouldAddHomePage = editPlan.mode === "full" || input.existingFiles.length === 0
@@ -845,6 +847,19 @@ export async function executeGenerationJob(
   let completionTokens = 0
   let totalTokens = 0
 
+  const timeoutController = new AbortController()
+  const hardTimeout = setTimeout(() => timeoutController.abort(), GENERATION_HARD_TIMEOUT_MS)
+
+  if (input.signal) {
+    if (input.signal.aborted) {
+      timeoutController.abort()
+    } else {
+      input.signal.addEventListener("abort", () => timeoutController.abort(), { once: true })
+    }
+  }
+
+  const signal = timeoutController.signal
+
   try {
     await GenerationJobService.transition(input.jobId, {
       type: "job.stage.planning",
@@ -907,6 +922,17 @@ export async function executeGenerationJob(
     }
 
     for (let index = 0; index < plan.filePlan.length; index += 1) {
+      const elapsedMs = performance.now() - jobStartedAt
+      if (elapsedMs > 120_000) {
+        log("warn", "Generation slice loop time budget exceeded, proceeding to validation", {
+          jobId: input.jobId,
+          elapsedMs: Math.round(elapsedMs),
+          completedSlices: index,
+          totalPlannedSlices: plan.filePlan.length,
+        })
+        break
+      }
+
       await GenerationJobService.assertNotCancelled(input.jobId)
       const target = plan.filePlan[index]
       const providerStartedAt = performance.now()
@@ -922,7 +948,7 @@ export async function executeGenerationJob(
         purpose: "generate",
         selectedModel: input.selectedModel,
         promptLanguage,
-        signal: input.signal,
+        signal,
       })
       providerLatencyMs += Math.round(performance.now() - providerStartedAt)
       promptTokens += Math.max(0, response.tokenUsage?.promptTokens || 0)
@@ -960,7 +986,7 @@ export async function executeGenerationJob(
       files: workingFiles,
       plan,
       blueprint,
-      signal: input.signal,
+      signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
 
@@ -988,7 +1014,7 @@ export async function executeGenerationJob(
         repairAttempt,
         maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
         promptLanguage,
-        signal: input.signal,
+        signal,
       })
 
       workingFiles = repaired.files
@@ -1014,7 +1040,7 @@ export async function executeGenerationJob(
         files: workingFiles,
         plan,
         blueprint,
-        signal: input.signal,
+        signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
     }
@@ -1106,6 +1132,28 @@ export async function executeGenerationJob(
   } catch (error) {
     const cancelledBySignal =
       error instanceof Error && error.message === "GENERATION_JOB_CANCELLED"
+    const cancelledByTimeout =
+      error instanceof Error && error.name === "AbortError" && timeoutController.signal.aborted
+
+    if (cancelledByTimeout) {
+      await recordGenerationQuality({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        appType: plan?.appType || classifyControlledAppType(input.prompt),
+        status: "cancelled",
+        validation,
+        repairAttempts: repairAttempt,
+        providerLatencyMs,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        totalLatencyMs: performance.now() - jobStartedAt,
+        failureStage: "code-generation",
+        failureCode: "hard_timeout",
+      }).catch(() => null)
+      await GenerationJobService.markCancelled(input.jobId, "Generation hard timeout exceeded (150s)")
+      throw new GenerationJobCancelledError("Generation hard timeout exceeded (150s)")
+    }
 
     if (error instanceof GenerationJobCancelledError || cancelledBySignal) {
       await recordGenerationQuality({
@@ -1160,5 +1208,7 @@ export async function executeGenerationJob(
     }).catch(() => null)
     await GenerationJobService.markFailed(input.jobId, serialized.message)
     throw error
+  } finally {
+    clearTimeout(hardTimeout)
   }
 }
