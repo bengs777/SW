@@ -3,6 +3,8 @@ import { prisma } from "@/lib/db/client"
 import { withDatabaseWriteRetry } from "@/lib/db/errors"
 import type { GeneratedFile } from "@/lib/types"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
+import { log } from "@/lib/logging"
+import { captureException } from "@/lib/observability"
 
 type PersistProjectFilesOptions = {
   idempotencyKey?: string | null
@@ -266,5 +268,46 @@ export class ProjectFilePersistenceService {
       cost: input.cost,
       tokensUsed: input.tokensUsed,
     })
+  }
+
+  static async savePartialCheckpoint(input: {
+    projectId: string
+    prompt: string
+    files: GeneratedFile[]
+    reason: string
+    projectMemoryJson?: string | null
+    idempotencyKey?: string | null
+    cost?: number | null
+    tokensUsed?: number | null
+  }): Promise<{ saved: boolean; historyId?: string; error?: string }> {
+    try {
+      const result = await this.saveGenerationSnapshot(input.projectId, input.prompt, input.files, {
+        projectMemoryJson: input.projectMemoryJson,
+        idempotencyKey: input.idempotencyKey,
+        cost: input.cost,
+        tokensUsed: input.tokensUsed,
+      })
+      log("info", "Partial checkpoint saved successfully", {
+        projectId: input.projectId,
+        reason: input.reason,
+        historyId: result.historyId,
+        fileCount: input.files.length,
+      })
+      return { saved: true, historyId: result.historyId }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      log("error", "Failed to save partial checkpoint", {
+        projectId: input.projectId,
+        reason: input.reason,
+        error: message,
+        fileCount: input.files.length,
+      })
+      captureException(error, {
+        context: "savePartialCheckpoint",
+        projectId: input.projectId,
+        reason: input.reason,
+      })
+      return { saved: false, error: message }
+    }
   }
 }

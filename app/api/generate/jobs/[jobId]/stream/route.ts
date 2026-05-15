@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
-import { abortGenerationJob } from "@/lib/ai/generation-job-runtime"
+import { abortGenerationJob, isGenerationJobFinalizing } from "@/lib/ai/generation-job-runtime"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 import { GenerationJobService, GENERATION_TERMINAL_STATUSES } from "@/lib/services/generation-job.service"
 
@@ -12,6 +12,7 @@ const HEARTBEAT_MS = 15_000
 const POLL_MS = 1_000
 const IDLE_TIMEOUT_MS = 90_000
 const MAX_RETRY_MS = 10_000
+const DISCONNECT_GRACE_MS = 30_000
 
 function parseLastEventSequence(request: NextRequest) {
   const headerValue = request.headers.get("last-event-id")
@@ -73,6 +74,7 @@ export async function GET(
   let closed = false
   let lastEventSequence = parseLastEventSequence(request)
   let lastSentAt = 0
+  let disconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -85,12 +87,36 @@ export async function GET(
       const close = () => {
         if (closed) return
         closed = true
+        if (disconnectTimer) {
+          clearTimeout(disconnectTimer)
+          disconnectTimer = null
+        }
         controller.close()
       }
 
       abortSignal.addEventListener("abort", () => {
-        abortGenerationJob(jobId)
-        close()
+        // Check if job is in a finalizing/terminal state - if so, do not abort
+        if (isGenerationJobFinalizing(jobId)) {
+          close()
+          return
+        }
+
+        // Grace period: wait before aborting to allow persist phase to complete
+        disconnectTimer = setTimeout(async () => {
+          // Re-check state after grace period
+          if (isGenerationJobFinalizing(jobId)) {
+            close()
+            return
+          }
+          const freshJob = await GenerationJobService.findById(jobId).catch(() => null)
+          const stage = freshJob?.stage
+          if (stage && (stage === "persisting" || stage === "saving" || stage === "completed" || GENERATION_TERMINAL_STATUSES.has(freshJob?.status || ""))) {
+            close()
+            return
+          }
+          abortGenerationJob(jobId)
+          close()
+        }, DISCONNECT_GRACE_MS)
       }, { once: true })
 
       send("job", lastEventSequence, GenerationJobService.toPublicJob(initialJob))
@@ -155,6 +181,10 @@ export async function GET(
     },
     cancel() {
       closed = true
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer)
+        disconnectTimer = null
+      }
     },
   })
 

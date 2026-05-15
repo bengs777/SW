@@ -36,8 +36,10 @@ import {
   type PartialEditPlan,
 } from "@/lib/ai/edit-planner"
 import { log } from "@/lib/logging"
+import { markGenerationJobFinalizing } from "@/lib/ai/generation-job-runtime"
 
 const GENERATION_HARD_TIMEOUT_MS = 150_000
+const FINALIZATION_TIMEOUT_MS = 30_000
 
 type GenerationPlannerFile = {
   path: string
@@ -859,6 +861,7 @@ export async function executeGenerationJob(
   }
 
   const signal = timeoutController.signal
+  let workingFiles: GeneratedFile[] = []
 
   try {
     await GenerationJobService.transition(input.jobId, {
@@ -912,7 +915,7 @@ export async function executeGenerationJob(
           projectName: plan.blueprint.label,
         })
       : []
-    let workingFiles = seededFiles.length > 0 ? mergeGeneratedFiles(seededFiles, existingFiles) : [...existingFiles]
+    workingFiles = seededFiles.length > 0 ? mergeGeneratedFiles(seededFiles, existingFiles) : [...existingFiles]
 
     if (seededFiles.length > 0) {
       await transition(input.jobId, "scaffolding", "Applying known-good starter architecture", 14, {
@@ -976,6 +979,23 @@ export async function executeGenerationJob(
           addedPackages: normalized.addedPackages,
         }
       )
+    }
+
+    // Checkpoint: persist workingFiles after slice loop before validation
+    if (workingFiles.length > 0) {
+      const checkpointResult = await ProjectFilePersistenceService.savePartialCheckpoint({
+        projectId: input.projectId,
+        prompt: input.prompt,
+        files: workingFiles,
+        reason: "post-slice-loop-checkpoint",
+        idempotencyKey: input.persistenceKey ? `${input.persistenceKey}:checkpoint` : undefined,
+      })
+      log("info", "Post-slice-loop checkpoint attempted", {
+        jobId: input.jobId,
+        saved: checkpointResult.saved,
+        historyId: checkpointResult.historyId,
+        fileCount: workingFiles.length,
+      })
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
@@ -1074,10 +1094,32 @@ export async function executeGenerationJob(
         repairAttempts: repairAttempt,
         failure: validation.failure,
       })
+      // Persist files before throwing so validation-failed generations still save their output
+      if (validation.files.length > 0) {
+        await ProjectFilePersistenceService.savePartialCheckpoint({
+          projectId: input.projectId,
+          prompt: input.prompt,
+          files: validation.files,
+          reason: "validation-failed-persist",
+          idempotencyKey: input.persistenceKey ? `${input.persistenceKey}:validation-failed` : undefined,
+        })
+      }
       throw new Error(validation.failure?.message || "Validation lifecycle failed")
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
+
+    // Protect persist phase: clear hard timeout and mark job as finalizing
+    clearTimeout(hardTimeout)
+    markGenerationJobFinalizing(input.jobId)
+
+    const finalizationTimeout = setTimeout(() => {
+      log("warn", "Finalization timeout warning: persist phase exceeding 30s", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+      })
+    }, FINALIZATION_TIMEOUT_MS)
+
     await transition(input.jobId, "persisting", "Persisting validated project artifacts", 94, {
       repairAttempts: repairAttempt,
       validationSteps: validation.steps.map((step) => ({
@@ -1093,6 +1135,8 @@ export async function executeGenerationJob(
       files: workingFiles,
       idempotencyKey: input.persistenceKey,
     })
+
+    clearTimeout(finalizationTimeout)
 
     await GenerationJobService.update(input.jobId, {
       metrics,
@@ -1135,6 +1179,17 @@ export async function executeGenerationJob(
     const cancelledByTimeout =
       error instanceof Error && error.name === "AbortError" && timeoutController.signal.aborted
 
+    // Emergency persistence: save workingFiles before marking job as failed/cancelled
+    if (cancelledByTimeout && workingFiles.length > 0) {
+      await ProjectFilePersistenceService.savePartialCheckpoint({
+        projectId: input.projectId,
+        prompt: input.prompt,
+        files: workingFiles,
+        reason: "emergency-save-timeout",
+        idempotencyKey: input.persistenceKey ? `${input.persistenceKey}:emergency-timeout` : undefined,
+      })
+    }
+
     if (cancelledByTimeout) {
       await recordGenerationQuality({
         jobId: input.jobId,
@@ -1173,6 +1228,17 @@ export async function executeGenerationJob(
       }).catch(() => null)
       await GenerationJobService.markCancelled(input.jobId, "Generation cancelled")
       throw error
+    }
+
+    // Emergency persistence for general failures
+    if (workingFiles.length > 0) {
+      await ProjectFilePersistenceService.savePartialCheckpoint({
+        projectId: input.projectId,
+        prompt: input.prompt,
+        files: workingFiles,
+        reason: "emergency-save-failure",
+        idempotencyKey: input.persistenceKey ? `${input.persistenceKey}:emergency-failure` : undefined,
+      })
     }
 
     const serialized = serializeError(error)
