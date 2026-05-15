@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
+import { abortGenerationJob } from "@/lib/ai/generation-job-runtime"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 import { GenerationJobService, GENERATION_TERMINAL_STATUSES } from "@/lib/services/generation-job.service"
 
 export const runtime = "nodejs"
@@ -8,7 +10,7 @@ export const dynamic = "force-dynamic"
 
 const HEARTBEAT_MS = 15_000
 const POLL_MS = 1_000
-const IDLE_TIMEOUT_MS = 120_000
+const IDLE_TIMEOUT_MS = 90_000
 const MAX_RETRY_MS = 10_000
 
 function parseLastEventSequence(request: NextRequest) {
@@ -54,6 +56,12 @@ export async function GET(
     return new Response("Authenticated user not found", { status: 404 })
   }
 
+  try {
+    await enforceRouteRateLimit(`stream:${user.id}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return new Response("Too many stream connections", { status: 429 })
+  }
+
   const initialJob = await GenerationJobService.findForUser(jobId, user.id)
   if (!initialJob) {
     return new Response("Generation job not found", { status: 404 })
@@ -80,7 +88,10 @@ export async function GET(
         controller.close()
       }
 
-      abortSignal.addEventListener("abort", close, { once: true })
+      abortSignal.addEventListener("abort", () => {
+        abortGenerationJob(jobId)
+        close()
+      }, { once: true })
 
       send("job", lastEventSequence, GenerationJobService.toPublicJob(initialJob))
 

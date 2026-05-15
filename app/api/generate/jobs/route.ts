@@ -362,7 +362,7 @@ export async function POST(request: NextRequest) {
     // Auto-cleanup: check if any "active" jobs are actually stale (stuck > 5 min).
     // This handles the case where worker crashed or serverless timed out, leaving
     // orphaned jobs that block new submissions forever.
-    const STUCK_THRESHOLD_MS = 5 * 60_000 // 5 minutes
+    const STUCK_THRESHOLD_MS = 3 * 60_000 // 3 minutes
     const stuckCutoff = new Date(Date.now() - STUCK_THRESHOLD_MS)
     const stuckJobs = await prisma.generationJob.findMany({
       where: {
