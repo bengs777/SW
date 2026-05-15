@@ -1,6 +1,7 @@
 import { env } from "@/lib/env"
 import { pingOpenRouter } from "@/lib/ai/connection-pool"
-import { warmCacheConnection } from "@/lib/ai/response-cache"
+import { warmCacheConnection, resetCacheCooldown } from "@/lib/ai/response-cache"
+import { resetRateLimitCooldown } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 
 /**
@@ -68,6 +69,12 @@ async function performWarmup() {
 
   state.lastSuccess = openRouterOk
   state.consecutiveFailures = openRouterOk ? 0 : state.consecutiveFailures + 1
+
+  // If cache is down, reset cooldown timers to force reconnection on next request
+  if (!cacheOk) {
+    resetCacheCooldown()
+    resetRateLimitCooldown()
+  }
 
   log("info", "ai_warmup_cycle", {
     openRouterOk,

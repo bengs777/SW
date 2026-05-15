@@ -20,13 +20,18 @@ const MAX_REQUESTS_PER_DAY = Math.max(
 // --- Redis connection for rate limiting ---
 
 let redisClient: import("ioredis").default | null = null
-let redisInitAttempted = false
+let lastAttemptAt = 0
+let consecutiveFailures = 0
+const BASE_COOLDOWN_MS = 30_000 // 30s initial cooldown
+const MAX_COOLDOWN_MS = 5 * 60_000 // 5 min max cooldown after repeated failures
 
 async function getRateLimitRedis(): Promise<import("ioredis").default | null> {
   if (redisClient) return redisClient
-  if (redisInitAttempted) return null
 
-  redisInitAttempted = true
+  const now = Date.now()
+  const cooldown = Math.min(BASE_COOLDOWN_MS * Math.pow(2, consecutiveFailures), MAX_COOLDOWN_MS)
+  if (now - lastAttemptAt < cooldown) return null
+  lastAttemptAt = now
 
   if (!env.hasNativeRedisConfig) {
     return null
@@ -48,13 +53,28 @@ async function getRateLimitRedis(): Promise<import("ioredis").default | null> {
       console.warn("[rate-limit] Redis error:", err.message)
     })
 
+    redisClient.on("end", () => {
+      redisClient = null
+    })
+
     await redisClient.connect()
+    consecutiveFailures = 0
     return redisClient
   } catch (error) {
     console.warn("[rate-limit] Redis connection failed, falling back to DB-only:", error instanceof Error ? error.message : String(error))
+    consecutiveFailures += 1
     redisClient = null
     return null
   }
+}
+
+/**
+ * Reset the cooldown timer so the next call to getRateLimitRedis() will attempt reconnection.
+ * Called by warmup when cache is detected as down.
+ */
+export function resetRateLimitCooldown() {
+  lastAttemptAt = 0
+  consecutiveFailures = 0
 }
 
 // --- Redis-based sliding window rate limiter ---
