@@ -74,7 +74,6 @@ async function getRateLimitRedis(): Promise<import("ioredis").default | null> {
  */
 export function resetRateLimitCooldown() {
   lastAttemptAt = 0
-  consecutiveFailures = 0
 }
 
 // --- Redis-based sliding window rate limiter ---

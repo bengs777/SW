@@ -85,7 +85,6 @@ async function getCacheRedis(): Promise<import("ioredis").default | null> {
  */
 export function resetCacheCooldown() {
   lastAttemptAt = 0
-  consecutiveFailures = 0
 }
 
 /**
