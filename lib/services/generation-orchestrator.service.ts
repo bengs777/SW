@@ -862,6 +862,7 @@ export async function executeGenerationJob(
 
   const signal = timeoutController.signal
   let workingFiles: GeneratedFile[] = []
+  let finalizationTimeout: ReturnType<typeof setTimeout> | null = null
 
   try {
     await GenerationJobService.transition(input.jobId, {
@@ -1113,7 +1114,7 @@ export async function executeGenerationJob(
     clearTimeout(hardTimeout)
     markGenerationJobFinalizing(input.jobId)
 
-    const finalizationTimeout = setTimeout(() => {
+    finalizationTimeout = setTimeout(() => {
       log("warn", "Finalization timeout warning: persist phase exceeding 30s", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -1211,6 +1212,17 @@ export async function executeGenerationJob(
     }
 
     if (error instanceof GenerationJobCancelledError || cancelledBySignal) {
+      // Emergency persistence: save workingFiles before marking job as cancelled
+      if (workingFiles.length > 0) {
+        await ProjectFilePersistenceService.savePartialCheckpoint({
+          projectId: input.projectId,
+          prompt: input.prompt,
+          files: workingFiles,
+          reason: "emergency-save-cancelled",
+          idempotencyKey: input.persistenceKey ? `${input.persistenceKey}:emergency-cancelled` : undefined,
+        })
+      }
+
       await recordGenerationQuality({
         jobId: input.jobId,
         projectId: input.projectId,
@@ -1276,5 +1288,8 @@ export async function executeGenerationJob(
     throw error
   } finally {
     clearTimeout(hardTimeout)
+    if (finalizationTimeout) {
+      clearTimeout(finalizationTimeout)
+    }
   }
 }
