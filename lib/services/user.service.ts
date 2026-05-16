@@ -320,7 +320,7 @@ export class UserService {
         (typeof name === 'string' && name.trim().length > 0 && name !== existingUser.name) ||
         (typeof image === 'string' && image !== existingUser.image)
       const shouldCreateWorkspace =
-        existingUser.memberships.length === 0
+        existingUser.memberships.length === 0 && existingUser.workspaces.length === 0
       const shouldMarkDeveloper = isDeveloperTreasuryEmail(normalizedEmail) && !existingUser.isDeveloperAccount
 
       if (!shouldUpdateProfile && !shouldCreateWorkspace && !shouldMarkDeveloper) {
@@ -344,50 +344,30 @@ export class UserService {
         }
 
         if (shouldCreateWorkspace) {
-          // Check if user already has a workspace (as creator) but missing membership
-          const existingOwnedWorkspace = existingUser.workspaces[0]
-          if (existingOwnedWorkspace) {
-            // Just add the missing membership
-            await tx.workspaceMember.upsert({
-              where: {
-                workspaceId_userId: {
-                  workspaceId: existingOwnedWorkspace.id,
-                  userId: existingUser.id,
-                },
-              },
-              create: {
-                workspaceId: existingOwnedWorkspace.id,
-                userId: existingUser.id,
-                role: 'admin',
-              },
-              update: {},
-            })
-          } else {
-            const workspaceName = `${name || existingUser.name || normalizedEmail.split('@')[0]} Workspace`
+          const workspaceName = `${name || existingUser.name || normalizedEmail.split('@')[0]} Workspace`
 
-            const workspace = await tx.workspace.create({
-              data: {
-                name: workspaceName,
-                slug: `workspace-${existingUser.id.slice(0, 8)}`,
-                createdBy: existingUser.id,
-              },
-            })
+          const workspace = await tx.workspace.create({
+            data: {
+              name: workspaceName,
+              slug: `workspace-${existingUser.id.slice(0, 8)}`,
+              createdBy: existingUser.id,
+            },
+          })
 
-            await tx.workspaceMember.create({
-              data: {
-                workspaceId: workspace.id,
-                userId: existingUser.id,
-                role: 'admin',
-              },
-            })
+          await tx.workspaceMember.create({
+            data: {
+              workspaceId: workspace.id,
+              userId: existingUser.id,
+              role: 'admin',
+            },
+          })
 
-            await tx.subscription.create({
-              data: {
-                workspaceId: workspace.id,
-                plan: 'free',
-              },
-            })
-          }
+          await tx.subscription.create({
+            data: {
+              workspaceId: workspace.id,
+              plan: 'free',
+            },
+          })
         }
 
         const refreshedUser = await tx.user.findUnique({

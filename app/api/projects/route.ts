@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
-import { WorkspaceService } from "@/lib/services/workspace.service"
 import { UserService } from "@/lib/services/user.service"
 
 const CreateProjectSchema = z.object({
@@ -11,6 +10,39 @@ const CreateProjectSchema = z.object({
   description: z.string().trim().max(500).optional().nullable(),
   prompt: z.string().trim().max(12000).optional().nullable(),
 })
+
+/**
+ * Checks if a user has access to a workspace.
+ * Checks both WorkspaceMember table AND workspace.createdBy for resilience
+ * against orphaned membership records.
+ */
+async function userHasWorkspaceAccess(workspaceId: string, userId: string): Promise<boolean> {
+  // First try the fast path: check membership table
+  const membership = await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId } },
+    select: { id: true },
+  })
+
+  if (membership) return true
+
+  // Fallback: check if user is the workspace creator (handles orphaned membership)
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { createdBy: true },
+  })
+
+  if (workspace?.createdBy === userId) {
+    // Auto-heal: create the missing membership record
+    await prisma.workspaceMember.upsert({
+      where: { workspaceId_userId: { workspaceId, userId } },
+      create: { workspaceId, userId, role: "admin" },
+      update: {},
+    }).catch(() => null)
+    return true
+  }
+
+  return false
+}
 
 export async function GET(request: NextRequest) {
   const session = await auth()
@@ -38,36 +70,20 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Check if user has access to workspace
-    const membership = await WorkspaceService.checkMembership(
-      workspaceId,
-      user.id
-    )
+    // Use session.user.id as the authoritative user ID (matches what /api/workspaces uses)
+    const userId = session.user.id || user.id
+    const hasAccess = await userHasWorkspaceAccess(workspaceId, userId)
 
-    if (!membership) {
-      // Auto-heal: check if user owns this workspace (creator) and add membership
-      const workspace = await prisma.workspace.findUnique({
-        where: { id: workspaceId },
-        select: { id: true, createdBy: true },
-      })
-
-      if (workspace?.createdBy === user.id) {
-        await prisma.workspaceMember.upsert({
-          where: { workspaceId_userId: { workspaceId, userId: user.id } },
-          create: { workspaceId, userId: user.id, role: "admin" },
-          update: {},
-        }).catch(() => null)
-      } else {
-        console.warn("[projects:GET] Forbidden", { userId: user.id, workspaceId, email: session.user.email })
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
+    if (!hasAccess) {
+      console.warn("[projects:GET] Forbidden", { userId, workspaceId, email: session.user.email, userServiceId: user.id })
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
     const projects = await prisma.project.findMany({
       where: { workspaceId },
       include: {
         files: {
-          take: 5, // Get latest 5 files
+          take: 5,
         },
       },
       orderBy: { updatedAt: "desc" },
@@ -75,7 +91,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ projects })
   } catch (error) {
-    console.error("[v0] Error fetching projects:", error)
+    console.error("[projects:GET] Error:", error)
     return NextResponse.json(
       { error: "Failed to fetch projects" },
       { status: 500 }
@@ -102,29 +118,13 @@ export async function POST(request: NextRequest) {
 
     const { name, description, workspaceId, prompt } = CreateProjectSchema.parse(await request.json())
 
-    // Check if user has access to workspace
-    const membership = await WorkspaceService.checkMembership(
-      workspaceId,
-      user.id
-    )
+    // Use session.user.id as the authoritative user ID
+    const userId = session.user.id || user.id
+    const hasAccess = await userHasWorkspaceAccess(workspaceId, userId)
 
-    if (!membership) {
-      // Auto-heal: check if user owns this workspace (creator) and add membership
-      const workspace = await prisma.workspace.findUnique({
-        where: { id: workspaceId },
-        select: { id: true, createdBy: true },
-      })
-
-      if (workspace?.createdBy === user.id) {
-        await prisma.workspaceMember.upsert({
-          where: { workspaceId_userId: { workspaceId, userId: user.id } },
-          create: { workspaceId, userId: user.id, role: "admin" },
-          update: {},
-        }).catch(() => null)
-      } else {
-        console.warn("[projects:POST] Forbidden", { userId: user.id, workspaceId, email: session.user.email })
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
+    if (!hasAccess) {
+      console.warn("[projects:POST] Forbidden", { userId, workspaceId, email: session.user.email, userServiceId: user.id })
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
     const project = await prisma.project.create({
@@ -145,7 +145,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    console.error("[v0] Error creating project:", error)
+    console.error("[projects:POST] Error:", error)
     return NextResponse.json(
       { error: "Failed to create project" },
       { status: 500 }
