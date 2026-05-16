@@ -17,6 +17,7 @@ type AuthToken = JWT & {
 type AuthSession = Session & {
   user: NonNullable<Session["user"]> & {
     id?: string | null
+    isDeveloperAccount?: boolean | null
   }
 }
 
@@ -138,6 +139,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         sessionUser.id = databaseUserId ?? currentToken.id ?? undefined
         sessionUser.email = currentToken.email ?? sessionUser.email ?? null
+
+        // Include isDeveloperAccount in session
+        if (databaseUserId) {
+          try {
+            const dbUser = await prisma.user.findUnique({
+              where: { id: databaseUserId },
+              select: { isDeveloperAccount: true },
+            })
+            sessionUser.isDeveloperAccount = dbUser?.isDeveloperAccount ?? null
+          } catch (error) {
+            console.error("[auth] Failed to fetch isDeveloperAccount:", error)
+          }
+        }
       }
 
       return session
