@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { redirect } from "next/navigation"
 import { useSession } from "next-auth/react"
 import Link from "next/link"
@@ -30,38 +30,44 @@ interface MonitoringData {
 }
 
 export default function AdminPage() {
-  const { data: session } = useSession()
+  const { data: session, status: sessionStatus } = useSession()
   const [monitoringData, setMonitoringData] = useState<MonitoringData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState("")
   const [isDevAccount, setIsDevAccount] = useState(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    // Check if user is a developer via session
-    const checkDevStatus = async () => {
-      try {
-        if (session?.user?.isDeveloperAccount || session?.user?.email?.endsWith("@swift.local")) {
-          setIsDevAccount(true)
-        }
-      } catch (err) {
-        console.error("[v0] Failed to check dev status:", err)
-      }
-    }
+    // Wait until session is fully resolved before checking dev status
+    if (sessionStatus !== "authenticated" || !session) return
 
-    if (session) {
-      checkDevStatus()
-    }
-  }, [session])
+    const isDev = session.user?.isDeveloperAccount || session.user?.email?.endsWith("@swift.local")
+    setIsDevAccount(Boolean(isDev))
+    console.log("[admin] Session resolved", {
+      email: session.user?.email,
+      isDeveloperAccount: session.user?.isDeveloperAccount,
+      sessionStatus,
+    })
+  }, [session, sessionStatus])
 
   useEffect(() => {
-    if (!isDevAccount) return
+    // Delay fetch until session is authenticated AND user is dev
+    if (sessionStatus !== "authenticated" || !isDevAccount) return
+
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     const fetchMonitoring = async () => {
       setIsLoading(true)
       setError("")
 
       try {
-        const response = await fetch("/api/admin/monitoring")
+        const response = await fetch("/api/admin/monitoring", {
+          signal: controller.signal,
+        })
+
+        if (controller.signal.aborted) return
+
         const data = await response.json().catch(() => ({}))
 
         if (!response.ok) {
@@ -71,18 +77,25 @@ export default function AdminPage() {
 
         setMonitoringData(data)
       } catch (err) {
-        console.error("[v0] Failed to fetch monitoring data:", err)
+        if (err instanceof DOMException && err.name === "AbortError") return
+        console.error("[admin] Failed to fetch monitoring data:", err)
         setError("Unable to load monitoring data right now.")
       } finally {
-        setIsLoading(false)
+        if (!controller.signal.aborted) {
+          setIsLoading(false)
+        }
       }
     }
 
     fetchMonitoring()
-    const interval = setInterval(fetchMonitoring, 30000) // Refresh every 30 seconds
+    const interval = setInterval(fetchMonitoring, 30000)
 
-    return () => clearInterval(interval)
-  }, [isDevAccount])
+    return () => {
+      controller.abort()
+      abortControllerRef.current = null
+      clearInterval(interval)
+    }
+  }, [isDevAccount, sessionStatus])
 
   if (!isDevAccount) {
     return (

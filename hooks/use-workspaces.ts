@@ -1,6 +1,7 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
+import { useSession } from "next-auth/react"
 
 interface Workspace {
   id: string
@@ -10,17 +11,33 @@ interface Workspace {
 }
 
 export function useWorkspaces() {
+  const { status: sessionStatus } = useSession()
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState("")
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
+    // Delay fetch until session is fully authenticated
+    if (sessionStatus !== "authenticated") {
+      setIsLoading(true)
+      return
+    }
+
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     const fetchWorkspaces = async () => {
       setIsLoading(true)
       setError("")
 
       try {
-        const response = await fetch("/api/workspaces")
+        const response = await fetch("/api/workspaces", {
+          signal: controller.signal,
+        })
+
+        if (controller.signal.aborted) return
+
         const data = await response.json().catch(() => [])
 
         if (!response.ok) {
@@ -31,16 +48,24 @@ export function useWorkspaces() {
 
         setWorkspaces(Array.isArray(data) ? data : [])
       } catch (fetchError) {
-        console.error("[v0] Failed to fetch workspaces:", fetchError)
+        if (fetchError instanceof DOMException && fetchError.name === "AbortError") return
+        console.error("[workspaces] Failed to fetch workspaces:", fetchError)
         setError("Unable to load workspaces right now.")
         setWorkspaces([])
       } finally {
-        setIsLoading(false)
+        if (!controller.signal.aborted) {
+          setIsLoading(false)
+        }
       }
     }
 
     fetchWorkspaces()
-  }, [])
+
+    return () => {
+      controller.abort()
+      abortControllerRef.current = null
+    }
+  }, [sessionStatus])
 
   return { workspaces, isLoading, error }
 }

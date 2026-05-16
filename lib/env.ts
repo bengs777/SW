@@ -104,7 +104,7 @@ export const env = {
   databaseUrl,
   directDatabaseUrl,
   nextAuthSecret: getEnv("NEXTAUTH_SECRET"),
-  nextAuthUrl: getEnv("NEXTAUTH_URL"),
+  nextAuthUrl: getEnv("NEXTAUTH_URL") || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : ""),
   googleClientId: getEnv("GOOGLE_CLIENT_ID"),
   googleClientSecret: getEnv("GOOGLE_CLIENT_SECRET"),
   aiTimeoutMs: getEnvNumber(20_000, "AI_TIMEOUT_MS"),

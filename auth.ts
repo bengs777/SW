@@ -60,8 +60,8 @@ setInterval(() => {
 }, 5 * 60 * 1000)
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  // SECURITY: Only trust host in non-production or when explicitly configured via NEXTAUTH_URL
-  trustHost: process.env.NODE_ENV !== "production" || Boolean(process.env.NEXTAUTH_URL),
+  // SECURITY: Trust host on Vercel (VERCEL=1) or non-production or when explicitly configured
+  trustHost: process.env.VERCEL === "1" || process.env.NODE_ENV !== "production" || Boolean(process.env.NEXTAUTH_URL),
   secret: env.nextAuthSecret,
   providers: [
     Google({
@@ -152,6 +152,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             console.error("[auth] Failed to fetch isDeveloperAccount:", error)
           }
         }
+
+        console.log("[auth:session]", {
+          email: sessionUser.email,
+          id: sessionUser.id,
+          isDeveloperAccount: sessionUser.isDeveloperAccount,
+        })
       }
 
       return session
