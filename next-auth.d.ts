@@ -8,8 +8,12 @@ declare module "next-auth" {
     user: {
       /** The user's id from the database */
       id?: string | null
+      /** The user's name */
+      name?: string | null
       /** The user's email address */
       email?: string | null
+      /** The user's image */
+      image?: string | null
       /** Whether the user is a developer account */
       isDeveloperAccount?: boolean | null
     }
