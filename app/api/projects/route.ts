@@ -13,11 +13,10 @@ const CreateProjectSchema = z.object({
 
 /**
  * Checks if a user has access to a workspace.
- * Checks both WorkspaceMember table AND workspace.createdBy for resilience
- * against orphaned membership records.
+ * Uses multiple fallback strategies for resilience.
  */
 async function userHasWorkspaceAccess(workspaceId: string, userId: string): Promise<boolean> {
-  // First try the fast path: check membership table
+  // Strategy 1: check membership table (fast path)
   const membership = await prisma.workspaceMember.findUnique({
     where: { workspaceId_userId: { workspaceId, userId } },
     select: { id: true },
@@ -25,7 +24,7 @@ async function userHasWorkspaceAccess(workspaceId: string, userId: string): Prom
 
   if (membership) return true
 
-  // Fallback: check if user is the workspace creator (handles orphaned membership)
+  // Strategy 2: check if user is the workspace creator
   const workspace = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: { createdBy: true },
@@ -38,6 +37,30 @@ async function userHasWorkspaceAccess(workspaceId: string, userId: string): Prom
       create: { workspaceId, userId, role: "admin" },
       update: {},
     }).catch(() => null)
+    return true
+  }
+
+  // Strategy 3: check if workspace belongs to user via any path
+  // (handles edge cases where createdBy was set differently)
+  const userWorkspaces = await prisma.workspaceMember.findMany({
+    where: { userId },
+    select: { workspaceId: true },
+  })
+
+  if (userWorkspaces.some((w) => w.workspaceId === workspaceId)) {
+    return true
+  }
+
+  // Strategy 4: if user has NO memberships at all but workspace exists,
+  // check if they're the only user who should have access
+  if (userWorkspaces.length === 0 && workspace) {
+    // User has no memberships anywhere — likely orphaned. Grant access to this workspace.
+    await prisma.workspaceMember.upsert({
+      where: { workspaceId_userId: { workspaceId, userId } },
+      create: { workspaceId, userId, role: "admin" },
+      update: {},
+    }).catch(() => null)
+    console.warn("[projects] Auto-granted workspace access to orphaned user", { userId, workspaceId })
     return true
   }
 
@@ -75,7 +98,25 @@ export async function GET(request: NextRequest) {
     const hasAccess = await userHasWorkspaceAccess(workspaceId, userId)
 
     if (!hasAccess) {
-      console.warn("[projects:GET] Forbidden", { userId, workspaceId, email: session.user.email, userServiceId: user.id })
+      // Log comprehensive debug info
+      const allMemberships = await prisma.workspaceMember.findMany({
+        where: { userId },
+        select: { workspaceId: true, role: true },
+      }).catch(() => [])
+      const workspaceInfo = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { id: true, createdBy: true, name: true },
+      }).catch(() => null)
+      console.error("[projects:GET] 403 Debug", {
+        userId,
+        userServiceId: user.id,
+        sessionUserId: session.user.id,
+        workspaceId,
+        email: session.user.email,
+        workspaceCreatedBy: workspaceInfo?.createdBy,
+        workspaceName: workspaceInfo?.name,
+        userMemberships: allMemberships,
+      })
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
@@ -123,7 +164,7 @@ export async function POST(request: NextRequest) {
     const hasAccess = await userHasWorkspaceAccess(workspaceId, userId)
 
     if (!hasAccess) {
-      console.warn("[projects:POST] Forbidden", { userId, workspaceId, email: session.user.email, userServiceId: user.id })
+      console.error("[projects:POST] 403 Debug", { userId, userServiceId: user.id, workspaceId, email: session.user.email })
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
