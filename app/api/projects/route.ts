@@ -45,7 +45,20 @@ export async function GET(request: NextRequest) {
     )
 
     if (!membership) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      // Auto-heal: check if user owns this workspace (creator) and add membership
+      const workspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { id: true, createdBy: true },
+      })
+
+      if (workspace?.createdBy === user.id) {
+        await prisma.workspaceMember.create({
+          data: { workspaceId, userId: user.id, role: "admin" },
+        }).catch(() => null)
+      } else {
+        console.warn("[projects:GET] Forbidden", { userId: user.id, workspaceId, email: session.user.email })
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
     }
 
     const projects = await prisma.project.findMany({
@@ -94,7 +107,20 @@ export async function POST(request: NextRequest) {
     )
 
     if (!membership) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      // Auto-heal: check if user owns this workspace (creator) and add membership
+      const workspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { id: true, createdBy: true },
+      })
+
+      if (workspace?.createdBy === user.id) {
+        await prisma.workspaceMember.create({
+          data: { workspaceId, userId: user.id, role: "admin" },
+        }).catch(() => null)
+      } else {
+        console.warn("[projects:POST] Forbidden", { userId: user.id, workspaceId, email: session.user.email })
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
     }
 
     const project = await prisma.project.create({
