@@ -52,8 +52,10 @@ export async function GET(request: NextRequest) {
       })
 
       if (workspace?.createdBy === user.id) {
-        await prisma.workspaceMember.create({
-          data: { workspaceId, userId: user.id, role: "admin" },
+        await prisma.workspaceMember.upsert({
+          where: { workspaceId_userId: { workspaceId, userId: user.id } },
+          create: { workspaceId, userId: user.id, role: "admin" },
+          update: {},
         }).catch(() => null)
       } else {
         console.warn("[projects:GET] Forbidden", { userId: user.id, workspaceId, email: session.user.email })
@@ -114,8 +116,10 @@ export async function POST(request: NextRequest) {
       })
 
       if (workspace?.createdBy === user.id) {
-        await prisma.workspaceMember.create({
-          data: { workspaceId, userId: user.id, role: "admin" },
+        await prisma.workspaceMember.upsert({
+          where: { workspaceId_userId: { workspaceId, userId: user.id } },
+          create: { workspaceId, userId: user.id, role: "admin" },
+          update: {},
         }).catch(() => null)
       } else {
         console.warn("[projects:POST] Forbidden", { userId: user.id, workspaceId, email: session.user.email })
