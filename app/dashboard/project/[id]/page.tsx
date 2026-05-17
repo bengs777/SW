@@ -158,6 +158,39 @@ const normalizeWorkspaceFiles = (files: GeneratedFile[]) =>
     language: normalizeLanguage(file.language),
   }))
 
+type StreamedFileSnapshotMode = "full" | "patch"
+
+type StreamedGeneratedFilesPayload = {
+  source?: string
+  snapshotMode?: StreamedFileSnapshotMode
+  files?: GeneratedFile[]
+  fileCount?: number
+  streamedFileCount?: number
+  paths?: string[]
+}
+
+const mergeGeneratedFileSnapshots = (
+  currentFiles: GeneratedFile[],
+  streamedFiles: GeneratedFile[],
+  snapshotMode: StreamedFileSnapshotMode = "patch"
+) => {
+  const normalizedStreamedFiles = normalizeWorkspaceFiles(streamedFiles)
+
+  if (snapshotMode === "full") {
+    return normalizedStreamedFiles
+  }
+
+  const nextByPath = new Map(
+    normalizeWorkspaceFiles(currentFiles).map((file) => [normalizeWorkspacePath(file.path), file])
+  )
+
+  for (const file of normalizedStreamedFiles) {
+    nextByPath.set(normalizeWorkspacePath(file.path), file)
+  }
+
+  return Array.from(nextByPath.values()).sort((left, right) => left.path.localeCompare(right.path))
+}
+
 const buildWorkspaceDraftKey = (projectId: string) => `${WORKSPACE_DRAFT_STORAGE_PREFIX}:${projectId}`
 
 function readWorkspaceDraftFromStorage(projectId: string): WorkspaceDraft | null {
@@ -348,6 +381,7 @@ export default function EditorPage() {
   const activeGenerationReconnectAttemptsRef = useRef(0)
   const activeGenerationLastEventIdRef = useRef("0")
   const activeGenerationReconnectTimerRef = useRef<number | null>(null)
+  const streamedGenerationFilesSeenRef = useRef(false)
   const workspaceProtectedPathsRef = useRef<string[]>([])
   const workspaceAutosaveTimerRef = useRef<number | null>(null)
   const workspaceDraftFingerprintRef = useRef<string | null>(null)
@@ -451,6 +485,51 @@ export default function EditorPage() {
       ...previous,
     ].slice(0, 100))
   }, [])
+
+  const applyStreamedGeneratedFiles = useCallback((rawPayload: unknown) => {
+    const payload = rawPayload && typeof rawPayload === "object"
+      ? rawPayload as { data?: StreamedGeneratedFilesPayload } & StreamedGeneratedFilesPayload
+      : null
+    const data = payload?.data && typeof payload.data === "object" ? payload.data : payload
+    const streamedFiles = Array.isArray(data?.files) ? data.files : []
+
+    if (streamedFiles.length === 0) {
+      return
+    }
+
+    const snapshotMode: StreamedFileSnapshotMode =
+      data?.snapshotMode === "full" ? "full" : "patch"
+    const normalizedStreamedFiles = normalizeWorkspaceFiles(streamedFiles)
+    const firstPath = normalizedStreamedFiles[0]?.path || null
+
+    setGeneratedFiles((currentFiles) => {
+      const nextFiles = mergeGeneratedFileSnapshots(currentFiles, normalizedStreamedFiles, snapshotMode)
+      if (firstPath) {
+        const nextIndex = nextFiles.findIndex((file) => normalizeWorkspacePath(file.path) === normalizeWorkspacePath(firstPath))
+        if (nextIndex >= 0) {
+          setActiveFileIndex(nextIndex)
+        }
+      }
+      return nextFiles
+    })
+    setPreviewFiles(null)
+    setLatestPreviewError(null)
+    setIsDirty(false)
+
+    if (!streamedGenerationFilesSeenRef.current) {
+      streamedGenerationFilesSeenRef.current = true
+      setActivePreviewTab("explorer")
+    }
+
+    console.info(JSON.stringify({
+      level: "info",
+      msg: "streamed_files_applied",
+      projectId,
+      snapshotMode,
+      streamedFileCount: normalizedStreamedFiles.length,
+      expectedFileCount: data?.fileCount ?? null,
+    }))
+  }, [projectId])
 
   const applyJobProgress = useCallback((job: {
     id: string
@@ -571,11 +650,38 @@ export default function EditorPage() {
             })()
             return
           }
+          if (job.status === "failed") {
+            const message = job.error || job.label || "Generate gagal. Buka Logs untuk detail error."
+            pushErrorLog("generate", message)
+            setShowLogsPanel(true)
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.isGenerating
+                  ? {
+                      ...msg,
+                      content: message,
+                      isGenerating: false,
+                    }
+                  : msg
+              )
+            )
+          }
           setIsGenerating(false)
           window.setTimeout(() => setGenerationProgress(null), 1200)
         }
       } catch {
         // Ignore malformed progress events and keep the existing client-side state.
+      }
+    })
+
+    stream.addEventListener("job.files.updated", (event) => {
+      try {
+        recordEventId(event as MessageEvent)
+        const payload = JSON.parse((event as MessageEvent).data)
+        applyStreamedGeneratedFiles(payload)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gagal membaca update file dari stream."
+        pushErrorLog("project", message)
       }
     })
 
@@ -606,7 +712,7 @@ export default function EditorPage() {
         startGenerationStream(jobId, nextAttempt)
       }, delay)
     }
-  }, [applyJobProgress, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
+  }, [applyJobProgress, applyStreamedGeneratedFiles, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
 
   useEffect(() => {
     return () => {
@@ -701,6 +807,7 @@ export default function EditorPage() {
       workspaceDraftFingerprintRef.current = null
       workspaceSaveFingerprintRef.current = null
       workspaceDraftRef.current = null
+      streamedGenerationFilesSeenRef.current = false
 
       try {
         const response = await fetch(`/api/projects/${projectId}`)
@@ -1132,6 +1239,7 @@ export default function EditorPage() {
 
     setMessages((prev) => [...prev, userMessage])
     setIsGenerating(true)
+    streamedGenerationFilesSeenRef.current = false
     activeGenerateWasCancelledRef.current = false
     setProviderStatus(null)
     setGenerationProgress({
@@ -1247,6 +1355,7 @@ export default function EditorPage() {
 
       const jobId = String(jobData.job.id)
       activeGenerationJobIdRef.current = jobId
+      activeGenerationLastEventIdRef.current = "0"
       applyJobProgress(jobData.job)
       startGenerationStream(jobId)
 

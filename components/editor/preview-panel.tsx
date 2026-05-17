@@ -285,16 +285,27 @@ export function PreviewPanel({
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden bg-background">
           {files.length > 0 ? (
-            <CodeExplorer
-              files={files}
-              activeFilePath={files[activeFileIndex]?.path}
-              onSelectFile={(filePath) => {
-                const index = files.findIndex((f) => f.path === filePath)
-                if (index >= 0 && onSelectFile) {
-                  onSelectFile(index)
-                }
-              }}
-            />
+            <>
+              <div className="w-72 shrink-0 border-r border-border">
+                <CodeExplorer
+                  files={files}
+                  activeFilePath={files[activeFileIndex]?.path}
+                  onSelectFile={(filePath) => {
+                    const index = files.findIndex((f) => f.path === filePath)
+                    if (index >= 0 && onSelectFile) {
+                      onSelectFile(index)
+                    }
+                  }}
+                />
+              </div>
+              <div className="min-w-0 flex-1">
+                <CodeEditor
+                  filePath={files[activeFileIndex]?.path || ""}
+                  code={files[activeFileIndex]?.content || ""}
+                  onChange={handleCodeChange}
+                />
+              </div>
+            </>
           ) : (
             <EmptyExplorer />
           )}

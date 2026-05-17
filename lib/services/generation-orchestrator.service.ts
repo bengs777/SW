@@ -351,6 +351,54 @@ async function transition(jobId: string, stage: GenerationJobStage, label: strin
   })
 }
 
+const FILE_STREAM_FULL_SNAPSHOT_MAX_BYTES = 750 * 1024
+
+const compactGeneratedFiles = (files: GeneratedFile[]) =>
+  files.map((file) => ({
+    path: normalizePath(file.path),
+    content: String(file.content ?? ""),
+    language: file.language,
+  }))
+
+const totalFileBytes = (files: GeneratedFile[]) =>
+  files.reduce((sum, file) => sum + Buffer.byteLength(String(file.content ?? ""), "utf8"), 0)
+
+async function emitGeneratedFilesUpdate(input: {
+  jobId: string
+  stage: GenerationJobStage
+  message: string
+  allFiles: GeneratedFile[]
+  changedFiles?: GeneratedFile[]
+  source: "seed" | "slice" | "repair"
+  data?: Record<string, unknown>
+}) {
+  const allFilesBytes = totalFileBytes(input.allFiles)
+  const useFullSnapshot = allFilesBytes <= FILE_STREAM_FULL_SNAPSHOT_MAX_BYTES
+  const files = useFullSnapshot
+    ? input.allFiles
+    : input.changedFiles && input.changedFiles.length > 0
+      ? input.changedFiles
+      : input.allFiles.slice(0, 12)
+
+  await GenerationJobService.appendEvent({
+    jobId: input.jobId,
+    type: "job.files.updated",
+    stage: input.stage,
+    status: "running",
+    message: input.message,
+    data: {
+      source: input.source,
+      snapshotMode: useFullSnapshot ? "full" : "patch",
+      files: compactGeneratedFiles(files),
+      fileCount: input.allFiles.length,
+      streamedFileCount: files.length,
+      totalBytes: allFilesBytes,
+      paths: input.allFiles.map((file) => normalizePath(file.path)).slice(0, 120),
+      ...(input.data || {}),
+    },
+  })
+}
+
 async function runProviderAttempt(input: {
   jobId: string
   prompt: string
@@ -1117,6 +1165,18 @@ export async function executeGenerationJob(
         appType: plan.appType,
         seededFileCount: seededFiles.length,
       })
+      await emitGeneratedFilesUpdate({
+        jobId: input.jobId,
+        stage: "scaffolding",
+        message: "Starter files are available in Explorer",
+        allFiles: workingFiles,
+        changedFiles: seededFiles,
+        source: "seed",
+        data: {
+          appType: plan.appType,
+          seededFileCount: seededFiles.length,
+        },
+      })
     }
 
     for (let index = 0; index < plan.filePlan.length; index += 1) {
@@ -1150,6 +1210,11 @@ export async function executeGenerationJob(
       workingFiles = mergeGeneratedFiles(workingFiles, scoped.acceptedFiles)
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
+      const streamPaths = new Set([
+        ...scoped.acceptedFiles.map((file) => normalizePath(file.path)),
+        ...(normalized.addedPackages.length > 0 ? ["package.json"] : []),
+      ])
+      const streamFiles = workingFiles.filter((file) => streamPaths.has(normalizePath(file.path)))
 
       await transition(
         input.jobId,
@@ -1165,6 +1230,24 @@ export async function executeGenerationJob(
           addedPackages: normalized.addedPackages,
         }
       )
+      if (streamFiles.length > 0) {
+        await emitGeneratedFilesUpdate({
+          jobId: input.jobId,
+          stage: "parsing",
+          message: `File slice ${index + 1}/${plan.filePlan.length} ready in Explorer`,
+          allFiles: workingFiles,
+          changedFiles: streamFiles,
+          source: "slice",
+          data: {
+            target: target.path,
+            sliceIndex: index + 1,
+            sliceTotal: plan.filePlan.length,
+            acceptedFileCount: scoped.acceptedFiles.length,
+            rejectedFileCount: scoped.rejectedFiles.length,
+            addedPackages: normalized.addedPackages,
+          },
+        })
+      }
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
@@ -1224,6 +1307,21 @@ export async function executeGenerationJob(
           normalizedPackages: repaired.normalizedPackages,
         }
       )
+      await emitGeneratedFilesUpdate({
+        jobId: input.jobId,
+        stage: "repairing",
+        message: `Repaired files ${repairAttempt}/${MAX_REPAIR_ATTEMPTS} ready in Explorer`,
+        allFiles: workingFiles,
+        changedFiles: repaired.files,
+        source: "repair",
+        data: {
+          repairAttempt,
+          repaired: repaired.repaired,
+          parsedFileCount: repaired.parsedFileCount,
+          acceptedFileCount: repaired.acceptedFileCount,
+          rejectedFiles: repaired.rejectedFiles,
+        },
+      })
 
       validation = await runValidationLifecycle({
         jobId: input.jobId,
