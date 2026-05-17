@@ -50,6 +50,8 @@ export function buildOpenRouterHeaders() {
     "Content-Type": "application/json",
     "HTTP-Referer": env.openRouterSiteUrl || env.appUrl || "https://swift.biz.id",
     "X-Title": env.openRouterAppName || "Swift AI",
+    "X-OpenRouter-Cache": "true",
+    "X-OpenRouter-Cache-TTL": "300",
   }
 }
 

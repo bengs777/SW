@@ -6,8 +6,14 @@ export const SWIFT_2_MODEL_KEY = SWIFT_BUILDER_MODEL_KEY
 export const DEFAULT_SWIFT_TIER_KEY = SWIFT_BUILDER_MODEL_KEY
 export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
+export const DEEPSEEK_FLASH_V4_MODEL_ID =
+  process.env.OPENROUTER_DEEPSEEK_FLASH_V4_MODEL ||
+  process.env.OPENROUTER_DEEPSEEK_V4_FLASH_MODEL ||
+  process.env.OPENROUTER_DEEPSEEK_V32_MODEL ||
+  process.env.OPENROUTER_DEEPSEEK_V32_PRO_MODEL ||
+  "deepseek/deepseek-v4-flash"
 export const DEEPSEEK_V32_MODEL_ID =
-  process.env.OPENROUTER_DEEPSEEK_V32_MODEL || process.env.OPENROUTER_DEEPSEEK_V32_PRO_MODEL || "deepseek/deepseek-v3.2"
+  DEEPSEEK_FLASH_V4_MODEL_ID
 export const DEEPSEEK_V32_PRO_MODEL_ID = DEEPSEEK_V32_MODEL_ID
 
 export type SwiftTierKey =
@@ -75,13 +81,13 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     timeoutMs: 120_000,
-    maxOutputTokens: 9000,
+    maxOutputTokens: 4096,
     rank: 2,
     public: true,
     generationLayer: "builder",
     queue: { concurrency: 3, maxQueueDepth: 36 },
     targets: [
-      { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 95_000, maxOutputTokens: 8500 },
+      { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 75_000, maxOutputTokens: 4096 },
     ],
   }
 
@@ -95,13 +101,13 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       priceIdr: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
       price: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
       timeoutMs: 75_000,
-      maxOutputTokens: 4500,
+      maxOutputTokens: 4096,
       rank: 1,
       public: true,
       generationLayer: "fast",
       queue: { concurrency: 6, maxQueueDepth: 64 },
       targets: [
-        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 75_000, maxOutputTokens: 4500 },
+        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 60_000, maxOutputTokens: 4096 },
       ],
     },
     builderTier,
@@ -126,13 +132,13 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       priceIdr: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
       price: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
       timeoutMs: 150_000,
-      maxOutputTokens: 9000,
+      maxOutputTokens: 4096,
       rank: 100,
       public: false,
       generationLayer: "premium-repair",
       queue: { concurrency: 1, maxQueueDepth: 12 },
       targets: [
-        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 120_000, maxOutputTokens: 9000 },
+        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 90_000, maxOutputTokens: 4096 },
       ],
     },
   ]

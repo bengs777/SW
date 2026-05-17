@@ -119,6 +119,33 @@ Aturan baku orchestrator:
 *   **Fase perbaikan**: ubah file terkecil yang menyebabkan error preview, jangan regenerasi seluruh proyek.
 *   **Target UX**: hasil pertama harus bisa muncul di preview dalam 45 detik, lalu fitur backend dipecah ke prompt lanjutan.
 
+### 4.4 Lock Khusus DeepSeek Flash V4
+DeepSeek Flash V4 wajib dipakai sebagai mesin murah-cepat untuk siklus preview. Karena model cepat mudah melenceng jika prompt longgar, sistem harus mengulang batas file, dummy data, dan format JSON pada system prompt.
+
+```text
+KAMU ADALAH ORCHESTRATOR SWIFT BUILDER. TUGASMU: PECAH PROMPT USER JADI MAX 3 FILE UNTUK PREVIEW CEPAT.
+
+ATURAN KERAS:
+1. MAX 3 FILE PER GENERATE. Kalau user minta fullstack, buat 3 file pondasi dulu. Sisanya tunggu prompt tahap 2.
+2. PAKAI DATA DUMMY. Jangan setup Prisma, Turso, Auth, Stripe, atau package baru. Semua data pakai array const di dalam file.
+3. MAX 4000 TOKEN PER FILE. Kode harus langsung jalan di preview. Jangan bikin file >150 baris.
+4. PATH HARUS BENAR. Root Next.js = /app. Jangan bikin /src/app.
+5. OUTPUT HANYA JSON. Jangan ada teks penjelasan, markdown, atau komentar di luar JSON.
+
+ATURAN KHUSUS FLASH V4:
+- Ulangi aturan MAX 3 FILE di awal setiap reasoning.
+- Kalau prompt user terlalu besar, PECAH OTOMATIS jadi tahap 1: UI + data dummy saja.
+- Jangan pakai reasoning_effort tinggi. Flash V4 stabil di default.
+```
+
+Konfigurasi API wajib:
+*   **Model**: `deepseek/deepseek-v4-flash` via `OPENROUTER_DEEPSEEK_FLASH_V4_MODEL`.
+*   **Temperature**: `0.2` untuk output lebih deterministik.
+*   **Max tokens**: `4096` per request agar tidak mengulang dan timeout.
+*   **Reasoning**: `include_reasoning = false`; jangan kirim `reasoning_effort: high`.
+*   **Cache**: aktifkan header OpenRouter response cache untuk request identik. Gunakan `cache_control` hanya untuk provider yang mendukung prompt caching eksplisit.
+*   **Output**: JSON task graph atau daftar file terstruktur, tanpa markdown dan tanpa teks di luar JSON.
+
 ---
 
 ## 🛡️ FASE 5: PERTAHANAN PRODUKSI & VALIDASI KEAMANAN

@@ -7,8 +7,8 @@ export const AI_CONFIG = {
   provider: SWIFT_PROVIDER,
   model: SWIFT_2_MODEL_KEY,
   baseUrl: "/api/generate",
-  temperature: 0.7,
-  maxTokens: env.aiMaxOutputTokens,
+  temperature: 0.2,
+  maxTokens: Math.min(env.aiMaxOutputTokens, 4096),
   topP: 0.95,
   systemPrompts: {
     planner: `You are a senior full-stack architect and product engineer. Your role is to analyze user requests and create detailed implementation plans for modern Next.js applications.
