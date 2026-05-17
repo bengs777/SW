@@ -85,6 +85,7 @@ type ExecuteGenerationJobDeps = {
 }
 
 const MAX_REPAIR_ATTEMPTS = 1
+const PREVIEW_FOUNDATION_FILE_LIMIT = 3
 
 type ValidationLifecycleStep =
   | "normalize"
@@ -277,7 +278,16 @@ function buildGenerationPlan(input: {
       })
     }
   } else {
-    for (const filePath of blueprint.requiredFiles.slice(0, 10)) {
+    for (const filePath of extractRequestedFilePaths(input.prompt).slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)) {
+      plannedByPath.set(normalizePath(filePath), {
+        path: normalizePath(filePath),
+        reason: "Explicitly requested by the prompt for the preview-first foundation",
+        action: "create_or_update",
+      })
+    }
+
+    for (const filePath of blueprint.requiredFiles.slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)) {
+      if (plannedByPath.size >= editPlan.maxSlices) break
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
         reason: `${blueprint.label} blueprint requires this file for deployable generation`,
@@ -286,6 +296,7 @@ function buildGenerationPlan(input: {
     }
 
     for (const file of trimmed.files.slice(0, 8)) {
+      if (plannedByPath.size >= editPlan.maxSlices) break
       const path = normalizePath(file.path)
       if (!plannedByPath.has(path)) {
         plannedByPath.set(path, {
@@ -481,6 +492,12 @@ function buildSlicePrompt(input: {
     "",
     "EXECUTION_RULES:",
     "- Work only on the requested file slice and directly related imports.",
+    `- Preview-first budget: the full generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files for the first pass.`,
+    "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
+    "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
+    "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
+    "- Keep each returned file under 4000 output tokens when possible.",
+    "- Stop after the requested slice; do not create extra support files speculatively.",
     "- Return ONLY a JSON object with taskGraph; include changed files as taskGraph.operations.",
     '- taskGraph schema: {"taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]}}',
     "- For delete operations, omit content. For create/modify operations, content must be the full file content.",
@@ -521,6 +538,19 @@ function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, 
       normalizePath(file.path) === "package.json"
     )
     .slice(0, 8)
+}
+
+function extractRequestedFilePaths(prompt: string) {
+  const paths = new Set<string>()
+  const pattern = /(?:^|[\s:`"'(])([A-Za-z0-9_./[\]()-]+\.(?:tsx?|jsx?|json|css|prisma|md|env))(?:\b|$)/gim
+
+  for (const match of String(prompt || "").matchAll(pattern)) {
+    if (match[1]) {
+      paths.add(normalizePath(match[1]))
+    }
+  }
+
+  return Array.from(paths)
 }
 
 function extractFilePathsFromError(message: string) {
@@ -640,8 +670,13 @@ async function runValidationLifecycle(input: {
   await input.emit("validating", "Checking static project invariants", 66)
   const fullstack = validateFullStackFiles(files)
   const dependencyMap = buildDependencyMap(files)
+  const plannedRequiredFiles = input.plan.filePlan.map((file) => normalizePath(file.path))
+  const isPreviewFoundationPass =
+    input.plan.editPlan.mode === "full" && plannedRequiredFiles.length <= PREVIEW_FOUNDATION_FILE_LIMIT
   const partialRequiredFiles =
-    input.plan.editPlan.mode === "partial"
+    isPreviewFoundationPass
+      ? plannedRequiredFiles
+      : input.plan.editPlan.mode === "partial"
       ? input.blueprint.requiredFiles.filter((filePath) => {
           const normalized = normalizePath(filePath)
           return (
@@ -658,7 +693,7 @@ async function runValidationLifecycle(input: {
     requiredFiles: partialRequiredFiles,
   })
   const staticFailures: string[] = []
-  const requiresFullStackCoverage = shouldRequireFullStackCoverage(input.plan)
+  const requiresFullStackCoverage = !isPreviewFoundationPass && shouldRequireFullStackCoverage(input.plan)
 
   if (dependencyMap.missingLocalImports.length > 0) {
     staticFailures.push(`Missing local imports: ${dependencyMap.missingLocalImports.length}`)

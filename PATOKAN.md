@@ -86,6 +86,39 @@ Hasilkan kode bersih yang HANYA berfokus pada industri yang diminta oleh penggun
 DILARANG KERAS berasumsi atau memasukkan komponen finansial, dasbor SaaS, metrik pendapatan, tingkat konversi bisnis, atau grafik keuangan jika pengguna meminta kategori non-komersial (seperti portal berita desa, portofolio pribadi, atau web hobi). Fokus pada fungsionalitas murni sesuai teks prompt pengguna.
 ```
 
+### 4.3 Strategi Generasi Bertahap Anti-Timeout (Preview-First Slicing)
+Generator dilarang membuat 10-15 file sekaligus pada awal proyek. Siklus pertama wajib berupa pondasi pratinjau kecil agar preview tampil cepat dan tidak menabrak batas timeout 180 detik.
+
+**Prompt pondasi tahap 1 untuk project JBB:**
+```text
+Buat MAX 3 FILE saja untuk project JBB.
+
+Yang dibuat sekarang:
+1. app/dashboard/page.tsx - UI dashboard dengan data dummy
+2. app/dashboard/layout.tsx - layout sidebar header
+3. app/api/dashboard/stats/route.ts - return JSON dummy
+
+Rules:
+- Pakai Tailwind + shadcn/ui. Jangan install library baru.
+- Data semua pakai array dummy di dalam file. Jangan konek DB.
+- Max 4000 token per file.
+- Stop setelah 3 file. Jangan buat file lain.
+
+Tujuan: Dashboard langsung tampil di preview dalam 45 detik.
+```
+
+**Prompt tahap 2 setelah preview tampil:**
+```text
+Sekarang konek ke Turso. Ubah app/api/dashboard/stats/route.ts jadi query Prisma.
+File yang diubah: schema.prisma, lib/prisma.ts, route.ts. Max 4 file.
+```
+
+Aturan baku orchestrator:
+*   **Fase pondasi**: maksimal 3 file, data dummy lokal, tanpa DB, tanpa dependency baru.
+*   **Fase integrasi**: maksimal 3-4 file per siklus, hanya file yang disebut di prompt.
+*   **Fase perbaikan**: ubah file terkecil yang menyebabkan error preview, jangan regenerasi seluruh proyek.
+*   **Target UX**: hasil pertama harus bisa muncul di preview dalam 45 detik, lalu fitur backend dipecah ke prompt lanjutan.
+
 ---
 
 ## 🛡️ FASE 5: PERTAHANAN PRODUKSI & VALIDASI KEAMANAN

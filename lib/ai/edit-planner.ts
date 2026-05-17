@@ -78,7 +78,7 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
       targetPaths: [],
       allowedNewPaths: [],
       preservePaths: [],
-      maxSlices: 10,
+      maxSlices: 3,
       requiresFullValidation: true,
     }
   }
@@ -362,8 +362,8 @@ function isGeneratedSupportFile(path: string, plan: PartialEditPlan) {
 }
 
 function maxSlicesForIntent(intent: EditIntent) {
-  if (intent === "schema_change" || intent === "upload_integration") return 6
-  if (intent === "api_change" || intent === "pricing_page") return 5
+  if (intent === "schema_change" || intent === "upload_integration") return 4
+  if (intent === "api_change" || intent === "pricing_page") return 4
   if (intent === "runtime_fix") return 4
   return 3
 }
