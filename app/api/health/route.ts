@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
 import { randomUUID } from "node:crypto"
 import { prisma } from "@/lib/db/client"
-import { env, getMissingProductionEnvVars } from "@/lib/env"
+import { env, getMissingProductionEnvVars, validateEnv } from "@/lib/env"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { log } from "@/lib/logging"
+import { timeoutConfig } from "@/lib/timeouts"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -89,6 +90,7 @@ export async function GET(request: NextRequest) {
     checkProviders(refreshProvider),
   ])
   const missingProductionEnv = env.nodeEnv === "production" ? getMissingProductionEnvVars() : []
+  const envReport = validateEnv()
   const requiredHealthy = database.status !== "unhealthy" && missingProductionEnv.length === 0
   const operational =
     requiredHealthy &&
@@ -105,6 +107,7 @@ export async function GET(request: NextRequest) {
     queue: queue.status,
     providers: providers.status,
     missingProductionEnvCount: missingProductionEnv.length,
+    envIssueCount: envReport.issues.length,
   })
 
   return NextResponse.json({
@@ -119,8 +122,29 @@ export async function GET(request: NextRequest) {
       queue,
       providers,
       environment: {
-        status: missingProductionEnv.length === 0 ? "healthy" : "unhealthy",
+        status: missingProductionEnv.length === 0 && envReport.issues.every((issue) => issue.severity !== "error")
+          ? "healthy"
+          : "unhealthy",
         missingProductionEnv,
+        audit: {
+          ok: envReport.ok,
+          issues: envReport.issues.map((issue) => ({
+            key: issue.key,
+            severity: issue.severity,
+            message: issue.message,
+          })),
+        },
+        runtime: {
+          nodeEnv: env.nodeEnv,
+          vercel: Boolean(process.env.VERCEL),
+          region: process.env.VERCEL_REGION || null,
+          generationExecutionMode: process.env.SWIFT_GENERATION_EXECUTION_MODE || (process.env.VERCEL ? "serverless" : "queue"),
+          aiTimeoutMs: env.aiTimeoutMs,
+          aiQueueTimeoutMs: env.aiQueueTimeoutMs,
+          timeouts: timeoutConfig,
+          aiMaxRetries: env.aiMaxRetries,
+          aiMaxConcurrentGenerations: env.aiMaxConcurrentGenerations,
+        },
       },
     },
   }, {

@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
+import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import type { GeneratedFile } from "@/lib/types"
 import { readWorkspaceStateFile, splitWorkspaceStateFiles } from "@/lib/workspace-state"
+import { log } from "@/lib/logging"
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const startedAt = Date.now()
+  const requestId = request.headers.get("x-request-id") || request.headers.get("x-vercel-id") || randomUUID()
   const session = await auth()
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -52,16 +56,44 @@ export async function GET(
 
     const { files: visibleFiles, stateFile } = splitWorkspaceStateFiles(project.files)
     const workspaceState = readWorkspaceStateFile(stateFile)
+    const latestFileUpdatedAt = project.files.reduce<string | null>((latest, file) => {
+      if (file.path.replace(/\\/g, "/") === ".swift/workspace-state.json") return latest
+      const updatedAt = file.updatedAt.toISOString()
+      if (!updatedAt) return latest
+      return !latest || updatedAt > latest ? updatedAt : latest
+    }, null)
+    const latestHistoryId = project.history[0]?.id || null
+
+    log("info", "project_state_loaded", {
+      requestId,
+      projectId: id,
+      userId: session.user.id,
+      fileCount: visibleFiles.length,
+      latestHistoryId,
+      durationMs: Date.now() - startedAt,
+    })
 
     return NextResponse.json({
       project: {
         ...project,
         files: visibleFiles,
         workspaceState,
+        fileState: {
+          count: visibleFiles.length,
+          latestUpdatedAt: latestFileUpdatedAt,
+          latestHistoryId,
+        },
       },
+    }, {
+      headers: { "X-Request-Id": requestId },
     })
   } catch (error) {
-    console.error("[v0] Error fetching project:", error)
+    log("error", "project_state_load_failed", {
+      requestId,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      durationMs: Date.now() - startedAt,
+    })
     return NextResponse.json(
       { error: "Failed to fetch project" },
       { status: 500 }

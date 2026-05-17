@@ -508,6 +508,7 @@ export async function POST(request: NextRequest) {
       collaborationMode: parsed.data.collaborationMode,
       idempotencyKey: parsed.data.idempotencyKey,
       requestHash,
+      traceId,
       previewContext: parsed.data.previewContext,
       attachments: parsed.data.attachments,
     }

@@ -312,7 +312,18 @@ export class ProviderRouter {
           }
 
           retryCount += 1
-          await sleep(retryDelayMs(retryCount))
+          const delayMs = retryDelayMs(retryCount)
+          log("warn", "ai_provider_retry_scheduled", {
+            mode,
+            tier: tier.key,
+            targetRole: target.role,
+            failureReason: normalized.reason,
+            statusCode: normalized.statusCode,
+            retryCount,
+            delayMs,
+            requestId: normalized.requestId,
+          })
+          await sleep(delayMs)
         }
       }
     }

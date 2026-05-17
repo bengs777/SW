@@ -1,8 +1,10 @@
 import type { Prisma } from "@prisma/client"
+import { createHash } from "node:crypto"
 import { prisma } from "@/lib/db/client"
 import { withDatabaseWriteRetry } from "@/lib/db/errors"
 import type { GeneratedFile } from "@/lib/types"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
+import { log } from "@/lib/logging"
 
 type PersistProjectFilesOptions = {
   idempotencyKey?: string | null
@@ -17,6 +19,12 @@ type ProjectFileDiff = {
   deleted: number
   unchanged: number
   finalFileCount: number
+}
+
+type ProjectFileIntegrity = {
+  fileCount: number
+  totalBytes: number
+  sha256: string
 }
 
 const MAX_PROJECT_FILES = 240
@@ -35,6 +43,28 @@ const FORBIDDEN_EXACT_FILES = new Set([
 
 const normalizeFilePath = (path: string) =>
   path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+
+function buildFileIntegrity(files: GeneratedFile[]): ProjectFileIntegrity {
+  const hash = createHash("sha256")
+  let totalBytes = 0
+
+  for (const file of [...files].sort((left, right) => left.path.localeCompare(right.path))) {
+    const content = String(file.content ?? "")
+    totalBytes += Buffer.byteLength(content, "utf8")
+    hash.update(file.path)
+    hash.update("\0")
+    hash.update(normalizeFileLanguage(file.language))
+    hash.update("\0")
+    hash.update(content)
+    hash.update("\0")
+  }
+
+  return {
+    fileCount: files.length,
+    totalBytes,
+    sha256: hash.digest("hex"),
+  }
+}
 
 function assertSafeProjectPath(path: string) {
   if (!path || path.includes("\0") || /[\u0000-\u001f\u007f]/.test(path)) {
@@ -234,6 +264,28 @@ export class ProjectFilePersistenceService {
           })
 
       const fileDiff = await syncProjectFiles(tx, projectId, normalizedFiles)
+      const persistedFiles = await tx.projectFile.findMany({
+        where: { projectId },
+        orderBy: { path: "asc" },
+      })
+      const persistedIntegrity = buildFileIntegrity(
+        persistedFiles.map((file) => ({
+          path: file.path,
+          content: file.content,
+          language: normalizeFileLanguage(file.language),
+        }))
+      )
+      const expectedIntegrity = buildFileIntegrity(normalizedFiles)
+
+      if (persistedIntegrity.sha256 !== expectedIntegrity.sha256) {
+        log("error", "project_file_integrity_mismatch", {
+          projectId,
+          expected: expectedIntegrity,
+          persisted: persistedIntegrity,
+          fileDiff,
+        })
+        throw new Error("Generated file integrity check failed after database persistence.")
+      }
 
       await tx.project.update({
         where: { id: projectId },
@@ -247,6 +299,7 @@ export class ProjectFilePersistenceService {
         historyId: createdHistory.id,
         files: normalizedFiles,
         fileDiff,
+        integrity: persistedIntegrity,
       }
     }))
   }

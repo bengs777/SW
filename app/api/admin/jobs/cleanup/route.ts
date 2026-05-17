@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/db/client"
 import { requireDeveloperActorResponse } from "@/lib/admin"
+import { cleanupGenerationQueue } from "@/lib/queue/generation-queue"
+import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 
 /**
  * POST /api/admin/jobs/cleanup
@@ -19,6 +21,13 @@ export async function POST(request: NextRequest) {
   if ("error" in actorResult) {
     return actorResult.error
   }
+
+  await reconcileStaleGenerationJobs().catch(() => null)
+  const queueCleanup = await cleanupGenerationQueue().catch((error) => ({
+    enabled: false,
+    cleaned: null,
+    error: error instanceof Error ? error.message : String(error),
+  }))
 
   const STUCK_THRESHOLD_MINUTES = 2
   const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MINUTES * 60 * 1000)
@@ -44,6 +53,7 @@ export async function POST(request: NextRequest) {
       success: true,
       message: "No stuck jobs found. All clear!",
       cleaned: 0,
+      queueCleanup,
     })
   }
 
@@ -65,6 +75,7 @@ export async function POST(request: NextRequest) {
     success: true,
     message: `Cleaned ${result.count} stuck job(s). Users can now submit new requests.`,
     cleaned: result.count,
+    queueCleanup,
     jobs: stuckJobs.map((j) => ({
       id: j.id,
       userId: j.userId,

@@ -6,6 +6,7 @@ import { signOut, useSession } from "next-auth/react"
 import {
   BookOpen,
   FolderOpen,
+  Activity,
   LayoutDashboard,
   LogOut,
   MonitorCog,
@@ -30,6 +31,7 @@ const navigation = [
   { name: "Projects", href: "/dashboard/projects", icon: FolderOpen },
   { name: "Templates", href: "/dashboard/templates", icon: BookOpen },
   { name: "Admin", href: "/dashboard/admin", icon: MonitorCog },
+  { name: "System", href: "/dashboard/system", icon: Activity },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ]
 

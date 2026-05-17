@@ -1,6 +1,7 @@
 import { subHours } from "date-fns"
 import { prisma } from "@/lib/db/client"
 import { getProductionReadiness } from "@/lib/production/readiness"
+import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 
 const DEFAULT_WINDOW_HOURS = 24
 
@@ -51,6 +52,11 @@ export class AdminMonitoringService {
       recentRequests,
       latestFailedRequests,
       pendingReservations,
+      generationJobStatus,
+      generationAttemptStatus,
+      generationLatency,
+      recentGenerationJobs,
+      queueHealth,
     ] = await Promise.all([
       prisma.user.count(),
       prisma.project.count(),
@@ -140,6 +146,58 @@ export class AdminMonitoringService {
           createdAt: { gte: since },
         },
       }),
+      prisma.generationJob.groupBy({
+        by: ["status"],
+        where: { createdAt: { gte: since } },
+        _count: { _all: true },
+      }),
+      prisma.generationAttempt.groupBy({
+        by: ["status"],
+        where: { startedAt: { gte: since } },
+        _count: { _all: true },
+      }),
+      prisma.generationQualityMetric.aggregate({
+        where: { createdAt: { gte: since } },
+        _avg: {
+          providerLatencyMs: true,
+          validationLatencyMs: true,
+          totalLatencyMs: true,
+        },
+        _count: { _all: true },
+      }),
+      prisma.generationJob.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 12,
+        select: {
+          id: true,
+          projectId: true,
+          status: true,
+          stage: true,
+          label: true,
+          progress: true,
+          queueJobId: true,
+          error: true,
+          createdAt: true,
+          updatedAt: true,
+          startedAt: true,
+          completedAt: true,
+          failedAt: true,
+        },
+      }),
+      getGenerationQueueHealth().catch((error) => ({
+        enabled: false,
+        status: "unhealthy",
+        counts: null,
+        deadLetter: null,
+        workerHeartbeat: null,
+        redis: {
+          configured: false,
+          status: "error",
+          ping: null,
+          error: error instanceof Error ? error.message : String(error),
+          latencyMs: 0,
+        },
+      })),
     ])
 
     const usage = statusCountMap(usageStatus)
@@ -170,6 +228,18 @@ export class AdminMonitoringService {
         total: totalRequestCount,
         successRate: totalRequestCount > 0 ? Math.round((requests.success / totalRequestCount) * 100) : 0,
       },
+      generation: {
+        jobsByStatus: statusCountMap(generationJobStatus),
+        attemptsByStatus: statusCountMap(generationAttemptStatus),
+        latency: {
+          sampleCount: generationLatency._count._all,
+          providerAvgMs: Math.round(generationLatency._avg.providerLatencyMs || 0),
+          validationAvgMs: Math.round(generationLatency._avg.validationLatencyMs || 0),
+          totalAvgMs: Math.round(generationLatency._avg.totalLatencyMs || 0),
+        },
+        recentJobs: recentGenerationJobs,
+      },
+      queue: queueHealth,
       recentUsage,
       recentRequests,
       latestFailedRequests,

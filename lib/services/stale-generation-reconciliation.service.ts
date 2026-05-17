@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
+import { timeoutConfig } from "@/lib/timeouts"
 import { captureException } from "@/lib/observability"
 import { log } from "@/lib/logging"
 import { BillingService } from "@/lib/services/billing.service"
@@ -7,7 +8,7 @@ import { GenerationJobService } from "@/lib/services/generation-job.service"
 
 const STALE_GENERATION_TIMEOUT_MS = Math.max(
   10_000,
-  Number(process.env.SWIFT_STALE_GENERATION_TIMEOUT_MS || env.aiQueueTimeoutMs)
+  Number(timeoutConfig.staleGenerationMs || env.aiQueueTimeoutMs)
 )
 
 function parseBillingContext(contextJson: string | null) {

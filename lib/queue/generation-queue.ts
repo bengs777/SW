@@ -1,6 +1,7 @@
 import { Queue, QueueEvents, Worker, type JobsOptions, type Processor } from "bullmq"
 import IORedis from "ioredis"
 import { env } from "@/lib/env"
+import { log } from "@/lib/logging"
 
 export type GenerationQueueJobName = "generation.execute"
 
@@ -18,11 +19,13 @@ export type GenerationQueuePayload = {
   promptLanguage?: "id" | "en"
   idempotencyKey?: string
   requestHash?: string
+  traceId?: string
   previewContext?: unknown
   attachments?: unknown[]
 }
 
 const QUEUE_NAME = "swift-generation-v2"
+const DEAD_LETTER_QUEUE_NAME = "swift-generation-dead-letter-v1"
 const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 1,
@@ -30,8 +33,26 @@ const DEFAULT_JOB_OPTIONS: JobsOptions = {
   removeOnFail: 500,
 }
 
+export type GenerationDeadLetterPayload = {
+  failedAt: string
+  queueName: string
+  queueJobId: string | number | null
+  jobId: string
+  userId: string
+  projectId: string
+  promptHash?: string | null
+  requestHash?: string | null
+  idempotencyKey?: string | null
+  traceId?: string | null
+  error: string
+  stack?: string
+  attemptsMade?: number
+  payload: GenerationQueuePayload
+}
+
 let redisConnection: IORedis | null = null
 let generationQueue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobName> | null = null
+let generationDeadLetterQueue: Queue<GenerationDeadLetterPayload, unknown, "generation.dead_letter"> | null = null
 let generationQueueEvents: QueueEvents | null = null
 
 function getRedisConnection() {
@@ -54,23 +75,45 @@ function getRedisConnection() {
       })
       
       redisConnection.on("error", (err) => {
-        console.error("[Generation Queue] Redis connection error:", err.message)
+        log("error", "redis_generation_queue_error", {
+          error: err.message,
+          status: redisConnection?.status,
+        })
       })
       
       redisConnection.on("connect", () => {
-        console.log("[Generation Queue] Redis connected successfully")
+        log("info", "redis_generation_queue_connected", {
+          status: redisConnection?.status,
+        })
       })
       
-      redisConnection.on("reconnecting", () => {
-        console.log("[Generation Queue] Redis reconnecting...")
+      redisConnection.on("ready", () => {
+        log("info", "redis_generation_queue_ready", {
+          status: redisConnection?.status,
+        })
+      })
+
+      redisConnection.on("reconnecting", (delayMs: number) => {
+        log("warn", "redis_generation_queue_reconnecting", {
+          delayMs,
+          status: redisConnection?.status,
+        })
+      })
+
+      redisConnection.on("end", () => {
+        log("warn", "redis_generation_queue_connection_ended")
       })
       
       // Try to connect
       redisConnection.connect().catch((err) => {
-        console.warn("[Generation Queue] Could not connect to Redis:", err.message)
+        log("warn", "redis_generation_queue_connect_failed", {
+          error: err.message,
+        })
       })
     } catch (error) {
-      console.warn("[Generation Queue] Failed to initialize Redis:", error instanceof Error ? error.message : String(error))
+      log("warn", "redis_generation_queue_init_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
       return null
     }
   }
@@ -92,16 +135,48 @@ export function getGenerationQueue() {
           connection,
           defaultJobOptions: DEFAULT_JOB_OPTIONS,
         })
-        console.log("[Generation Queue] Using Redis-backed queue")
+        log("info", "generation_queue_initialized", {
+          queueName: QUEUE_NAME,
+        })
       } catch (error) {
-        console.warn("[Generation Queue] Failed to create Redis queue:", error instanceof Error ? error.message : String(error))
+        log("warn", "generation_queue_init_failed", {
+          queueName: QUEUE_NAME,
+          error: error instanceof Error ? error.message : String(error),
+        })
       }
     } else {
-      console.log("[Generation Queue] Redis not available")
+      log("warn", "generation_queue_redis_unavailable", {
+        hasNativeRedisConfig: env.hasNativeRedisConfig,
+      })
     }
   }
 
   return generationQueue
+}
+
+export function getGenerationDeadLetterQueue() {
+  if (!generationDeadLetterQueue) {
+    const connection = getRedisConnection()
+
+    if (connection) {
+      generationDeadLetterQueue = new Queue<GenerationDeadLetterPayload, unknown, "generation.dead_letter">(
+        DEAD_LETTER_QUEUE_NAME,
+        {
+          connection,
+          defaultJobOptions: {
+            attempts: 1,
+            removeOnComplete: 1_000,
+            removeOnFail: 2_000,
+          },
+        }
+      )
+      log("info", "generation_dead_letter_queue_initialized", {
+        queueName: DEAD_LETTER_QUEUE_NAME,
+      })
+    }
+  }
+
+  return generationDeadLetterQueue
 }
 
 export function getGenerationQueueEvents() {
@@ -130,7 +205,11 @@ export async function enqueueGenerationTask(
     const queue = getGenerationQueue()
     
     if (!queue) {
-      console.warn("[Generation Queue] Redis queue unavailable for:", payload.jobId)
+      log("warn", "generation_queue_enqueue_unavailable", {
+        jobId: payload.jobId,
+        projectId: payload.projectId,
+        userId: payload.userId,
+      })
       return null
     }
 
@@ -138,15 +217,67 @@ export async function enqueueGenerationTask(
       ? ["generation", payload.userId, payload.projectId, payload.idempotencyKey].join("__")
       : payload.jobId)
     
-    return queue.add("generation.execute", payload, {
+    const queued = await queue.add("generation.execute", payload, {
       ...DEFAULT_JOB_OPTIONS,
       ...options,
       jobId: dedupeJobId,
     })
+    log("info", "generation_queue_enqueued", {
+      jobId: payload.jobId,
+      queueJobId: queued.id,
+      dedupeJobId,
+      projectId: payload.projectId,
+      userId: payload.userId,
+    })
+    return queued
   } catch (error) {
-    console.error("[Generation Queue] Failed to enqueue task:", error instanceof Error ? error.message : String(error))
+    log("error", "generation_queue_enqueue_failed", {
+      jobId: payload.jobId,
+      projectId: payload.projectId,
+      userId: payload.userId,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    })
     return null
   }
+}
+
+export async function moveGenerationJobToDeadLetter(input: {
+  payload: GenerationQueuePayload
+  queueJobId?: string | number | null
+  error: unknown
+  attemptsMade?: number
+}) {
+  const queue = getGenerationDeadLetterQueue()
+  if (!queue) return null
+
+  const errorMessage = input.error instanceof Error ? input.error.message : String(input.error)
+  const deadLetterPayload: GenerationDeadLetterPayload = {
+    failedAt: new Date().toISOString(),
+    queueName: QUEUE_NAME,
+    queueJobId: input.queueJobId ?? null,
+    jobId: input.payload.jobId,
+    userId: input.payload.userId,
+    projectId: input.payload.projectId,
+    requestHash: input.payload.requestHash || null,
+    idempotencyKey: input.payload.idempotencyKey || null,
+    traceId: input.payload.traceId || null,
+    error: errorMessage,
+    stack: input.error instanceof Error ? input.error.stack : undefined,
+    attemptsMade: input.attemptsMade,
+    payload: input.payload,
+  }
+
+  const dlqJob = await queue.add("generation.dead_letter", deadLetterPayload, {
+    jobId: `dlq:${input.payload.jobId}:${Date.now()}`,
+  })
+  log("error", "generation_dead_letter_written", {
+    jobId: input.payload.jobId,
+    queueJobId: input.queueJobId ?? null,
+    deadLetterJobId: dlqJob.id,
+    error: errorMessage,
+  })
+  return dlqJob
 }
 
 export async function recordGenerationWorkerHeartbeat(workerId: string) {
@@ -165,18 +296,41 @@ export async function recordGenerationWorkerHeartbeat(workerId: string) {
 
 export async function getGenerationQueueHealth() {
   const queue = getGenerationQueue()
+  const connection = getRedisConnection()
+  const redisStartedAt = Date.now()
+  let redisPing: string | null = null
+  let redisError: string | null = null
+  if (connection) {
+    redisPing = await connection.ping().catch((error) => {
+      redisError = error instanceof Error ? error.message : String(error)
+      return null
+    })
+  }
+  const redisLatencyMs = Date.now() - redisStartedAt
+
   if (!queue) {
     return {
       enabled: false,
       status: "disabled",
       counts: null,
+      deadLetter: null,
       workerHeartbeat: null,
+      redis: {
+        configured: env.hasNativeRedisConfig,
+        status: connection?.status || "unavailable",
+        ping: redisPing,
+        error: redisError,
+        latencyMs: redisLatencyMs,
+      },
     }
   }
 
   const counts = await queue.getJobCounts("waiting", "active", "delayed", "failed", "completed", "paused")
-  const connection = getRedisConnection()
   const rawHeartbeat = connection ? await connection.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null) : null
+  const deadLetterQueue = getGenerationDeadLetterQueue()
+  const deadLetterCounts = deadLetterQueue
+    ? await deadLetterQueue.getJobCounts("waiting", "active", "delayed", "failed", "completed", "paused").catch(() => null)
+    : null
   const workerHeartbeat = rawHeartbeat
     ? (() => {
         try {
@@ -190,14 +344,62 @@ export async function getGenerationQueueHealth() {
 
   return {
     enabled: true,
-    status: heartbeatAgeMs === null ? "degraded" : heartbeatAgeMs > 90_000 ? "stale" : "healthy",
+    status:
+      redisError
+        ? "degraded"
+        : heartbeatAgeMs === null
+          ? "degraded"
+          : heartbeatAgeMs > 90_000
+            ? "stale"
+            : "healthy",
     counts,
+    deadLetter: {
+      queueName: DEAD_LETTER_QUEUE_NAME,
+      counts: deadLetterCounts,
+    },
     workerHeartbeat: workerHeartbeat
       ? {
           ...workerHeartbeat,
           ageMs: heartbeatAgeMs,
         }
       : null,
+    redis: {
+      configured: env.hasNativeRedisConfig,
+      status: connection?.status || "unavailable",
+      ping: redisPing,
+      error: redisError,
+      latencyMs: redisLatencyMs,
+    },
+  }
+}
+
+export async function cleanupGenerationQueue(options: {
+  completedGraceMs?: number
+  failedGraceMs?: number
+  limit?: number
+} = {}) {
+  const queue = getGenerationQueue()
+  const deadLetterQueue = getGenerationDeadLetterQueue()
+  if (!queue) {
+    return { enabled: false, cleaned: null }
+  }
+
+  const completedGraceMs = options.completedGraceMs ?? 24 * 60 * 60 * 1000
+  const failedGraceMs = options.failedGraceMs ?? 7 * 24 * 60 * 60 * 1000
+  const limit = options.limit ?? 500
+  const [completed, failed, dlqCompleted] = await Promise.all([
+    queue.clean(completedGraceMs, limit, "completed"),
+    queue.clean(failedGraceMs, limit, "failed"),
+    deadLetterQueue ? deadLetterQueue.clean(failedGraceMs, limit, "completed") : Promise.resolve([]),
+  ])
+
+  return {
+    enabled: true,
+    cleaned: {
+      completed: completed.length,
+      failed: failed.length,
+      deadLetterCompleted: dlqCompleted.length,
+    },
   }
 }
 

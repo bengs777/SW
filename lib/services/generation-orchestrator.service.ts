@@ -36,6 +36,7 @@ import {
   type PartialEditPlan,
 } from "@/lib/ai/edit-planner"
 import { log } from "@/lib/logging"
+import { timeoutConfig } from "@/lib/timeouts"
 
 type GenerationPlannerFile = {
   path: string
@@ -150,10 +151,7 @@ async function startConfiguredSandboxService(input: {
     headers.Authorization = `Bearer ${token}`
   }
 
-  const configuredTimeoutMs = Number(process.env.SANDBOX_SERVICE_TIMEOUT_MS || 25_000)
-  const timeoutMs = Number.isFinite(configuredTimeoutMs)
-    ? Math.max(1000, configuredTimeoutMs)
-    : 25_000
+  const timeoutMs = timeoutConfig.sandboxServiceMs
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   const abortRequest = () => controller.abort()
@@ -1280,8 +1278,20 @@ export async function executeGenerationJob(
       files: workingFiles,
       idempotencyKey: input.persistenceKey,
     })
+    log("info", "generation_files_persisted", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      historyId: saveResult.historyId,
+      fileDiff: saveResult.fileDiff,
+      integrity: saveResult.integrity,
+    })
 
     assertNotAborted(input.signal)
+    metrics.persistence = {
+      historyId: saveResult.historyId,
+      fileDiff: saveResult.fileDiff,
+      integrity: saveResult.integrity,
+    }
     await GenerationJobService.update(input.jobId, {
       metrics,
       previewUrl: validation.previewUrl,

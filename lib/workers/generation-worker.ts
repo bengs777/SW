@@ -1,8 +1,10 @@
 import type { Job } from "bullmq"
 import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
+import { timeoutConfig } from "@/lib/timeouts"
 import {
   createGenerationWorker,
+  moveGenerationJobToDeadLetter,
   recordGenerationWorkerHeartbeat,
   type GenerationQueuePayload,
 } from "@/lib/queue/generation-queue"
@@ -16,7 +18,7 @@ import { captureException } from "@/lib/observability"
 
 const GENERATION_JOB_TIMEOUT_MS = Math.max(
   10_000,
-  Math.round(Number(process.env.SWIFT_GENERATION_JOB_TIMEOUT_MS || env.aiQueueTimeoutMs))
+  Math.round(timeoutConfig.generationJobMs || env.aiQueueTimeoutMs)
 )
 
 class GenerationJobTimeoutError extends Error {
@@ -62,6 +64,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       projectId: payload.projectId,
       userId: payload.userId,
       requestHash: payload.requestHash,
+      traceId: payload.traceId,
     })
 
     const execution = executeGenerationJob(
@@ -111,6 +114,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
       userId: payload.userId,
+      traceId: payload.traceId,
       durationMs: Date.now() - startedAt,
     })
   } catch (error) {
@@ -155,6 +159,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         durationMs: Date.now() - startedAt,
         timeoutMs: GENERATION_JOB_TIMEOUT_MS,
         timeoutTriggered: isTimeout,
+        traceId: payload.traceId,
       })
       captureException(error, {
         jobId: payload.jobId,
@@ -181,6 +186,13 @@ export function startGenerationWorker() {
   const worker = createGenerationWorker(processGenerationQueueJob)
   const workerId = `generation:${process.env.VERCEL_REGION || "local"}:${process.pid}`
 
+  log("info", "generation_worker_booted", {
+    workerId,
+    pid: process.pid,
+    concurrency: Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2),
+    timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+  })
+
   void reconcileStaleGenerationJobs().catch((error) => {
     log("error", "Stale generation reconciliation failed", {
       error: error instanceof Error ? error.message : String(error),
@@ -203,6 +215,15 @@ export function startGenerationWorker() {
   worker.on("active", async (job) => {
     if (!job) return
     await GenerationJobService.attachQueueJob(job.data.jobId, job.id || job.data.jobId)
+    log("info", "generation_worker_job_active", {
+      workerId,
+      jobId: job.data.jobId,
+      queueJobId: job.id,
+      attemptsMade: job.attemptsMade,
+      projectId: job.data.projectId,
+      userId: job.data.userId,
+      traceId: job.data.traceId,
+    })
   })
 
   worker.on("failed", async (job, error) => {
@@ -217,14 +238,56 @@ export function startGenerationWorker() {
       queueJobId: job.id,
       source: "generation_worker_failed_event",
     })
+    await moveGenerationJobToDeadLetter({
+      payload: job.data,
+      queueJobId: job.id,
+      attemptsMade: job.attemptsMade,
+      error,
+    }).catch((deadLetterError) => {
+      log("error", "generation_dead_letter_write_failed", {
+        jobId: job.data.jobId,
+        queueJobId: job.id,
+        error: deadLetterError instanceof Error ? deadLetterError.message : String(deadLetterError),
+      })
+    })
   })
 
   worker.on("completed", async (job) => {
     if (!job) return
     log("info", "Generation worker completed", {
+      workerId,
       jobId: job.data.jobId,
       queueJobId: job.id,
+      attemptsMade: job.attemptsMade,
+      finishedOn: job.finishedOn,
+      processedOn: job.processedOn,
+      latencyMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
+      traceId: job.data.traceId,
     })
+  })
+
+  worker.on("stalled", (jobId) => {
+    log("warn", "generation_worker_job_stalled", {
+      workerId,
+      queueJobId: jobId,
+    })
+  })
+
+  worker.on("error", (error) => {
+    log("error", "generation_worker_runtime_error", {
+      workerId,
+      error: error.message,
+      stack: error.stack,
+    })
+    captureException(error, { source: "generation_worker_runtime", workerId })
+  })
+
+  worker.on("ready", () => {
+    log("info", "generation_worker_ready", { workerId })
+  })
+
+  worker.on("closed", () => {
+    log("warn", "generation_worker_closed", { workerId })
   })
 
   return worker
