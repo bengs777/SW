@@ -28,7 +28,6 @@ import {
   type ControlledAppBlueprint,
   type ControlledAppType,
 } from "@/lib/ai/app-blueprints"
-import { createVirtualFileDelta } from "@/lib/workspace-state"
 import {
   buildPartialEditInstructionBlock,
   buildPartialEditPlan,
@@ -349,15 +348,6 @@ async function transition(jobId: string, stage: GenerationJobStage, label: strin
   })
 }
 
-const FILE_STREAM_FULL_SNAPSHOT_MAX_BYTES = 750 * 1024
-
-const compactGeneratedFiles = (files: GeneratedFile[]) =>
-  files.map((file) => ({
-    path: normalizePath(file.path),
-    content: String(file.content ?? ""),
-    language: file.language,
-  }))
-
 const totalFileBytes = (files: GeneratedFile[]) =>
   files.reduce((sum, file) => sum + Buffer.byteLength(String(file.content ?? ""), "utf8"), 0)
 
@@ -373,21 +363,7 @@ async function emitGeneratedFilesUpdate(input: {
   data?: Record<string, unknown>
 }) {
   const allFilesBytes = totalFileBytes(input.allFiles)
-  const useFullSnapshot = allFilesBytes <= FILE_STREAM_FULL_SNAPSHOT_MAX_BYTES
-  const files = useFullSnapshot
-    ? input.allFiles
-    : input.changedFiles && input.changedFiles.length > 0
-      ? input.changedFiles
-      : input.allFiles.slice(0, 12)
-  const fileDeltas =
-    !useFullSnapshot && input.changedFiles && input.changedFiles.length > 0
-      ? input.changedFiles.map((file) =>
-          createVirtualFileDelta(
-            input.previousFiles?.find((previous) => normalizePath(previous.path) === normalizePath(file.path)),
-            file
-          )
-        )
-      : []
+  const changedPaths = (input.changedFiles || []).map((file) => normalizePath(file.path)).slice(0, 120)
 
   await GenerationJobService.appendEvent({
     jobId: input.jobId,
@@ -397,13 +373,10 @@ async function emitGeneratedFilesUpdate(input: {
     message: input.message,
     data: {
       source: input.source,
-      snapshotMode: useFullSnapshot ? "full" : "patch",
-      files: compactGeneratedFiles(files),
-      fileDeltas,
       fileCount: input.allFiles.length,
-      streamedFileCount: files.length,
       deletedPaths: input.deletedPaths || [],
       totalBytes: allFilesBytes,
+      changedPaths,
       paths: input.allFiles.map((file) => normalizePath(file.path)).slice(0, 120),
       ...(input.data || {}),
     },
@@ -1411,21 +1384,34 @@ export async function executeGenerationJob(
       projectId: input.projectId,
       historyId: saveResult.historyId,
       fileDiff: saveResult.fileDiff,
-      integrity: saveResult.integrity,
+      manifest: saveResult.manifest,
     })
     log("info", "generation_files_persisted", {
       jobId: input.jobId,
       projectId: input.projectId,
       historyId: saveResult.historyId,
       fileDiff: saveResult.fileDiff,
-      integrity: saveResult.integrity,
+      manifest: saveResult.manifest,
+    })
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "job.files.persisted",
+      stage: "persisting",
+      status: "running",
+      message: "Project filesystem persisted",
+      data: {
+        source: "persisted",
+        historyId: saveResult.historyId,
+        fileDiff: saveResult.fileDiff,
+        manifest: saveResult.manifest,
+      },
     })
 
     assertNotAborted(input.signal)
     metrics.persistence = {
       historyId: saveResult.historyId,
       fileDiff: saveResult.fileDiff,
-      integrity: saveResult.integrity,
+      manifest: saveResult.manifest,
     }
     await GenerationJobService.update(input.jobId, {
       metrics,

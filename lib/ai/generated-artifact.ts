@@ -15,6 +15,11 @@ const FORBIDDEN_EXACT_FILES = new Set([
   "pnpm-lock.yaml",
   "yarn.lock",
 ])
+const PROTECTED_DELETE_FILES = new Set([
+  "package.json",
+  "app/layout.tsx",
+  "app/page.tsx",
+])
 
 const normalizePath = (path: string) =>
   path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
@@ -50,6 +55,24 @@ const taskGraphOperationSchema = z.object({
   content: z.string().optional(),
   language: z.string().trim().optional(),
   reason: z.string().optional(),
+}).superRefine((operation, ctx) => {
+  const path = normalizePath(operation.path)
+
+  if ((operation.action === "create" || operation.action === "modify") && typeof operation.content !== "string") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "create/modify operation requires full content",
+      path: ["content"],
+    })
+  }
+
+  if (operation.action === "delete" && PROTECTED_DELETE_FILES.has(path)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `protected file cannot be deleted: ${path}`,
+      path: ["path"],
+    })
+  }
 })
 
 const taskGraphSchema = z.object({
@@ -187,9 +210,45 @@ function validateGeneratedFiles(files: GeneratedFile[], source: string) {
 }
 
 function tryParseJson(value: string) {
+  const raw = String(value || "").trim()
+
   try {
-    return JSON.parse(String(value || "").trim())
+    return JSON.parse(raw)
   } catch {
-    return null
+    // Continue with fragment extraction below.
   }
+
+  for (const fragment of extractJsonFragments(raw)) {
+    try {
+      return JSON.parse(fragment)
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null
+}
+
+function extractJsonFragments(value: string) {
+  const fragments: string[] = []
+  const fencedJson = /```(?:json)?\s*([\s\S]*?)```/gi
+  for (const match of value.matchAll(fencedJson)) {
+    if (match[1]?.trim()) {
+      fragments.push(match[1].trim())
+    }
+  }
+
+  const firstObject = value.indexOf("{")
+  const lastObject = value.lastIndexOf("}")
+  if (firstObject >= 0 && lastObject > firstObject) {
+    fragments.push(value.slice(firstObject, lastObject + 1))
+  }
+
+  const firstArray = value.indexOf("[")
+  const lastArray = value.lastIndexOf("]")
+  if (firstArray >= 0 && lastArray > firstArray) {
+    fragments.push(value.slice(firstArray, lastArray + 1))
+  }
+
+  return fragments
 }

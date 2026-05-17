@@ -1,5 +1,4 @@
 import type { Job } from "bullmq"
-import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import { timeoutConfig } from "@/lib/timeouts"
 import {
@@ -12,6 +11,7 @@ import { registerGenerationAbortController } from "@/lib/ai/generation-job-runti
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
+import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
 import { captureException } from "@/lib/observability"
@@ -29,24 +29,7 @@ class GenerationJobTimeoutError extends Error {
 }
 
 async function loadProjectFiles(projectId: string) {
-  const files = await prisma.projectFile.findMany({
-    where: { projectId },
-    orderBy: { path: "asc" },
-  })
-
-  return files.map((file) => ({
-    path: file.path,
-    content: file.content,
-    language: file.language as
-      | "tsx"
-      | "ts"
-      | "css"
-      | "json"
-      | "html"
-      | "prisma"
-      | "md"
-      | "env",
-  }))
+  return ProjectFilesystemService.readFiles(projectId)
 }
 
 export async function processGenerationPayload(payload: GenerationQueuePayload, queueJobId?: string | number) {

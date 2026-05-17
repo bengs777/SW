@@ -23,14 +23,10 @@ import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, Promp
 import {
   splitWorkspaceStateFiles,
   normalizeFileLanguage,
-  applyVirtualFileDelta,
   readWorkspaceStateFile,
   buildWorkspaceStateFile,
   createWorkspaceStateSnapshot,
-  filesToVirtualFileSystem,
-  virtualFileSystemToFiles,
   type ValidLanguage,
-  type VirtualFileDelta,
   type WorkspaceState,
 } from "@/lib/workspace-state"
 import { ChevronDown } from "lucide-react"
@@ -162,53 +158,11 @@ const normalizeWorkspaceFiles = (files: GeneratedFile[]) =>
     language: normalizeLanguage(file.language),
   }))
 
-type StreamedFileSnapshotMode = "full" | "patch"
-
 type StreamedGeneratedFilesPayload = {
   source?: string
-  snapshotMode?: StreamedFileSnapshotMode
-  files?: GeneratedFile[]
-  fileDeltas?: VirtualFileDelta[]
   fileCount?: number
-  streamedFileCount?: number
-  deletedPaths?: string[]
-  paths?: string[]
-}
-
-const mergeGeneratedFileSnapshots = (
-  currentFiles: GeneratedFile[],
-  streamedFiles: GeneratedFile[],
-  snapshotMode: StreamedFileSnapshotMode = "patch",
-  fileDeltas: VirtualFileDelta[] = [],
-  deletedPaths: string[] = []
-) => {
-  const normalizedStreamedFiles = normalizeWorkspaceFiles(streamedFiles)
-
-  if (snapshotMode === "full") {
-    return normalizedStreamedFiles
-  }
-
-  let nextVfs = filesToVirtualFileSystem(currentFiles)
-
-  for (const delta of fileDeltas) {
-    nextVfs = applyVirtualFileDelta(nextVfs, delta)
-  }
-
-  for (const deletedPath of deletedPaths) {
-    const normalizedDeletedPath = normalizeWorkspacePath(deletedPath)
-    if (normalizedDeletedPath) {
-      delete nextVfs[normalizedDeletedPath]
-    }
-  }
-
-  if (normalizedStreamedFiles.length > 0) {
-    nextVfs = {
-      ...nextVfs,
-      ...filesToVirtualFileSystem(normalizedStreamedFiles),
-    }
-  }
-
-  return virtualFileSystemToFiles(nextVfs, [...currentFiles, ...normalizedStreamedFiles])
+  manifest?: unknown
+  fileDiff?: unknown
 }
 
 const buildWorkspaceDraftKey = (projectId: string) => `${WORKSPACE_DRAFT_STORAGE_PREFIX}:${projectId}`
@@ -474,8 +428,9 @@ export default function EditorPage() {
     setCurrentVersion(serverWorkspaceState.version)
     setActiveFileIndex(0)
     setIsDirty(false)
+    setStreamLockedPaths([])
     workspaceProtectedPathsRef.current = serverWorkspaceState.lockedPaths
-    if (reason === "generation-completed" || reason === "explorer-refresh") {
+    if (reason === "generation-completed" || reason === "explorer-refresh" || reason === "filesystem-persisted") {
       console.info(JSON.stringify({
         level: "info",
         msg: "explorer_refreshed",
@@ -512,43 +467,23 @@ export default function EditorPage() {
       ? rawPayload as { data?: StreamedGeneratedFilesPayload } & StreamedGeneratedFilesPayload
       : null
     const data = payload?.data && typeof payload.data === "object" ? payload.data : payload
-    const streamedFiles = Array.isArray(data?.files) ? data.files : []
-    const fileDeltas = Array.isArray(data?.fileDeltas) ? data.fileDeltas : []
-    const deletedPaths = Array.isArray(data?.deletedPaths)
-      ? data.deletedPaths.filter((path): path is string => typeof path === "string")
-      : []
 
-    if (streamedFiles.length === 0 && fileDeltas.length === 0 && deletedPaths.length === 0) {
+    if (data?.source !== "persisted") {
+      console.info(JSON.stringify({
+        level: "info",
+        msg: "streamed_files_ignored",
+        projectId,
+        reason: "explorer_uses_project_api_as_source_of_truth",
+        source: data?.source || null,
+        fileCount: data?.fileCount ?? null,
+      }))
       return
     }
 
-    const snapshotMode: StreamedFileSnapshotMode =
-      data?.snapshotMode === "full" ? "full" : "patch"
-    const normalizedStreamedFiles = normalizeWorkspaceFiles(streamedFiles)
-    const deltaPaths = fileDeltas
-      .map((delta) => typeof delta?.path === "string" ? normalizeWorkspacePath(delta.path) : "")
-      .filter(Boolean)
-    const streamedPaths = normalizedStreamedFiles.map((file) => normalizeWorkspacePath(file.path))
-    const normalizedDeletedPaths = deletedPaths.map(normalizeWorkspacePath).filter(Boolean)
-    const firstPath = streamedPaths[0] || deltaPaths[0] || null
-
-    setGeneratedFiles((currentFiles) => {
-      const nextFiles = mergeGeneratedFileSnapshots(currentFiles, normalizedStreamedFiles, snapshotMode, fileDeltas, normalizedDeletedPaths)
-      if (firstPath) {
-        const nextIndex = nextFiles.findIndex((file) => normalizeWorkspacePath(file.path) === normalizeWorkspacePath(firstPath))
-        if (nextIndex >= 0) {
-          setActiveFileIndex(nextIndex)
-        }
-      }
-      if (normalizedDeletedPaths.some((deletedPath) => normalizeWorkspacePath(currentFiles[activeFileIndex]?.path || "") === deletedPath)) {
-        setActiveFileIndex(0)
-      }
-      return nextFiles
+    void refreshProjectState("filesystem-persisted").catch((error) => {
+      const message = error instanceof Error ? error.message : "Gagal refresh Explorer setelah file tersimpan."
+      pushErrorLog("project", message)
     })
-    setPreviewFiles(null)
-    setLatestPreviewError(null)
-    setIsDirty(false)
-    setStreamLockedPaths(Array.from(new Set([...streamedPaths, ...deltaPaths, ...normalizedDeletedPaths])).sort())
 
     if (!streamedGenerationFilesSeenRef.current) {
       streamedGenerationFilesSeenRef.current = true
@@ -557,14 +492,12 @@ export default function EditorPage() {
 
     console.info(JSON.stringify({
       level: "info",
-      msg: "streamed_files_applied",
+      msg: "filesystem_persisted_refresh_requested",
       projectId,
-      snapshotMode,
-      streamedFileCount: normalizedStreamedFiles.length,
-      deletedFileCount: normalizedDeletedPaths.length,
-      expectedFileCount: data?.fileCount ?? null,
+      manifest: data?.manifest || null,
+      fileDiff: data?.fileDiff || null,
     }))
-  }, [activeFileIndex, projectId])
+  }, [projectId, pushErrorLog, refreshProjectState])
 
   const applyJobProgress = useCallback((job: {
     id: string
@@ -718,6 +651,17 @@ export default function EditorPage() {
         applyStreamedGeneratedFiles(payload)
       } catch (error) {
         const message = error instanceof Error ? error.message : "Gagal membaca update file dari stream."
+        pushErrorLog("project", message)
+      }
+    })
+
+    stream.addEventListener("job.files.persisted", (event) => {
+      try {
+        recordEventId(event as MessageEvent)
+        const payload = JSON.parse((event as MessageEvent).data)
+        applyStreamedGeneratedFiles(payload)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gagal membaca status persist file dari stream."
         pushErrorLog("project", message)
       }
     })

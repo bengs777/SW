@@ -4,6 +4,7 @@ import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
+import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import type { GeneratedFile } from "@/lib/types"
 import { readWorkspaceStateFile, splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { log } from "@/lib/logging"
@@ -35,7 +36,6 @@ export async function GET(
         },
       },
       include: {
-        files: true,
         history: {
           orderBy: { createdAt: "desc" },
           take: 10,
@@ -55,14 +55,19 @@ export async function GET(
       )
     }
 
-    const { files: visibleFiles, stateFile } = splitWorkspaceStateFiles(project.files)
+    const projectFiles = await ProjectFilesystemService.readFiles(id)
+    const manifest = ProjectFilesystemService.buildManifest(projectFiles)
+    const { files: visibleFiles, stateFile } = splitWorkspaceStateFiles(projectFiles)
     const workspaceState = readWorkspaceStateFile(stateFile)
-    const latestFileUpdatedAt = project.files.reduce<string | null>((latest, file) => {
-      if (file.path.replace(/\\/g, "/") === ".swift/workspace-state.json") return latest
-      const updatedAt = file.updatedAt.toISOString()
-      if (!updatedAt) return latest
-      return !latest || updatedAt > latest ? updatedAt : latest
-    }, null)
+    const latestFileUpdatedAt = await prisma.projectFile.findFirst({
+      where: {
+        projectId: id,
+        path: { not: ".swift/workspace-state.json" },
+      },
+      orderBy: { updatedAt: "desc" },
+      select: { updatedAt: true },
+    })
+    const latestUpdatedAt = latestFileUpdatedAt?.updatedAt.toISOString() || null
     const latestHistoryId = project.history[0]?.id || null
 
     log("info", "project_state_loaded", {
@@ -81,7 +86,7 @@ export async function GET(
         userId: session.user.id,
         fileCount: visibleFiles.length,
         latestHistoryId,
-        latestFileUpdatedAt,
+        latestFileUpdatedAt: latestUpdatedAt,
         durationMs: Date.now() - startedAt,
       })
     }
@@ -93,8 +98,9 @@ export async function GET(
         workspaceState,
         fileState: {
           count: visibleFiles.length,
-          latestUpdatedAt: latestFileUpdatedAt,
+          latestUpdatedAt,
           latestHistoryId,
+          manifest,
         },
       },
     }, {
@@ -289,6 +295,7 @@ export async function POST(
       success: true,
       historyId: saved.historyId,
       fileDiff: saved.fileDiff,
+      manifest: saved.manifest,
     })
   } catch (error) {
     console.error("[v0] Error saving generation:", error)

@@ -1,10 +1,12 @@
-import type { Prisma } from "@prisma/client"
-import { createHash } from "node:crypto"
 import { prisma } from "@/lib/db/client"
 import { withDatabaseWriteRetry } from "@/lib/db/errors"
-import type { GeneratedFile } from "@/lib/types"
-import { normalizeFileLanguage } from "@/lib/workspace-state"
 import { log } from "@/lib/logging"
+import {
+  ProjectFilesystemService,
+  type ProjectFileDiff,
+  type ProjectFileManifest,
+} from "@/lib/services/project-filesystem.service"
+import type { GeneratedFile } from "@/lib/types"
 
 type PersistProjectFilesOptions = {
   idempotencyKey?: string | null
@@ -13,216 +15,9 @@ type PersistProjectFilesOptions = {
   tokensUsed?: number | null
 }
 
-type ProjectFileDiff = {
-  created: number
-  updated: number
-  deleted: number
-  unchanged: number
-  finalFileCount: number
-}
-
-type ProjectFileIntegrity = {
-  fileCount: number
-  totalBytes: number
-  sha256: string
-}
-
-const MAX_PROJECT_FILES = 240
-const MAX_TOTAL_FILE_BYTES = 6 * 1024 * 1024
-const MAX_SINGLE_FILE_BYTES = 512 * 1024
-const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
-const FORBIDDEN_EXACT_FILES = new Set([
-  ".env",
-  ".env.local",
-  ".env.production",
-  ".env.development",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-])
-
-const normalizeFilePath = (path: string) =>
-  path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
-
-function buildFileIntegrity(files: GeneratedFile[]): ProjectFileIntegrity {
-  const hash = createHash("sha256")
-  let totalBytes = 0
-
-  for (const file of [...files].sort((left, right) => left.path.localeCompare(right.path))) {
-    const content = String(file.content ?? "")
-    totalBytes += Buffer.byteLength(content, "utf8")
-    hash.update(file.path)
-    hash.update("\0")
-    hash.update(normalizeFileLanguage(file.language))
-    hash.update("\0")
-    hash.update(content)
-    hash.update("\0")
-  }
-
-  return {
-    fileCount: files.length,
-    totalBytes,
-    sha256: hash.digest("hex"),
-  }
-}
-
-function assertSafeProjectPath(path: string) {
-  if (!path || path.includes("\0") || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new Error(`Invalid generated file path: ${path}`)
-  }
-
-  const segments = path.split("/")
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new Error(`Unsafe generated file path rejected: ${path}`)
-  }
-
-  const lower = path.toLowerCase()
-  if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
-    throw new Error(`Forbidden generated file path rejected: ${path}`)
-  }
-}
-
-const dedupeFilesByPath = (files: GeneratedFile[]) => {
-  if (files.length > MAX_PROJECT_FILES) {
-    throw new Error(`Too many generated files. Maximum: ${MAX_PROJECT_FILES}`)
-  }
-
-  const fileMap = new Map<string, GeneratedFile>()
-  let totalBytes = 0
-
-  for (const file of files) {
-    const path = normalizeFilePath(file.path)
-    if (!path) {
-      continue
-    }
-    assertSafeProjectPath(path)
-
-    const content = String(file.content ?? "")
-    const size = Buffer.byteLength(content, "utf8")
-    if (size > MAX_SINGLE_FILE_BYTES) {
-      throw new Error(`Generated file ${path} exceeds the single-file size limit.`)
-    }
-    totalBytes += size
-    if (totalBytes > MAX_TOTAL_FILE_BYTES) {
-      throw new Error(`Generated files exceed the total size limit.`)
-    }
-
-    fileMap.set(path, {
-      ...file,
-      path,
-      language: normalizeFileLanguage(file.language),
-      content,
-    })
-  }
-
-  return Array.from(fileMap.values()).sort((left, right) =>
-    left.path.localeCompare(right.path)
-  )
-}
-
-async function syncProjectFiles(
-  tx: Prisma.TransactionClient,
-  projectId: string,
-  files: GeneratedFile[]
-): Promise<ProjectFileDiff> {
-  const normalizedFiles = dedupeFilesByPath(files)
-  const nextPaths = normalizedFiles.map((file) => file.path)
-  const existingFiles = await tx.projectFile.findMany({
-    where: { projectId },
-    select: {
-      id: true,
-      path: true,
-      content: true,
-      language: true,
-    },
-  })
-  const existingByPath = new Map(existingFiles.map((file) => [file.path, file]))
-
-  const creates: GeneratedFile[] = []
-  const updates: Array<{ id: string; content: string; language: string }> = []
-  let created = 0
-  let updated = 0
-  let unchanged = 0
-
-  for (const file of normalizedFiles) {
-    const existing = existingByPath.get(file.path)
-    const language = normalizeFileLanguage(file.language)
-
-    if (existing && existing.content === file.content && existing.language === language) {
-      unchanged += 1
-      continue
-    }
-
-    if (existing) {
-      updated += 1
-    } else {
-      created += 1
-    }
-
-    if (existing) {
-      updates.push({
-        id: existing.id,
-        content: file.content,
-        language,
-      })
-      continue
-    }
-
-    creates.push({
-      ...file,
-      language,
-    })
-  }
-
-  if (creates.length > 0) {
-    await tx.projectFile.createMany({
-      data: creates.map((file) => ({
-        id: crypto.randomUUID(),
-        projectId,
-        path: file.path,
-        content: file.content,
-        language: normalizeFileLanguage(file.language),
-      })),
-    })
-  }
-
-  for (const item of updates) {
-    await tx.projectFile.update({
-      where: { id: item.id },
-      data: {
-        content: item.content,
-        language: item.language,
-        updatedAt: new Date(),
-      },
-    })
-  }
-
-  const staleFiles = existingFiles.filter((file) => !nextPaths.includes(file.path))
-  const deleted = staleFiles.length
-
-  if (deleted > 0) {
-    await tx.projectFile.deleteMany({
-      where: {
-        projectId,
-        path: {
-          in: staleFiles.map((file) => file.path),
-        },
-      },
-    })
-  }
-
-  return {
-    created,
-    updated,
-    deleted,
-    unchanged,
-    finalFileCount: normalizedFiles.length,
-  }
-}
-
 export class ProjectFilePersistenceService {
   static normalizeFiles(files: GeneratedFile[]) {
-    return dedupeFilesByPath(files)
+    return ProjectFilesystemService.normalizeFiles(files)
   }
 
   static async saveGenerationSnapshot(
@@ -230,83 +25,75 @@ export class ProjectFilePersistenceService {
     prompt: string,
     files: GeneratedFile[],
     opts?: PersistProjectFilesOptions
-  ) {
-    const normalizedFiles = dedupeFilesByPath(files)
+  ): Promise<{
+    historyId: string
+    files: GeneratedFile[]
+    fileDiff: ProjectFileDiff
+    integrity: ProjectFileManifest
+    manifest: ProjectFileManifest
+  }> {
+    const normalizedFiles = ProjectFilesystemService.normalizeFiles(files)
 
-    return withDatabaseWriteRetry(() => prisma.$transaction(async (tx) => {
-      const historyData = {
-        prompt,
-        result: JSON.stringify(normalizedFiles),
-        tokensUsed: opts?.tokensUsed ?? 0,
-        cost: opts?.cost ?? 0,
-      }
+    return withDatabaseWriteRetry(() =>
+      prisma.$transaction(async (tx) => {
+        const historyData = {
+          prompt,
+          result: JSON.stringify(normalizedFiles),
+          tokensUsed: opts?.tokensUsed ?? 0,
+          cost: opts?.cost ?? 0,
+        }
 
-      const createdHistory = opts?.idempotencyKey
-        ? await tx.generationHistory.upsert({
-            where: {
-              projectId_idempotencyKey: {
+        const createdHistory = opts?.idempotencyKey
+          ? await tx.generationHistory.upsert({
+              where: {
+                projectId_idempotencyKey: {
+                  projectId,
+                  idempotencyKey: opts.idempotencyKey,
+                },
+              },
+              create: {
                 projectId,
                 idempotencyKey: opts.idempotencyKey,
+                ...historyData,
               },
-            },
-            create: {
-              projectId,
-              idempotencyKey: opts.idempotencyKey,
-              ...historyData,
-            },
-            update: historyData,
-          })
-        : await tx.generationHistory.create({
-            data: {
-              projectId,
-              ...historyData,
-            },
-          })
+              update: historyData,
+            })
+          : await tx.generationHistory.create({
+              data: {
+                projectId,
+                ...historyData,
+              },
+            })
 
-      const fileDiff = await syncProjectFiles(tx, projectId, normalizedFiles)
-      log("info", "files_written", {
-        projectId,
-        fileDiff,
-        expectedFileCount: normalizedFiles.length,
-      })
-      const persistedFiles = await tx.projectFile.findMany({
-        where: { projectId },
-        orderBy: { path: "asc" },
-      })
-      const persistedIntegrity = buildFileIntegrity(
-        persistedFiles.map((file) => ({
-          path: file.path,
-          content: file.content,
-          language: normalizeFileLanguage(file.language),
-        }))
-      )
-      const expectedIntegrity = buildFileIntegrity(normalizedFiles)
-
-      if (persistedIntegrity.sha256 !== expectedIntegrity.sha256) {
-        log("error", "project_file_integrity_mismatch", {
+        const filesystemWrite = await ProjectFilesystemService.replaceFiles({
           projectId,
-          expected: expectedIntegrity,
-          persisted: persistedIntegrity,
-          fileDiff,
+          files: normalizedFiles,
+          tx,
         })
-        throw new Error("Generated file integrity check failed after database persistence.")
-      }
 
-      await tx.project.update({
-        where: { id: projectId },
-        data: {
-          prompt,
-          ...(opts?.projectMemoryJson ? { memoryJson: opts.projectMemoryJson } : {}),
-        },
+        log("info", "files_written", {
+          projectId,
+          fileDiff: filesystemWrite.fileDiff,
+          manifest: filesystemWrite.manifest,
+        })
+
+        await tx.project.update({
+          where: { id: projectId },
+          data: {
+            prompt,
+            ...(opts?.projectMemoryJson ? { memoryJson: opts.projectMemoryJson } : {}),
+          },
+        })
+
+        return {
+          historyId: createdHistory.id,
+          files: filesystemWrite.files,
+          fileDiff: filesystemWrite.fileDiff,
+          integrity: filesystemWrite.manifest,
+          manifest: filesystemWrite.manifest,
+        }
       })
-
-      return {
-        historyId: createdHistory.id,
-        files: normalizedFiles,
-        fileDiff,
-        integrity: persistedIntegrity,
-      }
-    }))
+    )
   }
 
   static async saveBufferedArtifacts(input: {
