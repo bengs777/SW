@@ -375,6 +375,13 @@ export default function EditorPage() {
     activeGenerationReconnectAttemptsRef.current = 0
   }, [])
 
+  const clearGenerateDeadline = useCallback(() => {
+    if (activeGenerateTimeoutRef.current !== null) {
+      window.clearTimeout(activeGenerateTimeoutRef.current)
+      activeGenerateTimeoutRef.current = null
+    }
+  }, [])
+
   const refreshProjectState = useCallback(async () => {
     const response = await fetch(`/api/projects/${projectId}`)
     const data = await response.json()
@@ -456,6 +463,10 @@ export default function EditorPage() {
         applyJobProgress(job)
         if (["completed", "failed", "cancelled"].includes(job.status)) {
           stream.close()
+          clearGenerateDeadline()
+          activeGenerateControllerRef.current = null
+          activeGenerationJobIdRef.current = null
+          activeGenerateWasCancelledRef.current = false
           if (activeGenerationStreamRef.current === stream) {
             activeGenerationStreamRef.current = null
           }
@@ -508,6 +519,9 @@ export default function EditorPage() {
             : current
         )
         setIsGenerating(false)
+        clearGenerateDeadline()
+        activeGenerateControllerRef.current = null
+        activeGenerationJobIdRef.current = null
         return
       }
       const delay = Math.min(10_000, 1000 * 2 ** (nextAttempt - 1))
@@ -515,18 +529,19 @@ export default function EditorPage() {
         startGenerationStream(jobId, nextAttempt)
       }, delay)
     }
-  }, [applyJobProgress, closeGenerationStream, refreshProjectState])
+  }, [applyJobProgress, clearGenerateDeadline, closeGenerationStream, refreshProjectState])
 
   useEffect(() => {
     return () => {
       closeGenerationStream()
+      clearGenerateDeadline()
       activeGenerateControllerRef.current?.abort()
       if (workspaceAutosaveTimerRef.current !== null) {
         window.clearTimeout(workspaceAutosaveTimerRef.current)
         workspaceAutosaveTimerRef.current = null
       }
     }
-  }, [closeGenerationStream])
+  }, [clearGenerateDeadline, closeGenerationStream])
 
   useEffect(() => {
     if (generatedFiles.length === 0) {
@@ -1107,12 +1122,55 @@ export default function EditorPage() {
 
     setMessages((prev) => [...prev, assistantMessage])
     let handoffToJobStream = false
+    clearGenerateDeadline()
+    const generateController = new AbortController()
+    activeGenerateControllerRef.current = generateController
+    activeGenerateTimeoutRef.current = window.setTimeout(() => {
+      const jobId = activeGenerationJobIdRef.current
+      if (jobId) {
+        void fetch(`/api/generate/jobs/${jobId}/cancel`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "timeout" }),
+        }).catch(() => null)
+      }
+
+      generateController.abort()
+      closeGenerationStream()
+      setIsGenerating(false)
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "timeout",
+              label: "Swift timeout",
+              progressPercent: 100,
+            }
+          : current
+      )
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                content: "Swift timeout setelah 180 detik. Request dihentikan otomatis dan saldo akan dikembalikan jika job gagal.",
+                isGenerating: false,
+              }
+            : msg
+        )
+      )
+      activeGenerateTimeoutRef.current = null
+      activeGenerateControllerRef.current = null
+      activeGenerationJobIdRef.current = null
+      activeGenerateWasCancelledRef.current = false
+    }, GENERATE_CLIENT_TIMEOUT_MS)
 
     try {
       const idempotencyKey = createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext)
       const jobResponse = await fetch("/api/generate/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: generateController.signal,
         body: JSON.stringify({
           projectId,
           prompt: promptForGeneration,
@@ -1236,6 +1294,8 @@ export default function EditorPage() {
     activeFileIndex,
     activePreviewTab,
     buildProviderStatusFromError,
+    clearGenerateDeadline,
+    closeGenerationStream,
     createIdempotencyKey,
     currentVersion,
     generatedFiles,
@@ -1248,7 +1308,6 @@ export default function EditorPage() {
     pushErrorLog,
     applyJobProgress,
     startGenerationStream,
-    closeGenerationStream,
   ])
 
   const handleCancelGeneration = useCallback(() => {
@@ -1256,6 +1315,7 @@ export default function EditorPage() {
     const jobId = activeGenerationJobIdRef.current
 
     activeGenerateWasCancelledRef.current = true
+    clearGenerateDeadline()
     if (jobId) {
       void fetch(`/api/generate/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => null)
     }
@@ -1270,7 +1330,7 @@ export default function EditorPage() {
         : current
     )
     controller?.abort()
-  }, [])
+  }, [clearGenerateDeadline])
 
   useEffect(() => {
     if (

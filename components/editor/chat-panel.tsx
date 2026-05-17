@@ -1332,15 +1332,16 @@ function GenerationProgressCard({
     return () => window.clearInterval(interval)
   }, [progress.startedAt])
 
-  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = Math.max(1, Math.ceil(progress.timeoutMs / 1000))
   const isTerminal = progress.stage === "timeout" || progress.stage === "error" || progress.stage === "cancelled"
   const isOverdue = !isTerminal && elapsedMs > progress.timeoutMs
+  const displayElapsedMs = Math.min(elapsedMs, progress.timeoutMs)
+  const elapsedSeconds = Math.max(0, Math.floor(displayElapsedMs / 1000))
   const percent =
     typeof progress.progressPercent === "number"
       ? Math.max(0, Math.min(isTerminal ? 100 : 95, progress.progressPercent))
-      : Math.min(isTerminal ? 100 : 95, Math.round((elapsedMs / progress.timeoutMs) * 100))
-  const elapsedLabel = isOverdue ? `${timeoutSeconds}s+` : `${elapsedSeconds}s`
+      : Math.min(isTerminal ? 100 : 95, Math.round((displayElapsedMs / progress.timeoutMs) * 100))
+  const elapsedLabel = `${elapsedSeconds}s`
   const steps = getGenerationSteps(progress.stage)
 
   return (
@@ -1381,7 +1382,7 @@ function GenerationProgressCard({
       </div>
       {isOverdue && (
         <p className="mt-2 text-[11px] text-amber-300">
-          Job masih berjalan di backend. Estimasi awal terlewati, tapi proses belum berhenti.
+          Batas 180 detik tercapai. Swift sedang menghentikan job dan memproses refund bila diperlukan.
         </p>
       )}
       {progress.prompt && (
@@ -1638,8 +1639,9 @@ function GeneratingStatus({ startedAt, progress }: { startedAt: Date; progress?:
     label = "Masih menunggu Swift. Request akan dihentikan otomatis jika terlalu lama."
   }
 
-  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = progress ? Math.ceil(progress.timeoutMs / 1000) : null
+  const displayElapsedMs = progress ? Math.min(elapsedMs, progress.timeoutMs) : elapsedMs
+  const elapsedSeconds = Math.max(0, Math.floor(displayElapsedMs / 1000))
 
   return (
     <span className="text-sm text-muted-foreground">

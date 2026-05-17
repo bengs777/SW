@@ -324,12 +324,13 @@ function GeneratingPreview({
     return () => window.clearInterval(interval)
   }, [progress])
 
-  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const timeoutSeconds = progress ? Math.ceil(progress.timeoutMs / 1000) : 55
+  const displayElapsedMs = progress ? Math.min(elapsedMs, progress.timeoutMs) : elapsedMs
+  const elapsedSeconds = Math.max(0, Math.floor(displayElapsedMs / 1000))
   const percent = progress
     ? typeof progress.progressPercent === "number"
       ? Math.max(0, Math.min(100, progress.progressPercent))
-      : Math.min(100, Math.round((elapsedMs / progress.timeoutMs) * 100))
+      : Math.min(100, Math.round((displayElapsedMs / progress.timeoutMs) * 100))
     : 12
 
   return (

@@ -1,5 +1,6 @@
 import type { Job } from "bullmq"
 import { prisma } from "@/lib/db/client"
+import { env } from "@/lib/env"
 import {
   createGenerationWorker,
   recordGenerationWorkerHeartbeat,
@@ -12,6 +13,18 @@ import { GenerationJobCancelledError, GenerationJobService } from "@/lib/service
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
 import { captureException } from "@/lib/observability"
+
+const GENERATION_JOB_TIMEOUT_MS = Math.max(
+  10_000,
+  Math.round(Number(process.env.SWIFT_GENERATION_JOB_TIMEOUT_MS || env.aiQueueTimeoutMs))
+)
+
+class GenerationJobTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Generation timed out after ${Math.round(timeoutMs / 1000)}s`)
+    this.name = "GenerationJobTimeoutError"
+  }
+}
 
 async function loadProjectFiles(projectId: string) {
   const files = await prisma.projectFile.findMany({
@@ -39,6 +52,8 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   const unregisterAbort = registerGenerationAbortController(payload.jobId, abortController)
   const startedAt = Date.now()
   const resolvedQueueJobId = queueJobId ? String(queueJobId) : payload.jobId
+  let timeoutTriggered = false
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null
 
   try {
     log("info", "Generation worker started", {
@@ -49,7 +64,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       requestHash: payload.requestHash,
     })
 
-    await executeGenerationJob(
+    const execution = executeGenerationJob(
       {
         jobId: payload.jobId,
         projectId: payload.projectId,
@@ -65,6 +80,17 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         loadProjectFiles,
       }
     )
+
+    await Promise.race([
+      execution,
+      new Promise<never>((_resolve, reject) => {
+        timeoutHandle = setTimeout(() => {
+          timeoutTriggered = true
+          abortController.abort()
+          reject(new GenerationJobTimeoutError(GENERATION_JOB_TIMEOUT_MS))
+        }, GENERATION_JOB_TIMEOUT_MS)
+      }),
+    ])
     await BillingService.markCompleted(payload.usageLogId, {
       provider: payload.provider,
       model: payload.model,
@@ -88,6 +114,13 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       durationMs: Date.now() - startedAt,
     })
   } catch (error) {
+    const isTimeout = timeoutTriggered || error instanceof GenerationJobTimeoutError
+    const timeoutMessage = `Generation timed out after ${Math.round(GENERATION_JOB_TIMEOUT_MS / 1000)}s`
+    const errorMessage = isTimeout
+      ? timeoutMessage
+      : error instanceof Error
+        ? error.message
+        : String(error)
     const isCancelled =
       error instanceof GenerationJobCancelledError ||
       (error instanceof Error && error.message === "GENERATION_JOB_CANCELLED")
@@ -96,7 +129,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       payload.usageLogId,
       payload.userId,
       payload.reservedCost,
-      error instanceof Error ? error.message : String(error)
+      errorMessage
     ).catch((refundError) => {
       log("error", "Generation billing refund failed", {
         jobId: payload.jobId,
@@ -110,12 +143,18 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       })
     })
 
+    if (isTimeout) {
+      await GenerationJobService.markFailed(payload.jobId, timeoutMessage, "timeout").catch(() => null)
+    }
+
     if (!isCancelled) {
       log("error", "Generation worker failed", {
         jobId: payload.jobId,
         queueJobId: resolvedQueueJobId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
         durationMs: Date.now() - startedAt,
+        timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+        timeoutTriggered: isTimeout,
       })
       captureException(error, {
         jobId: payload.jobId,
@@ -127,6 +166,9 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     }
     throw error
   } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle)
+    }
     unregisterAbort()
   }
 }

@@ -134,6 +134,12 @@ function serializeError(error: unknown) {
   }
 }
 
+function assertNotAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("Generation aborted before completion")
+  }
+}
+
 function buildGenerationPlan(input: {
   prompt: string
   existingFiles: GeneratedFile[]
@@ -846,6 +852,7 @@ export async function executeGenerationJob(
   let totalTokens = 0
 
   try {
+    assertNotAborted(input.signal)
     await GenerationJobService.transition(input.jobId, {
       type: "job.stage.planning",
       status: "running",
@@ -858,6 +865,7 @@ export async function executeGenerationJob(
     await GenerationJobService.assertNotCancelled(input.jobId)
 
     const existingFiles = await deps.loadProjectFiles(input.projectId)
+    assertNotAborted(input.signal)
     plan = buildGenerationPlan({
       prompt: input.prompt,
       existingFiles,
@@ -908,6 +916,7 @@ export async function executeGenerationJob(
 
     for (let index = 0; index < plan.filePlan.length; index += 1) {
       await GenerationJobService.assertNotCancelled(input.jobId)
+      assertNotAborted(input.signal)
       const target = plan.filePlan[index]
       const providerStartedAt = performance.now()
       const response = await runProviderAttempt({
@@ -924,6 +933,7 @@ export async function executeGenerationJob(
         promptLanguage,
         signal: input.signal,
       })
+      assertNotAborted(input.signal)
       providerLatencyMs += Math.round(performance.now() - providerStartedAt)
       promptTokens += Math.max(0, response.tokenUsage?.promptTokens || 0)
       completionTokens += Math.max(0, response.tokenUsage?.completionTokens || 0)
@@ -953,6 +963,7 @@ export async function executeGenerationJob(
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
+    assertNotAborted(input.signal)
     validation = await runValidationLifecycle({
       jobId: input.jobId,
       projectId: input.projectId,
@@ -967,6 +978,7 @@ export async function executeGenerationJob(
     while (!validation.ok && repairAttempt < MAX_REPAIR_ATTEMPTS) {
       repairAttempt += 1
       await GenerationJobService.assertNotCancelled(input.jobId)
+      assertNotAborted(input.signal)
       await transition(
         input.jobId,
         "repairing",
@@ -991,6 +1003,7 @@ export async function executeGenerationJob(
         signal: input.signal,
       })
 
+      assertNotAborted(input.signal)
       workingFiles = repaired.files
       await transition(
         input.jobId,
@@ -1017,6 +1030,7 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      assertNotAborted(input.signal)
     }
 
     workingFiles = validation.files
@@ -1052,6 +1066,7 @@ export async function executeGenerationJob(
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
+    assertNotAborted(input.signal)
     await transition(input.jobId, "persisting", "Persisting validated project artifacts", 94, {
       repairAttempts: repairAttempt,
       validationSteps: validation.steps.map((step) => ({
@@ -1068,6 +1083,7 @@ export async function executeGenerationJob(
       idempotencyKey: input.persistenceKey,
     })
 
+    assertNotAborted(input.signal)
     await GenerationJobService.update(input.jobId, {
       metrics,
       previewUrl: validation.previewUrl,

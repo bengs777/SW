@@ -32,7 +32,7 @@ function parseBillingContext(contextJson: string | null) {
 }
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
 ) {
   const session = await auth()
@@ -65,7 +65,13 @@ export async function POST(
     })
   }
 
-  await GenerationJobService.requestCancel(jobId)
+  const body = (await request.json().catch(() => ({}))) as { reason?: string }
+  const isTimeout = body.reason === "timeout"
+  const finalReason = isTimeout ? "Generation timed out after 180s" : "Generation cancelled"
+
+  if (!isTimeout) {
+    await GenerationJobService.requestCancel(jobId)
+  }
   const abortedInProcess = abortGenerationJob(jobId)
   const queue = getGenerationQueue()
   const queueJobId = job.queueJobId || job.id
@@ -82,15 +88,17 @@ export async function POST(
       billing.usageLogId,
       user.id,
       billing.reservedCost,
-      "Generation cancelled"
+      finalReason
     ).catch(() => null)
   }
 
-  const cancelled = await GenerationJobService.markCancelled(jobId, "Generation cancelled")
+  const finalJob = isTimeout
+    ? await GenerationJobService.markFailed(jobId, finalReason, "timeout")
+    : await GenerationJobService.markCancelled(jobId, finalReason)
 
   return NextResponse.json({
     ok: true,
     abortedInProcess,
-    job: cancelled ? GenerationJobService.toPublicJob(cancelled) : null,
+    job: finalJob ? GenerationJobService.toPublicJob(finalJob) : null,
   })
 }
