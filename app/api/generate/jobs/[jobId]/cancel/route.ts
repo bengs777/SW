@@ -5,6 +5,7 @@ import { abortGenerationJob } from "@/lib/ai/generation-job-runtime"
 import { getGenerationQueue } from "@/lib/queue/generation-queue"
 import { BillingService } from "@/lib/services/billing.service"
 import { GENERATION_TERMINAL_STATUSES, GenerationJobService } from "@/lib/services/generation-job.service"
+import { timeoutConfig } from "@/lib/timeouts"
 
 export const runtime = "nodejs"
 
@@ -67,7 +68,8 @@ export async function POST(
 
   const body = (await request.json().catch(() => ({}))) as { reason?: string }
   const isTimeout = body.reason === "timeout"
-  const finalReason = isTimeout ? "Generation timed out after 180s" : "Generation cancelled"
+  const generationTimeoutSeconds = Math.round(timeoutConfig.generationJobMs / 1000)
+  const finalReason = isTimeout ? `Generation timed out after ${generationTimeoutSeconds}s` : "Generation cancelled"
 
   if (!isTimeout) {
     await GenerationJobService.requestCancel(jobId)
