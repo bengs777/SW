@@ -50,6 +50,7 @@ interface PreviewPanelProps {
   onTabChange?: (tab: "preview" | "code" | "explorer") => void
   onPreviewErrorChange?: (error: string | null) => void
   isGenerating?: boolean
+  streamLockedPaths?: string[]
   generationProgress?: GenerationProgress | null
   onCancelGeneration?: () => void
   projectId?: string
@@ -70,6 +71,7 @@ export function PreviewPanel({
   onTabChange,
   onPreviewErrorChange,
   isGenerating = false,
+  streamLockedPaths = [],
   generationProgress = null,
   onCancelGeneration,
   projectId,
@@ -118,6 +120,11 @@ export function PreviewPanel({
   }, [onViewportChange, viewport])
 
   const handleCodeChange = (content: string) => {
+    const activePath = files[activeFileIndex]?.path || ""
+    if (isGenerating && streamLockedPaths.includes(normalizePath(activePath))) {
+      return
+    }
+
     onUpdateFile?.(activeFileIndex, content)
   }
 
@@ -133,6 +140,8 @@ export function PreviewPanel({
     }
     onTabChange?.(tab)
   }
+  const activePath = files[activeFileIndex]?.path || ""
+  const isActiveFileLocked = isGenerating && streamLockedPaths.includes(normalizePath(activePath))
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-muted/30">
@@ -276,6 +285,7 @@ export function PreviewPanel({
                 filePath={files[activeFileIndex]?.path || ""}
                 code={files[activeFileIndex]?.content || ""}
                 onChange={handleCodeChange}
+                readOnly={isActiveFileLocked}
               />
             </div>
           ) : (
@@ -303,6 +313,7 @@ export function PreviewPanel({
                   filePath={files[activeFileIndex]?.path || ""}
                   code={files[activeFileIndex]?.content || ""}
                   onChange={handleCodeChange}
+                  readOnly={isActiveFileLocked}
                 />
               </div>
             </>
@@ -436,10 +447,12 @@ function CodeEditor({
   filePath,
   code,
   onChange,
+  readOnly = false,
 }: {
   filePath: string
   code: string
   onChange: (value: string) => void
+  readOnly?: boolean
 }) {
   const language = getMonacoLanguage(filePath)
 
@@ -447,6 +460,7 @@ function CodeEditor({
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
         {filePath}
+        {readOnly && <span className="ml-2 text-amber-500">Streaming lock</span>}
       </div>
       <MonacoEditor
         key={filePath}
@@ -463,10 +477,15 @@ function CodeEditor({
           wordWrap: "on",
           tabSize: 2,
           padding: { top: 14, bottom: 14 },
+          readOnly,
         }}
       />
     </div>
   )
+}
+
+function normalizePath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
 }
 
 function getMonacoLanguage(path: string) {

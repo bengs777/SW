@@ -159,7 +159,7 @@ function blueprint(appType: ControlledAppType, label: string, starterPrompt: str
 export function classifyControlledAppType(prompt: string): ControlledAppType {
   const text = String(prompt || "").toLowerCase()
 
-  if (/\b(berita|news|artikel|article|portal berita|portal desa|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)\b/.test(text)) {
+  if (/\b(berita|news|artikel|article|majalah|blog|portal berita|portal desa|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)\b/.test(text)) {
     return "village_news_portal"
   }
 
@@ -175,7 +175,7 @@ export function classifyControlledAppType(prompt: string): ControlledAppType {
     return "lightweight_crm"
   }
 
-  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|cart|checkout|toko)\b/.test(text)) {
+  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar)\b/.test(text)) {
     return "simple_marketplace"
   }
 
@@ -192,6 +192,34 @@ export function classifyControlledAppType(prompt: string): ControlledAppType {
   }
 
   return "saas_dashboard"
+}
+
+export function buildDynamicSeedDirective(prompt: string) {
+  const appType = classifyControlledAppType(prompt)
+
+  if (appType === "village_news_portal") {
+    return [
+      "DYNAMIC_SEED_STRATEGY:",
+      "- Prompt matched article/blog/news keywords.",
+      "- Use static article/blog seed semantics: posts, categories, announcements, agendas, authors, and public article detail pages.",
+      "- Do not add commerce revenue cards, conversion charts, order metrics, or SaaS finance dashboards unless explicitly requested.",
+    ].join("\n")
+  }
+
+  if (appType === "simple_marketplace") {
+    return [
+      "DYNAMIC_SEED_STRATEGY:",
+      "- Prompt matched commerce/catalog keywords.",
+      "- Use open e-commerce catalog seed semantics: products, categories, inventory-safe placeholders, cart or inquiry flow, and seller/admin placeholders.",
+      "- Keep payment flow as a safe placeholder unless the user explicitly asks for live checkout integration.",
+    ].join("\n")
+  }
+
+  return [
+    "DYNAMIC_SEED_STRATEGY:",
+    "- Select the starter semantics from the user's explicit industry keywords only.",
+    "- Do not inject unrelated SaaS, finance, commerce, or dashboard assumptions into non-commercial prompts.",
+  ].join("\n")
 }
 
 export function getControlledAppBlueprint(appType: ControlledAppType) {

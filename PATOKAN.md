@@ -1,0 +1,116 @@
+
+---
+
+## 📌 FASE 1: FONDASI ARSITEKTUR DATA & SISTEM FILE
+*Target: Mengubah manipulasi file statis tunggal menjadi Virtual File System (VFS) multi-file berbasis memori.*
+
+### 1.1 Struktur State File Global (Client-Side)
+Aplikasi wajib mengelola seluruh struktur folder proyek dalam bentuk objek JSON datar (*flat key-value object*) untuk mempermudah mutasi state instan.
+```typescript
+interface VirtualFileSystem {
+  [filePath: string]: string; // Key: Path file relatif, Value: Isi teks kode pemrograman
+}
+
+// Contoh State Riwayat Proyek:
+const initialVFS: VirtualFileSystem = {
+  "package.json": "{\n  \"dependencies\": {\n    \"lucide-react\": \"latest\"\n  }\n}",
+  "app/page.tsx": "export default function Page() { return <h1>Swift Engine</h1> }",
+  "app/api/news/route.ts": "export async function GET() { return Response.json({ data: [] }) }"
+};
+```
+
+### 1.2 Sinkronisasi Real-Time Menggunakan Server-Sent Events (SSE)
+*   **Backend (`generation-orchestrator.service.ts`)**: Event `job.files.updated` harus memancarkan data pecahan (*chunks*) berbasis delta terkompresi. Jangan mengirim ulang seluruh isi berkas file jika hanya ada perubahan kecil.
+*   **Client (`page.tsx`)**: Begitu token data masuk, parser langsung melakukan penggabungan (*shallow merge*) ke dalam state VFS global tanpa merusak UI.
+
+---
+
+## 💻 FASE 2: OPTIMALISASI RUANG KERJA MONACO EDITOR
+*Target: Integrasi penuh penjelajah folder (File Tree) dengan Monaco Editor secara responsif.*
+
+### 2.1 Sinkronisasi Penjelajah Berkas (Explorer Component)
+*   **Sisi Kiri (File Tree Components)**: Membaca kunci teks (*keys*) dari objek JSON `VirtualFileSystem`, memisahkan karakter garis miring (`/`), dan menyusunnya menjadi visual direktori folder interaktif.
+*   **Sisi Kanan (Monaco Editor)**: Saat berkas file di-klik oleh pengguna, Monaco Editor wajib:
+    1. Mengganti isi teks visual sesuai value state file.
+    2. Melakukan deteksi otomatis (*auto-detect extension*) untuk mengubah penyorotan bahasa sintaks (`.tsx` ➔ `typescript`, `.json` ➔ `json`, `.css` ➔ `css`).
+
+### 2.2 Hubungan Komunikasi Dua Arah (Two-Way Data Binding)
+*   **AI Generating Status**: Ketika AI sedang melakukan *streaming text input*, kunci (*read-only = true*) Monaco Editor khusus untuk file yang sedang dimodifikasi tersebut demi mencegah tabrakan data (*race condition*).
+*   **User Editing Status**: Saat status kecerdasan buatan dalam posisi diam (*idle*), buka kunci editor. Setiap ketikan manual pengguna di Monaco Editor wajib memicu perubahan state VFS secara *real-time* yang otomatis memperbarui tampilan visual panel pratinjau.
+
+---
+
+## ⚡ FASE 3: MESIN SANDBOX PREVIEW TANPA SERVER (ZERO-COST RUNTIME)
+*Target: Menjalankan eksekusi backend fungsional Next.js tanpa membebani biaya VPS/Railway berbayar.*
+
+### 3.1 Pilihan Utama: WebContainers API (@webcontainer/api)
+Gunakan tumpukan teknologi berbasis WebAssembly dari StackBlitz untuk menjalankan Node.js langsung di tab peramban pengguna.
+```typescript
+// Alur Kerja Inisialisasi Terminal di Browser
+import { WebContainer } from '@webcontainer/api';
+
+async function startDevServer() {
+  const webcontainerInstance = await WebContainer.boot();
+  await webcontainerInstance.mount(initialVFS);
+  
+  const installProcess = await webcontainerInstance.spawn('npm', ['install']);
+  if ((await installProcess.exit) !== 0) throw new Error('Instalasi Dependensi Gagal');
+
+  // Menjalankan perintah npm run dev secara lokal
+  webcontainerInstance.on('server-ready', (port, url) => {
+    document.getElementById('preview-iframe').src = url;
+  });
+}
+```
+
+### 3.2 Opsi Alternatif: Client-Side Router & SDK Mocking Injection
+Jika WebContainer terlalu lambat di komputer spesifikasi rendah, gunakan teknik injeksi URL Blob:
+*   Mata-matai perintah global `window.fetch` di dalam `<iframe>`.
+*   Jika aplikasi hasil buatan AI menembak endpoint internal seperti `/api/news`, cegat permintaan tersebut dan jalankan fungsi JavaScript backend dari VFS berkas `app/api/news/route.ts` secara dinamis.
+
+---
+
+## 🧠 FASE 4: INSTANSINASI SISTEM PROMPT & INTEGRASI OPENROUTER
+*Target: Menjinakkan model LLM (DeepSeek R1/V3) agar patuh pada kategori industri pengguna.*
+
+### 4.1 Pembuatan Berkas Benih Dinamis (Dynamic Seeding Strategy)
+Sistem dilarang keras menggunakan satu templat awal universal. Backend wajib melakukan pengkondisian klasifikasi kata kunci (*keyword matching*):
+*   Prompt mengandung kata `berita`, `portal`, `majalah` ➔ Gunakan Benih Artikel & Blog Statis.
+*   Prompt mengandung kata `toko`, `dagang`, `pasar` ➔ Gunakan Benih Katalog E-Commerce Terbuka.
+
+### 4.2 Aturan Baku Instruksi Sistem (Strict System Prompt Definition)
+Suntikkan teks instruksi di bawah ini ke dalam variabel payload OpenRouter di file `generation-orchestrator.service.ts`:
+```text
+[STRICT RULE] Anda adalah mesin generator Next.js 14 App Router. 
+Hasilkan kode bersih yang HANYA berfokus pada industri yang diminta oleh pengguna. 
+DILARANG KERAS berasumsi atau memasukkan komponen finansial, dasbor SaaS, metrik pendapatan, tingkat konversi bisnis, atau grafik keuangan jika pengguna meminta kategori non-komersial (seperti portal berita desa, portofolio pribadi, atau web hobi). Fokus pada fungsionalitas murni sesuai teks prompt pengguna.
+```
+
+---
+
+## 🛡️ FASE 5: PERTAHANAN PRODUKSI & VALIDASI KEAMANAN
+*Target: Mengamankan stabilitas aplikasi, kuota API, dan akurasi sinkronisasi database.*
+
+### 5.1 Skema Pembatasan Laju (Rate Limiting via Upstash Redis)
+Gunakan interseptor berbasis *Vercel Edge Middleware* untuk membatasi konsumsi saldo token OpenAI/OpenRouter:
+*   **Pengguna Gratis (Tier Free)**: Maksimal 3 kali siklus perintah pembuatan web per 24 jam berbasis IP & Sidik Jari Browser (*browser fingerprinting*).
+*   **Pengguna Premium**: Akses tanpa batas yang diawasi oleh kebijakan pemakaian wajar (*Fair Usage Policy*).
+
+### 5.2 Otomatisasi Webhook Gerbang Pembayaran Crypto BNB
+*   Endpoint `/api/webhooks/pakasir` wajib memverifikasi kode unik kriptografi (*hash cryptographic signature*) dari Pakasir.
+*   Ketika pembayaran dinyatakan berhasil (*Success*), picu mutasi pembaruan kolom baris data pengguna di **Neon DB** ke tingkat `PREMIUM` untuk membuka kunci pembatas laju kuota secara instan.
+
+### 5.3 Validasi Keandalan Berkas (Consistency Verification Check)
+Setiap kali alur streaming selesai, jalankan validasi silang otomatis di sisi klien untuk memastikan integritas data:
+```typescript
+if (clientFileState.count !== databaseFileState.count) {
+  console.error("Explorer file count mismatch. Triggering explorer_refreshed backend query...");
+  // Eksekusi API Penyegaran Otomatis:
+  fetch(`/api/projects/${projectId}?reason=generation-completed`);
+} else {
+  console.log("streamed_files_applied: VFS Sync Status OK.");
+}
+```
+
+---
+*Dokumen ini wajib diperbarui setiap kali terjadi modifikasi fungsionalitas sistem inti. Patuhi aturan pengetikan kode TypeScript yang ketat demi menjaga skor kelulusan audit produksi.*

@@ -16,6 +16,10 @@ const MAX_REQUESTS_PER_DAY = Math.max(
   MAX_REQUESTS_PER_MINUTE,
   Math.round(getEnvNumber(500, "AI_RATE_LIMIT_PER_DAY", "GENERATE_RATE_LIMIT_PER_DAY"))
 )
+const FREE_GENERATIONS_PER_DAY = Math.max(
+  1,
+  Math.round(getEnvNumber(3, "FREE_GENERATE_LIMIT_PER_DAY", "FREE_GENERATIONS_PER_DAY"))
+)
 
 // --- Redis connection for rate limiting ---
 
@@ -116,12 +120,34 @@ export async function enforceAiUsageRateLimit(userId: string) {
   // Fast path: Redis-based rate limiting
   await enforceUserRateLimit(userId)
 
+  const activePaidSubscription = await prisma.subscription.findFirst({
+    where: {
+      status: "active",
+      plan: { not: "free" },
+      workspace: {
+        members: {
+          some: {
+            userId,
+          },
+        },
+      },
+    },
+    select: { id: true },
+  })
+
+  const hasPremiumAccess = Boolean(activePaidSubscription)
+  const dailyLimit = hasPremiumAccess ? MAX_REQUESTS_PER_DAY : FREE_GENERATIONS_PER_DAY
+
   // Check daily limit via Redis
   const dayKey = `user:${userId}:day:${new Date().toISOString().slice(0, 10)}`
-  const dayResult = await redisRateCheck(dayKey, MAX_REQUESTS_PER_DAY, 86400)
+  const dayResult = await redisRateCheck(dayKey, dailyLimit, 86400)
 
   if (!dayResult.allowed) {
-    throw new Error(`Daily limit exceeded. Maximum ${MAX_REQUESTS_PER_DAY} paid prompts per day.`)
+    throw new Error(
+      hasPremiumAccess
+        ? `Daily fair usage limit exceeded. Maximum ${dailyLimit} paid prompts per day.`
+        : `Free limit exceeded. Maximum ${FREE_GENERATIONS_PER_DAY} generations per 24 hours.`
+    )
   }
 
   // Defense-in-depth: Verify against database for accurate billing counts
@@ -153,8 +179,12 @@ export async function enforceAiUsageRateLimit(userId: string) {
     throw new Error(`Rate limit exceeded. Maximum ${MAX_REQUESTS_PER_MINUTE} paid prompts per minute.`)
   }
 
-  if (dayCount >= MAX_REQUESTS_PER_DAY) {
-    throw new Error(`Daily limit exceeded. Maximum ${MAX_REQUESTS_PER_DAY} paid prompts per day.`)
+  if (dayCount >= dailyLimit) {
+    throw new Error(
+      hasPremiumAccess
+        ? `Daily fair usage limit exceeded. Maximum ${dailyLimit} paid prompts per day.`
+        : `Free limit exceeded. Maximum ${FREE_GENERATIONS_PER_DAY} generations per 24 hours.`
+    )
   }
 }
 
@@ -187,4 +217,5 @@ export async function enforceRouteRateLimit(
 export const aiRateLimitConfig = {
   perMinute: MAX_REQUESTS_PER_MINUTE,
   perDay: MAX_REQUESTS_PER_DAY,
+  freePerDay: FREE_GENERATIONS_PER_DAY,
 }

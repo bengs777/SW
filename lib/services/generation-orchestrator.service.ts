@@ -23,12 +23,14 @@ import { GenerationQualityService, type GenerationQualityStage } from "@/lib/ser
 import {
   buildBlueprintInstructionBlock,
   buildBlueprintSeedFiles,
+  buildDynamicSeedDirective,
   classifyControlledAppType,
   getControlledAppBlueprint,
   validateBlueprintConstraints,
   type ControlledAppBlueprint,
   type ControlledAppType,
 } from "@/lib/ai/app-blueprints"
+import { createVirtualFileDelta } from "@/lib/workspace-state"
 import {
   buildPartialEditInstructionBlock,
   buildPartialEditPlan,
@@ -373,6 +375,7 @@ async function emitGeneratedFilesUpdate(input: {
   stage: GenerationJobStage
   message: string
   allFiles: GeneratedFile[]
+  previousFiles?: GeneratedFile[]
   changedFiles?: GeneratedFile[]
   source: "seed" | "slice" | "repair"
   data?: Record<string, unknown>
@@ -384,6 +387,15 @@ async function emitGeneratedFilesUpdate(input: {
     : input.changedFiles && input.changedFiles.length > 0
       ? input.changedFiles
       : input.allFiles.slice(0, 12)
+  const fileDeltas =
+    !useFullSnapshot && input.changedFiles && input.changedFiles.length > 0
+      ? input.changedFiles.map((file) =>
+          createVirtualFileDelta(
+            input.previousFiles?.find((previous) => normalizePath(previous.path) === normalizePath(file.path)),
+            file
+          )
+        )
+      : []
 
   await GenerationJobService.appendEvent({
     jobId: input.jobId,
@@ -395,6 +407,7 @@ async function emitGeneratedFilesUpdate(input: {
       source: input.source,
       snapshotMode: useFullSnapshot ? "full" : "patch",
       files: compactGeneratedFiles(files),
+      fileDeltas,
       fileCount: input.allFiles.length,
       streamedFileCount: files.length,
       totalBytes: allFilesBytes,
@@ -491,6 +504,8 @@ function buildSlicePrompt(input: {
 
   return [
     context,
+    "",
+    buildDynamicSeedDirective(input.prompt),
     "",
     buildBlueprintInstructionBlock(input.blueprint),
     "",
@@ -1194,6 +1209,7 @@ export async function executeGenerationJob(
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
       const target = plan.filePlan[index]
+      const previousWorkingFiles = workingFiles
       const providerStartedAt = performance.now()
       const response = await runProviderAttempt({
         jobId: input.jobId,
@@ -1247,6 +1263,7 @@ export async function executeGenerationJob(
           stage: "parsing",
           message: `File slice ${index + 1}/${plan.filePlan.length} ready in Explorer`,
           allFiles: workingFiles,
+          previousFiles: previousWorkingFiles,
           changedFiles: streamFiles,
           source: "slice",
           data: {
@@ -1304,6 +1321,7 @@ export async function executeGenerationJob(
 
       assertNotAborted(input.signal)
       workingFiles = repaired.files
+      const previousRepairFiles = validation.files
       await transition(
         input.jobId,
         "validating",
@@ -1323,6 +1341,7 @@ export async function executeGenerationJob(
         stage: "repairing",
         message: `Repaired files ${repairAttempt}/${MAX_REPAIR_ATTEMPTS} ready in Explorer`,
         allFiles: workingFiles,
+        previousFiles: previousRepairFiles,
         changedFiles: repaired.files,
         source: "repair",
         data: {

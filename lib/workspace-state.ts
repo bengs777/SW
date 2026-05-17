@@ -2,6 +2,18 @@ import type { GeneratedFile } from "@/lib/types"
 
 export const WORKSPACE_STATE_FILE_PATH = ".swift/workspace-state.json"
 
+export type VirtualFileSystem = Record<string, string>
+
+export type VirtualFileDelta = {
+  path: string
+  content?: string
+  language?: GeneratedFile["language"]
+  previousContent?: string
+  prefixLength?: number
+  suffixLength?: number
+  replacement?: string
+}
+
 export const VALID_LANGUAGES = [
   "tsx",
   "ts",
@@ -43,6 +55,96 @@ export const isWorkspaceStateFilePath = (input: string) =>
 
 export const isWorkspaceStateFile = (file: GeneratedFile) =>
   isWorkspaceStateFilePath(file.path)
+
+export function filesToVirtualFileSystem(files: GeneratedFile[]): VirtualFileSystem {
+  return Object.fromEntries(
+    files
+      .filter((file) => !isWorkspaceStateFile(file))
+      .map((file) => [normalizeWorkspacePath(file.path), String(file.content ?? "")])
+  )
+}
+
+export function virtualFileSystemToFiles(
+  vfs: VirtualFileSystem,
+  previousFiles: GeneratedFile[] = []
+): GeneratedFile[] {
+  const previousLanguageByPath = new Map(
+    previousFiles.map((file) => [normalizeWorkspacePath(file.path), normalizeFileLanguage(file.language)])
+  )
+
+  return Object.entries(vfs)
+    .map(([path, content]) => {
+      const normalizedPath = normalizeWorkspacePath(path)
+      return {
+        path: normalizedPath,
+        content: String(content ?? ""),
+        language: previousLanguageByPath.get(normalizedPath) || inferFileLanguage(normalizedPath),
+      }
+    })
+    .sort((left, right) => left.path.localeCompare(right.path))
+}
+
+export function applyVirtualFileDelta(
+  vfs: VirtualFileSystem,
+  delta: VirtualFileDelta
+): VirtualFileSystem {
+  const path = normalizeWorkspacePath(delta.path)
+  const currentContent = String(vfs[path] ?? delta.previousContent ?? "")
+
+  if (typeof delta.content === "string") {
+    return {
+      ...vfs,
+      [path]: delta.content,
+    }
+  }
+
+  const prefixLength = Math.max(0, Math.min(currentContent.length, delta.prefixLength ?? 0))
+  const suffixLength = Math.max(0, Math.min(currentContent.length - prefixLength, delta.suffixLength ?? 0))
+  const replacement = String(delta.replacement ?? "")
+
+  return {
+    ...vfs,
+    [path]: `${currentContent.slice(0, prefixLength)}${replacement}${currentContent.slice(currentContent.length - suffixLength)}`,
+  }
+}
+
+export function createVirtualFileDelta(
+  previousFile: GeneratedFile | null | undefined,
+  nextFile: GeneratedFile
+): VirtualFileDelta {
+  const nextContent = String(nextFile.content ?? "")
+  const previousContent = String(previousFile?.content ?? "")
+
+  if (!previousFile) {
+    return {
+      path: normalizeWorkspacePath(nextFile.path),
+      language: normalizeFileLanguage(nextFile.language),
+      content: nextContent,
+    }
+  }
+
+  let prefixLength = 0
+  const minLength = Math.min(previousContent.length, nextContent.length)
+  while (prefixLength < minLength && previousContent[prefixLength] === nextContent[prefixLength]) {
+    prefixLength += 1
+  }
+
+  let suffixLength = 0
+  while (
+    suffixLength < minLength - prefixLength &&
+    previousContent[previousContent.length - suffixLength - 1] === nextContent[nextContent.length - suffixLength - 1]
+  ) {
+    suffixLength += 1
+  }
+
+  return {
+    path: normalizeWorkspacePath(nextFile.path),
+    language: normalizeFileLanguage(nextFile.language),
+    prefixLength,
+    suffixLength,
+    replacement: nextContent.slice(prefixLength, nextContent.length - suffixLength),
+  }
+}
 
 /**
  * Accepts raw file arrays (e.g. from Prisma where language is plain string)
@@ -122,4 +224,16 @@ export function createWorkspaceStateSnapshot(input: {
     activeFilePath: input.activeFilePath?.trim() || null,
     updatedAt: new Date().toISOString(),
   }
+}
+
+function inferFileLanguage(path: string): ValidLanguage {
+  if (path.endsWith(".tsx")) return "tsx"
+  if (path.endsWith(".ts")) return "ts"
+  if (path.endsWith(".css")) return "css"
+  if (path.endsWith(".json")) return "json"
+  if (path.endsWith(".html")) return "html"
+  if (path.endsWith(".prisma")) return "prisma"
+  if (path.endsWith(".md")) return "md"
+  if (path.endsWith(".env")) return "env"
+  return "ts"
 }
