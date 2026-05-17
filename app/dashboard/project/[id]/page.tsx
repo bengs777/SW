@@ -32,7 +32,9 @@ import {
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
-const GENERATE_CLIENT_TIMEOUT_MS = 120_000
+const GENERATE_BACKEND_TIMEOUT_MS = 120_000
+const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
+const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
 const COLLABORATION_MODE_INSTRUCTIONS: Record<PromptLanguage, Record<CollaborationMode, string>> = {
   id: {
     build:
@@ -1316,7 +1318,7 @@ export default function EditorPage() {
           msg.id === assistantId
             ? {
                 ...msg,
-                content: "Swift timeout setelah 180 detik. Request dihentikan otomatis dan saldo akan dikembalikan jika job gagal.",
+                content: `Swift timeout setelah ${GENERATE_CLIENT_TIMEOUT_SECONDS} detik. Request dihentikan otomatis dan saldo akan dikembalikan jika job gagal.`,
                 isGenerating: false,
               }
             : msg

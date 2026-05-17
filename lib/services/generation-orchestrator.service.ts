@@ -13,6 +13,7 @@ import {
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import { ProviderRouter } from "@/lib/ai/provider-router"
+import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
 import { startRuntimeSandbox, type SandboxValidationStep } from "@/lib/sandbox/runtime"
@@ -402,11 +403,29 @@ async function runProviderAttempt(input: {
   promptLanguage: "id" | "en"
   signal?: AbortSignal
 }) {
-  const route = routeModelForRequest({
+  const routed = routeModelForRequest({
     prompt: input.prompt,
     purpose: input.purpose,
   })
+  const selectedTier = input.purpose === "generate" ? getSwiftTierConfig(input.selectedModel) : null
+  const route = selectedTier
+    ? {
+        ...routed,
+        modelName: selectedTier.key,
+        layer: selectedTier.generationLayer,
+        reason: `selected_generation_tier:${selectedTier.key}`,
+      }
+    : routed
   const startedAt = performance.now()
+  log("info", "generation_provider_attempt_started", {
+    jobId: input.jobId,
+    purpose: input.purpose,
+    selectedModel: input.selectedModel,
+    routedModel: route.modelName,
+    layer: route.layer,
+    classification: route.classification,
+    reason: route.reason,
+  })
   const attempt = await GenerationJobService.startAttempt({
     jobId: input.jobId,
     provider: route.provider,
@@ -417,6 +436,7 @@ async function runProviderAttempt(input: {
       classification: route.classification,
       complexity: route.complexity,
       reason: route.reason,
+      selectedModel: input.selectedModel,
     },
   })
 

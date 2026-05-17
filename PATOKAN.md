@@ -87,7 +87,7 @@ DILARANG KERAS berasumsi atau memasukkan komponen finansial, dasbor SaaS, metrik
 ```
 
 ### 4.3 Strategi Generasi Bertahap Anti-Timeout (Preview-First Slicing)
-Generator dilarang membuat 10-15 file sekaligus pada awal proyek. Siklus pertama wajib berupa pondasi pratinjau kecil agar preview tampil cepat dan tidak menabrak batas timeout 180 detik.
+Generator dilarang membuat 10-15 file sekaligus pada awal proyek. Siklus pertama wajib berupa pondasi pratinjau kecil agar preview tampil cepat dan tidak menabrak batas total job 120 detik.
 
 **Prompt pondasi tahap 1 untuk project JBB:**
 ```text

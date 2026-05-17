@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic"
 
 const HEARTBEAT_MS = 15_000
 const POLL_MS = 1_000
-const IDLE_TIMEOUT_MS = 120_000
+const IDLE_TIMEOUT_MS = 135_000
 const MAX_RETRY_MS = 10_000
 
 function parseLastEventSequence(request: NextRequest) {
