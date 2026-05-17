@@ -71,24 +71,26 @@ export async function register() {
 
   await runFailOpen("environment", warnMissingProductionEnv)
 
-  await runFailOpen("generation_worker", async () => {
-    if (shouldStartGenerationWorker()) {
-      const globalState = globalThis as typeof globalThis & { swiftGenerationWorkerStarted?: boolean }
-      if (!globalState.swiftGenerationWorkerStarted) {
-        const { startGenerationWorker } = await import("@/lib/workers/generation-worker")
-        startGenerationWorker()
-        globalState.swiftGenerationWorkerStarted = true
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    await runFailOpen("generation_worker", async () => {
+      if (shouldStartGenerationWorker()) {
+        const globalState = globalThis as typeof globalThis & { swiftGenerationWorkerStarted?: boolean }
+        if (!globalState.swiftGenerationWorkerStarted) {
+          const { startGenerationWorker } = await import("@/lib/workers/generation-worker")
+          startGenerationWorker()
+          globalState.swiftGenerationWorkerStarted = true
+        }
       }
-    }
-  })
+    })
+  }
 
   // Initialize AI warmup (keep-alive socket + Redis cache) so the AI subsystem
   // is always in standby and ready to respond fast on first request.
   // Only runs in nodejs runtime (not edge) since it uses keep-alive HTTP agents.
-  await runFailOpen("ai_warmup", async () => {
-    if (process.env.NEXT_RUNTIME === "nodejs") {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    await runFailOpen("ai_warmup", async () => {
       const { initializeAiWarmup } = await import("@/lib/ai/warmup")
       initializeAiWarmup()
-    }
-  })
+    })
+  }
 }

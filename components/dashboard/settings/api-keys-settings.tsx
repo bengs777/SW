@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { Copy, Trash2, Plus, Eye, EyeOff, Check } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -17,17 +17,21 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { useWorkspaces } from "@/hooks/use-workspaces"
 import { formatDistanceToNow } from "date-fns"
 
 interface ApiKey {
   id: string
   name: string
-  key: string
+  key?: string
   createdAt: string
+  lastUsed?: string | null
   lastUsedAt?: string | null
+  expiresAt?: string | null
 }
 
 export function ApiKeysSettings() {
+  const { workspaces, isLoading: isLoadingWorkspaces, error: workspaceError } = useWorkspaces()
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState("")
@@ -37,18 +41,21 @@ export function ApiKeysSettings() {
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [newKeyName, setNewKeyName] = useState("")
   const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const workspaceId = workspaces[0]?.id ?? ""
 
-  useEffect(() => {
-    fetchApiKeys()
-  }, [])
+  const fetchApiKeys = useCallback(async () => {
+    if (!workspaceId) {
+      setApiKeys([])
+      setIsLoading(false)
+      return
+    }
 
-  const fetchApiKeys = async () => {
     setIsLoading(true)
     setError("")
 
     try {
-      const response = await fetch("/api/api-keys")
-      const data = await response.json().catch(() => ({}))
+      const response = await fetch(`/api/api-keys?workspaceId=${encodeURIComponent(workspaceId)}`)
+      const data = await response.json().catch(() => [])
 
       if (!response.ok) {
         setError(data.error || "Failed to load API keys")
@@ -56,7 +63,7 @@ export function ApiKeysSettings() {
         return
       }
 
-      setApiKeys(data.keys || [])
+      setApiKeys(Array.isArray(data) ? data : [])
     } catch (err) {
       console.error("[v0] Failed to fetch API keys:", err)
       setError("Unable to load API keys right now.")
@@ -64,10 +71,14 @@ export function ApiKeysSettings() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [workspaceId])
+
+  useEffect(() => {
+    fetchApiKeys()
+  }, [fetchApiKeys])
 
   const handleCreateKey = async () => {
-    if (!newKeyName.trim() || isCreating) return // Guard against re-entry
+    if (!newKeyName.trim() || !workspaceId || isCreating) return // Guard against re-entry
 
     setIsCreating(true)
     setError("")
@@ -78,7 +89,7 @@ export function ApiKeysSettings() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ name: newKeyName.trim() }),
+        body: JSON.stringify({ workspaceId, name: newKeyName.trim() }),
       })
 
       const data = await response.json().catch(() => ({}))
@@ -139,12 +150,22 @@ export function ApiKeysSettings() {
     setTimeout(() => setCopiedKey(null), 2000)
   }
 
-  if (isLoading) {
+  if (isLoadingWorkspaces || isLoading) {
     return (
       <Card>
         <CardContent className="flex items-center justify-center py-12">
           <Spinner className="mr-2" />
           Loading API keys...
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (!workspaceId) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center text-muted-foreground">
+          {workspaceError || "Create a workspace before managing API keys."}
         </CardContent>
       </Card>
     )
@@ -162,7 +183,7 @@ export function ApiKeysSettings() {
         <Alert className="border-green-500/30 bg-green-500/5">
           <AlertDescription className="text-green-700 dark:text-green-400">
             <p className="font-semibold mb-2">API Key Created Successfully</p>
-            <p className="text-sm mb-3">Make sure to copy and save this key in a secure place. You won't be able to see it again.</p>
+            <p className="text-sm mb-3">Make sure to copy and save this key in a secure place. You won&apos;t be able to see it again.</p>
             <div className="flex gap-2 items-center bg-background/50 p-3 rounded-lg">
               <code className="text-xs font-mono flex-1 truncate">{createdKey}</code>
               <Button
@@ -212,11 +233,11 @@ export function ApiKeysSettings() {
                     <p className="font-medium">{apiKey.name}</p>
                     <div className="flex items-center gap-2 mt-1">
                       <Badge variant="secondary" className="rounded-full text-xs">
-                        {visibleKeys.has(apiKey.id) ? apiKey.key : "••••••••••••••••"}
+                        {visibleKeys.has(apiKey.id) && apiKey.key ? apiKey.key : "••••••••••••••••"}
                       </Badge>
-                      {apiKey.lastUsedAt && (
+                      {(apiKey.lastUsedAt || apiKey.lastUsed) && (
                         <span className="text-xs text-muted-foreground">
-                          Used {formatDistanceToNow(new Date(apiKey.lastUsedAt), { addSuffix: true })}
+                          Used {formatDistanceToNow(new Date(apiKey.lastUsedAt || apiKey.lastUsed || ""), { addSuffix: true })}
                         </span>
                       )}
                     </div>
@@ -227,6 +248,7 @@ export function ApiKeysSettings() {
                       size="icon"
                       onClick={() => toggleKeyVisibility(apiKey.id)}
                       className="h-9 w-9"
+                      disabled={!apiKey.key}
                     >
                       {visibleKeys.has(apiKey.id) ? (
                         <EyeOff className="h-4 w-4" />
@@ -237,8 +259,9 @@ export function ApiKeysSettings() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => handleCopyKey(apiKey.key)}
+                      onClick={() => apiKey.key && handleCopyKey(apiKey.key)}
                       className="h-9 w-9"
+                      disabled={!apiKey.key}
                     >
                       {copiedKey === apiKey.key ? (
                         <Check className="h-4 w-4 text-green-500" />
