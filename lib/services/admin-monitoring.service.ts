@@ -55,6 +55,7 @@ export class AdminMonitoringService {
       generationJobStatus,
       generationAttemptStatus,
       generationLatency,
+      generationJobsInWindow,
       recentGenerationJobs,
       queueHealth,
     ] = await Promise.all([
@@ -166,6 +167,17 @@ export class AdminMonitoringService {
         _count: { _all: true },
       }),
       prisma.generationJob.findMany({
+        where: { createdAt: { gte: since } },
+        orderBy: { createdAt: "asc" },
+        select: {
+          status: true,
+          createdAt: true,
+          startedAt: true,
+          completedAt: true,
+          failedAt: true,
+        },
+      }),
+      prisma.generationJob.findMany({
         orderBy: { createdAt: "desc" },
         take: 12,
         select: {
@@ -204,6 +216,53 @@ export class AdminMonitoringService {
     const requests = successCountMap(requestStatus)
     const totalUsageCount = Object.values(usage).reduce((sum, count) => sum + count, 0)
     const totalRequestCount = requests.success + requests.failed
+    const hourlyGeneration = Array.from({ length: hours }, (_, index) => {
+      const start = new Date(since.getTime() + index * 60 * 60 * 1000)
+      const end = new Date(start.getTime() + 60 * 60 * 1000)
+      const bucketJobs = generationJobsInWindow.filter((job) => job.createdAt >= start && job.createdAt < end)
+      const completedDurations = bucketJobs
+        .map((job) => {
+          const endAt = job.completedAt || job.failedAt
+          if (!job.startedAt || !endAt) return null
+          return Math.max(0, endAt.getTime() - job.startedAt.getTime())
+        })
+        .filter((duration): duration is number => typeof duration === "number")
+      const completed = bucketJobs.filter((job) => job.status === "completed").length
+      const failed = bucketJobs.filter((job) => job.status === "failed").length
+      const total = bucketJobs.length
+
+      return {
+        at: start.toISOString(),
+        label: start.toISOString().slice(11, 16),
+        total,
+        queued: bucketJobs.filter((job) => job.status === "queued").length,
+        running: bucketJobs.filter((job) => job.status === "running").length,
+        completed,
+        failed,
+        failureRate: total > 0 ? Math.round((failed / total) * 100) : 0,
+        averageGenerationMs: completedDurations.length > 0
+          ? Math.round(completedDurations.reduce((sum, duration) => sum + duration, 0) / completedDurations.length)
+          : 0,
+      }
+    })
+    const queueStatus = String((queueHealth as { status?: string }).status || "unknown")
+    const queueCounts = (queueHealth as { counts?: Record<string, number> | null }).counts || {}
+    const workerHeartbeat = (queueHealth as { workerHeartbeat?: { ageMs?: number | null } | null }).workerHeartbeat
+    const redis = (queueHealth as { redis?: { error?: string | null; status?: string | null } | null }).redis
+    const alerts = [
+      redis?.error
+        ? { key: "redis_down", severity: "critical", message: redis.error }
+        : null,
+      !workerHeartbeat || Number(workerHeartbeat.ageMs || 0) > 90_000
+        ? { key: "worker_dead", severity: "critical", message: "Generation worker heartbeat is missing or stale." }
+        : null,
+      queueStatus === "disabled" || queueStatus === "degraded" || queueStatus === "stale" || queueStatus === "unhealthy"
+        ? { key: "queue_unhealthy", severity: "warning", message: `Generation queue status is ${queueStatus}.` }
+        : null,
+      Number(queueCounts.failed || 0) > 0
+        ? { key: "queue_failed_jobs", severity: "warning", message: `${queueCounts.failed} failed BullMQ jobs retained.` }
+        : null,
+    ].filter((alert): alert is { key: string; severity: string; message: string } => Boolean(alert))
 
     return {
       windowHours: hours,
@@ -238,8 +297,10 @@ export class AdminMonitoringService {
           totalAvgMs: Math.round(generationLatency._avg.totalLatencyMs || 0),
         },
         recentJobs: recentGenerationJobs,
+        history: hourlyGeneration,
       },
       queue: queueHealth,
+      alerts,
       recentUsage,
       recentRequests,
       latestFailedRequests,

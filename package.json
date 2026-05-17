@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "audit:production": "node scripts/production-audit.js",
     "test:chaos": "node scripts/chaos-concurrency.js",
+    "test:resilience": "node scripts/pipeline-resilience-smoke.js",
     "test:regression": "node scripts/regression-tests.js",
     "demo:readiness": "node scripts/demo-readiness.js",
     "deploy:readiness": "node scripts/deploy-readiness.js",

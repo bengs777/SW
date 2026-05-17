@@ -386,6 +386,15 @@ async function runProviderAttempt(input: {
       promptLanguage: input.promptLanguage,
       signal: input.signal,
     })
+    log("info", "ai_response_received", {
+      jobId: input.jobId,
+      purpose: input.purpose,
+      provider: route.provider,
+      model: route.modelName,
+      latencyMs: Math.round(performance.now() - startedAt),
+      attempts: response.attempts.length,
+      tokenUsage: response.tokenUsage || null,
+    })
 
     await GenerationJobService.finishAttempt({
       jobId: input.jobId,
@@ -1277,6 +1286,13 @@ export async function executeGenerationJob(
       prompt: input.prompt,
       files: workingFiles,
       idempotencyKey: input.persistenceKey,
+    })
+    log("info", "database_persisted", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      historyId: saveResult.historyId,
+      fileDiff: saveResult.fileDiff,
+      integrity: saveResult.integrity,
     })
     log("info", "generation_files_persisted", {
       jobId: input.jobId,

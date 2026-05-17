@@ -47,6 +47,39 @@ function Metric({
   )
 }
 
+function MiniBars({
+  title,
+  data,
+  valueKey,
+  suffix = "",
+}: {
+  title: string
+  data: Array<Record<string, string | number>>
+  valueKey: string
+  suffix?: string
+}) {
+  const max = Math.max(1, ...data.map((item) => Number(item[valueKey] || 0)))
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">{title}</div>
+      <div className="flex h-24 items-end gap-1">
+        {data.map((item) => {
+          const value = Number(item[valueKey] || 0)
+          return (
+            <div key={`${title}:${item.at}`} className="flex min-w-0 flex-1 flex-col items-center gap-1">
+              <div
+                className="w-full rounded-t bg-primary/70"
+                style={{ height: `${Math.max(4, Math.round((value / max) * 88))}px` }}
+                title={`${item.label}: ${value}${suffix}`}
+              />
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export default async function SystemDashboardPage() {
   const actor = await getCurrentDeveloperActor()
   if (!actor) {
@@ -79,6 +112,7 @@ export default async function SystemDashboardPage() {
   const generation = overview.generation
   const jobsByStatus = generation.jobsByStatus || {}
   const attemptsByStatus = generation.attemptsByStatus || {}
+  const alerts = overview.alerts || []
   const failureRate = generation.latency.sampleCount > 0
     ? Math.round(((jobsByStatus.failed || 0) / generation.latency.sampleCount) * 100)
     : 0
@@ -110,6 +144,16 @@ export default async function SystemDashboardPage() {
         <Metric label="Completed" value={queue.counts?.completed || 0} hint="BullMQ retained" />
         <Metric label="Failed" value={queue.counts?.failed || 0} hint={`failure rate ${failureRate}%`} />
       </div>
+
+      {alerts.length > 0 ? (
+        <div className="grid gap-2">
+          {alerts.map((alert) => (
+            <div key={alert.key} className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+              <span className="font-medium">{alert.key}</span>: {alert.message}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <Card>
@@ -173,6 +217,18 @@ export default async function SystemDashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Historical Graphs</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <MiniBars title="Queue size" data={generation.history} valueKey="total" />
+          <MiniBars title="Latency" data={generation.history} valueKey="averageGenerationMs" suffix="ms" />
+          <MiniBars title="Failure rate" data={generation.history} valueKey="failureRate" suffix="%" />
+          <MiniBars title="Average generation" data={generation.history} valueKey="averageGenerationMs" suffix="ms" />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

@@ -14,6 +14,7 @@ export async function GET(
 ) {
   const startedAt = Date.now()
   const requestId = request.headers.get("x-request-id") || request.headers.get("x-vercel-id") || randomUUID()
+  const refreshReason = request.nextUrl.searchParams.get("reason") || "project-load"
   const session = await auth()
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -70,8 +71,20 @@ export async function GET(
       userId: session.user.id,
       fileCount: visibleFiles.length,
       latestHistoryId,
+      reason: refreshReason,
       durationMs: Date.now() - startedAt,
     })
+    if (refreshReason === "generation-completed" || refreshReason === "explorer-refresh") {
+      log("info", "explorer_refreshed", {
+        requestId,
+        projectId: id,
+        userId: session.user.id,
+        fileCount: visibleFiles.length,
+        latestHistoryId,
+        latestFileUpdatedAt,
+        durationMs: Date.now() - startedAt,
+      })
+    }
 
     return NextResponse.json({
       project: {

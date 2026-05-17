@@ -382,8 +382,8 @@ export default function EditorPage() {
     }
   }, [])
 
-  const refreshProjectState = useCallback(async () => {
-    const response = await fetch(`/api/projects/${projectId}`)
+  const refreshProjectState = useCallback(async (reason = "project-load") => {
+    const response = await fetch(`/api/projects/${projectId}?reason=${encodeURIComponent(reason)}`)
     const data = await response.json()
     if (!response.ok) {
       throw new Error(data.error || "Failed to refresh project")
@@ -397,6 +397,10 @@ export default function EditorPage() {
         }))
       : []
     const { files } = splitWorkspaceStateFiles(serverFiles)
+    const expectedFileCount = Number(data.project?.fileState?.count ?? files.length)
+    if (expectedFileCount !== files.length) {
+      throw new Error(`Explorer file count mismatch. API=${expectedFileCount}, client=${files.length}`)
+    }
     const serverWorkspaceState =
       readWorkspaceStateFile(
         data.project?.workspaceState
@@ -416,6 +420,15 @@ export default function EditorPage() {
     setActiveFileIndex(0)
     setIsDirty(false)
     workspaceProtectedPathsRef.current = serverWorkspaceState.lockedPaths
+    if (reason === "generation-completed" || reason === "explorer-refresh") {
+      console.info(JSON.stringify({
+        level: "info",
+        msg: "explorer_refreshed",
+        projectId,
+        fileCount: files.length,
+        latestHistoryId: data.project?.fileState?.latestHistoryId || null,
+      }))
+    }
   }, [projectId])
 
   const pushErrorLog = useCallback((
@@ -504,7 +517,7 @@ export default function EditorPage() {
             )
             void (async () => {
               try {
-                await refreshProjectState()
+                await refreshProjectState("generation-completed")
                 setActivePreviewTab("preview")
                 setMessages((prev) =>
                   prev.map((msg) =>

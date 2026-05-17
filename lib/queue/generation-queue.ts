@@ -280,6 +280,64 @@ export async function moveGenerationJobToDeadLetter(input: {
   return dlqJob
 }
 
+export async function getGenerationDeadLetterPayload(deadLetterJobId: string) {
+  const deadLetterQueue = getGenerationDeadLetterQueue()
+  if (!deadLetterQueue) {
+    throw new Error("Generation dead-letter queue is unavailable.")
+  }
+
+  const deadLetterJob = await deadLetterQueue.getJob(deadLetterJobId)
+  if (!deadLetterJob) {
+    throw new Error("Dead-letter job not found.")
+  }
+
+  return deadLetterJob.data.payload
+}
+
+export async function replayGenerationDeadLetterJob(input: {
+  deadLetterJobId: string
+  queueJobId?: string
+  removeDeadLetter?: boolean
+}) {
+  const deadLetterQueue = getGenerationDeadLetterQueue()
+  const queue = getGenerationQueue()
+  if (!deadLetterQueue || !queue) {
+    throw new Error("Generation queue or dead-letter queue is unavailable.")
+  }
+
+  const deadLetterJob = await deadLetterQueue.getJob(input.deadLetterJobId)
+  if (!deadLetterJob) {
+    throw new Error("Dead-letter job not found.")
+  }
+
+  const payload = deadLetterJob.data.payload
+  const queueJobId = input.queueJobId || `replay:${payload.jobId}:${Date.now()}`
+  const queued = await queue.add("generation.execute", payload, {
+    ...DEFAULT_JOB_OPTIONS,
+    jobId: queueJobId,
+  })
+
+  if (input.removeDeadLetter) {
+    await deadLetterJob.remove()
+  }
+
+  log("warn", "generation_dead_letter_replayed", {
+    deadLetterJobId: input.deadLetterJobId,
+    jobId: payload.jobId,
+    queueJobId: queued.id,
+    projectId: payload.projectId,
+    userId: payload.userId,
+    traceId: payload.traceId,
+    removeDeadLetter: Boolean(input.removeDeadLetter),
+  })
+
+  return {
+    deadLetterJobId: input.deadLetterJobId,
+    queueJobId: queued.id,
+    payload,
+  }
+}
+
 export async function recordGenerationWorkerHeartbeat(workerId: string) {
   const connection = getRedisConnection()
   if (!connection) return null

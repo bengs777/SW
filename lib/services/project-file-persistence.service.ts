@@ -264,6 +264,11 @@ export class ProjectFilePersistenceService {
           })
 
       const fileDiff = await syncProjectFiles(tx, projectId, normalizedFiles)
+      log("info", "files_written", {
+        projectId,
+        fileDiff,
+        expectedFileCount: normalizedFiles.length,
+      })
       const persistedFiles = await tx.projectFile.findMany({
         where: { projectId },
         orderBy: { path: "asc" },

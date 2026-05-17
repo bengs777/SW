@@ -1,5 +1,22 @@
 const { PrismaClient } = require("@prisma/client")
 
+function loadEnvFile(path) {
+  const fs = require("node:fs")
+  if (!fs.existsSync(path)) return
+  for (const line of fs.readFileSync(path, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
+    if (!match) continue
+    const key = match[1]
+    if (process.env[key]) continue
+    process.env[key] = match[2].trim().replace(/^['"]|['"]$/g, "")
+  }
+}
+
+loadEnvFile(".env.production")
+loadEnvFile(".env")
+
 process.env.DATABASE_URL = process.env.SWIFT_LOCAL_DATABASE_URL || process.env.DATABASE_URL || ""
 
 if (!/^postgres(?:ql)?:\/\//i.test(process.env.DATABASE_URL)) {
@@ -12,6 +29,7 @@ const prisma = new PrismaClient({
 
 const runId = `chaos-${Date.now()}`
 const cost = 3000
+const concurrency = Math.min(10, Math.max(5, Math.round(Number(process.env.CHAOS_CONCURRENCY || 10))))
 
 async function reserveGeneration({ userId, projectId, modelConfigId, requestHash }) {
   return prisma.$transaction(async (tx) => {
@@ -166,7 +184,7 @@ async function main() {
     data: {
       email: `${runId}@swift-chaos.local`,
       name: "Chaos User",
-      balance: 10_000,
+      balance: cost * concurrency,
     },
   })
   const workspace = await prisma.workspace.create({
@@ -205,26 +223,27 @@ async function main() {
   })
 
   const requestHash = `${runId}:same-request`
-  const reservations = await Promise.allSettled([
-    reserveGeneration({ userId: user.id, projectId: project.id, modelConfigId: modelConfig.id, requestHash }),
-    reserveGeneration({ userId: user.id, projectId: project.id, modelConfigId: modelConfig.id, requestHash }),
-  ])
+  const reservations = await Promise.allSettled(
+    Array.from({ length: concurrency }, () =>
+      reserveGeneration({ userId: user.id, projectId: project.id, modelConfigId: modelConfig.id, requestHash })
+    )
+  )
   const fulfilled = reservations.filter((item) => item.status === "fulfilled")
   const rejected = reservations.filter((item) => item.status === "rejected")
 
   assert(fulfilled.length === 1, `Expected one reservation, got ${fulfilled.length}`)
-  assert(rejected.length === 1, `Expected one deduped rejection, got ${rejected.length}`)
+  assert(rejected.length === concurrency - 1, `Expected ${concurrency - 1} deduped rejections, got ${rejected.length}`)
 
   const [reservation] = fulfilled.map((item) => item.value)
   const afterReserve = await prisma.user.findUnique({ where: { id: user.id }, select: { balance: true } })
-  assert(afterReserve?.balance === 7_000, `Expected one debit, balance=${afterReserve?.balance}`)
+  assert(afterReserve?.balance === cost * (concurrency - 1), `Expected one debit, balance=${afterReserve?.balance}`)
 
   await Promise.allSettled([
     refundReservation({ usageLogId: reservation.usageLog.id, userId: user.id }),
     refundReservation({ usageLogId: reservation.usageLog.id, userId: user.id }),
   ])
   const afterRefund = await prisma.user.findUnique({ where: { id: user.id }, select: { balance: true } })
-  assert(afterRefund?.balance === 10_000, `Expected exactly one refund, balance=${afterRefund?.balance}`)
+  assert(afterRefund?.balance === cost * concurrency, `Expected exactly one refund, balance=${afterRefund?.balance}`)
 
   const refundCount = await prisma.billingTransaction.count({
     where: {
@@ -283,7 +302,7 @@ async function main() {
   })
   assert(historyCount === 1, `Expected one generation history replay record, got ${historyCount}`)
 
-  console.log("[chaos] concurrency safety checks passed")
+  console.log(`[chaos] concurrency safety checks passed (${concurrency} simultaneous duplicate prompts)`)
 }
 
 main()

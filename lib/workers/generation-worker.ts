@@ -192,6 +192,12 @@ export function startGenerationWorker() {
     concurrency: Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2),
     timeoutMs: GENERATION_JOB_TIMEOUT_MS,
   })
+  log("info", "worker_boot", {
+    workerId,
+    pid: process.pid,
+    concurrency: Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2),
+    timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+  })
 
   void reconcileStaleGenerationJobs().catch((error) => {
     log("error", "Stale generation reconciliation failed", {
@@ -224,6 +230,15 @@ export function startGenerationWorker() {
       userId: job.data.userId,
       traceId: job.data.traceId,
     })
+    log("info", "worker_active", {
+      workerId,
+      jobId: job.data.jobId,
+      queueJobId: job.id,
+      projectId: job.data.projectId,
+      userId: job.data.userId,
+      attemptsMade: job.attemptsMade,
+      traceId: job.data.traceId,
+    })
   })
 
   worker.on("failed", async (job, error) => {
@@ -237,6 +252,16 @@ export function startGenerationWorker() {
       jobId: job.data.jobId,
       queueJobId: job.id,
       source: "generation_worker_failed_event",
+    })
+    log("error", "worker_failed", {
+      workerId,
+      jobId: job.data.jobId,
+      queueJobId: job.id,
+      projectId: job.data.projectId,
+      userId: job.data.userId,
+      attemptsMade: job.attemptsMade,
+      error: error.message,
+      traceId: job.data.traceId,
     })
     await moveGenerationJobToDeadLetter({
       payload: job.data,
@@ -264,10 +289,24 @@ export function startGenerationWorker() {
       latencyMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
       traceId: job.data.traceId,
     })
+    log("info", "worker_completed", {
+      workerId,
+      jobId: job.data.jobId,
+      queueJobId: job.id,
+      projectId: job.data.projectId,
+      userId: job.data.userId,
+      attemptsMade: job.attemptsMade,
+      latencyMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
+      traceId: job.data.traceId,
+    })
   })
 
   worker.on("stalled", (jobId) => {
     log("warn", "generation_worker_job_stalled", {
+      workerId,
+      queueJobId: jobId,
+    })
+    log("warn", "worker_stalled", {
       workerId,
       queueJobId: jobId,
     })
