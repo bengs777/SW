@@ -118,6 +118,100 @@ type ValidationLifecycleResult = {
   failure?: ValidationLifecycleFailure
 }
 
+type RemoteSandboxResponse = {
+  status?: string | null
+  previewUrl?: string | null
+  logs?: string[] | null
+  error?: string | null
+}
+
+const sandboxServiceUrl = () => (process.env.SANDBOX_SERVICE_URL || "").replace(/\/+$/, "")
+const sandboxServiceToken = () => process.env.SANDBOX_SERVICE_TOKEN || ""
+const isProductionVercel = () => process.env.NODE_ENV === "production" && Boolean(process.env.VERCEL)
+
+function canUseRemoteSandboxService() {
+  const url = sandboxServiceUrl()
+  if (!url) return false
+  if (process.env.NODE_ENV === "production" && !sandboxServiceToken()) return false
+  return true
+}
+
+async function startConfiguredSandboxService(input: {
+  projectId: string
+  files: GeneratedFile[]
+  signal?: AbortSignal
+}): Promise<RemoteSandboxResponse> {
+  const headers: HeadersInit = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  }
+  const token = sandboxServiceToken()
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+
+  const configuredTimeoutMs = Number(process.env.SANDBOX_SERVICE_TIMEOUT_MS || 25_000)
+  const timeoutMs = Number.isFinite(configuredTimeoutMs)
+    ? Math.max(1000, configuredTimeoutMs)
+    : 25_000
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const abortRequest = () => controller.abort()
+  input.signal?.addEventListener("abort", abortRequest, { once: true })
+
+  let response: Response
+  try {
+    response = await fetch(
+      `${sandboxServiceUrl()}/sandbox/${encodeURIComponent(input.projectId)}`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ files: input.files }),
+        signal: controller.signal,
+        cache: "no-store",
+      }
+    )
+  } catch (error) {
+    return {
+      status: "error",
+      previewUrl: null,
+      logs: [],
+      error:
+        error instanceof Error && error.name === "AbortError"
+          ? `Sandbox service request timed out after ${timeoutMs}ms`
+          : error instanceof Error
+            ? error.message
+            : "Sandbox service request failed",
+    }
+  } finally {
+    clearTimeout(timeout)
+    input.signal?.removeEventListener("abort", abortRequest)
+  }
+
+  const data = (await response.json().catch(() => ({
+    status: "error",
+    previewUrl: null,
+    logs: [],
+    error: `Sandbox service returned non-JSON response (${response.status})`,
+  }))) as RemoteSandboxResponse
+
+  if (!response.ok) {
+    return {
+      status: data.status || "error",
+      previewUrl: data.previewUrl || null,
+      logs: Array.isArray(data.logs) ? data.logs : [],
+      error: data.error || `Sandbox service failed with HTTP ${response.status}`,
+    }
+  }
+
+  return {
+    status: data.status || null,
+    previewUrl: data.previewUrl || null,
+    logs: Array.isArray(data.logs) ? data.logs : [],
+    error: data.error || null,
+  }
+}
+
 function serializeError(error: unknown) {
   if (error instanceof Error) {
     return {
@@ -606,6 +700,110 @@ async function runValidationLifecycle(input: {
 
   await GenerationJobService.assertNotCancelled(input.jobId)
   stepStartedAt = performance.now()
+  if (canUseRemoteSandboxService()) {
+    await input.emit("building", "Validating project in configured sandbox service", 84)
+    const preview = await startConfiguredSandboxService({
+      projectId: input.projectId,
+      files,
+      signal: input.signal,
+    })
+    const logs = Array.isArray(preview.logs) ? preview.logs : []
+    if (preview.error || preview.status !== "running") {
+      const message = preview.error || `Sandbox service did not reach running state (${preview.status || "unknown"})`
+      if (isProductionVercel()) {
+        recordStep("build", "skipped", "advisory", stepStartedAt, message, {
+          sandboxStatus: preview.status || null,
+          logs: logs.slice(-80),
+        })
+        recordStep(
+          "runtime-smoke",
+          "skipped",
+          "advisory",
+          stepStartedAt,
+          "Sandbox service unavailable; browser iframe preview will validate client-side after persistence.",
+          {
+            sandboxStatus: preview.status || null,
+            logs: logs.slice(-80),
+          }
+        )
+        return {
+          ok: true,
+          files,
+          previewUrl: null,
+          previewStatus: "browser-preview-only",
+          steps,
+          sandboxValidation: [],
+        }
+      }
+
+      recordStep("runtime-smoke", "failed", "required", stepStartedAt, message, {
+        sandboxStatus: preview.status || null,
+        logs: logs.slice(-80),
+      })
+      return {
+        ok: false,
+        files,
+        previewUrl: preview.previewUrl || null,
+        previewStatus: preview.status || null,
+        steps,
+        sandboxValidation: [],
+        failure: {
+          step: "runtime-smoke",
+          message,
+          data: {
+            sandboxStatus: preview.status || null,
+            logs: logs.slice(-80),
+          },
+        },
+      }
+    }
+
+    recordStep("build", "passed", "required", stepStartedAt, "Sandbox service accepted and built the project.", {
+      sandboxStatus: preview.status,
+      logs: logs.slice(-20),
+    })
+    recordStep("runtime-smoke", "passed", "required", stepStartedAt, undefined, {
+      sandboxStatus: preview.status,
+      previewUrl: preview.previewUrl || null,
+    })
+
+    return {
+      ok: true,
+      files,
+      previewUrl: preview.previewUrl || null,
+      previewStatus: preview.status || null,
+      steps,
+      sandboxValidation: [],
+    }
+  }
+
+  if (isProductionVercel()) {
+    await input.emit("building", "Runtime sandbox unavailable; saving browser-previewable files", 84)
+    recordStep(
+      "build",
+      "skipped",
+      "advisory",
+      stepStartedAt,
+      "Skipped in Vercel production because SANDBOX_SERVICE_URL is not configured."
+    )
+    recordStep(
+      "runtime-smoke",
+      "skipped",
+      "advisory",
+      stepStartedAt,
+      "Browser iframe preview will validate client-side after persistence."
+    )
+
+    return {
+      ok: true,
+      files,
+      previewUrl: null,
+      previewStatus: "browser-preview-only",
+      steps,
+      sandboxValidation: [],
+    }
+  }
+
   await input.emit("building", "Running typecheck, lint, and production build", 84)
   const preview = await startRuntimeSandbox(input.projectId, files, { signal: input.signal })
   for (const sandboxStep of preview.validation) {

@@ -418,6 +418,27 @@ export default function EditorPage() {
     workspaceProtectedPathsRef.current = serverWorkspaceState.lockedPaths
   }, [projectId])
 
+  const pushErrorLog = useCallback((
+    source: ErrorLogEntry["source"],
+    message: string
+  ) => {
+    const trimmed = message.trim()
+    if (!trimmed) return
+
+    setErrorLogs((previous) => [
+      {
+        id:
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+        source,
+        message: trimmed,
+        timestamp: new Date(),
+      },
+      ...previous,
+    ].slice(0, 100))
+  }, [])
+
   const applyJobProgress = useCallback((job: {
     id: string
     stage: string
@@ -471,28 +492,71 @@ export default function EditorPage() {
             activeGenerationStreamRef.current = null
           }
           if (job.status === "completed") {
-            void refreshProjectState()
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.isGenerating
-                  ? {
-                      ...msg,
-                      content: "Swift menyelesaikan generation job. File project dan preview sudah diperbarui dari worker.",
-                      isGenerating: false,
-                    }
-                  : msg
-              )
-            )
             setGenerationProgress((current) =>
               current
                 ? {
                     ...current,
-                    stage: "preview",
-                    label: "Preview siap",
-                    progressPercent: 100,
+                    stage: "save",
+                    label: "Mengambil file project terbaru",
+                    progressPercent: Math.max(current.progressPercent ?? 0, 98),
                   }
                 : current
             )
+            void (async () => {
+              try {
+                await refreshProjectState()
+                setActivePreviewTab("preview")
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.isGenerating
+                      ? {
+                          ...msg,
+                          content: "Swift menyelesaikan generation job. File project dan preview sudah diperbarui dari worker.",
+                          isGenerating: false,
+                        }
+                      : msg
+                  )
+                )
+                setGenerationProgress((current) =>
+                  current
+                    ? {
+                        ...current,
+                        stage: "preview",
+                        label: "Preview siap",
+                        progressPercent: 100,
+                      }
+                    : current
+                )
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error)
+                pushErrorLog("project", `Generation selesai, tapi refresh file gagal: ${message}`)
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.isGenerating
+                      ? {
+                          ...msg,
+                          content: "Generation selesai, tapi file project belum bisa dimuat ulang. Coba refresh halaman atau buka Logs.",
+                          isGenerating: false,
+                        }
+                      : msg
+                  )
+                )
+                setGenerationProgress((current) =>
+                  current
+                    ? {
+                        ...current,
+                        stage: "error",
+                        label: "Refresh file gagal",
+                        progressPercent: 100,
+                      }
+                    : current
+                )
+              } finally {
+                setIsGenerating(false)
+                window.setTimeout(() => setGenerationProgress(null), 1600)
+              }
+            })()
+            return
           }
           setIsGenerating(false)
           window.setTimeout(() => setGenerationProgress(null), 1200)
@@ -529,7 +593,7 @@ export default function EditorPage() {
         startGenerationStream(jobId, nextAttempt)
       }, delay)
     }
-  }, [applyJobProgress, clearGenerateDeadline, closeGenerationStream, refreshProjectState])
+  }, [applyJobProgress, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
 
   useEffect(() => {
     return () => {
@@ -555,27 +619,6 @@ export default function EditorPage() {
       setActiveFileIndex(generatedFiles.length - 1)
     }
   }, [activeFileIndex, generatedFiles.length])
-
-  const pushErrorLog = useCallback((
-    source: ErrorLogEntry["source"],
-    message: string
-  ) => {
-    const trimmed = message.trim()
-    if (!trimmed) return
-
-    setErrorLogs((previous) => [
-      {
-        id:
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-        source,
-        message: trimmed,
-        timestamp: new Date(),
-      },
-      ...previous,
-    ].slice(0, 100))
-  }, [])
 
   const createIdempotencyKey = useCallback((prompt: string, modelKey: string, attachments: PromptAttachment[], previewContext?: PreviewContext | null) => {
     const attachmentFingerprint = attachments
