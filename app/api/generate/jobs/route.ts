@@ -7,7 +7,7 @@ import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
-import { enqueueGenerationTask } from "@/lib/queue/generation-queue"
+import { enqueueGenerationTask, getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { processGenerationPayload } from "@/lib/workers/generation-worker"
 import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
@@ -511,12 +511,33 @@ export async function POST(request: NextRequest) {
       attachments: parsed.data.attachments,
     }
 
-    const queueJob = await enqueueGenerationTask(
-      generationPayload,
-      {
-        jobId: queueId,
-      }
-    )
+    const queueHealth = await getGenerationQueueHealth().catch((error) => {
+      log("warn", "generation_queue_health_check_failed", {
+        requestId,
+        jobId: job.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    })
+    const shouldUseServerlessFallback = !queueHealth || queueHealth.status !== "healthy"
+    if (shouldUseServerlessFallback) {
+      log("warn", "generation_queue_worker_unavailable", {
+        requestId,
+        jobId: job.id,
+        queueStatus: queueHealth?.status || "unknown",
+        queueEnabled: queueHealth?.enabled ?? false,
+        workerHeartbeat: queueHealth?.workerHeartbeat || null,
+      })
+    }
+
+    const queueJob = shouldUseServerlessFallback
+      ? null
+      : await enqueueGenerationTask(
+          generationPayload,
+          {
+            jobId: queueId,
+          }
+        )
 
     if (!queueJob) {
       fallbackScheduled = true
@@ -534,7 +555,7 @@ export async function POST(request: NextRequest) {
           requestId,
           jobId: job.id,
           queueJobId: fallbackQueueJobId,
-          reason: "queue_unavailable",
+          reason: shouldUseServerlessFallback ? "queue_worker_unavailable" : "queue_unavailable",
         })
         try {
           await processGenerationPayload(generationPayload, fallbackQueueJobId)
@@ -569,7 +590,9 @@ export async function POST(request: NextRequest) {
         dbCreated,
         enqueueSuccess,
         fallbackScheduled,
-        probableRootCause: "queue_unavailable_serverless_fallback_scheduled",
+        probableRootCause: shouldUseServerlessFallback
+          ? "queue_worker_unavailable_serverless_fallback_scheduled"
+          : "queue_unavailable_serverless_fallback_scheduled",
       })
       logStage("response_return", true, {
         requestId,
