@@ -9,6 +9,7 @@ export type ProjectFileManifest = {
   totalBytes: number
   sha256: string
   paths: string[]
+  fileHashes: Record<string, string>
 }
 
 export type ProjectFileDiff = {
@@ -45,6 +46,21 @@ const FORBIDDEN_EXACT_FILES = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
+])
+const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
+const ALLOWED_EXACT_FILES = new Set([
+  ".swift/workspace-state.json",
+  "package.json",
+  "components.json",
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "tsconfig.json",
+  "postcss.config.js",
+  "postcss.config.mjs",
+  "tailwind.config.js",
+  "tailwind.config.ts",
+  "middleware.ts",
 ])
 
 export class PersistenceIntegrityError extends Error {
@@ -300,15 +316,26 @@ function buildManifest(files: GeneratedFile[]): ProjectFileManifest {
   const normalizedFiles = normalizeFiles(files)
   const hash = createHash("sha256")
   let totalBytes = 0
+  const fileHashes: Record<string, string> = {}
 
   for (const file of normalizedFiles) {
     const content = String(file.content ?? "")
     totalBytes += Buffer.byteLength(content, "utf8")
+    const contentHash = createHash("sha256").update(content).digest("hex")
+    const fileHash = createHash("sha256")
+      .update(file.path)
+      .update("\0")
+      .update(normalizeFileLanguage(file.language))
+      .update("\0")
+      .update(contentHash)
+      .digest("hex")
+    fileHashes[file.path] = fileHash
+
     hash.update(file.path)
     hash.update("\0")
     hash.update(normalizeFileLanguage(file.language))
     hash.update("\0")
-    hash.update(content)
+    hash.update(fileHash)
     hash.update("\0")
   }
 
@@ -317,6 +344,7 @@ function buildManifest(files: GeneratedFile[]): ProjectFileManifest {
     totalBytes,
     sha256: hash.digest("hex"),
     paths: normalizedFiles.map((file) => file.path),
+    fileHashes,
   }
 }
 
@@ -358,5 +386,9 @@ function assertSafeProjectPath(path: string) {
   const lower = path.toLowerCase()
   if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
     throw new Error(`Forbidden generated file path rejected: ${path}`)
+  }
+
+  if (!ALLOWED_EXACT_FILES.has(lower) && !ALLOWED_ROOTS.some((root) => lower.startsWith(root))) {
+    throw new Error(`Generated file path is outside allowed project roots: ${path}`)
   }
 }

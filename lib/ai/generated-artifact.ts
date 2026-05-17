@@ -20,6 +20,21 @@ const PROTECTED_DELETE_FILES = new Set([
   "app/layout.tsx",
   "app/page.tsx",
 ])
+const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
+const ALLOWED_EXACT_FILES = new Set([
+  ".swift/workspace-state.json",
+  "package.json",
+  "components.json",
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "tsconfig.json",
+  "postcss.config.js",
+  "postcss.config.mjs",
+  "tailwind.config.js",
+  "tailwind.config.ts",
+  "middleware.ts",
+])
 
 const normalizePath = (path: string) =>
   path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
@@ -36,7 +51,11 @@ function isSafeGeneratedPath(path: string) {
   }
 
   const lower = normalized.toLowerCase()
-  return !FORBIDDEN_PATH_SEGMENTS.test(lower) && !FORBIDDEN_EXACT_FILES.has(lower)
+  if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
+    return false
+  }
+
+  return ALLOWED_EXACT_FILES.has(lower) || ALLOWED_ROOTS.some((root) => lower.startsWith(root))
 }
 
 const generatedFileSchema = z.object({

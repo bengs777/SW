@@ -10,6 +10,31 @@ type TaskGraphExecutionResult = {
 }
 
 const PACKAGE_JSON_PATH = "package.json"
+const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
+const ALLOWED_EXACT_FILES = new Set([
+  ".swift/workspace-state.json",
+  "package.json",
+  "components.json",
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "tsconfig.json",
+  "postcss.config.js",
+  "postcss.config.mjs",
+  "tailwind.config.js",
+  "tailwind.config.ts",
+  "middleware.ts",
+])
+const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
+const FORBIDDEN_EXACT_FILES = new Set([
+  ".env",
+  ".env.local",
+  ".env.production",
+  ".env.development",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+])
 
 export function executeGeneratedTaskGraph(
   currentFiles: GeneratedFile[],
@@ -22,14 +47,14 @@ export function executeGeneratedTaskGraph(
     byPath.set(normalizePath(file.path), normalizeGeneratedFile(file))
   }
 
-  const operations = taskGraph?.operations?.length
+  const operations = collapseOperations(taskGraph?.operations?.length
     ? taskGraph.operations
     : fallbackFiles.map((file): GeneratedTaskOperation => ({
         action: byPath.has(normalizePath(file.path)) ? "modify" : "create",
         path: file.path,
         content: file.content,
         language: file.language,
-      }))
+      })))
 
   const changedPaths = new Set<string>()
   const deletedPaths: string[] = []
@@ -167,6 +192,7 @@ function normalizeRecord(value: unknown): Record<string, string> {
 
 function normalizeGeneratedFile(file: GeneratedFile): GeneratedFile {
   const path = normalizePath(file.path)
+  assertSafePath(path)
   return {
     path,
     content: String(file.content ?? ""),
@@ -176,6 +202,44 @@ function normalizeGeneratedFile(file: GeneratedFile): GeneratedFile {
 
 function normalizePath(path: string) {
   return String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function collapseOperations(operations: GeneratedTaskOperation[]) {
+  const byPath = new Map<string, GeneratedTaskOperation>()
+
+  for (const operation of operations) {
+    const path = normalizePath(operation.path)
+    if (!path) continue
+    assertSafePath(path)
+
+    byPath.set(path, {
+      ...operation,
+      path,
+      language: operation.language || inferLanguageFromPath(path),
+    })
+  }
+
+  return Array.from(byPath.values())
+}
+
+function assertSafePath(path: string) {
+  if (!path || path.includes("\0") || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new Error(`Invalid generated file path: ${path}`)
+  }
+
+  const segments = path.split("/")
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Unsafe generated file path rejected: ${path}`)
+  }
+
+  const lower = path.toLowerCase()
+  if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
+    throw new Error(`Forbidden generated file path rejected: ${path}`)
+  }
+
+  if (!ALLOWED_EXACT_FILES.has(lower) && !ALLOWED_ROOTS.some((root) => lower.startsWith(root))) {
+    throw new Error(`Generated file path is outside allowed project roots: ${path}`)
+  }
 }
 
 function inferLanguageFromPath(path: string): GeneratedFile["language"] {

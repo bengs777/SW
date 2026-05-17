@@ -362,6 +362,7 @@ export default function EditorPage() {
   const workspaceDraftFingerprintRef = useRef<string | null>(null)
   const workspaceSaveFingerprintRef = useRef<string | null>(null)
   const workspaceDraftRef = useRef<WorkspaceDraft | null>(null)
+  const projectRefreshSequenceRef = useRef(0)
 
   const latestUserPrompt = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -392,10 +393,25 @@ export default function EditorPage() {
   }, [])
 
   const refreshProjectState = useCallback(async (reason = "project-load") => {
+    const refreshSequence = projectRefreshSequenceRef.current + 1
+    projectRefreshSequenceRef.current = refreshSequence
     const response = await fetch(`/api/projects/${projectId}?reason=${encodeURIComponent(reason)}`)
     const data = await response.json()
     if (!response.ok) {
       throw new Error(data.error || "Failed to refresh project")
+    }
+    if (refreshSequence < projectRefreshSequenceRef.current) {
+      console.info(JSON.stringify({
+        level: "info",
+        msg: "project_refresh_ignored",
+        projectId,
+        reason,
+        refreshSequence,
+        latestRefreshSequence: projectRefreshSequenceRef.current,
+        manifestHash: data.project?.fileState?.manifest?.sha256 || null,
+        latestUpdatedAt: data.project?.fileState?.latestUpdatedAt || null,
+      }))
+      return
     }
 
     const serverFiles = Array.isArray(data.project?.files)
@@ -437,6 +453,8 @@ export default function EditorPage() {
         projectId,
         fileCount: files.length,
         latestHistoryId: data.project?.fileState?.latestHistoryId || null,
+        latestUpdatedAt: data.project?.fileState?.latestUpdatedAt || null,
+        manifestHash: data.project?.fileState?.manifest?.sha256 || null,
       }))
     }
   }, [projectId])
