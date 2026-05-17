@@ -573,7 +573,7 @@ export async function POST(
       return NextResponse.json({ error: "User not found" }, { status: 404 })
     }
 
-    if (!env.vercelAccessToken) {
+    if (!env.verproAccessToken) {
       return NextResponse.json(
         {
           error:
@@ -677,7 +677,7 @@ export async function POST(
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.vercelAccessToken}`,
+        Authorization: `Bearer ${env.verproAccessToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),

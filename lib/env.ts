@@ -73,7 +73,7 @@ const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
 const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const vercelTeamId = getEnv("VERCEL_TEAM_ID")
-const vercelDeployToken = getEnv("verpro_akses_token", "VERCEL_ACCESS_TOKEN")
+const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
 const hasRedisRestConfig = Boolean(upstashRedisRestUrl && upstashRedisRestToken)
@@ -142,7 +142,7 @@ export const env = {
   appUrl: normalizeAppUrl(getEnv("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL") || "http://localhost:3000"),
   pakasirSlug: getEnv("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID"),
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
-  vercelAccessToken: vercelDeployToken,
+  verproAccessToken: verproDeployToken,
   vercelTeamId,
   // Crypto Payment
   cryptoPaymentPrivateKey: getEnv("CRYPTO_PAYMENT_PRIVATE_KEY"),
