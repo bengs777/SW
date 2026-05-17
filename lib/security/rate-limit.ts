@@ -120,22 +120,28 @@ export async function enforceAiUsageRateLimit(userId: string) {
   // Fast path: Redis-based rate limiting
   await enforceUserRateLimit(userId)
 
-  const activePaidSubscription = await prisma.subscription.findFirst({
-    where: {
-      status: "active",
-      plan: { not: "free" },
-      workspace: {
-        members: {
-          some: {
-            userId,
+  const [user, activePaidSubscription] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { isDeveloperAccount: true },
+    }),
+    prisma.subscription.findFirst({
+      where: {
+        status: "active",
+        plan: { not: "free" },
+        workspace: {
+          members: {
+            some: {
+              userId,
+            },
           },
         },
       },
-    },
-    select: { id: true },
-  })
+      select: { id: true },
+    }),
+  ])
 
-  const hasPremiumAccess = Boolean(activePaidSubscription)
+  const hasPremiumAccess = Boolean(user?.isDeveloperAccount || activePaidSubscription)
   const dailyLimit = hasPremiumAccess ? MAX_REQUESTS_PER_DAY : FREE_GENERATIONS_PER_DAY
 
   // Check daily limit via Redis
