@@ -529,6 +529,10 @@ function buildSlicePrompt(input: {
     "- Return ONLY a JSON object with taskGraph; include changed files as taskGraph.operations.",
     '- taskGraph schema: {"taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]}}',
     "- For delete operations, omit content. For create/modify operations, content must be the full file content.",
+    "- TSX_PARSE_LOCK: every returned .tsx/.ts/.jsx/.js file must parse with @babel/parser using jsx + typescript plugins.",
+    "- Do not use raw emoji or decorative non-ASCII symbols in TSX code. Use plain text labels or imported icons only.",
+    "- Never split quoted strings across physical lines. Put long copy in JSX text nodes, arrays of short strings, or properly closed template literals.",
+    "- Keep generated code ASCII-safe unless the user explicitly asks for local script characters.",
     "- Prefer task graph operations over raw files.",
     "- Prefer patch-safe, deterministic updates.",
     "- Preserve stable files unless this slice requires a focused update.",
@@ -1035,6 +1039,8 @@ async function attemptTargetedRepair(input: {
     "- Repair only the failing files or their direct imports.",
     "- Do not regenerate the entire project.",
     "- Return only changed files.",
+    "- The repaired file must be syntactically valid TSX/TypeScript. No raw emoji, no unterminated strings, no split quoted strings.",
+    "- If a fancy design is causing syntax risk, replace it with a minimal compile-safe version of the failing file.",
     "- The result will be revalidated through normalize -> static validation -> preview compile -> typecheck -> lint -> build before persistence.",
     `- Repair attempt: ${input.repairAttempt} / ${input.maxRepairAttempts}`,
     "",
@@ -1069,6 +1075,222 @@ async function attemptTargetedRepair(input: {
     normalizedPackages: normalized.normalizedPackages,
     addedPackages: normalized.addedPackages,
   }
+}
+
+function shouldApplySafePreviewFallback(plan: GenerationPlan, validation: ValidationLifecycleResult) {
+  const isPreviewFoundationPass =
+    plan.editPlan.mode === "full" && plan.filePlan.length > 0 && plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+  if (!isPreviewFoundationPass) return false
+
+  const failureMessage = validation.failure?.message || ""
+  return validation.failure?.step === "preview-compile" || /unterminated|unexpected character|parse/i.test(failureMessage)
+}
+
+function buildSafePreviewFallbackFiles(input: {
+  prompt: string
+  appType: ControlledAppType
+}): GeneratedFile[] {
+  const lowerPrompt = input.prompt.toLowerCase()
+  const isMarketplace =
+    input.appType === "simple_marketplace" ||
+    /\b(jual|beli|toko|dagang|market|produk|ecommerce|commerce)\b/i.test(lowerPrompt)
+  const isNews = /\b(berita|portal|majalah|artikel|desa)\b/i.test(lowerPrompt)
+
+  if (isMarketplace) {
+    return [
+      {
+        path: "app/layout.tsx",
+        language: "tsx",
+        content: `import type { Metadata } from "next"
+import "./globals.css"
+
+export const metadata: Metadata = {
+  title: "JBB Marketplace",
+  description: "Preview marketplace lokal berbasis data dummy",
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="id">
+      <body>{children}</body>
+    </html>
+  )
+}
+`,
+      },
+      {
+        path: "app/page.tsx",
+        language: "tsx",
+        content: `const products = [
+  { name: "Kurung Manuk Bambu", area: "Majalengka Kota", price: "Rp 85.000", status: "Ready" },
+  { name: "Kurung Manuk Besi", area: "Kadipaten", price: "Rp 140.000", status: "Favorit" },
+  { name: "Pakan Harian", area: "Jatiwangi", price: "Rp 18.000", status: "Stok aman" },
+  { name: "Aksesoris Tangkringan", area: "Leuwimunding", price: "Rp 25.000", status: "Baru" },
+]
+
+const stats = [
+  { label: "Produk aktif", value: "48" },
+  { label: "Penjual lokal", value: "12" },
+  { label: "Area layanan", value: "Majalengka" },
+]
+
+export default function Page() {
+  return (
+    <main className="min-h-screen bg-slate-50 text-slate-950">
+      <section className="border-b bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
+          <div>
+            <p className="text-sm font-medium text-rose-600">JBB Majalengka</p>
+            <h1 className="text-2xl font-bold">Jual beli kurung manuk lokal</h1>
+          </div>
+          <a className="rounded-md bg-rose-600 px-4 py-2 text-sm font-semibold text-white" href="#produk">
+            Lihat produk
+          </a>
+        </div>
+      </section>
+
+      <section className="mx-auto grid max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-lg border bg-white p-6 shadow-sm">
+          <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">Preview cepat</p>
+          <h2 className="mt-3 text-4xl font-bold leading-tight">Pasar sederhana untuk kurung manuk dan kebutuhan hobi.</h2>
+          <p className="mt-4 max-w-2xl text-slate-600">
+            Semua data masih dummy agar preview tampil cepat. Tahap berikutnya bisa menambahkan database, login penjual,
+            dan checkout.
+          </p>
+          <div className="mt-6 grid gap-3 sm:grid-cols-3">
+            {stats.map((item) => (
+              <div key={item.label} className="rounded-md border bg-slate-50 p-4">
+                <p className="text-2xl font-bold">{item.value}</p>
+                <p className="text-sm text-slate-500">{item.label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-lg border bg-white p-6 shadow-sm">
+          <h3 className="font-semibold">Kategori populer</h3>
+          <div className="mt-4 grid gap-3">
+            {["Kurung bambu", "Kurung besi", "Pakan", "Aksesoris"].map((item) => (
+              <div key={item} className="flex items-center justify-between rounded-md bg-slate-100 px-4 py-3">
+                <span>{item}</span>
+                <span className="text-sm text-slate-500">Dummy</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section id="produk" className="mx-auto max-w-6xl px-6 pb-10">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {products.map((product) => (
+            <article key={product.name} className="rounded-lg border bg-white p-4 shadow-sm">
+              <div className="mb-4 flex h-28 items-center justify-center rounded-md bg-rose-50 text-sm font-semibold text-rose-700">
+                Foto produk
+              </div>
+              <h3 className="font-semibold">{product.name}</h3>
+              <p className="mt-1 text-sm text-slate-500">{product.area}</p>
+              <div className="mt-4 flex items-center justify-between">
+                <span className="font-bold">{product.price}</span>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">{product.status}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  )
+}
+`,
+      },
+      {
+        path: "app/globals.css",
+        language: "css",
+        content: `@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f8fafc;
+  font-family: Arial, Helvetica, sans-serif;
+}
+`,
+      },
+    ]
+  }
+
+  return [
+    {
+      path: "app/layout.tsx",
+      language: "tsx",
+      content: `import type { Metadata } from "next"
+import "./globals.css"
+
+export const metadata: Metadata = {
+  title: "Swift Preview",
+  description: "Preview awal berbasis data dummy",
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="id">
+      <body>{children}</body>
+    </html>
+  )
+}
+`,
+    },
+    {
+      path: "app/page.tsx",
+      language: "tsx",
+      content: `const cards = [
+  { title: "${isNews ? "Artikel utama" : "Konten utama"}", body: "Data dummy untuk memastikan preview tampil cepat." },
+  { title: "Kategori", body: "Susun bagian penting tanpa koneksi database dulu." },
+  { title: "Tahap lanjut", body: "Integrasi backend dilakukan setelah tampilan dasar berhasil." },
+]
+
+export default function Page() {
+  return (
+    <main className="min-h-screen bg-slate-50 px-6 py-10 text-slate-950">
+      <section className="mx-auto max-w-5xl">
+        <p className="text-sm font-semibold text-rose-600">Swift preview</p>
+        <h1 className="mt-3 text-4xl font-bold">Preview awal siap ditampilkan</h1>
+        <p className="mt-4 max-w-2xl text-slate-600">
+          File ini dibuat sebagai fallback aman ketika output AI tidak lolos parser. Semua data masih dummy.
+        </p>
+        <div className="mt-8 grid gap-4 md:grid-cols-3">
+          {cards.map((card) => (
+            <article key={card.title} className="rounded-lg border bg-white p-5 shadow-sm">
+              <h2 className="font-semibold">{card.title}</h2>
+              <p className="mt-2 text-sm text-slate-600">{card.body}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  )
+}
+`,
+    },
+    {
+      path: "app/globals.css",
+      language: "css",
+      content: `@import "tailwindcss";
+
+body {
+  margin: 0;
+  background: #f8fafc;
+  font-family: Arial, Helvetica, sans-serif;
+}
+`,
+    },
+  ]
 }
 
 function mapLifecycleFailureToQualityStage(step?: ValidationLifecycleStep | null): GenerationQualityStage {
@@ -1406,6 +1628,56 @@ export async function executeGenerationJob(
           rejectedFiles: repaired.rejectedFiles,
           deletedPaths: repaired.deletedPaths,
           installedDependencies: repaired.installedDependencies,
+        },
+      })
+
+      validation = await runValidationLifecycle({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        prompt: input.prompt,
+        files: workingFiles,
+        plan,
+        blueprint,
+        signal: input.signal,
+        emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
+      })
+      assertNotAborted(input.signal)
+    }
+
+    if (!validation.ok && shouldApplySafePreviewFallback(plan, validation)) {
+      await GenerationJobService.assertNotCancelled(input.jobId)
+      assertNotAborted(input.signal)
+      const previousFallbackFiles = validation.files
+      const fallback = normalizeGeneratedDependencies(
+        buildSafePreviewFallbackFiles({
+          prompt: input.prompt,
+          appType: plan.appType,
+        })
+      )
+      workingFiles = fallback.files
+
+      await transition(input.jobId, "repairing", "Applying safe preview fallback", 91, {
+        reason: validation.failure?.message || "Preview compile failed after AI repair",
+        fallbackFileCount: workingFiles.length,
+        addedPackages: fallback.addedPackages,
+        normalizedPackages: fallback.normalizedPackages,
+      })
+      await emitGeneratedFilesUpdate({
+        jobId: input.jobId,
+        stage: "repairing",
+        message: "Safe preview fallback ready in Explorer",
+        allFiles: workingFiles,
+        previousFiles: previousFallbackFiles,
+        changedFiles: workingFiles,
+        deletedPaths: previousFallbackFiles
+          .map((file) => normalizePath(file.path))
+          .filter((path) => !workingFiles.some((file) => normalizePath(file.path) === path)),
+        source: "repair",
+        data: {
+          fallbackApplied: true,
+          failure: validation.failure || null,
+          addedPackages: fallback.addedPackages,
+          normalizedPackages: fallback.normalizedPackages,
         },
       })
 

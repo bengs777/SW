@@ -129,6 +129,8 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "MAX 3 FILE PER GENERATE remains mandatory even for marketplace, auth, payment, chat, dashboard, CMS, CRM, and full-stack prompts.",
   "Use only existing stack: Next.js App Router, React, TypeScript, Tailwind CSS, Prisma, Route Handlers, lucide-react, zod, next-auth, shadcn/ui.",
   "Always keep output compile-safe: valid imports, aliases, dependencies, jsx-runtime compatibility, TypeScript, App Router compatibility, and Prisma consistency.",
+  "Generated TSX must parse cleanly with @babel/parser using jsx + typescript plugins. Do not output raw emoji or decorative non-ASCII symbols in code; use text labels or lucide-react icons only when already imported.",
+  "Never split a quoted string across lines. For long copy, use JSX text nodes, arrays of short strings, or template literals that are properly closed.",
   "Use diff-only execution: no full repo injection, no unrelated files, focused logs only, no broad context dumps.",
   "For SaaS/web app requests include folder structure only when requested, database schema/API routes only when needed, responsive UI, loading/error states, clean state handling, and scalable architecture.",
   "Prioritize correctness, runtime stability, token efficiency, speed, and visual polish.",
