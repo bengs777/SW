@@ -43,6 +43,9 @@ function staticChecks() {
   const packageJson = JSON.parse(read("package.json"))
   const gitignore = exists(".gitignore") ? read(".gitignore") : ""
   const generateJobsRoute = exists("app/api/generate/jobs/route.ts") ? read("app/api/generate/jobs/route.ts") : ""
+  const providerRouter = exists("lib/ai/provider-router.ts") ? read("lib/ai/provider-router.ts") : ""
+  const swiftTiers = exists("lib/ai/swift-tiers.ts") ? read("lib/ai/swift-tiers.ts") : ""
+  const generationPipeline = exists("lib/ai/generation-pipeline.ts") ? read("lib/ai/generation-pipeline.ts") : ""
   const generationOrchestrator = exists("lib/services/generation-orchestrator.service.ts")
     ? read("lib/services/generation-orchestrator.service.ts")
     : ""
@@ -76,6 +79,20 @@ function staticChecks() {
     check("predeploy.typecheck-script", packageJson.scripts && packageJson.scripts.typecheck, "package.json exposes npm run typecheck"),
     check("predeploy.build-script", packageJson.scripts && packageJson.scripts.build, "package.json exposes npm run build"),
     check("ai.zod-input-validation", /z\.object\(/.test(generateJobsRoute), "Canonical queued AI endpoint validates request input with Zod"),
+    check(
+      "ai.single-orchestrator-model",
+      /SWIFT_CANONICAL_MODEL_ID\s*=\s*"deepseek\/deepseek-v4-pro"/.test(swiftTiers) &&
+        !/deepseek-v4-flash|deepseek-v3\.2|OPENROUTER_DEEPSEEK_FLASH|OPENROUTER_DEEPSEEK_V32/.test(
+          [swiftTiers, providerRouter, generationPipeline].join("\n")
+        ),
+      "Swift AI runtime is locked to deepseek/deepseek-v4-pro only"
+    ),
+    check(
+      "ai.single-public-model-option",
+      (swiftTiers.match(/public:\s*true/g) || []).length === 1 &&
+        !/SWIFT_FAST_MODEL_KEY/.test(generationPipeline),
+      "Public model selection exposes one Swift AI orchestrator and routing never selects a fast lane"
+    ),
     check("ai.output-file-extraction", /parseGeneratedArtifact/.test(generationOrchestrator) && /generatedArtifactSchema/.test(generatedArtifact), "AI provider output is parsed into a strict GeneratedArtifact schema"),
     check("ai.controlled-app-blueprints", /ControlledAppType/.test(appBlueprints) && /saas_dashboard/.test(appBlueprints) && /simple_marketplace/.test(appBlueprints), "Generation is constrained to controlled app categories"),
     check("ai.intent-taskgraph-generation", /analyzePromptIntent/.test(generationOrchestrator) && /executeGeneratedTaskGraph/.test(generationOrchestrator), "Generation uses intent analysis and TaskGraph execution instead of starter-only output"),

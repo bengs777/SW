@@ -1,6 +1,23 @@
 import { prisma } from "@/lib/db/client"
 import { getRuntimeModelOptions } from "@/lib/ai/runtime-models"
-import { LEGACY_SWIFT_2_MODEL_KEY, SWIFT_BUILDER_MODEL_KEY } from "@/lib/ai/model-tiers"
+import {
+  LEGACY_SWIFT_2_MODEL_KEY,
+  SWIFT_BUILDER_MODEL_KEY,
+  SWIFT_FAST_MODEL_KEY,
+  SWIFT_PREMIUM_REPAIR_MODEL_KEY,
+} from "@/lib/ai/model-tiers"
+
+function normalizeSwiftModelKey(key: string) {
+  if (
+    key === LEGACY_SWIFT_2_MODEL_KEY ||
+    key === SWIFT_FAST_MODEL_KEY ||
+    key === SWIFT_PREMIUM_REPAIR_MODEL_KEY
+  ) {
+    return SWIFT_BUILDER_MODEL_KEY
+  }
+
+  return key
+}
 
 export class ModelConfigService {
   static async ensureDefaults() {
@@ -60,7 +77,7 @@ export class ModelConfigService {
 
   static async getActiveModelByKey(key: string) {
     await this.ensureDefaults()
-    const normalizedKey = key === LEGACY_SWIFT_2_MODEL_KEY ? SWIFT_BUILDER_MODEL_KEY : key
+    const normalizedKey = normalizeSwiftModelKey(key)
 
     return prisma.modelConfig.findFirst({
       where: {

@@ -2,7 +2,6 @@ import type { GeneratedFile } from "@/lib/types"
 import { buildImportGraph } from "@/lib/ai/import-graph"
 import {
   SWIFT_BUILDER_MODEL_KEY,
-  SWIFT_FAST_MODEL_KEY,
   SWIFT_PROVIDER,
   type SwiftTierKey,
 } from "@/lib/ai/swift-tiers"
@@ -264,45 +263,23 @@ export function routeModelForRequest(input: {
     attachmentCount: input.attachmentCount,
   })
   const repairAttempt = input.repairAttempt ?? 0
+  const reasonPrefix =
+    purpose === "repair"
+      ? repairAttempt <= 0
+        ? "single_orchestrator_repair"
+        : "single_orchestrator_repair_retry"
+      : purpose === "inspect"
+        ? "single_orchestrator_inspect"
+        : "single_orchestrator_generate"
 
-  if (purpose === "repair") {
-    if (repairAttempt <= 0) {
-      return buildDecision("fast", SWIFT_FAST_MODEL_KEY, classification, complexity, "cheap_repair_first", false)
-    }
-
-    if (repairAttempt === 1) {
-      return buildDecision("builder", SWIFT_BUILDER_MODEL_KEY, classification, complexity, "deepseek_repair_second", false)
-    }
-
-    return buildDecision("builder", SWIFT_BUILDER_MODEL_KEY, classification, complexity, "repair_limit_reached", false)
-  }
-
-  if (purpose === "inspect") {
-    const needsBuilder =
-      classification === "runtime_debug" ||
-      classification === "architecture" ||
-      classification === "refactor" ||
-      complexity.band === "high"
-    return buildDecision(
-      needsBuilder ? "builder" : "fast",
-      needsBuilder ? SWIFT_BUILDER_MODEL_KEY : SWIFT_FAST_MODEL_KEY,
-      classification,
-      complexity,
-      needsBuilder ? "inspect_requires_dependency_awareness" : "cheap_inspection",
-      false
-    )
-  }
-
-  const fastAllowed =
-    (classification === "simple_ui" || classification === "component_edit") &&
-    complexity.band === "low" &&
-    !input.previewError
-
-  if (fastAllowed) {
-    return buildDecision("fast", SWIFT_FAST_MODEL_KEY, classification, complexity, "simple_ui_fast_path", false)
-  }
-
-  return buildDecision("builder", SWIFT_BUILDER_MODEL_KEY, classification, complexity, "fullstack_builder_core", false)
+  return buildDecision(
+    "builder",
+    SWIFT_BUILDER_MODEL_KEY,
+    classification,
+    complexity,
+    `${reasonPrefix}:${classification}:${complexity.band}`,
+    false
+  )
 }
 
 export function trimContextForGeneration(input: {

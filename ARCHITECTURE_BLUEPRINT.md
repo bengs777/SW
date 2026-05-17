@@ -47,7 +47,7 @@ This document details the architectural transformation of Swift AI from a monoli
 │                                                                 │
 │ ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
 │ │ GenerationWorker│  │  RepairWorker   │  │  SandboxWorker  │ │
-│ │ - DeepSeek V3.2 │  │ - Claude Sonnet │  │ - Runtime mgr   │ │
+│ │ - DeepSeek V4 Pro│  │ - DeepSeek V4 Pro│  │ - Runtime mgr   │ │
 │ │ - File streaming│  │ - Targeted fix  │  │ - Isolation     │ │
 │ └─────────────────┘  └─────────────────┘  └─────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘

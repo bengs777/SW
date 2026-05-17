@@ -1,6 +1,6 @@
 import { DEFAULT_MODEL_KEY, SWIFT_BUILD_MODEL_KEY } from "@/lib/ai/models"
 import {
-  DEEPSEEK_V32_MODEL_ID,
+  DEEPSEEK_V4_PRO_MODEL_ID,
   SWIFT_FAST_MODEL_KEY,
   SWIFT_PUBLIC_PRICE_IDR,
   SWIFT_PREMIUM_REPAIR_MODEL_KEY,
@@ -34,7 +34,7 @@ const FIXED_MODEL_PRICES: Record<string, number> = {
 }
 
 const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
-  [DEEPSEEK_V32_MODEL_ID]: { inputUsdPer1m: 0.252, outputUsdPer1m: 0.378, minimumCharge: SWIFT_PUBLIC_PRICE_IDR },
+  [DEEPSEEK_V4_PRO_MODEL_ID]: { inputUsdPer1m: 0.435, outputUsdPer1m: 0.87, minimumCharge: SWIFT_PUBLIC_PRICE_IDR },
 }
 
 export function estimateRequestTokens(prompt: string) {
@@ -113,7 +113,7 @@ export function calculateModelRequestPrice({
 }
 
 function calculateDeepSeekRawCostIdr(inputTokens: number, outputTokens: number) {
-  const pricing = TOKEN_PRICING_BY_MODEL[DEEPSEEK_V32_MODEL_ID]
+  const pricing = TOKEN_PRICING_BY_MODEL[DEEPSEEK_V4_PRO_MODEL_ID]
   return roundUpToNearest(
     ((inputTokens / 1_000_000) * pricing.inputUsdPer1m +
       (outputTokens / 1_000_000) * pricing.outputUsdPer1m) *

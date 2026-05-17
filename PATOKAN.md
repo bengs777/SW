@@ -71,7 +71,7 @@ Jika WebContainer terlalu lambat di komputer spesifikasi rendah, gunakan teknik 
 ---
 
 ## 🧠 FASE 4: INSTANSINASI SISTEM PROMPT & INTEGRASI OPENROUTER
-*Target: Menjinakkan model LLM (DeepSeek R1/V3) agar patuh pada kategori industri pengguna.*
+*Target: Menjinakkan model LLM tunggal (DeepSeek V4 Pro) agar patuh pada kategori industri pengguna.*
 
 ### 4.1 Pembuatan Berkas Benih Dinamis (Dynamic Seeding Strategy)
 Sistem dilarang keras menggunakan satu templat awal universal. Backend wajib melakukan pengkondisian klasifikasi kata kunci (*keyword matching*):
@@ -119,8 +119,8 @@ Aturan baku orchestrator:
 *   **Fase perbaikan**: ubah file terkecil yang menyebabkan error preview, jangan regenerasi seluruh proyek.
 *   **Target UX**: hasil pertama harus bisa muncul di preview dalam 45 detik, lalu fitur backend dipecah ke prompt lanjutan.
 
-### 4.4 Lock Khusus DeepSeek Flash V4
-DeepSeek Flash V4 wajib dipakai sebagai mesin murah-cepat untuk siklus preview. Karena model cepat mudah melenceng jika prompt longgar, sistem harus mengulang batas file, dummy data, dan format JSON pada system prompt.
+### 4.4 Lock Khusus DeepSeek V4 Pro
+DeepSeek V4 Pro wajib menjadi satu-satunya orchestrator Swift. Semua jalur generate, inspect, repair, health check, billing estimate, dan alias model lama harus berakhir ke `deepseek/deepseek-v4-pro`.
 
 ```text
 KAMU ADALAH ORCHESTRATOR SWIFT BUILDER. TUGASMU: PECAH PROMPT USER JADI MAX 3 FILE UNTUK PREVIEW CEPAT.
@@ -132,17 +132,17 @@ ATURAN KERAS:
 4. PATH HARUS BENAR. Root Next.js = /app. Jangan bikin /src/app.
 5. OUTPUT HANYA JSON. Jangan ada teks penjelasan, markdown, atau komentar di luar JSON.
 
-ATURAN KHUSUS FLASH V4:
+ATURAN KHUSUS DEEPSEEK V4 PRO:
 - Ulangi aturan MAX 3 FILE di awal setiap reasoning.
 - Kalau prompt user terlalu besar, PECAH OTOMATIS jadi tahap 1: UI + data dummy saja.
-- Jangan pakai reasoning_effort tinggi. Flash V4 stabil di default.
+- Jangan pakai reasoning_effort tinggi. V4 Pro dipakai dengan output ringkas, deterministik, dan JSON-only.
 ```
 
 Konfigurasi API wajib:
-*   **Model**: `deepseek/deepseek-v4-flash` via `OPENROUTER_DEEPSEEK_FLASH_V4_MODEL`.
+*   **Model**: `deepseek/deepseek-v4-pro` via `OPENROUTER_DEEPSEEK_V4_PRO_MODEL`.
 *   **Temperature**: `0.2` untuk output lebih deterministik.
 *   **Max tokens**: `4096` per request agar tidak mengulang dan timeout.
-*   **Provider timeout**: slice cepat `45_000ms`, slice fullstack/builder `90_000ms`, total job `120_000ms`.
+*   **Provider timeout**: semua slice produksi `90_000ms`, total job mengikuti `AI_QUEUE_TIMEOUT_MS`/`GENERATION_JOB_TIMEOUT_MS`.
 *   **Vercel Pro route**: endpoint job generation wajib `export const maxDuration = 300`; Hobby tetap wajib selesai di bawah batas platform.
 *   **Reasoning**: `include_reasoning = false`; jangan kirim `reasoning_effort: high`.
 *   **Cache**: aktifkan header OpenRouter response cache untuk request identik. Gunakan `cache_control` hanya untuk provider yang mendukung prompt caching eksplisit.

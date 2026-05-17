@@ -6,15 +6,14 @@ export const SWIFT_2_MODEL_KEY = SWIFT_BUILDER_MODEL_KEY
 export const DEFAULT_SWIFT_TIER_KEY = SWIFT_BUILDER_MODEL_KEY
 export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
-export const DEEPSEEK_FLASH_V4_MODEL_ID =
-  process.env.OPENROUTER_DEEPSEEK_FLASH_V4_MODEL ||
-  process.env.OPENROUTER_DEEPSEEK_V4_FLASH_MODEL ||
-  process.env.OPENROUTER_DEEPSEEK_V32_MODEL ||
-  process.env.OPENROUTER_DEEPSEEK_V32_PRO_MODEL ||
-  "deepseek/deepseek-v4-flash"
-export const DEEPSEEK_V32_MODEL_ID =
-  DEEPSEEK_FLASH_V4_MODEL_ID
-export const DEEPSEEK_V32_PRO_MODEL_ID = DEEPSEEK_V32_MODEL_ID
+export const SWIFT_CANONICAL_MODEL_ID = "deepseek/deepseek-v4-pro"
+const configuredCanonicalModel = process.env.OPENROUTER_DEEPSEEK_V4_PRO_MODEL?.trim()
+export const DEEPSEEK_V4_PRO_MODEL_ID =
+  configuredCanonicalModel === SWIFT_CANONICAL_MODEL_ID
+    ? configuredCanonicalModel
+    : SWIFT_CANONICAL_MODEL_ID
+export const DEEPSEEK_V32_MODEL_ID = DEEPSEEK_V4_PRO_MODEL_ID
+export const DEEPSEEK_V32_PRO_MODEL_ID = DEEPSEEK_V4_PRO_MODEL_ID
 
 export type SwiftTierKey =
   | typeof SWIFT_FAST_MODEL_KEY
@@ -74,10 +73,10 @@ export const SWIFT_PUBLIC_PRICE_IDR = 3000
 export function getSwiftTierConfigs(): SwiftTierConfig[] {
   const builderTier: SwiftTierConfig = {
     key: SWIFT_BUILDER_MODEL_KEY,
-    label: "Swift Builder",
+    label: "Swift AI Orchestrator",
     shortLabel: "Builder",
-    description: "Core engine untuk full-stack SaaS, dashboard, CRUD, Prisma, API route, dan arsitektur project.",
-    note: "Rute utama Swift AI untuk generasi full-stack yang butuh struktur stabil.",
+    description: "Satu-satunya engine produksi Swift untuk full-stack, dashboard, CRUD, Prisma, API route, repair, dan arsitektur project.",
+    note: "Semua request Swift dirutekan ke DeepSeek V4 Pro melalui OpenRouter dengan routing internal yang efisien.",
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     timeoutMs: 90_000,
@@ -87,65 +86,57 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     generationLayer: "builder",
     queue: { concurrency: 3, maxQueueDepth: 36 },
     targets: [
-      { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 90_000, maxOutputTokens: 4096 },
+      { modelId: DEEPSEEK_V4_PRO_MODEL_ID, role: "primary", timeoutMs: 90_000, maxOutputTokens: 4096 },
     ],
   }
 
   return [
     {
-      key: SWIFT_FAST_MODEL_KEY,
-      label: "Swift Fast",
-      shortLabel: "Fast",
-      description: "Murah dan cepat untuk UI kecil, landing page, copywriting, komponen, formatting, dan edit ringan.",
-      note: "Tidak dipakai untuk repair otonom, dependency debugging, atau refactor besar.",
-      priceIdr: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-      price: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-      timeoutMs: 45_000,
-      maxOutputTokens: 4096,
+      ...builderTier,
       rank: 1,
-      public: true,
-      generationLayer: "fast",
-      queue: { concurrency: 6, maxQueueDepth: 64 },
-      targets: [
-        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 45_000, maxOutputTokens: 4096 },
-      ],
     },
-    builderTier,
     {
       ...builderTier,
-      key: LEGACY_SWIFT_2_MODEL_KEY,
-      label: "Swift AI",
+      key: SWIFT_FAST_MODEL_KEY,
+      label: "Swift AI Compatibility",
       shortLabel: "Swift",
-      description: "Legacy alias yang diarahkan ke Swift Builder agar request lama tetap berjalan.",
-      note: "Alias kompatibilitas. Request baru otomatis dirutekan ke Swift Fast atau Swift Builder sesuai kompleksitas.",
+      description: "Alias internal lama yang tetap diarahkan ke DeepSeek V4 Pro.",
+      note: "Compatibility alias. Tidak ditampilkan ke user.",
       priceIdr: builderTier.priceIdr,
       price: builderTier.price,
       rank: 99,
       public: false,
     },
     {
-      key: SWIFT_PREMIUM_REPAIR_MODEL_KEY,
-      label: "Swift Premium Repair",
-      shortLabel: "Premium Repair",
-      description: "Repair runtime premium untuk crash berulang, dependency graph rusak, dan build error persisten.",
-      note: "Hanya untuk eskalasi repair. Tidak pernah menjadi default generasi.",
-      priceIdr: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-      price: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-      timeoutMs: 90_000,
-      maxOutputTokens: 4096,
+      ...builderTier,
+      key: LEGACY_SWIFT_2_MODEL_KEY,
+      label: "Swift AI Compatibility",
+      shortLabel: "Swift",
+      description: "Legacy alias yang diarahkan ke DeepSeek V4 Pro agar request lama tetap berjalan.",
+      note: "Compatibility alias. Tidak ditampilkan ke user.",
       rank: 100,
       public: false,
-      generationLayer: "premium-repair",
-      queue: { concurrency: 1, maxQueueDepth: 12 },
-      targets: [
-        { modelId: DEEPSEEK_V32_MODEL_ID, role: "primary", timeoutMs: 90_000, maxOutputTokens: 4096 },
-      ],
+    },
+    {
+      ...builderTier,
+      key: SWIFT_PREMIUM_REPAIR_MODEL_KEY,
+      label: "Swift AI Compatibility",
+      shortLabel: "Swift",
+      description: "Alias repair lama yang tetap diarahkan ke DeepSeek V4 Pro.",
+      note: "Compatibility alias. Tidak ditampilkan ke user.",
+      rank: 101,
+      public: false,
     },
   ]
 }
 
 export function getSwiftTierConfig(key: string | null | undefined) {
-  const normalizedKey = key === LEGACY_SWIFT_2_MODEL_KEY ? SWIFT_BUILDER_MODEL_KEY : key
+  const normalizedKey =
+    key === LEGACY_SWIFT_2_MODEL_KEY ||
+    key === SWIFT_FAST_MODEL_KEY ||
+    key === SWIFT_PREMIUM_REPAIR_MODEL_KEY
+      ? SWIFT_BUILDER_MODEL_KEY
+      : key
   return getSwiftTierConfigs().find((tier) => tier.key === normalizedKey) || null
 }
 

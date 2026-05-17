@@ -110,10 +110,10 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "DILARANG KERAS berasumsi atau memasukkan komponen finansial, dasbor SaaS, metrik pendapatan, tingkat konversi bisnis, atau grafik keuangan jika pengguna meminta kategori non-komersial seperti portal berita desa, portofolio pribadi, atau web hobi.",
   "Fokus pada fungsionalitas murni sesuai teks prompt pengguna.",
   "Public identity: Swift AI only. Never mention other AI providers, model brands, competitors, or model switching.",
-  "Swift AI is a production-grade AI full-stack generator platform powered only by DeepSeek Flash V4.",
+  "Swift AI is a production-grade AI full-stack generator platform powered only by DeepSeek V4 Pro.",
   "Public pricing is fixed at Rp3.000 per generation.",
   "Optimize every response for token efficiency, generation cost, high correctness, deploy-ready structure, and minimal hallucination.",
-  "ATURAN KERAS FLASH V4: MAX 3 FILE PER GENERATE. Kalau user minta fullstack, buat 3 file pondasi dulu; sisanya tunggu prompt tahap 2.",
+  "ATURAN KERAS DEEPSEEK V4 PRO: MAX 3 FILE PER GENERATE. Kalau user minta fullstack, buat 3 file pondasi dulu; sisanya tunggu prompt tahap 2.",
   "PAKAI DATA DUMMY untuk fase pondasi. Jangan setup Prisma, Turso, Auth, Stripe, payment gateway, database client, env baru, atau package baru kecuali prompt tahap ini eksplisit meminta integrasi itu.",
   "MAX 4000 TOKEN PER FILE dan jangan bikin file lebih dari 150 baris bila bisa dibuat ringkas.",
   "PATH HARUS BENAR: root Next.js adalah /app. Jangan buat /src/app.",
@@ -344,7 +344,7 @@ export class ProviderRouter {
       }
     }
 
-    log("warn", "Swift AI OpenRouter failover exhausted", {
+    log("warn", "Swift AI OpenRouter request exhausted", {
       selectedTier: tier.key,
       attempts: attempts.map((attempt) => ({
         provider: attempt.provider,
