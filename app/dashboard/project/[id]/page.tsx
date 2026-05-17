@@ -171,6 +171,7 @@ type StreamedGeneratedFilesPayload = {
   fileDeltas?: VirtualFileDelta[]
   fileCount?: number
   streamedFileCount?: number
+  deletedPaths?: string[]
   paths?: string[]
 }
 
@@ -178,7 +179,8 @@ const mergeGeneratedFileSnapshots = (
   currentFiles: GeneratedFile[],
   streamedFiles: GeneratedFile[],
   snapshotMode: StreamedFileSnapshotMode = "patch",
-  fileDeltas: VirtualFileDelta[] = []
+  fileDeltas: VirtualFileDelta[] = [],
+  deletedPaths: string[] = []
 ) => {
   const normalizedStreamedFiles = normalizeWorkspaceFiles(streamedFiles)
 
@@ -190,6 +192,13 @@ const mergeGeneratedFileSnapshots = (
 
   for (const delta of fileDeltas) {
     nextVfs = applyVirtualFileDelta(nextVfs, delta)
+  }
+
+  for (const deletedPath of deletedPaths) {
+    const normalizedDeletedPath = normalizeWorkspacePath(deletedPath)
+    if (normalizedDeletedPath) {
+      delete nextVfs[normalizedDeletedPath]
+    }
   }
 
   if (normalizedStreamedFiles.length > 0) {
@@ -505,8 +514,11 @@ export default function EditorPage() {
     const data = payload?.data && typeof payload.data === "object" ? payload.data : payload
     const streamedFiles = Array.isArray(data?.files) ? data.files : []
     const fileDeltas = Array.isArray(data?.fileDeltas) ? data.fileDeltas : []
+    const deletedPaths = Array.isArray(data?.deletedPaths)
+      ? data.deletedPaths.filter((path): path is string => typeof path === "string")
+      : []
 
-    if (streamedFiles.length === 0 && fileDeltas.length === 0) {
+    if (streamedFiles.length === 0 && fileDeltas.length === 0 && deletedPaths.length === 0) {
       return
     }
 
@@ -517,22 +529,26 @@ export default function EditorPage() {
       .map((delta) => typeof delta?.path === "string" ? normalizeWorkspacePath(delta.path) : "")
       .filter(Boolean)
     const streamedPaths = normalizedStreamedFiles.map((file) => normalizeWorkspacePath(file.path))
+    const normalizedDeletedPaths = deletedPaths.map(normalizeWorkspacePath).filter(Boolean)
     const firstPath = streamedPaths[0] || deltaPaths[0] || null
 
     setGeneratedFiles((currentFiles) => {
-      const nextFiles = mergeGeneratedFileSnapshots(currentFiles, normalizedStreamedFiles, snapshotMode, fileDeltas)
+      const nextFiles = mergeGeneratedFileSnapshots(currentFiles, normalizedStreamedFiles, snapshotMode, fileDeltas, normalizedDeletedPaths)
       if (firstPath) {
         const nextIndex = nextFiles.findIndex((file) => normalizeWorkspacePath(file.path) === normalizeWorkspacePath(firstPath))
         if (nextIndex >= 0) {
           setActiveFileIndex(nextIndex)
         }
       }
+      if (normalizedDeletedPaths.some((deletedPath) => normalizeWorkspacePath(currentFiles[activeFileIndex]?.path || "") === deletedPath)) {
+        setActiveFileIndex(0)
+      }
       return nextFiles
     })
     setPreviewFiles(null)
     setLatestPreviewError(null)
     setIsDirty(false)
-    setStreamLockedPaths(Array.from(new Set([...streamedPaths, ...deltaPaths])).sort())
+    setStreamLockedPaths(Array.from(new Set([...streamedPaths, ...deltaPaths, ...normalizedDeletedPaths])).sort())
 
     if (!streamedGenerationFilesSeenRef.current) {
       streamedGenerationFilesSeenRef.current = true
@@ -545,9 +561,10 @@ export default function EditorPage() {
       projectId,
       snapshotMode,
       streamedFileCount: normalizedStreamedFiles.length,
+      deletedFileCount: normalizedDeletedPaths.length,
       expectedFileCount: data?.fileCount ?? null,
     }))
-  }, [projectId])
+  }, [activeFileIndex, projectId])
 
   const applyJobProgress = useCallback((job: {
     id: string

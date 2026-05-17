@@ -12,7 +12,6 @@ import {
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
-import { mergeGeneratedFiles } from "@/lib/ai/provider-output"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
@@ -22,7 +21,6 @@ import { GenerationJobCancelledError, GenerationJobService, type GenerationJobSt
 import { GenerationQualityService, type GenerationQualityStage } from "@/lib/services/generation-quality.service"
 import {
   buildBlueprintInstructionBlock,
-  buildBlueprintSeedFiles,
   buildDynamicSeedDirective,
   classifyControlledAppType,
   getControlledAppBlueprint,
@@ -35,9 +33,10 @@ import {
   buildPartialEditInstructionBlock,
   buildPartialEditPlan,
   filterFilesForPartialEdit,
-  isFullReplacementPrompt,
   type PartialEditPlan,
 } from "@/lib/ai/edit-planner"
+import { analyzePromptIntent, buildIntentInstructionBlock, type IntentAnalysis } from "@/lib/ai/intent-analyzer"
+import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
 import { timeoutConfig } from "@/lib/timeouts"
 
@@ -50,6 +49,7 @@ type GenerationPlannerFile = {
 type GenerationPlan = {
   objective: string
   appType: ControlledAppType
+  intent: IntentAnalysis
   editPlan: PartialEditPlan
   blueprint: {
     label: string
@@ -247,13 +247,14 @@ function buildGenerationPlan(input: {
     collaborationMode: input.collaborationMode || undefined,
     previewError: previewContext?.previewError?.message || null,
   })
+  const intent = analyzePromptIntent(input.prompt)
   const editPlan = buildPartialEditPlan({
     prompt: input.prompt,
     existingFiles: input.existingFiles,
     collaborationMode: input.collaborationMode,
     previewContext,
   })
-  const appType = classifyControlledAppType(input.prompt)
+  const appType = intent.appType || classifyControlledAppType(input.prompt)
   const blueprint = getControlledAppBlueprint(appType)
   const trimmed = trimContextForGeneration({
     prompt: input.prompt,
@@ -313,6 +314,7 @@ function buildGenerationPlan(input: {
   return {
     objective: classification,
     appType,
+    intent,
     editPlan,
     blueprint: {
       label: blueprint.label,
@@ -333,17 +335,6 @@ function buildGenerationPlan(input: {
       usedChars: trimmed.totalChars,
     },
   } satisfies GenerationPlan
-}
-
-function shouldSeedBlueprint(existingFiles: GeneratedFile[]) {
-  if (existingFiles.length === 0) return true
-
-  const paths = new Set(existingFiles.map((file) => normalizePath(file.path)))
-  return !paths.has("app/page.tsx") || !paths.has("package.json") || !paths.has("prisma/schema.prisma")
-}
-
-function shouldForceBlueprintReseed(prompt: string) {
-  return isFullReplacementPrompt(prompt)
 }
 
 async function transition(jobId: string, stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) {
@@ -377,6 +368,7 @@ async function emitGeneratedFilesUpdate(input: {
   allFiles: GeneratedFile[]
   previousFiles?: GeneratedFile[]
   changedFiles?: GeneratedFile[]
+  deletedPaths?: string[]
   source: "seed" | "slice" | "repair"
   data?: Record<string, unknown>
 }) {
@@ -410,6 +402,7 @@ async function emitGeneratedFilesUpdate(input: {
       fileDeltas,
       fileCount: input.allFiles.length,
       streamedFileCount: files.length,
+      deletedPaths: input.deletedPaths || [],
       totalBytes: allFilesBytes,
       paths: input.allFiles.map((file) => normalizePath(file.path)).slice(0, 120),
       ...(input.data || {}),
@@ -505,6 +498,8 @@ function buildSlicePrompt(input: {
   return [
     context,
     "",
+    buildIntentInstructionBlock(input.plan.intent),
+    "",
     buildDynamicSeedDirective(input.prompt),
     "",
     buildBlueprintInstructionBlock(input.blueprint),
@@ -513,9 +508,12 @@ function buildSlicePrompt(input: {
     "",
     "EXECUTION_RULES:",
     "- Work only on the requested file slice and directly related imports.",
-    "- Return only changed files.",
+    "- Return ONLY a JSON object with taskGraph; include changed files as taskGraph.operations.",
+    '- taskGraph schema: {"taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]}}',
+    "- For delete operations, omit content. For create/modify operations, content must be the full file content.",
+    "- Prefer task graph operations over raw files.",
     "- Prefer patch-safe, deterministic updates.",
-    "- Preserve stable files from the starter template unless this slice requires a focused update.",
+    "- Preserve stable files unless this slice requires a focused update.",
     "- Keep the app deployable after this slice: no unresolved imports, no forbidden stack drift.",
     `- Current file objective: ${input.target.path}`,
     `- Why this file matters: ${input.target.reason}`,
@@ -1016,8 +1014,11 @@ async function attemptTargetedRepair(input: {
     signal: input.signal,
   })
   const parsed = parseGeneratedArtifact(response.message)
-  const scoped = filterFilesForPartialEdit(parsed.files, input.editPlan)
-  const mergedFiles = mergeGeneratedFiles(currentFiles, scoped.acceptedFiles)
+  const scoped = parsed.taskGraph
+    ? { acceptedFiles: parsed.files, rejectedFiles: [] as GeneratedFile[] }
+    : filterFilesForPartialEdit(parsed.files, input.editPlan)
+  const executed = executeGeneratedTaskGraph(currentFiles, parsed.taskGraph, scoped.acceptedFiles, parsed.dependencies)
+  const mergedFiles = executed.files
   const normalized = normalizeGeneratedDependencies(mergedFiles)
 
   return {
@@ -1026,6 +1027,8 @@ async function attemptTargetedRepair(input: {
     parsedFileCount: parsed.files.length,
     acceptedFileCount: scoped.acceptedFiles.length,
     rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 8),
+    deletedPaths: executed.deletedPaths,
+    installedDependencies: executed.installedDependencies,
     normalizedPackages: normalized.normalizedPackages,
     addedPackages: normalized.addedPackages,
   }
@@ -1160,6 +1163,7 @@ export async function executeGenerationJob(
       data: {
         objective: plan.objective,
         appType: plan.appType,
+        intent: plan.intent,
         blueprint: plan.blueprint,
         editPlan: {
           mode: plan.editPlan.mode,
@@ -1171,39 +1175,7 @@ export async function executeGenerationJob(
       },
     })
 
-    const forceBlueprintReseed = shouldForceBlueprintReseed(input.prompt)
-    const seededFiles = shouldSeedBlueprint(existingFiles) || forceBlueprintReseed
-      ? buildBlueprintSeedFiles({
-          prompt: input.prompt,
-          appType: plan.appType,
-          projectName: plan.blueprint.label,
-        })
-      : []
-    let workingFiles =
-      seededFiles.length > 0 ? mergeGeneratedFiles(seededFiles, forceBlueprintReseed ? [] : existingFiles) : [...existingFiles]
-
-    if (seededFiles.length > 0) {
-      await transition(input.jobId, "scaffolding", "Applying known-good starter architecture", 14, {
-        appType: plan.appType,
-        seededFileCount: seededFiles.length,
-        forceBlueprintReseed,
-      })
-      await emitGeneratedFilesUpdate({
-        jobId: input.jobId,
-        stage: "scaffolding",
-        message: forceBlueprintReseed
-          ? "Project files were fully regenerated and are available in Explorer"
-          : "Starter files are available in Explorer",
-        allFiles: workingFiles,
-        changedFiles: seededFiles,
-        source: "seed",
-        data: {
-          appType: plan.appType,
-          seededFileCount: seededFiles.length,
-          forceBlueprintReseed,
-        },
-      })
-    }
+    let workingFiles = [...existingFiles]
 
     for (let index = 0; index < plan.filePlan.length; index += 1) {
       await GenerationJobService.assertNotCancelled(input.jobId)
@@ -1232,14 +1204,21 @@ export async function executeGenerationJob(
       totalTokens += Math.max(0, response.tokenUsage?.totalTokens || 0)
 
       const parsed = parseGeneratedArtifact(response.message)
-      const scoped = filterFilesForPartialEdit(parsed.files, plan.editPlan)
-
-      workingFiles = mergeGeneratedFiles(workingFiles, scoped.acceptedFiles)
+      const scoped = parsed.taskGraph
+        ? { acceptedFiles: parsed.files, rejectedFiles: [] as GeneratedFile[] }
+        : filterFilesForPartialEdit(parsed.files, plan.editPlan)
+      const executed = executeGeneratedTaskGraph(
+        workingFiles,
+        parsed.taskGraph,
+        scoped.acceptedFiles,
+        parsed.dependencies
+      )
+      workingFiles = executed.files
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
       const streamPaths = new Set([
-        ...scoped.acceptedFiles.map((file) => normalizePath(file.path)),
-        ...(normalized.addedPackages.length > 0 ? ["package.json"] : []),
+        ...executed.changedFiles.map((file) => normalizePath(file.path)),
+        ...(normalized.addedPackages.length > 0 || executed.installedDependencies.length > 0 ? ["package.json"] : []),
       ])
       const streamFiles = workingFiles.filter((file) => streamPaths.has(normalizePath(file.path)))
 
@@ -1254,10 +1233,13 @@ export async function executeGenerationJob(
           acceptedFileCount: scoped.acceptedFiles.length,
           rejectedFileCount: scoped.rejectedFiles.length,
           rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 8),
+          taskOperationCount: parsed.taskGraph?.operations.length || 0,
+          deletedPaths: executed.deletedPaths,
+          installedDependencies: executed.installedDependencies,
           addedPackages: normalized.addedPackages,
         }
       )
-      if (streamFiles.length > 0) {
+      if (streamFiles.length > 0 || executed.deletedPaths.length > 0) {
         await emitGeneratedFilesUpdate({
           jobId: input.jobId,
           stage: "parsing",
@@ -1265,6 +1247,7 @@ export async function executeGenerationJob(
           allFiles: workingFiles,
           previousFiles: previousWorkingFiles,
           changedFiles: streamFiles,
+          deletedPaths: executed.deletedPaths,
           source: "slice",
           data: {
             target: target.path,
@@ -1272,6 +1255,9 @@ export async function executeGenerationJob(
             sliceTotal: plan.filePlan.length,
             acceptedFileCount: scoped.acceptedFiles.length,
             rejectedFileCount: scoped.rejectedFiles.length,
+            taskOperationCount: parsed.taskGraph?.operations.length || 0,
+            deletedPaths: executed.deletedPaths,
+            installedDependencies: executed.installedDependencies,
             addedPackages: normalized.addedPackages,
           },
         })
@@ -1332,6 +1318,8 @@ export async function executeGenerationJob(
           parsedFileCount: repaired.parsedFileCount,
           acceptedFileCount: repaired.acceptedFileCount,
           rejectedFiles: repaired.rejectedFiles,
+          deletedPaths: repaired.deletedPaths,
+          installedDependencies: repaired.installedDependencies,
           addedPackages: repaired.addedPackages,
           normalizedPackages: repaired.normalizedPackages,
         }
@@ -1343,6 +1331,7 @@ export async function executeGenerationJob(
         allFiles: workingFiles,
         previousFiles: previousRepairFiles,
         changedFiles: repaired.files,
+        deletedPaths: repaired.deletedPaths,
         source: "repair",
         data: {
           repairAttempt,
@@ -1350,6 +1339,8 @@ export async function executeGenerationJob(
           parsedFileCount: repaired.parsedFileCount,
           acceptedFileCount: repaired.acceptedFileCount,
           rejectedFiles: repaired.rejectedFiles,
+          deletedPaths: repaired.deletedPaths,
+          installedDependencies: repaired.installedDependencies,
         },
       })
 

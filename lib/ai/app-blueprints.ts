@@ -175,7 +175,7 @@ export function classifyControlledAppType(prompt: string): ControlledAppType {
     return "lightweight_crm"
   }
 
-  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar)\b/.test(text)) {
+  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar|jual|beli|jual beli|shopee|tokopedia|produk)\b/.test(text)) {
     return "simple_marketplace"
   }
 
