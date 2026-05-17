@@ -49,10 +49,24 @@ const INTENT_RULES: Array<{
     requiredCapabilities: ["lead_pipeline", "customer_table", "activity_timeline"],
   },
   {
+    appType: "internal_business_tool",
+    domain: "community_social_tool",
+    keywords: ["komunitas", "community", "social", "sosial", "feed", "post ", " post", "moderation admin"],
+    requiredCapabilities: ["feed", "profile_or_member_context", "moderation_state"],
+    forbiddenAssumptions: ["commerce_checkout", "saas_metrics"],
+  },
+  {
     appType: "crud_admin_panel",
     domain: "crud_admin",
     keywords: ["crud", "admin panel", "cms", "moderasi", "manage records"],
     requiredCapabilities: ["list_view", "create_form", "edit_flow", "status_filter"],
+  },
+  {
+    appType: "saas_dashboard",
+    domain: "saas_dashboard",
+    keywords: ["saas", "dashboard", "workspace", "workspace metrics", "activity feed", "settings"],
+    requiredCapabilities: ["dashboard_shell", "workspace_metrics", "activity_feed", "settings_entry"],
+    forbiddenAssumptions: ["commerce_checkout", "article_portal"],
   },
   {
     appType: "landing_auth",

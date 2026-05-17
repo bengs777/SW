@@ -1,0 +1,1 @@
+Buat web full stack jual beli seperti Shopee dan Tokopedia dengan storefront produk, kategori, cart placeholder, seller/admin placeholder, API products, dan schema Prisma produk.

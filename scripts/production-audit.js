@@ -59,6 +59,10 @@ function staticChecks() {
   const persistenceService = exists("lib/services/project-file-persistence.service.ts")
     ? read("lib/services/project-file-persistence.service.ts")
     : ""
+  const filesystemService = exists("lib/services/project-filesystem.service.ts")
+    ? read("lib/services/project-filesystem.service.ts")
+    : ""
+  const taskGraphExecutor = exists("lib/ai/task-graph-executor.ts") ? read("lib/ai/task-graph-executor.ts") : ""
   const generatedArtifact = exists("lib/ai/generated-artifact.ts") ? read("lib/ai/generated-artifact.ts") : ""
   const sandboxRuntime = exists("lib/sandbox/runtime.ts") ? read("lib/sandbox/runtime.ts") : ""
   const preview = exists("components/editor/sandbox-preview.tsx") ? read("components/editor/sandbox-preview.tsx") : ""
@@ -74,7 +78,7 @@ function staticChecks() {
     check("ai.zod-input-validation", /z\.object\(/.test(generateJobsRoute), "Canonical queued AI endpoint validates request input with Zod"),
     check("ai.output-file-extraction", /parseGeneratedArtifact/.test(generationOrchestrator) && /generatedArtifactSchema/.test(generatedArtifact), "AI provider output is parsed into a strict GeneratedArtifact schema"),
     check("ai.controlled-app-blueprints", /ControlledAppType/.test(appBlueprints) && /saas_dashboard/.test(appBlueprints) && /simple_marketplace/.test(appBlueprints), "Generation is constrained to controlled app categories"),
-    check("ai.template-seeded-generation", /buildBlueprintSeedFiles/.test(generationOrchestrator) && /Applying known-good starter architecture/.test(generationOrchestrator), "Generation seeds from deterministic starter architectures"),
+    check("ai.intent-taskgraph-generation", /analyzePromptIntent/.test(generationOrchestrator) && /executeGeneratedTaskGraph/.test(generationOrchestrator), "Generation uses intent analysis and TaskGraph execution instead of starter-only output"),
     check("ai.partial-regeneration-contract", /buildPartialEditPlan/.test(editPlanner) && /filterFilesForPartialEdit/.test(generationOrchestrator), "Conversational edits are scoped to target files and allowed new files"),
     check("ai.edit-intent-classifier", /pricing_page/.test(editPlanner) && /schema_change/.test(editPlanner) && /upload_integration/.test(editPlanner), "Edit planner classifies common retention-driving edit intents"),
     check("ai.import-graph", /buildImportGraph/.test(importGraph) && /importedBy/.test(importGraph) && /getTransitiveImpactPaths/.test(editPlanner), "Import graph powers reverse dependency lookup and transitive edit impact analysis"),
@@ -85,6 +89,10 @@ function staticChecks() {
     check("ai.atomic-generation-billing", /reserveGenerationJob/.test(generateJobsRoute) && /reserveGenerationJob/.test(billingService), "Generation job creation and billing reservation are atomic"),
     check("ai.request-hash-dedupe", /requestHash/.test(prisma) && /@@unique\(\[userId,\s*projectId,\s*requestHash\]\)/.test(prisma), "Request hash dedupe is enforced at the database level"),
     check("ai.persistence-idempotency", /@@unique\(\[projectId,\s*idempotencyKey\]\)/.test(prisma) && /upsert/.test(persistenceService), "Generation persistence is replay-safe"),
+    check("ai.canonical-filesystem", /class ProjectFilesystemService/.test(filesystemService) && /replaceFiles/.test(persistenceService) && /ProjectFilesystemService\.readFiles/.test(generationWorker), "Project files flow through the canonical filesystem service"),
+    check("ai.manifest-verification", /fileHashes/.test(filesystemService) && /PersistenceIntegrityError/.test(filesystemService) && /verify\(input\.projectId/.test(filesystemService), "Persisted project files are verified with content-hash manifests"),
+    check("ai.taskgraph-hardening", /collapseOperations/.test(taskGraphExecutor) && /Dependency is not allowed by Swift policy/.test(taskGraphExecutor) && /MAX_OPERATIONS\s*=\s*100/.test(taskGraphExecutor), "TaskGraph execution has merge semantics, dependency policy, and resource limits"),
+    check("ai.stale-generation-guard", /pg_advisory_xact_lock/.test(persistenceService) && /StaleGenerationRejected/.test(persistenceService), "Older project generations are rejected during persistence"),
     check("sandbox.path-guard", /assertSafeFilePath/.test(sandboxRuntime) && /startsWith\(`\$\{root\}\$\{path\.sep\}`\)/.test(sandboxRuntime), "Sandbox rejects path traversal writes"),
     check(
       "sandbox.command-timeout",
@@ -98,6 +106,9 @@ function staticChecks() {
     check("ops.worker-heartbeat", /recordGenerationWorkerHeartbeat/.test(generationQueue) && /recordGenerationWorkerHeartbeat/.test(generationWorker), "Queue health includes worker heartbeat reporting"),
     check("ops.sentry-config", exists("instrumentation.ts") && exists("instrumentation-client.ts") && exists("sentry.server.config.ts"), "Sentry instrumentation exists for client and server runtimes"),
     check("ops.chaos-script", packageJson.scripts && packageJson.scripts["test:chaos"] && exists("scripts/chaos-concurrency.js"), "Concurrency chaos test script is available"),
+    check("ops.resilience-script", packageJson.scripts && packageJson.scripts["test:resilience"] && exists("scripts/pipeline-resilience-smoke.js"), "Pipeline resilience smoke test script is available"),
+    check("ops.hardening-regression-script", packageJson.scripts && packageJson.scripts["test:hardening"] && exists("scripts/pipeline-hardening-regression.js"), "Pipeline hardening regression gate is available"),
+    check("ops.prompt-corpus-script", packageJson.scripts && packageJson.scripts["test:corpus"] && exists("scripts/prompt-corpus-regression.js") && exists("fixtures/prompts/malicious.txt"), "Prompt corpus regression gate is available"),
     check("preview.iframe-sandbox", /sandbox="[^"]*allow-scripts/.test(preview), "Preview iframe uses sandbox attribute"),
     check("preview.iframe-no-same-origin", !/sandbox="[^"]*allow-same-origin/.test(preview), "Preview iframe does not combine allow-scripts with allow-same-origin", "warn"),
     check("preview.error-boundary", /ErrorBoundary/.test(preview), "Preview contains an error boundary"),

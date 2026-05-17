@@ -1378,6 +1378,7 @@ export async function executeGenerationJob(
       prompt: input.prompt,
       files: workingFiles,
       idempotencyKey: input.persistenceKey,
+      generationJobId: input.jobId,
     })
     log("info", "database_persisted", {
       jobId: input.jobId,

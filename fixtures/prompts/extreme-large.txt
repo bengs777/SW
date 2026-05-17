@@ -1,0 +1,1 @@
+Buat clone Shopee lengkap plus admin seller, realtime chat, AI rekomendasi, analytics, payment, dashboard, inventory, CRM, voucher, ekspedisi, notifikasi, dan laporan lengkap.

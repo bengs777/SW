@@ -60,7 +60,7 @@ export type TrimmedContext = {
 
 export const MAX_AUTOMATIC_REPAIR_ATTEMPTS = 2
 
-const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
+export const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
   next: "16.2.6",
   react: "19.2.5",
   "react-dom": "19.2.5",
@@ -103,7 +103,7 @@ const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
   "@radix-ui/react-tooltip": "1.2.8",
 }
 
-const PACKAGE_DEV_DEPENDENCIES = new Set(["typescript", "prisma"])
+export const PACKAGE_DEV_DEPENDENCIES = new Set(["typescript", "prisma"])
 const BUILTIN_PACKAGES = new Set([
   "assert",
   "buffer",

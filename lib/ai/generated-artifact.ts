@@ -3,8 +3,8 @@ import type { GeneratedFile } from "@/lib/types"
 import { extractGeneratedFilesFromProviderMessage } from "@/lib/ai/provider-output"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
-const MAX_GENERATED_FILES = 240
-const MAX_SINGLE_FILE_BYTES = 512 * 1024
+const MAX_GENERATED_FILES = 100
+const MAX_SINGLE_FILE_BYTES = 200 * 1024
 const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
 const FORBIDDEN_EXACT_FILES = new Set([
   ".env",
@@ -23,6 +23,9 @@ const PROTECTED_DELETE_FILES = new Set([
 const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
 const ALLOWED_EXACT_FILES = new Set([
   ".swift/workspace-state.json",
+  ".env.example",
+  "auth.ts",
+  "instrumentation.ts",
   "package.json",
   "components.json",
   "next.config.js",

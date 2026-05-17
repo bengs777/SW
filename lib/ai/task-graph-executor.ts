@@ -1,5 +1,6 @@
 import type { GeneratedFile } from "@/lib/types"
 import type { GeneratedTaskGraph, GeneratedTaskOperation } from "@/lib/ai/generated-artifact"
+import { PACKAGE_DEV_DEPENDENCIES, PACKAGE_VERSION_ALLOWLIST } from "@/lib/ai/generation-pipeline"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type TaskGraphExecutionResult = {
@@ -10,9 +11,15 @@ type TaskGraphExecutionResult = {
 }
 
 const PACKAGE_JSON_PATH = "package.json"
+const MAX_OPERATIONS = 100
+const MAX_TOTAL_BYTES = 5 * 1024 * 1024
+const MAX_FILE_BYTES = 200 * 1024
 const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
 const ALLOWED_EXACT_FILES = new Set([
   ".swift/workspace-state.json",
+  ".env.example",
+  "auth.ts",
+  "instrumentation.ts",
   "package.json",
   "components.json",
   "next.config.js",
@@ -78,6 +85,7 @@ export function executeGeneratedTaskGraph(
       language: operation.language || inferLanguageFromPath(path),
     })
     changedPaths.add(path)
+    assertResourceLimits(Array.from(byPath.values()), operations.length)
   }
 
   const dependencies = normalizeDependencies([
@@ -91,6 +99,7 @@ export function executeGeneratedTaskGraph(
   }
 
   const files = Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path))
+  assertResourceLimits(files, operations.length)
 
   return {
     files,
@@ -103,6 +112,7 @@ export function executeGeneratedTaskGraph(
 function installDependencies(packageFile: GeneratedFile | undefined, dependencies: string[]): GeneratedFile {
   const packageJson = parsePackageJson(packageFile?.content) as Record<string, unknown> & {
     dependencies: Record<string, string>
+    devDependencies: Record<string, string>
     scripts: Record<string, string>
   }
   packageJson.dependencies = normalizeRecord(packageJson.dependencies)
@@ -110,9 +120,21 @@ function installDependencies(packageFile: GeneratedFile | undefined, dependencie
   for (const dependency of dependencies) {
     const parsed = parseDependency(dependency)
     if (!parsed.name) continue
-    if (!packageJson.dependencies[parsed.name]) {
-      packageJson.dependencies[parsed.name] = parsed.version || "latest"
+    const allowedVersion = PACKAGE_VERSION_ALLOWLIST[parsed.name]
+    if (!allowedVersion) {
+      throw new Error(`Dependency is not allowed by Swift policy: ${parsed.name}`)
     }
+    if (!packageJson.dependencies[parsed.name]) {
+      packageJson.dependencies[parsed.name] = allowedVersion
+    }
+  }
+
+  packageJson.devDependencies = normalizeRecord(packageJson.devDependencies)
+  for (const dependency of dependencies) {
+    const parsed = parseDependency(dependency)
+    if (!parsed.name || !PACKAGE_DEV_DEPENDENCIES.has(parsed.name)) continue
+    delete packageJson.dependencies[parsed.name]
+    packageJson.devDependencies[parsed.name] = PACKAGE_VERSION_ALLOWLIST[parsed.name]
   }
 
   packageJson.scripts = {
@@ -154,6 +176,13 @@ function normalizeDependencies(dependencies: string[]) {
         .map((dependency) => dependency.trim())
         .filter(Boolean)
         .filter((dependency) => !dependency.startsWith(".") && !dependency.startsWith("/"))
+        .map((dependency) => {
+          const parsed = parseDependency(dependency)
+          if (!parsed.name || !PACKAGE_VERSION_ALLOWLIST[parsed.name]) {
+            throw new Error(`Dependency is not allowed by Swift policy: ${parsed.name || dependency}`)
+          }
+          return parsed.name
+        })
     )
   ).sort()
 }
@@ -205,15 +234,31 @@ function normalizePath(path: string) {
 }
 
 function collapseOperations(operations: GeneratedTaskOperation[]) {
+  if (operations.length > MAX_OPERATIONS) {
+    throw new Error(`Too many task graph operations. Maximum: ${MAX_OPERATIONS}`)
+  }
+
   const byPath = new Map<string, GeneratedTaskOperation>()
+  const createdPaths = new Set<string>()
 
   for (const operation of operations) {
     const path = normalizePath(operation.path)
     if (!path) continue
     assertSafePath(path)
+    if (operation.action === "create") {
+      createdPaths.add(path)
+    }
 
+    const previous = byPath.get(path)
+    const action =
+      operation.action === "delete"
+        ? "delete"
+        : createdPaths.has(path) || previous?.action === "create"
+          ? "create"
+          : operation.action
     byPath.set(path, {
       ...operation,
+      action,
       path,
       language: operation.language || inferLanguageFromPath(path),
     })
@@ -239,6 +284,24 @@ function assertSafePath(path: string) {
 
   if (!ALLOWED_EXACT_FILES.has(lower) && !ALLOWED_ROOTS.some((root) => lower.startsWith(root))) {
     throw new Error(`Generated file path is outside allowed project roots: ${path}`)
+  }
+}
+
+function assertResourceLimits(files: GeneratedFile[], operationCount: number) {
+  if (operationCount > MAX_OPERATIONS) {
+    throw new Error(`Too many task graph operations. Maximum: ${MAX_OPERATIONS}`)
+  }
+
+  let totalBytes = 0
+  for (const file of files) {
+    const size = Buffer.byteLength(String(file.content ?? ""), "utf8")
+    if (size > MAX_FILE_BYTES) {
+      throw new Error(`Generated file ${file.path} exceeds ${MAX_FILE_BYTES} bytes.`)
+    }
+    totalBytes += size
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      throw new Error(`Generated files exceed ${MAX_TOTAL_BYTES} bytes.`)
+    }
   }
 }
 

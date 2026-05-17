@@ -1,0 +1,1 @@
+Buat aplikasi komunitas sosial ringan dengan feed post, profil pengguna, komentar, like placeholder, API posts, dan moderation admin sederhana.

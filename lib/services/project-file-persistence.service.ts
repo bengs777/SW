@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client"
 import { prisma } from "@/lib/db/client"
 import { withDatabaseWriteRetry } from "@/lib/db/errors"
 import { log } from "@/lib/logging"
@@ -13,6 +14,7 @@ type PersistProjectFilesOptions = {
   cost?: number | null
   projectMemoryJson?: string | null
   tokensUsed?: number | null
+  generationJobId?: string | null
 }
 
 export class ProjectFilePersistenceService {
@@ -36,6 +38,10 @@ export class ProjectFilePersistenceService {
 
     return withDatabaseWriteRetry(() =>
       prisma.$transaction(async (tx) => {
+        if (opts?.generationJobId) {
+          await assertLatestProjectGeneration(tx, projectId, opts.generationJobId)
+        }
+
         const historyData = {
           prompt,
           result: JSON.stringify(normalizedFiles),
@@ -104,12 +110,49 @@ export class ProjectFilePersistenceService {
     idempotencyKey?: string | null
     cost?: number | null
     tokensUsed?: number | null
+    generationJobId?: string | null
   }) {
     return this.saveGenerationSnapshot(input.projectId, input.prompt, input.files, {
       projectMemoryJson: input.projectMemoryJson,
       idempotencyKey: input.idempotencyKey,
       cost: input.cost,
       tokensUsed: input.tokensUsed,
+      generationJobId: input.generationJobId,
     })
+  }
+}
+
+async function assertLatestProjectGeneration(
+  tx: Prisma.TransactionClient,
+  projectId: string,
+  generationJobId: string
+) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${projectId}))`
+
+  const currentJob = await tx.generationJob.findUnique({
+    where: { id: generationJobId },
+    select: { id: true, createdAt: true },
+  })
+  if (!currentJob) {
+    throw new Error("Generation job not found for persistence guard.")
+  }
+
+  const newerJob = await tx.generationJob.findFirst({
+    where: {
+      projectId,
+      createdAt: { gt: currentJob.createdAt },
+      status: { notIn: ["failed", "cancelled"] },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      status: true,
+      stage: true,
+      createdAt: true,
+    },
+  })
+
+  if (newerJob) {
+    throw new Error(`StaleGenerationRejected: newer generation ${newerJob.id} is ${newerJob.status}/${newerJob.stage}.`)
   }
 }

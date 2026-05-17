@@ -1,0 +1,1 @@
+Buat portal berita desa dengan halaman utama, artikel terbaru, pengumuman warga, agenda desa, detail artikel, komentar, admin CRUD post, dan kategori.

@@ -34,9 +34,9 @@ type ProjectFilesystemWriteResult = {
   manifest: ProjectFileManifest
 }
 
-const MAX_PROJECT_FILES = 240
-const MAX_TOTAL_FILE_BYTES = 6 * 1024 * 1024
-const MAX_SINGLE_FILE_BYTES = 512 * 1024
+const MAX_PROJECT_FILES = 100
+const MAX_TOTAL_FILE_BYTES = 5 * 1024 * 1024
+const MAX_SINGLE_FILE_BYTES = 200 * 1024
 const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
 const FORBIDDEN_EXACT_FILES = new Set([
   ".env",
@@ -50,6 +50,9 @@ const FORBIDDEN_EXACT_FILES = new Set([
 const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
 const ALLOWED_EXACT_FILES = new Set([
   ".swift/workspace-state.json",
+  ".env.example",
+  "auth.ts",
+  "instrumentation.ts",
   "package.json",
   "components.json",
   "next.config.js",

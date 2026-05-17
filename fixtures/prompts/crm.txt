@@ -1,0 +1,1 @@
+Buat CRM sederhana untuk tim sales dengan pipeline lead, tabel customer, activity timeline, API leads, filter status, dan service layer Prisma.

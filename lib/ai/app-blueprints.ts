@@ -171,12 +171,20 @@ export function classifyControlledAppType(prompt: string): ControlledAppType {
     return "booking_app"
   }
 
+  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar|jual|beli|jual beli|shopee|tokopedia|produk)\b/.test(text)) {
+    return "simple_marketplace"
+  }
+
   if (/\b(crm|lead|pipeline|sales|customer relationship|pelanggan|prospect)\b/.test(text)) {
     return "lightweight_crm"
   }
 
-  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar|jual|beli|jual beli|shopee|tokopedia|produk)\b/.test(text)) {
-    return "simple_marketplace"
+  if (/\b(saas|dashboard|workspace metrics|workspace|activity feed|settings)\b/.test(text)) {
+    return "saas_dashboard"
+  }
+
+  if (/\b(komunitas|community|social|sosial|feed|moderation admin)\b|\bpost\b/.test(text)) {
+    return "internal_business_tool"
   }
 
   if (/\b(crud|admin panel|cms|manage records|data table|moderation|moderasi)\b/.test(text)) {

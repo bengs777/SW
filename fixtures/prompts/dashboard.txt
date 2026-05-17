@@ -1,0 +1,1 @@
+Buat SaaS dashboard modern dengan auth-ready layout, workspace metrics, activity feed, settings, Prisma schema, dan placeholder Neon PostgreSQL.
