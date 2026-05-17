@@ -19,6 +19,7 @@ import { ModelConfigService } from "@/lib/services/model-config.service"
 export const runtime = "nodejs"
 export const maxDuration = 300
 const routeRuntime: string = runtime
+const generationExecutionMode = process.env.SWIFT_GENERATION_EXECUTION_MODE || (process.env.VERCEL ? "serverless" : "queue")
 
 const CreateJobSchema = z.object({
   projectId: z.string().min(1),
@@ -511,19 +512,23 @@ export async function POST(request: NextRequest) {
       attachments: parsed.data.attachments,
     }
 
-    const queueHealth = await getGenerationQueueHealth().catch((error) => {
-      log("warn", "generation_queue_health_check_failed", {
-        requestId,
-        jobId: job.id,
-        error: error instanceof Error ? error.message : String(error),
-      })
-      return null
-    })
-    const shouldUseServerlessFallback = !queueHealth || queueHealth.status !== "healthy"
+    const preferServerlessExecution = generationExecutionMode !== "queue"
+    const queueHealth = preferServerlessExecution
+      ? null
+      : await getGenerationQueueHealth().catch((error) => {
+          log("warn", "generation_queue_health_check_failed", {
+            requestId,
+            jobId: job.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return null
+        })
+    const shouldUseServerlessFallback = preferServerlessExecution || !queueHealth || queueHealth.status !== "healthy"
     if (shouldUseServerlessFallback) {
       log("warn", "generation_queue_worker_unavailable", {
         requestId,
         jobId: job.id,
+        executionMode: generationExecutionMode,
         queueStatus: queueHealth?.status || "unknown",
         queueEnabled: queueHealth?.enabled ?? false,
         workerHeartbeat: queueHealth?.workerHeartbeat || null,
@@ -555,7 +560,11 @@ export async function POST(request: NextRequest) {
           requestId,
           jobId: job.id,
           queueJobId: fallbackQueueJobId,
-          reason: shouldUseServerlessFallback ? "queue_worker_unavailable" : "queue_unavailable",
+          reason: preferServerlessExecution
+            ? "serverless_execution_mode"
+            : shouldUseServerlessFallback
+              ? "queue_worker_unavailable"
+              : "queue_unavailable",
         })
         try {
           await processGenerationPayload(generationPayload, fallbackQueueJobId)
@@ -590,9 +599,11 @@ export async function POST(request: NextRequest) {
         dbCreated,
         enqueueSuccess,
         fallbackScheduled,
-        probableRootCause: shouldUseServerlessFallback
-          ? "queue_worker_unavailable_serverless_fallback_scheduled"
-          : "queue_unavailable_serverless_fallback_scheduled",
+        probableRootCause: preferServerlessExecution
+          ? "serverless_execution_mode"
+          : shouldUseServerlessFallback
+            ? "queue_worker_unavailable_serverless_fallback_scheduled"
+            : "queue_unavailable_serverless_fallback_scheduled",
       })
       logStage("response_return", true, {
         requestId,
