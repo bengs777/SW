@@ -3,10 +3,10 @@
 import { useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { FieldGroup } from "@/components/ui/field"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Bell, Mail, MessageSquare, AlertTriangle } from "lucide-react"
+import { Bell, Mail, AlertTriangle } from "lucide-react"
 import { Separator } from "@/components/ui/separator"
 
 interface NotificationSettings {

@@ -2,11 +2,10 @@
 
 import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Spinner } from "@/components/ui/spinner"
 import { Badge } from "@/components/ui/badge"
-import { Wallet, ArrowUpRight, ArrowDownLeft, TrendingUp } from "lucide-react"
+import { Wallet, ArrowUpRight, ArrowDownLeft } from "lucide-react"
 import { BillingPanel } from "@/components/dashboard/billing-panel"
 import { formatDistanceToNow } from "date-fns"
 

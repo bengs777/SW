@@ -1,9 +1,8 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { FolderOpen, Search } from "lucide-react"
+import { Search } from "lucide-react"
 import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
 import { ProjectList } from "@/components/dashboard/project-list"
 import { useWorkspaces } from "@/hooks/use-workspaces"
 import { NewProjectTrigger } from "@/components/dashboard/new-project-trigger"

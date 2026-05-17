@@ -1,4 +1,4 @@
-import NextAuth from "next-auth"
+export {}
 
 declare module "next-auth" {
   /**

@@ -16,6 +16,7 @@ import { getHealthSnapshot, isModelTemporarilyUnavailable, markModelFailure, mar
 import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
 import { buildCacheKey, getCachedResponse, setCachedResponse } from "@/lib/ai/response-cache"
 import { buildDomainAnchorDirective } from "@/lib/ai/prompt-guard"
+import { env } from "@/lib/env"
 import { log } from "@/lib/logging"
 
 export type ProviderName = string
@@ -360,7 +361,7 @@ export class ProviderRouter {
   }
 
   static async getConfiguredProviderHealth() {
-    return getHealthSnapshot()
+    return getHealthSnapshot({ ttlMs: env.providerStatusCacheTtlMs })
   }
 
   static async checkProviderHealth(modelId?: string) {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Settings, User, Key, CreditCard, Palette, Bell } from "lucide-react"
+import { User, Key, CreditCard, Palette, Bell } from "lucide-react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ProfileSettings } from "@/components/dashboard/settings/profile-settings"
 import { ApiKeysSettings } from "@/components/dashboard/settings/api-keys-settings"

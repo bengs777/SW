@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
 import { prisma } from "@/lib/db/client"
 import { requireDeveloperActorResponse } from "@/lib/admin"
 import { cleanupGenerationQueue } from "@/lib/queue/generation-queue"
@@ -16,7 +16,7 @@ import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-re
 
 export const runtime = "nodejs"
 
-export async function POST(request: NextRequest) {
+export async function POST() {
   const actorResult = await requireDeveloperActorResponse()
   if ("error" in actorResult) {
     return actorResult.error
@@ -86,7 +86,7 @@ export async function POST(request: NextRequest) {
 }
 
 // GET: Show current stuck jobs without cleaning
-export async function GET(request: NextRequest) {
+export async function GET() {
   const actorResult = await requireDeveloperActorResponse()
   if ("error" in actorResult) {
     return actorResult.error
