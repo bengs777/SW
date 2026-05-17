@@ -14,7 +14,7 @@ type BuildProjectFilesOutput = {
   moduleStatus: ModuleStatusReport
 }
 
-type BuildIntent = "dashboard" | "ecommerce" | "landing" | "portfolio" | "booking" | "crm" | "laundry" | "generic"
+type BuildIntent = "dashboard" | "news" | "ecommerce" | "landing" | "portfolio" | "booking" | "crm" | "laundry" | "generic"
 
 export function buildProjectFiles({
   prompt,
@@ -35,7 +35,9 @@ export function buildProjectFiles({
 
   const baseFiles = buildStandardStructureFiles(name)
   const domainOverrides =
-    intent === "dashboard"
+    intent === "news"
+      ? buildNewsPortalOverrideFiles(name, brief)
+      : intent === "dashboard"
       ? buildDashboardOverrideFiles(name, brief)
       : intent === "ecommerce"
         ? buildCommerceOverrideFiles(name, brief)
@@ -877,6 +879,564 @@ export async function GET() {
   ]
 }
 
+function buildNewsPortalOverrideFiles(name: string, prompt: string): GeneratedFile[] {
+  const safeName = serializeForCode(name || "Desa Buntu")
+  const safePrompt = serializeForCode(escapeInlineText(prompt))
+
+  return [
+    {
+      path: "app/page.tsx",
+      language: "tsx",
+      content: `import Link from "next/link"
+import { BuildStatusPanel } from "@/components/build-status-panel"
+import { moduleStatus } from "@/lib/build-status"
+import { listAgenda, listAnnouncements, listPosts } from "@/lib/services/news.service"
+
+export default async function HomePage() {
+  const projectName = ${safeName}
+  const buildBrief = ${safePrompt}
+  const posts = await listPosts()
+  const announcements = await listAnnouncements()
+  const agenda = await listAgenda()
+  const featured = posts[0]
+
+  return (
+    <main className="min-h-screen bg-stone-50 text-stone-950">
+      <section className="border-b border-emerald-900/10 bg-emerald-950 text-white">
+        <div className="mx-auto grid max-w-7xl gap-8 px-5 py-12 lg:grid-cols-[1.2fr_0.8fr] lg:py-16">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-emerald-200">Portal Berita Resmi</p>
+            <h1 className="mt-4 text-4xl font-bold leading-tight md:text-6xl">{projectName}</h1>
+            <p className="mt-5 max-w-2xl text-lg text-emerald-50/85">
+              Informasi warga, kegiatan BUMDes, pengumuman layanan, dan agenda Pemerintah Desa Buntu dalam satu portal yang mudah dibaca.
+            </p>
+            <p className="mt-4 max-w-2xl text-sm text-emerald-100/70">Brief: {buildBrief}</p>
+          </div>
+          {featured && (
+            <article className="rounded-xl border border-white/15 bg-white/10 p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-200">Berita Utama</p>
+              <h2 className="mt-3 text-2xl font-semibold">{featured.title}</h2>
+              <p className="mt-3 text-sm text-emerald-50/80">{featured.excerpt}</p>
+              <Link href={\`/posts/\${featured.slug}\`} className="mt-5 inline-flex rounded-md bg-white px-4 py-2 text-sm font-semibold text-emerald-950">
+                Baca selengkapnya
+              </Link>
+            </article>
+          )}
+        </div>
+      </section>
+
+      <section className="mx-auto grid max-w-7xl gap-8 px-5 py-10 lg:grid-cols-[1fr_340px]">
+        <div>
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-2xl font-bold">Berita Terkini Desa Buntu</h2>
+            <Link href="/admin/posts" className="text-sm font-semibold text-emerald-700">Admin berita</Link>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {posts.map((post) => (
+              <article key={post.id} className="rounded-xl border border-stone-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">{post.category.name}</p>
+                <h3 className="mt-3 text-xl font-semibold">{post.title}</h3>
+                <p className="mt-2 text-sm leading-6 text-stone-600">{post.excerpt}</p>
+                <div className="mt-4 flex items-center justify-between text-xs text-stone-500">
+                  <span>{post.publishedAt}</span>
+                  <Link href={\`/posts/\${post.slug}\`} className="font-semibold text-emerald-700">Baca</Link>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+
+        <aside className="space-y-4">
+          <section className="rounded-xl border border-amber-200 bg-amber-50 p-5">
+            <h2 className="text-lg font-bold">Pengumuman Warga</h2>
+            <div className="mt-4 space-y-3">
+              {announcements.map((item) => (
+                <article key={item.id} className="rounded-lg bg-white p-3">
+                  <h3 className="font-semibold">{item.title}</h3>
+                  <p className="mt-1 text-sm text-stone-600">{item.body}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-stone-200 bg-white p-5">
+            <h2 className="text-lg font-bold">Agenda Kegiatan Desa</h2>
+            <div className="mt-4 space-y-3">
+              {agenda.map((item) => (
+                <article key={item.id} className="border-l-4 border-emerald-600 pl-3">
+                  <p className="text-xs font-semibold text-emerald-700">{item.date}</p>
+                  <h3 className="font-semibold">{item.title}</h3>
+                  <p className="text-sm text-stone-600">{item.location}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+        </aside>
+      </section>
+
+      <BuildStatusPanel status={moduleStatus} />
+    </main>
+  )
+}
+`,
+    },
+    {
+      path: "app/posts/[slug]/page.tsx",
+      language: "tsx",
+      content: `import Link from "next/link"
+import { notFound } from "next/navigation"
+import { getPostBySlug, listCommentsForPost } from "@/lib/services/news.service"
+import { CommentForm } from "@/components/news/comment-form"
+
+export default async function ArticlePage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params
+  const post = await getPostBySlug(slug)
+  if (!post) notFound()
+  const comments = await listCommentsForPost(post.id)
+
+  return (
+    <main className="min-h-screen bg-stone-50 text-stone-950">
+      <article className="mx-auto max-w-3xl px-5 py-10">
+        <Link href="/" className="text-sm font-semibold text-emerald-700">Kembali ke beranda</Link>
+        <p className="mt-8 text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">{post.category.name}</p>
+        <h1 className="mt-3 text-4xl font-bold leading-tight">{post.title}</h1>
+        <div className="mt-3 text-sm text-stone-500">{post.publishedAt} oleh {post.authorName}</div>
+        <div className="prose prose-stone mt-8 max-w-none">
+          {post.body.split("\\n").map((paragraph) => (
+            <p key={paragraph}>{paragraph}</p>
+          ))}
+        </div>
+      </article>
+
+      <section className="mx-auto max-w-3xl px-5 pb-12">
+        <div className="rounded-xl border border-stone-200 bg-white p-5">
+          <h2 className="text-xl font-bold">Komentar Warga</h2>
+          <p className="mt-1 text-sm text-stone-600">Login Gmail dapat dihubungkan lewat NextAuth Google provider sebelum komentar dipublikasikan.</p>
+          <CommentForm postId={post.id} />
+          <div className="mt-6 space-y-3">
+            {comments.map((comment) => (
+              <article key={comment.id} className="rounded-lg bg-stone-50 p-3">
+                <div className="text-sm font-semibold">{comment.authorName}</div>
+                <p className="mt-1 text-sm text-stone-700">{comment.body}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+    </main>
+  )
+}
+`,
+    },
+    {
+      path: "components/news/comment-form.tsx",
+      language: "tsx",
+      content: `"use client"
+
+import { useState } from "react"
+
+export function CommentForm({ postId }: { postId: string }) {
+  const [body, setBody] = useState("")
+  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle")
+
+  async function submitComment(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setStatus("saving")
+    await fetch("/api/comments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ postId, body, authorName: "Warga Desa Buntu" }),
+    })
+    setBody("")
+    setStatus("saved")
+  }
+
+  return (
+    <form onSubmit={submitComment} className="mt-5 space-y-3">
+      <textarea
+        value={body}
+        onChange={(event) => setBody(event.target.value)}
+        required
+        minLength={3}
+        className="min-h-24 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
+        placeholder="Tulis komentar atau masukan untuk berita ini..."
+      />
+      <div className="flex items-center justify-between gap-3">
+        <button className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white" disabled={status === "saving"}>
+          {status === "saving" ? "Mengirim..." : "Kirim komentar"}
+        </button>
+        <span className="text-xs text-stone-500">Masuk Gmail dapat diaktifkan via NextAuth Google.</span>
+      </div>
+    </form>
+  )
+}
+`,
+    },
+    {
+      path: "app/admin/posts/page.tsx",
+      language: "tsx",
+      content: `import Link from "next/link"
+import { listCategories, listPosts } from "@/lib/services/news.service"
+
+export default async function AdminPostsPage() {
+  const posts = await listPosts()
+  const categories = await listCategories()
+
+  return (
+    <main className="min-h-screen bg-stone-100 px-5 py-8 text-stone-950">
+      <div className="mx-auto max-w-6xl">
+        <div className="flex flex-col gap-3 border-b border-stone-300 pb-5 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-emerald-700">Admin Desa Buntu</p>
+            <h1 className="mt-2 text-3xl font-bold">CRUD Berita</h1>
+          </div>
+          <Link href="/admin/categories" className="rounded-md border border-emerald-700 px-4 py-2 text-sm font-semibold text-emerald-800">Kelola kategori</Link>
+        </div>
+
+        <section className="mt-6 rounded-xl border border-stone-200 bg-white p-5">
+          <h2 className="text-lg font-bold">Buat / Edit Artikel</h2>
+          <form className="mt-4 grid gap-3 md:grid-cols-2">
+            <input className="rounded-lg border px-3 py-2" placeholder="Judul berita" />
+            <select className="rounded-lg border px-3 py-2">
+              {categories.map((category) => (
+                <option key={category.id}>{category.name}</option>
+              ))}
+            </select>
+            <textarea className="min-h-28 rounded-lg border px-3 py-2 md:col-span-2" placeholder="Isi berita lengkap" />
+            <button className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white" type="button">Simpan draft berita</button>
+          </form>
+        </section>
+
+        <section className="mt-6 overflow-hidden rounded-xl border border-stone-200 bg-white">
+          <div className="grid grid-cols-[1fr_180px_160px] bg-stone-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-stone-500">
+            <span>Judul</span>
+            <span>Kategori</span>
+            <span>Aksi</span>
+          </div>
+          {posts.map((post) => (
+            <div key={post.id} className="grid grid-cols-[1fr_180px_160px] items-center border-t px-4 py-3 text-sm">
+              <span className="font-medium">{post.title}</span>
+              <span>{post.category.name}</span>
+              <span className="flex gap-2">
+                <button className="rounded border px-3 py-1">Edit</button>
+                <button className="rounded border border-red-300 px-3 py-1 text-red-700">Hapus</button>
+              </span>
+            </div>
+          ))}
+        </section>
+      </div>
+    </main>
+  )
+}
+`,
+    },
+    {
+      path: "app/admin/categories/page.tsx",
+      language: "tsx",
+      content: `import { listCategories } from "@/lib/services/news.service"
+
+export default async function AdminCategoriesPage() {
+  const categories = await listCategories()
+
+  return (
+    <main className="min-h-screen bg-stone-100 px-5 py-8 text-stone-950">
+      <div className="mx-auto max-w-4xl">
+        <h1 className="text-3xl font-bold">Kategori Berita Desa</h1>
+        <form className="mt-6 flex gap-2 rounded-xl border bg-white p-4">
+          <input className="flex-1 rounded-lg border px-3 py-2" placeholder="Contoh: Info Warga" />
+          <button className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white" type="button">Tambah</button>
+        </form>
+        <div className="mt-6 grid gap-3">
+          {categories.map((category) => (
+            <article key={category.id} className="flex items-center justify-between rounded-xl border bg-white p-4">
+              <div>
+                <h2 className="font-semibold">{category.name}</h2>
+                <p className="text-sm text-stone-600">{category.description}</p>
+              </div>
+              <div className="flex gap-2">
+                <button className="rounded border px-3 py-1 text-sm">Edit</button>
+                <button className="rounded border border-red-300 px-3 py-1 text-sm text-red-700">Hapus</button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </main>
+  )
+}
+`,
+    },
+    {
+      path: "app/api/posts/route.ts",
+      language: "ts",
+      content: `import { NextRequest, NextResponse } from "next/server"
+import { z } from "zod"
+import { createPost, listPosts } from "@/lib/services/news.service"
+
+const PostSchema = z.object({
+  title: z.string().min(3),
+  slug: z.string().min(3),
+  body: z.string().min(10),
+  categoryId: z.string().min(1),
+})
+
+export async function GET() {
+  return NextResponse.json({ posts: await listPosts() })
+}
+
+export async function POST(request: NextRequest) {
+  const parsed = PostSchema.safeParse(await request.json().catch(() => null))
+  if (!parsed.success) return NextResponse.json({ error: "Invalid post payload" }, { status: 400 })
+  return NextResponse.json({ post: await createPost(parsed.data) }, { status: 201 })
+}
+`,
+    },
+    {
+      path: "app/api/posts/[id]/route.ts",
+      language: "ts",
+      content: `import { NextRequest, NextResponse } from "next/server"
+import { deletePost, updatePost } from "@/lib/services/news.service"
+
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  const body = await request.json().catch(() => ({}))
+  return NextResponse.json({ post: await updatePost(id, body) })
+}
+
+export async function DELETE(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  await deletePost(id)
+  return NextResponse.json({ ok: true })
+}
+`,
+    },
+    {
+      path: "app/api/categories/route.ts",
+      language: "ts",
+      content: `import { NextRequest, NextResponse } from "next/server"
+import { z } from "zod"
+import { createCategory, listCategories } from "@/lib/services/news.service"
+
+const CategorySchema = z.object({
+  name: z.string().min(3),
+  description: z.string().optional(),
+})
+
+export async function GET() {
+  return NextResponse.json({ categories: await listCategories() })
+}
+
+export async function POST(request: NextRequest) {
+  const parsed = CategorySchema.safeParse(await request.json().catch(() => null))
+  if (!parsed.success) return NextResponse.json({ error: "Invalid category payload" }, { status: 400 })
+  return NextResponse.json({ category: await createCategory(parsed.data) }, { status: 201 })
+}
+`,
+    },
+    {
+      path: "app/api/comments/route.ts",
+      language: "ts",
+      content: `import { NextRequest, NextResponse } from "next/server"
+import { z } from "zod"
+import { createComment } from "@/lib/services/news.service"
+
+const CommentSchema = z.object({
+  postId: z.string().min(1),
+  body: z.string().min(3),
+  authorName: z.string().min(2).default("Warga Desa Buntu"),
+})
+
+export async function POST(request: NextRequest) {
+  const parsed = CommentSchema.safeParse(await request.json().catch(() => null))
+  if (!parsed.success) return NextResponse.json({ error: "Invalid comment payload" }, { status: 400 })
+  return NextResponse.json({ comment: await createComment(parsed.data) }, { status: 201 })
+}
+`,
+    },
+    {
+      path: "lib/services/news.service.ts",
+      language: "ts",
+      content: `const categories = [
+  { id: "cat-info-warga", name: "Info Warga", description: "Layanan administrasi, imbauan, dan informasi harian warga." },
+  { id: "cat-bumdes", name: "Kegiatan BUMDes", description: "Kabar usaha desa dan pemberdayaan ekonomi warga." },
+  { id: "cat-pengumuman", name: "Pengumuman", description: "Pengumuman resmi Pemerintah Desa Buntu." },
+]
+
+const posts = [
+  {
+    id: "post-1",
+    slug: "musyawarah-desa-buntu-2026",
+    title: "Musyawarah Desa Buntu Bahas Prioritas Pembangunan 2026",
+    excerpt: "Pemerintah Desa Buntu mengundang warga untuk menyampaikan aspirasi pembangunan dusun dan layanan publik.",
+    body: "Pemerintah Desa Buntu menggelar musyawarah desa untuk membahas prioritas pembangunan 2026. Warga dapat menyampaikan usulan terkait infrastruktur, pelayanan administrasi, kegiatan pemuda, dan penguatan ekonomi desa.\\n\\nHasil musyawarah akan dirangkum sebagai bahan penyusunan rencana kerja pemerintah desa.",
+    categoryId: "cat-pengumuman",
+    authorName: "Admin Desa Buntu",
+    publishedAt: "17 Mei 2026",
+  },
+  {
+    id: "post-2",
+    slug: "bumdes-buntu-buka-pelatihan-produk-lokal",
+    title: "BUMDes Buntu Buka Pelatihan Pengemasan Produk Lokal",
+    excerpt: "Pelaku UMKM desa mengikuti pelatihan kemasan dan pemasaran digital untuk memperluas jangkauan produk lokal.",
+    body: "BUMDes Buntu membuka pelatihan pengemasan produk lokal bagi pelaku UMKM. Kegiatan ini membantu warga meningkatkan nilai jual produk dan mempersiapkan katalog digital desa.",
+    categoryId: "cat-bumdes",
+    authorName: "Pengurus BUMDes",
+    publishedAt: "16 Mei 2026",
+  },
+  {
+    id: "post-3",
+    slug: "jadwal-pelayanan-administrasi-desa",
+    title: "Jadwal Pelayanan Administrasi Desa Pekan Ini",
+    excerpt: "Pelayanan surat keterangan, domisili, dan pengantar warga dibuka Senin sampai Jumat pukul 08.00-14.00.",
+    body: "Kantor Desa Buntu membuka pelayanan administrasi warga pada hari kerja. Warga diminta membawa identitas dan dokumen pendukung agar proses pelayanan berjalan lancar.",
+    categoryId: "cat-info-warga",
+    authorName: "Pelayanan Desa",
+    publishedAt: "15 Mei 2026",
+  },
+]
+
+const comments = [
+  { id: "comment-1", postId: "post-1", authorName: "Siti Aminah", body: "Semoga usulan perbaikan jalan dusun bisa masuk prioritas." },
+  { id: "comment-2", postId: "post-1", authorName: "Rahmat", body: "Mohon jadwal musyawarah juga diumumkan lewat grup warga." },
+]
+
+export async function listCategories() {
+  return categories
+}
+
+export async function createCategory(input: { name: string; description?: string }) {
+  return { id: \`cat-\${Date.now()}\`, name: input.name, description: input.description || "" }
+}
+
+export async function listPosts() {
+  return posts.map((post) => ({
+    ...post,
+    category: categories.find((category) => category.id === post.categoryId) || categories[0],
+  }))
+}
+
+export async function getPostBySlug(slug: string) {
+  return (await listPosts()).find((post) => post.slug === slug) || null
+}
+
+export async function createPost(input: { title: string; slug: string; body: string; categoryId: string }) {
+  return {
+    id: \`post-\${Date.now()}\`,
+    excerpt: input.body.slice(0, 140),
+    authorName: "Admin Desa Buntu",
+    publishedAt: new Date().toLocaleDateString("id-ID", { dateStyle: "medium" }),
+    ...input,
+  }
+}
+
+export async function updatePost(id: string, input: Record<string, unknown>) {
+  return { id, ...input }
+}
+
+export async function deletePost(id: string) {
+  return { id, deleted: true }
+}
+
+export async function listCommentsForPost(postId: string) {
+  return comments.filter((comment) => comment.postId === postId)
+}
+
+export async function createComment(input: { postId: string; body: string; authorName: string }) {
+  return { id: \`comment-\${Date.now()}\`, ...input }
+}
+
+export async function listAnnouncements() {
+  return [
+    { id: "ann-1", title: "Pendataan Kartu Keluarga", body: "Warga diminta memperbarui data KK di kantor desa pekan ini." },
+    { id: "ann-2", title: "Kerja Bakti Jumat", body: "Kerja bakti dimulai pukul 07.00 di halaman balai desa." },
+  ]
+}
+
+export async function listAgenda() {
+  return [
+    { id: "agenda-1", date: "20 Mei 2026", title: "Posyandu Balita", location: "Balai Desa Buntu" },
+    { id: "agenda-2", date: "24 Mei 2026", title: "Pelatihan UMKM BUMDes", location: "Aula BUMDes" },
+    { id: "agenda-3", date: "28 Mei 2026", title: "Musyawarah Dusun", location: "Kantor Desa" },
+  ]
+}
+`,
+    },
+    {
+      path: "prisma/schema.prisma",
+      language: "prisma",
+      content: `generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  posts Post[]
+
+  @@map("categories")
+}
+
+model Post {
+  id          String   @id @default(cuid())
+  categoryId  String
+  title       String
+  slug        String   @unique
+  excerpt     String?
+  body        String
+  status      String   @default("draft")
+  authorName  String   @default("Admin Desa Buntu")
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  comments Comment[]
+
+  @@index([categoryId])
+  @@index([status, publishedAt])
+  @@map("posts")
+}
+
+model Comment {
+  id          String   @id @default(cuid())
+  postId      String
+  authorName  String
+  authorEmail String?
+  body        String
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@index([status])
+  @@map("comments")
+}
+`,
+    },
+    {
+      path: ".env.example",
+      language: "env",
+      content: `DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/desa_buntu"
+NEXTAUTH_SECRET="replace-with-secret"
+GOOGLE_CLIENT_ID=""
+GOOGLE_CLIENT_SECRET=""
+`,
+    },
+  ]
+}
+
 function buildCommerceOverrideFiles(name: string, prompt: string): GeneratedFile[] {
   const safeName = serializeForCode(name)
   const safePrompt = serializeForCode(escapeInlineText(prompt))
@@ -1478,6 +2038,22 @@ export function buildModuleStatusReport({
       status: "partial",
       detail: "Overview data is mocked; drill-down charts and filters are planned.",
     })
+  } else if (inferredIntent === "news") {
+    ready.push({
+      name: "Portal berita publik",
+      status: "ready",
+      detail: "Hero Desa Buntu, berita terkini, pengumuman warga, dan agenda desa tersedia.",
+    })
+    ready.push({
+      name: "Artikel dan komentar",
+      status: "ready",
+      detail: "Halaman detail artikel dengan form komentar dan placeholder login Gmail tersedia.",
+    })
+    partial.push({
+      name: "Admin CRUD berita",
+      status: "partial",
+      detail: "Halaman admin untuk posts dan categories tersedia dengan API route placeholder.",
+    })
   } else if (inferredIntent === "booking") {
     ready.push({
       name: "Booking preview",
@@ -1558,6 +2134,7 @@ function inferCurrentPhase(intent: BuildIntent, normalizedPrompt: string) {
   if (/checkout|payment|midtrans|bayar|pembayaran/.test(normalizedPrompt)) return "checkout-payment"
   if (intent === "ecommerce") return "buyer-storefront"
   if (intent === "dashboard") return "dashboard-overview"
+  if (intent === "news") return "village-news-portal"
   if (intent === "booking") return "booking-flow"
   return "preview-first-foundation"
 }
@@ -1588,6 +2165,14 @@ function buildNextSteps(intent: BuildIntent, normalizedPrompt: string, previewSt
     ]
   }
 
+  if (intent === "news" || /berita|news|artikel|portal|desa|warga|bumdes|pengumuman/.test(normalizedPrompt)) {
+    return [
+      "Connect posts, categories, and comments to Prisma database writes.",
+      "Enable Google/Gmail login with NextAuth before comment publishing.",
+      "Protect /admin routes with an admin role and add moderation states for comments.",
+    ]
+  }
+
   return [
     "Turn the preview mock data into Prisma-backed services.",
     "Add the next user-facing flow as a small, testable module.",
@@ -1615,6 +2200,10 @@ function normalizePath(path: string) {
 
 function inferBuildIntent(prompt: string): BuildIntent {
   const normalized = prompt.toLowerCase()
+
+  if (/(berita|news|artikel|article|portal berita|portal desa|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)/i.test(normalized)) {
+    return "news"
+  }
 
   if (/(laundry|dry clean|cuci|setrika|laundromat)/i.test(normalized)) {
     return "laundry"

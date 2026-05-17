@@ -3,6 +3,7 @@ import { buildProjectFiles } from "@/lib/ai/project-scaffold"
 
 export type ControlledAppType =
   | "saas_dashboard"
+  | "village_news_portal"
   | "crud_admin_panel"
   | "ai_chat_app"
   | "landing_auth"
@@ -67,6 +68,16 @@ const BASE_REQUIRED_FILES = [
 ]
 
 const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
+  village_news_portal: blueprint("village_news_portal", "Portal berita desa", "Build an official village news portal for Desa Buntu. Public home must show hero with village identity, latest village news, citizen announcements, and village agenda. Include full article reading pages with comments and Google/Gmail-ready login placeholders. Include admin CRUD for posts and categories. Prisma schema must model posts, categories, and comments. Do not include SaaS finance metrics, revenue, orders, conversion cards, or business analytics.", [
+    "app/posts/[slug]/page.tsx",
+    "app/admin/posts/page.tsx",
+    "app/admin/categories/page.tsx",
+    "app/api/posts/route.ts",
+    "app/api/posts/[id]/route.ts",
+    "app/api/categories/route.ts",
+    "app/api/comments/route.ts",
+    "lib/services/news.service.ts",
+  ]),
   saas_dashboard: blueprint("saas_dashboard", "SaaS dashboard", "Build a SaaS dashboard with auth-ready layout, workspace metrics, activity feed, settings entry points, Prisma schema, Neon PostgreSQL env template, and Supabase storage placeholders.", [
     "app/dashboard/page.tsx",
     "app/api/projects/route.ts",
@@ -147,6 +158,10 @@ function blueprint(appType: ControlledAppType, label: string, starterPrompt: str
 
 export function classifyControlledAppType(prompt: string): ControlledAppType {
   const text = String(prompt || "").toLowerCase()
+
+  if (/\b(berita|news|artikel|article|portal berita|portal desa|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)\b/.test(text)) {
+    return "village_news_portal"
+  }
 
   if (/\b(ai chat|chatbot|chat app|conversation|assistant|llm|openai|claude)\b/.test(text)) {
     return "ai_chat_app"

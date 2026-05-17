@@ -40,6 +40,13 @@ const ALWAYS_ALLOWED_PATCH_FILES = new Set([
   "lib/utils.ts",
 ])
 
+const FULL_REPLACEMENT_RE =
+  /(koreksi\s+total|rombak\s+(ulang|total)|hapus\s+(seluruh|semua)|ganti\s+total|buat\s+ulang|generate\s+ulang|regenerasi\s+ulang|ulang\s+dari\s+awal|salah\s+jalur|replace\s+all|full\s+replacement|start\s+over|rewrite\s+(all|project)|rebuild\s+(all|project))/i
+
+export function isFullReplacementPrompt(prompt: string) {
+  return FULL_REPLACEMENT_RE.test(String(prompt || ""))
+}
+
 export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan {
   const existingPaths = input.existingFiles.map((file) => normalizePath(file.path))
   const importGraph = buildImportGraph(input.existingFiles)
@@ -49,8 +56,10 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
   const hasExistingProject = existingPaths.length > 0
   const activeFilePath = normalizePath(input.previewContext?.activeFilePath || "")
   const previewErrorFile = normalizePath(input.previewContext?.previewError?.filename || "")
-  const intent = classifyEditIntent(normalizedPrompt, mode)
+  const forceFullGeneration = isFullReplacementPrompt(prompt)
+  const intent = forceFullGeneration ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
   const partial =
+    !forceFullGeneration &&
     hasExistingProject &&
     (mode === "edit" ||
       mode === "fix" ||
@@ -63,7 +72,9 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
       mode: "full",
       intent: "full_generation",
       confidence: 0.92,
-      reason: "New or broad build request; full controlled generation is allowed.",
+      reason: forceFullGeneration
+        ? "Full replacement requested; existing generated files may be rebuilt."
+        : "New or broad build request; full controlled generation is allowed.",
       targetPaths: [],
       allowedNewPaths: [],
       preservePaths: [],

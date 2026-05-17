@@ -33,6 +33,7 @@ import {
   buildPartialEditInstructionBlock,
   buildPartialEditPlan,
   filterFilesForPartialEdit,
+  isFullReplacementPrompt,
   type PartialEditPlan,
 } from "@/lib/ai/edit-planner"
 import { log } from "@/lib/logging"
@@ -337,6 +338,10 @@ function shouldSeedBlueprint(existingFiles: GeneratedFile[]) {
 
   const paths = new Set(existingFiles.map((file) => normalizePath(file.path)))
   return !paths.has("app/page.tsx") || !paths.has("package.json") || !paths.has("prisma/schema.prisma")
+}
+
+function shouldForceBlueprintReseed(prompt: string) {
+  return isFullReplacementPrompt(prompt)
 }
 
 async function transition(jobId: string, stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) {
@@ -1151,30 +1156,36 @@ export async function executeGenerationJob(
       },
     })
 
-    const seededFiles = shouldSeedBlueprint(existingFiles)
+    const forceBlueprintReseed = shouldForceBlueprintReseed(input.prompt)
+    const seededFiles = shouldSeedBlueprint(existingFiles) || forceBlueprintReseed
       ? buildBlueprintSeedFiles({
           prompt: input.prompt,
           appType: plan.appType,
           projectName: plan.blueprint.label,
         })
       : []
-    let workingFiles = seededFiles.length > 0 ? mergeGeneratedFiles(seededFiles, existingFiles) : [...existingFiles]
+    let workingFiles =
+      seededFiles.length > 0 ? mergeGeneratedFiles(seededFiles, forceBlueprintReseed ? [] : existingFiles) : [...existingFiles]
 
     if (seededFiles.length > 0) {
       await transition(input.jobId, "scaffolding", "Applying known-good starter architecture", 14, {
         appType: plan.appType,
         seededFileCount: seededFiles.length,
+        forceBlueprintReseed,
       })
       await emitGeneratedFilesUpdate({
         jobId: input.jobId,
         stage: "scaffolding",
-        message: "Starter files are available in Explorer",
+        message: forceBlueprintReseed
+          ? "Project files were fully regenerated and are available in Explorer"
+          : "Starter files are available in Explorer",
         allFiles: workingFiles,
         changedFiles: seededFiles,
         source: "seed",
         data: {
           appType: plan.appType,
           seededFileCount: seededFiles.length,
+          forceBlueprintReseed,
         },
       })
     }
