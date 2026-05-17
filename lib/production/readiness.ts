@@ -84,7 +84,7 @@ export function getProductionReadiness() {
     check("SUPABASE_SERVICE_ROLE_KEY", "Supabase asset storage service key", env.supabaseServiceRoleKey, "required"),
     check("PAKASIR_SLUG", "Pakasir merchant slug", env.pakasirSlug, "recommended"),
     check("PAKASIR_API_KEY", "Pakasir API key", env.pakasirApiKey, "recommended"),
-    check("VERCEL_TEAM_ID", "Vercel team scope for generated deployments", env.vercelTeamId, "required"),
+    check("VERDI_TEAM", "Vercel team scope for generated deployments", env.verdiTeamId, "required"),
     check("VERPRO_ACCES_TOKEN", "Generated app deploy token", env.verproAccessToken, "recommended"),
     check("DEV_OWNER_EMAIL", "Developer owner email", env.devOwnerEmail, "required"),
     check("AI_RATE_LIMIT_PER_MINUTE", "AI prompt rate limit per minute", aiRateLimitConfig.perMinute > 0, "required", `${aiRateLimitConfig.perMinute} prompts/minute`),

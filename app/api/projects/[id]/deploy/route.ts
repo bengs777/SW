@@ -656,12 +656,12 @@ export async function POST(
       })),
     }
 
-    const teamId = env.vercelTeamId
+    const teamId = env.verdiTeamId
     if (!teamId) {
       return NextResponse.json(
         {
           error:
-            "VERCEL_TEAM_ID is required for Swift deployments. Set it to the Swift Vercel team instead of a personal account like bengs777.",
+            "VERDI_TEAM is required for Swift deployments. Set it to the Swift Vercel team instead of a personal account like bengs777.",
         },
         { status: 500 }
       )

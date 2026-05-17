@@ -72,7 +72,7 @@ const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
 const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
 const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
-const vercelTeamId = getEnv("VERCEL_TEAM_ID")
+const verdiTeamId = getEnv("VERDI_TEAM")
 const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
@@ -143,7 +143,7 @@ export const env = {
   pakasirSlug: getEnv("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID"),
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
   verproAccessToken: verproDeployToken,
-  vercelTeamId,
+  verdiTeamId,
   // Crypto Payment
   cryptoPaymentPrivateKey: getEnv("CRYPTO_PAYMENT_PRIVATE_KEY"),
   cryptoPaymentAddress: getEnv("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS"),
@@ -172,7 +172,7 @@ export function getMissingProductionEnvVars() {
   if (!env.hasNativeRedisConfig) missing.push("REDIS_URL (native redis:// or rediss:// for BullMQ)")
   if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
-  if (!env.vercelTeamId) missing.push("VERCEL_TEAM_ID")
+  if (!env.verdiTeamId) missing.push("VERDI_TEAM")
 
   if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
 

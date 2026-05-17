@@ -30,7 +30,7 @@ Dashboard app:
 - `SUPABASE_STORAGE_BUCKET`
 - `SANDBOX_SERVICE_URL`
 - `SANDBOX_SERVICE_TOKEN`
-- `VERCEL_TEAM_ID`
+- `VERDI_TEAM`
 
 Sandbox runtime:
 
