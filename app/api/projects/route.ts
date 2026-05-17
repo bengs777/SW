@@ -12,17 +12,18 @@ const CreateProjectSchema = z.object({
 })
 
 /**
- * Checks if a user has access to a workspace.
- * Uses multiple fallback strategies for resilience.
+ * Resolves a workspace id only when the user has access to it.
+ * Also accepts a WorkspaceMember id to tolerate stale clients that used
+ * the raw /api/workspaces membership response as a workspace option.
  */
-async function userHasWorkspaceAccess(workspaceId: string, userId: string): Promise<boolean> {
+async function resolveAccessibleWorkspaceId(workspaceId: string, userId: string): Promise<string | null> {
   // Strategy 1: check membership table (fast path)
   const membership = await prisma.workspaceMember.findUnique({
     where: { workspaceId_userId: { workspaceId, userId } },
     select: { id: true },
   })
 
-  if (membership) return true
+  if (membership) return workspaceId
 
   // Strategy 2: check if user is the workspace creator
   const workspace = await prisma.workspace.findUnique({
@@ -37,10 +38,20 @@ async function userHasWorkspaceAccess(workspaceId: string, userId: string): Prom
       create: { workspaceId, userId, role: "admin" },
       update: {},
     }).catch(() => null)
-    return true
+    return workspaceId
   }
 
-  // Strategy 3: check if workspace belongs to user via any path
+  // Strategy 3: accept the user's WorkspaceMember.id as a legacy alias.
+  const membershipAlias = await prisma.workspaceMember.findUnique({
+    where: { id: workspaceId },
+    select: { workspaceId: true, userId: true },
+  })
+
+  if (membershipAlias?.userId === userId) {
+    return membershipAlias.workspaceId
+  }
+
+  // Strategy 4: check if workspace belongs to user via any path
   // (handles edge cases where createdBy was set differently)
   const userWorkspaces = await prisma.workspaceMember.findMany({
     where: { userId },
@@ -48,10 +59,10 @@ async function userHasWorkspaceAccess(workspaceId: string, userId: string): Prom
   })
 
   if (userWorkspaces.some((w) => w.workspaceId === workspaceId)) {
-    return true
+    return workspaceId
   }
 
-  // Strategy 4: if user has NO memberships at all but workspace exists,
+  // Strategy 5: if user has NO memberships at all but workspace exists,
   // check if they're the only user who should have access
   if (userWorkspaces.length === 0 && workspace) {
     // User has no memberships anywhere — likely orphaned. Grant access to this workspace.
@@ -61,10 +72,10 @@ async function userHasWorkspaceAccess(workspaceId: string, userId: string): Prom
       update: {},
     }).catch(() => null)
     console.warn("[projects] Auto-granted workspace access to orphaned user", { userId, workspaceId })
-    return true
+    return workspaceId
   }
 
-  return false
+  return null
 }
 
 export async function GET(request: NextRequest) {
@@ -95,9 +106,9 @@ export async function GET(request: NextRequest) {
 
     // Use session.user.id as the authoritative user ID (matches what /api/workspaces uses)
     const userId = session.user.id || user.id
-    const hasAccess = await userHasWorkspaceAccess(workspaceId, userId)
+    const resolvedWorkspaceId = await resolveAccessibleWorkspaceId(workspaceId, userId)
 
-    if (!hasAccess) {
+    if (!resolvedWorkspaceId) {
       // Log comprehensive debug info
       const allMemberships = await prisma.workspaceMember.findMany({
         where: { userId },
@@ -121,7 +132,7 @@ export async function GET(request: NextRequest) {
     }
 
     const projects = await prisma.project.findMany({
-      where: { workspaceId },
+      where: { workspaceId: resolvedWorkspaceId },
       include: {
         files: {
           take: 5,
@@ -161,9 +172,9 @@ export async function POST(request: NextRequest) {
 
     // Use session.user.id as the authoritative user ID
     const userId = session.user.id || user.id
-    const hasAccess = await userHasWorkspaceAccess(workspaceId, userId)
+    const resolvedWorkspaceId = await resolveAccessibleWorkspaceId(workspaceId, userId)
 
-    if (!hasAccess) {
+    if (!resolvedWorkspaceId) {
       console.error("[projects:POST] 403 Debug", { userId, userServiceId: user.id, workspaceId, email: session.user.email })
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
@@ -173,7 +184,7 @@ export async function POST(request: NextRequest) {
         name,
         description,
         prompt,
-        workspaceId,
+        workspaceId: resolvedWorkspaceId,
       },
     })
 

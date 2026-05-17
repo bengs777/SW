@@ -10,6 +10,36 @@ interface Workspace {
   image?: string | null
 }
 
+type WorkspaceApiItem = Partial<Workspace> & {
+  workspace?: Partial<Workspace> | null
+}
+
+function normalizeWorkspace(item: unknown): Workspace | null {
+  if (!item || typeof item !== "object") {
+    return null
+  }
+
+  const apiItem = item as WorkspaceApiItem
+  const workspace = apiItem.workspace && typeof apiItem.workspace === "object"
+    ? apiItem.workspace
+    : apiItem
+
+  if (
+    typeof workspace.id !== "string" ||
+    typeof workspace.name !== "string" ||
+    typeof workspace.slug !== "string"
+  ) {
+    return null
+  }
+
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    slug: workspace.slug,
+    image: workspace.image ?? null,
+  }
+}
+
 export function useWorkspaces() {
   const { status: sessionStatus } = useSession()
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
@@ -46,7 +76,13 @@ export function useWorkspaces() {
           return
         }
 
-        setWorkspaces(Array.isArray(data) ? data : [])
+        const nextWorkspaces = Array.isArray(data)
+          ? data
+              .map((item) => normalizeWorkspace(item))
+              .filter((workspace): workspace is Workspace => Boolean(workspace))
+          : []
+
+        setWorkspaces(nextWorkspaces)
       } catch (fetchError) {
         if (fetchError instanceof DOMException && fetchError.name === "AbortError") return
         console.error("[workspaces] Failed to fetch workspaces:", fetchError)
