@@ -1,7 +1,6 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { redirect } from "next/navigation"
 import { useSession } from "next-auth/react"
 import Link from "next/link"
 import { Activity, AlertTriangle, CheckCircle2, Clock3, Server, Zap } from "lucide-react"
@@ -10,7 +9,6 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Spinner } from "@/components/ui/spinner"
-import { Separator } from "@/components/ui/separator"
 
 interface MonitoringData {
   status: "healthy" | "degraded" | "critical"
@@ -29,6 +27,75 @@ interface MonitoringData {
   }
 }
 
+type AdminMonitoringResponse = {
+  ok?: boolean
+  overview?: {
+    readiness?: {
+      ok?: boolean
+      checks?: Array<{
+        key: string
+        label: string
+        ok: boolean
+        severity: "required" | "recommended"
+      }>
+      requiredMissing?: string[]
+    }
+    requests?: {
+      total?: number
+      success?: number
+      failed?: number
+      successRate?: number
+    }
+    recentRequests?: Array<{ latencyMs?: number }>
+  }
+}
+
+function normalizeMonitoringData(payload: unknown): MonitoringData {
+  const response = payload as AdminMonitoringResponse & Partial<MonitoringData>
+
+  if (response.metrics && response.services && response.status && response.timestamp) {
+    return response as MonitoringData
+  }
+
+  const overview = response.overview
+  if (!overview) {
+    throw new Error("Monitoring response is missing overview data.")
+  }
+
+  const readinessChecks = overview.readiness?.checks || []
+  const requiredMissing = overview.readiness?.requiredMissing || []
+  const status: MonitoringData["status"] =
+    overview.readiness?.ok === false || requiredMissing.length > 0
+      ? "critical"
+      : readinessChecks.some((check) => !check.ok)
+        ? "degraded"
+        : "healthy"
+  const recentLatencies = (overview.recentRequests || [])
+    .map((request) => Number(request.latencyMs || 0))
+    .filter((latency) => Number.isFinite(latency) && latency >= 0)
+  const avgLatency = recentLatencies.length > 0
+    ? Math.round(recentLatencies.reduce((sum, latency) => sum + latency, 0) / recentLatencies.length)
+    : 0
+  const successRate = Number(overview.requests?.successRate || 0)
+
+  return {
+    status,
+    timestamp: new Date().toISOString(),
+    services: readinessChecks.map((check) => ({
+      name: check.label || check.key,
+      status: check.ok ? "up" : check.severity === "required" ? "down" : "degraded",
+      latency: 0,
+      uptime: check.ok ? 100 : 0,
+    })),
+    metrics: {
+      totalRequests: Number(overview.requests?.total || 0),
+      successRate,
+      avgLatency,
+      errorRate: Math.max(0, 100 - successRate),
+    },
+  }
+}
+
 export default function AdminPage() {
   const { data: session, status: sessionStatus } = useSession()
   const [monitoringData, setMonitoringData] = useState<MonitoringData | null>(null)
@@ -36,6 +103,9 @@ export default function AdminPage() {
   const [error, setError] = useState("")
   const [isDevAccount, setIsDevAccount] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const canAccessAdmin = isDevAccount || Boolean(
+    session?.user?.isDeveloperAccount || session?.user?.email?.endsWith("@swift.local")
+  )
 
   useEffect(() => {
     // Wait until session is fully resolved before checking dev status
@@ -52,7 +122,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     // Delay fetch until session is authenticated AND user is dev
-    if (sessionStatus !== "authenticated" || !isDevAccount) return
+    if (sessionStatus !== "authenticated" || !canAccessAdmin) return
 
     const controller = new AbortController()
     abortControllerRef.current = controller
@@ -75,7 +145,7 @@ export default function AdminPage() {
           return
         }
 
-        setMonitoringData(data)
+        setMonitoringData(normalizeMonitoringData(data))
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return
         console.error("[admin] Failed to fetch monitoring data:", err)
@@ -95,9 +165,22 @@ export default function AdminPage() {
       abortControllerRef.current = null
       clearInterval(interval)
     }
-  }, [isDevAccount, sessionStatus])
+  }, [canAccessAdmin, sessionStatus])
 
-  if (!isDevAccount) {
+  if (sessionStatus === "loading") {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <Card className="w-full max-w-md">
+          <CardContent className="flex items-center justify-center py-10">
+            <Spinner className="mr-2" />
+            Checking developer access...
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  if (!canAccessAdmin) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4">
         <AlertTriangle className="h-12 w-12 text-yellow-500" />
