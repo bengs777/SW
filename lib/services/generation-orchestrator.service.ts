@@ -491,6 +491,7 @@ function buildSlicePrompt(input: {
   blueprint: ControlledAppBlueprint
   existingFiles: GeneratedFile[]
   target: GenerationPlannerFile
+  targets?: GenerationPlannerFile[]
 }) {
   const context = buildContextForTask({
     prompt: input.prompt,
@@ -498,6 +499,9 @@ function buildSlicePrompt(input: {
     maxFiles: 10,
     layer: "builder",
   })
+  const targets = input.targets && input.targets.length > 0 ? input.targets : [input.target]
+  const targetPaths = targets.map((target) => target.path)
+  const batchedFoundation = targets.length > 1
 
   return [
     context,
@@ -511,9 +515,13 @@ function buildSlicePrompt(input: {
     buildPartialEditInstructionBlock(input.plan.editPlan),
     "",
     "EXECUTION_RULES:",
-    "- Work only on the requested file slice and directly related imports.",
+    batchedFoundation
+      ? `- PREVIEW_FOUNDATION_BATCH: create or modify ONLY these ${targets.length} files in this single provider call: ${targetPaths.join(", ")}.`
+      : "- Work only on the requested file slice and directly related imports.",
     `- Preview-first budget: the full generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files for the first pass.`,
-    "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
+    batchedFoundation
+      ? `- For this provider call, return at most ${targets.length} create/modify operations, one per listed preview foundation file.`
+      : "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
     "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
     "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
     "- Keep each returned file under 4000 output tokens when possible.",
@@ -527,6 +535,7 @@ function buildSlicePrompt(input: {
     "- Keep the app deployable after this slice: no unresolved imports, no forbidden stack drift.",
     `- Current file objective: ${input.target.path}`,
     `- Why this file matters: ${input.target.reason}`,
+    `- Allowed target files for this provider call: ${targetPaths.join(", ")}`,
     `- Planned objective: ${input.plan.objective}`,
     `- Controlled app type: ${input.plan.appType}`,
   ].join("\n")
@@ -1205,10 +1214,26 @@ export async function executeGenerationJob(
 
     let workingFiles = [...existingFiles]
 
-    for (let index = 0; index < plan.filePlan.length; index += 1) {
+    const usePreviewFoundationBatch =
+      plan.editPlan.mode === "full" && plan.filePlan.length > 1 && plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+
+    for (
+      let index = 0;
+      index < plan.filePlan.length;
+      index += usePreviewFoundationBatch ? plan.filePlan.length : 1
+    ) {
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
-      const target = plan.filePlan[index]
+      const targets = usePreviewFoundationBatch ? plan.filePlan : [plan.filePlan[index]]
+      const target = usePreviewFoundationBatch
+        ? {
+            path: targets.map((item) => item.path).join(", "),
+            reason: "Preview-first foundation batch keeps the first render inside the timeout budget",
+            action: "create_or_update" as const,
+          }
+        : plan.filePlan[index]
+      const sliceIndex = usePreviewFoundationBatch ? 1 : index + 1
+      const sliceTotal = usePreviewFoundationBatch ? 1 : plan.filePlan.length
       const previousWorkingFiles = workingFiles
       const providerStartedAt = performance.now()
       const response = await runProviderAttempt({
@@ -1219,6 +1244,7 @@ export async function executeGenerationJob(
           blueprint,
           existingFiles: workingFiles,
           target,
+          targets,
         }),
         purpose: "generate",
         selectedModel: input.selectedModel,
@@ -1254,8 +1280,8 @@ export async function executeGenerationJob(
       await transition(
         input.jobId,
         "parsing",
-        `Generating controlled file slice ${index + 1}/${plan.filePlan.length}`,
-        Math.min(55, 15 + Math.round(((index + 1) / Math.max(1, plan.filePlan.length)) * 35)),
+        `Generating controlled file slice ${sliceIndex}/${sliceTotal}`,
+        Math.min(55, 15 + Math.round((sliceIndex / Math.max(1, sliceTotal)) * 35)),
         {
           target: target.path,
           sliceDurationMs,
@@ -1273,7 +1299,7 @@ export async function executeGenerationJob(
         await emitGeneratedFilesUpdate({
           jobId: input.jobId,
           stage: "parsing",
-          message: `File slice ${index + 1}/${plan.filePlan.length} ready in Explorer`,
+          message: `File slice ${sliceIndex}/${sliceTotal} ready in Explorer`,
           allFiles: workingFiles,
           previousFiles: previousWorkingFiles,
           changedFiles: streamFiles,
@@ -1281,8 +1307,8 @@ export async function executeGenerationJob(
           source: "slice",
           data: {
             target: target.path,
-            sliceIndex: index + 1,
-            sliceTotal: plan.filePlan.length,
+            sliceIndex,
+            sliceTotal,
             sliceDurationMs,
             acceptedFileCount: scoped.acceptedFiles.length,
             rejectedFileCount: scoped.rejectedFiles.length,
@@ -1296,8 +1322,8 @@ export async function executeGenerationJob(
 
       log("info", "generation_slice_completed", {
         jobId: input.jobId,
-        sliceIndex: index + 1,
-        sliceTotal: plan.filePlan.length,
+        sliceIndex,
+        sliceTotal,
         target: target.path,
         durationMs: sliceDurationMs,
       })

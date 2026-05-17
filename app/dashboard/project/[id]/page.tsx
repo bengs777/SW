@@ -35,47 +35,6 @@ const MAX_PROMPT_LENGTH = 12000
 const GENERATE_BACKEND_TIMEOUT_MS = 120_000
 const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
 const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
-const COLLABORATION_MODE_INSTRUCTIONS: Record<PromptLanguage, Record<CollaborationMode, string>> = {
-  id: {
-    build:
-      "Mode kolaborasi: BUILD. Buat atau perluas fitur sesuai prompt. Gunakan konteks editor sebagai source of truth dan jaga hasil tetap previewable.",
-    edit:
-      "Mode kolaborasi: EDIT. Utamakan mengubah file aktif dan file terkait. Hindari rewrite seluruh project kecuali benar-benar diperlukan.",
-    fix:
-      "Mode kolaborasi: FIX. Diagnosis error berdasarkan preview context, active file, dan file terkait. Terapkan patch minimal yang memperbaiki root cause.",
-    review:
-      "Mode kolaborasi: REVIEW. Cari bug, risiko regresi, gap validasi, dan perbaikan paling bernilai. Jika membuat perubahan, batasi ke patch kecil yang jelas.",
-    ask:
-      "Mode kolaborasi: ASK. Jawab pertanyaan user berdasarkan konteks editor. Jangan mengubah file kecuali user secara eksplisit meminta patch.",
-  },
-  en: {
-    build:
-      "Collaboration mode: BUILD. Create or extend features from the prompt. Treat editor context as the source of truth and keep the result previewable.",
-    edit:
-      "Collaboration mode: EDIT. Prefer changing the active file and related files. Avoid broad rewrites unless they are truly necessary.",
-    fix:
-      "Collaboration mode: FIX. Diagnose the issue from preview context, the active file, and related files. Apply the smallest patch that fixes the root cause.",
-    review:
-      "Collaboration mode: REVIEW. Look for bugs, regression risks, validation gaps, and high-value improvements. If changing files, keep patches small and clear.",
-    ask:
-      "Collaboration mode: ASK. Answer the user based on editor context. Do not change files unless the user explicitly asks for a patch.",
-  },
-}
-
-function buildCollaborationPrompt(input: {
-  content: string
-  mode: CollaborationMode
-  language: PromptLanguage
-}) {
-  const instruction = COLLABORATION_MODE_INSTRUCTIONS[input.language][input.mode]
-  return [
-    instruction,
-    "Gunakan AI_CONTEXT_JSON dan PREVIEW_CONTEXT_JSON bila tersedia. Jangan mengarang file, error, atau state yang tidak ada di konteks.",
-    "",
-    "Prompt user:",
-    input.content,
-  ].join("\n")
-}
 
 function buildClientWorkPlan(prompt: string, mode: CollaborationMode, language: PromptLanguage) {
   const shortPrompt = prompt.replace(/\s+/g, " ").trim().slice(0, 120)
@@ -1269,11 +1228,7 @@ export default function EditorPage() {
       notes: ["Preview context captured from the editor before sending the request."],
     })
 
-    const promptForGeneration = buildCollaborationPrompt({
-      content: trimmedContent,
-      mode: collaborationMode,
-      language: promptLanguage,
-    })
+    const promptForGeneration = trimmedContent
 
     // Add assistant message placeholder
     const assistantId = Math.random().toString(36).substring(7)

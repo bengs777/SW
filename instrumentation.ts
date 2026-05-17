@@ -57,12 +57,14 @@ function shouldStartGenerationWorker() {
 
 function registerGlobalErrorCapture() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return
+  const nodeProcess = (globalThis as typeof globalThis & { process?: { on?: (event: string, handler: (...args: unknown[]) => void) => void } }).process
+  if (typeof nodeProcess?.on !== "function") return
 
   const globalState = globalThis as typeof globalThis & { swiftGlobalErrorCaptureRegistered?: boolean }
   if (globalState.swiftGlobalErrorCaptureRegistered) return
   globalState.swiftGlobalErrorCaptureRegistered = true
 
-  process.on("unhandledRejection", (reason) => {
+  nodeProcess.on("unhandledRejection", (reason) => {
     log("error", "process_unhandled_rejection", {
       reason: reason instanceof Error ? reason.message : String(reason),
       stack: reason instanceof Error ? reason.stack : undefined,
@@ -70,10 +72,11 @@ function registerGlobalErrorCapture() {
     Sentry.captureException(reason)
   })
 
-  process.on("uncaughtException", (error) => {
+  nodeProcess.on("uncaughtException", (error) => {
+    const payload = errorPayload(error)
     log("error", "process_uncaught_exception", {
-      error: error.message,
-      stack: error.stack,
+      error: payload.error,
+      stack: payload.stack,
     })
     Sentry.captureException(error)
   })
