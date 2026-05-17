@@ -43,6 +43,13 @@ const INTENT_RULES: Array<{
     requiredCapabilities: ["availability", "reservation_form", "confirmation_state"],
   },
   {
+    appType: "clinic_management",
+    domain: "clinic_management",
+    keywords: ["klinik", "clinic", "healthcare", "dokter", "doctor", "pasien", "patient", "medical", "rekam medis", "rumah sakit", "hospital"],
+    requiredCapabilities: ["public_clinic_page", "patient_registration", "appointment_scheduling", "admin_dashboard", "user_roles", "api_routes", "prisma_models"],
+    forbiddenAssumptions: ["sports_content", "commerce_checkout", "saas_metrics"],
+  },
+  {
     appType: "lightweight_crm",
     domain: "crm",
     keywords: ["crm", "lead", "pipeline", "customer", "pelanggan", "prospect"],
@@ -54,6 +61,13 @@ const INTENT_RULES: Array<{
     keywords: ["komunitas", "community", "social", "sosial", "feed", "post ", " post", "moderation admin"],
     requiredCapabilities: ["feed", "profile_or_member_context", "moderation_state"],
     forbiddenAssumptions: ["commerce_checkout", "saas_metrics"],
+  },
+  {
+    appType: "sports_portfolio",
+    domain: "sports_club_portfolio",
+    keywords: ["persib", "bola", "football", "soccer", "club", "klub", "tim", "team", "pemain", "player", "match", "pertandingan", "portfolio", "portofolio"],
+    requiredCapabilities: ["public_portfolio", "squad_or_player_showcase", "news_or_match_content", "admin_content_management", "user_roles", "api_routes", "prisma_models"],
+    forbiddenAssumptions: ["clinic_content", "saas_metrics", "commerce_checkout"],
   },
   {
     appType: "crud_admin_panel",

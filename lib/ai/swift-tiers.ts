@@ -79,14 +79,14 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     note: "Semua request Swift dirutekan ke DeepSeek V4 Pro melalui OpenRouter dengan routing internal yang efisien.",
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-    timeoutMs: 90_000,
-    maxOutputTokens: 4096,
+    timeoutMs: 120_000,
+    maxOutputTokens: 8192,
     rank: 2,
     public: true,
     generationLayer: "builder",
     queue: { concurrency: 3, maxQueueDepth: 36 },
     targets: [
-      { modelId: DEEPSEEK_V4_PRO_MODEL_ID, role: "primary", timeoutMs: 90_000, maxOutputTokens: 4096 },
+      { modelId: DEEPSEEK_V4_PRO_MODEL_ID, role: "primary", timeoutMs: 120_000, maxOutputTokens: 8192 },
     ],
   }
 

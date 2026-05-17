@@ -93,6 +93,21 @@ function staticChecks() {
         !/SWIFT_FAST_MODEL_KEY/.test(generationPipeline),
       "Public model selection exposes one Swift AI orchestrator and routing never selects a fast lane"
     ),
+    check(
+      "ai.production-fullstack-mode",
+      /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
+        /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*14/.test(generationOrchestrator) &&
+        /PRODUCTION_FULLSTACK_BATCH_SIZE\s*=\s*4/.test(generationOrchestrator) &&
+        /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator),
+      "Explicit full-stack/admin/API/payment prompts use a production full-stack orchestration mode"
+    ),
+    check(
+      "ai.server-prisma-boundary",
+      /function isBrowserPreviewFile/.test(generationPipeline) &&
+        /normalized\.startsWith\("app\/api\/"\)\)\s*return false/.test(generationPipeline) &&
+        /normalized\.startsWith\("lib\/services\/"\)\)\s*return false/.test(generationPipeline),
+      "Prisma and server-only imports are allowed in API routes and service files, but still blocked from preview UI"
+    ),
     check("ai.output-file-extraction", /parseGeneratedArtifact/.test(generationOrchestrator) && /generatedArtifactSchema/.test(generatedArtifact), "AI provider output is parsed into a strict GeneratedArtifact schema"),
     check("ai.controlled-app-blueprints", /ControlledAppType/.test(appBlueprints) && /saas_dashboard/.test(appBlueprints) && /simple_marketplace/.test(appBlueprints), "Generation is constrained to controlled app categories"),
     check("ai.intent-taskgraph-generation", /analyzePromptIntent/.test(generationOrchestrator) && /executeGeneratedTaskGraph/.test(generationOrchestrator), "Generation uses intent analysis and TaskGraph execution instead of starter-only output"),

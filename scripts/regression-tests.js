@@ -80,6 +80,22 @@ assert(
 )
 
 assert(
+  "explicit fullstack uses production mode",
+  /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator) &&
+    /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
+    /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*14/.test(generationOrchestrator) &&
+    /Production pass budget/.test(generationOrchestrator),
+  "full-stack/admin/database/payment prompts must not be forced through the 3-file preview contract"
+)
+
+assert(
+  "production fullstack requires full coverage",
+  /input\.plan\.productionMode !== "production_fullstack"[\s\S]*isPreviewFoundationPass/.test(generationOrchestrator) &&
+    /requiresFullStackCoverage && fullstack\.missingCategories/.test(generationOrchestrator),
+  "production full-stack mode must require frontend, API, data, and config coverage"
+)
+
+assert(
   "repair retry is bounded and revalidated",
   /while \(!validation\.ok && repairAttempt < MAX_REPAIR_ATTEMPTS\)/.test(generationOrchestrator) &&
     /Revalidating repaired artifacts/.test(generationOrchestrator) &&

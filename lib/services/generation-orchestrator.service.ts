@@ -51,6 +51,8 @@ type GenerationPlan = {
   appType: ControlledAppType
   intent: IntentAnalysis
   editPlan: PartialEditPlan
+  productionMode: "preview" | "production_fullstack"
+  maxFilesThisPass: number
   blueprint: {
     label: string
     requiredFiles: string[]
@@ -87,6 +89,8 @@ type ExecuteGenerationJobDeps = {
 
 const MAX_REPAIR_ATTEMPTS = 1
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
+const PRODUCTION_FULLSTACK_FILE_LIMIT = 14
+const PRODUCTION_FULLSTACK_BATCH_SIZE = 4
 
 type ValidationLifecycleStep =
   | "normalize"
@@ -236,6 +240,63 @@ function assertNotAborted(signal?: AbortSignal) {
   }
 }
 
+function shouldUseProductionFullStackMode(prompt: string, input?: { collaborationMode?: string | null }) {
+  const text = `${prompt}\n${input?.collaborationMode || ""}`.toLowerCase()
+  const explicitFullStack =
+    /\b(full\s*stack|fullstack|backend|database|db|prisma|postgres|api route|route handler|crud|auth|login|register|role|rbac|admin|pengelola|user|payment|checkout|webhook|integrasi|integration)\b/i.test(text)
+  const explicitBuild =
+    /\b(buat|bikin|generate|build|jadikan|create|website|web|app|aplikasi)\b/i.test(text)
+
+  return explicitFullStack && explicitBuild
+}
+
+function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: string) {
+  const text = prompt.toLowerCase()
+  const coreFiles = [
+    "app/layout.tsx",
+    "app/page.tsx",
+    "app/globals.css",
+    "prisma/schema.prisma",
+    ".env.example",
+    "package.json",
+  ]
+  const genericSupportFiles = new Set([
+    "app/api/health/route.ts",
+    "components/build-status-panel.tsx",
+    "lib/services/project.service.ts",
+  ])
+  const required = new Set<string>(coreFiles)
+  const domainFiles = blueprint.requiredFiles
+    .map(normalizePath)
+    .filter((filePath) => !required.has(filePath) && !genericSupportFiles.has(filePath))
+
+  for (const filePath of domainFiles) {
+    required.add(filePath)
+  }
+
+  if (/\b(admin|pengelola|staff|role|rbac|user|login|auth)\b/i.test(text)) {
+    required.add("app/admin/page.tsx")
+    required.add("app/api/admin/users/route.ts")
+  }
+
+  if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/i.test(text)) {
+    required.add("app/api/payments/checkout/route.ts")
+    required.add("app/api/payments/webhook/route.ts")
+    required.add("lib/services/payment.service.ts")
+  }
+
+  if (/\b(api|integrasi|integration|connect|hubungkan|external api|third party)\b/i.test(text)) {
+    required.add("app/api/integrations/route.ts")
+    required.add("lib/services/integration.service.ts")
+  }
+
+  for (const filePath of genericSupportFiles) {
+    required.add(filePath)
+  }
+
+  return Array.from(required).slice(0, PRODUCTION_FULLSTACK_FILE_LIMIT)
+}
+
 function buildGenerationPlan(input: {
   prompt: string
   existingFiles: GeneratedFile[]
@@ -257,6 +318,13 @@ function buildGenerationPlan(input: {
   })
   const appType = intent.appType || classifyControlledAppType(input.prompt)
   const blueprint = getControlledAppBlueprint(appType)
+  const productionMode = shouldUseProductionFullStackMode(input.prompt, {
+    collaborationMode: input.collaborationMode,
+  })
+    ? "production_fullstack"
+    : "preview"
+  const maxFilesThisPass =
+    productionMode === "production_fullstack" ? PRODUCTION_FULLSTACK_FILE_LIMIT : editPlan.maxSlices
   const trimmed = trimContextForGeneration({
     prompt: input.prompt,
     files: input.existingFiles,
@@ -279,25 +347,36 @@ function buildGenerationPlan(input: {
       })
     }
   } else {
-    for (const filePath of extractRequestedFilePaths(input.prompt).slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)) {
+    for (const filePath of extractRequestedFilePaths(input.prompt).slice(0, maxFilesThisPass)) {
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
-        reason: "Explicitly requested by the prompt for the preview-first foundation",
+        reason:
+          productionMode === "production_fullstack"
+            ? "Explicitly requested by the prompt for the production full-stack plan"
+            : "Explicitly requested by the prompt for the preview-first foundation",
         action: "create_or_update",
       })
     }
 
-    for (const filePath of blueprint.requiredFiles.slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)) {
-      if (plannedByPath.size >= editPlan.maxSlices) break
+    const requiredFiles =
+      productionMode === "production_fullstack"
+        ? productionRequiredFiles(blueprint, input.prompt)
+        : blueprint.requiredFiles.slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)
+
+    for (const filePath of requiredFiles) {
+      if (plannedByPath.size >= maxFilesThisPass) break
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
-        reason: `${blueprint.label} blueprint requires this file for deployable generation`,
+        reason:
+          productionMode === "production_fullstack"
+            ? `${blueprint.label} production full-stack plan requires this file`
+            : `${blueprint.label} blueprint requires this file for deployable generation`,
         action: "create_or_update",
       })
     }
 
     for (const file of trimmed.files.slice(0, 8)) {
-      if (plannedByPath.size >= editPlan.maxSlices) break
+      if (plannedByPath.size >= maxFilesThisPass) break
       const path = normalizePath(file.path)
       if (!plannedByPath.has(path)) {
         plannedByPath.set(path, {
@@ -309,7 +388,7 @@ function buildGenerationPlan(input: {
     }
   }
 
-  const filePlan = Array.from(plannedByPath.values()).slice(0, editPlan.maxSlices)
+  const filePlan = Array.from(plannedByPath.values()).slice(0, maxFilesThisPass)
 
   if (!filePlan.some((item) => /^app\/page\.(tsx|ts|jsx|js)$/i.test(item.path))) {
     const shouldAddHomePage = editPlan.mode === "full" || input.existingFiles.length === 0
@@ -319,6 +398,9 @@ function buildGenerationPlan(input: {
         reason: "Primary visible entrypoint should be generated or refined first",
         action: "create_or_update",
       })
+      if (filePlan.length > maxFilesThisPass) {
+        filePlan.pop()
+      }
     }
   }
 
@@ -327,6 +409,8 @@ function buildGenerationPlan(input: {
     appType,
     intent,
     editPlan,
+    productionMode,
+    maxFilesThisPass,
     blueprint: {
       label: blueprint.label,
       requiredFiles: blueprint.requiredFiles,
@@ -502,6 +586,7 @@ function buildSlicePrompt(input: {
   const targets = input.targets && input.targets.length > 0 ? input.targets : [input.target]
   const targetPaths = targets.map((target) => target.path)
   const batchedFoundation = targets.length > 1
+  const productionFullStack = input.plan.productionMode === "production_fullstack"
 
   return [
     context,
@@ -515,15 +600,24 @@ function buildSlicePrompt(input: {
     buildPartialEditInstructionBlock(input.plan.editPlan),
     "",
     "EXECUTION_RULES:",
+    productionFullStack
+      ? "- PRODUCTION_FULLSTACK_MODE: generate a deployable full-stack slice with visible UI, route handlers, Prisma/data layer, env example, and package config as requested. Do not downgrade to dummy-only preview."
+      : "- PREVIEW_MODE: generate a small preview-first foundation that can render quickly.",
     batchedFoundation
-      ? `- PREVIEW_FOUNDATION_BATCH: create or modify ONLY these ${targets.length} files in this single provider call: ${targetPaths.join(", ")}.`
+      ? `- BATCHED_SLICE: create or modify ONLY these ${targets.length} files in this provider call: ${targetPaths.join(", ")}.`
       : "- Work only on the requested file slice and directly related imports.",
-    `- Preview-first budget: the full generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files for the first pass.`,
+    productionFullStack
+      ? `- Production pass budget: this job may create up to ${input.plan.maxFilesThisPass} files across batched slices.`
+      : `- Preview-first budget: the full generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files for the first pass.`,
     batchedFoundation
-      ? `- For this provider call, return at most ${targets.length} create/modify operations, one per listed preview foundation file.`
+      ? `- For this provider call, return at most ${targets.length} create/modify operations, one per listed target file.`
       : "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
-    "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
-    "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
+    productionFullStack
+      ? "- Use the existing locked stack. You MAY use Prisma schema, server-only service files, Route Handlers, NextAuth-compatible placeholders, and payment/API integration placeholders when the prompt asks for them."
+      : "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
+    productionFullStack
+      ? "- Do not use UI-only dummy output. If real external credentials are not available, create server-side integration boundaries, env placeholders, zod validation, and clear TODO-safe service functions instead of fake-only UI."
+      : "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
     "- Keep each returned file under 4000 output tokens when possible.",
     "- Stop after the requested slice; do not create extra support files speculatively.",
     "- Return ONLY a JSON object with taskGraph; include changed files as taskGraph.operations.",
@@ -705,7 +799,9 @@ async function runValidationLifecycle(input: {
   const dependencyMap = buildDependencyMap(files)
   const plannedRequiredFiles = input.plan.filePlan.map((file) => normalizePath(file.path))
   const isPreviewFoundationPass =
-    input.plan.editPlan.mode === "full" && plannedRequiredFiles.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+    input.plan.productionMode !== "production_fullstack" &&
+    input.plan.editPlan.mode === "full" &&
+    plannedRequiredFiles.length <= PREVIEW_FOUNDATION_FILE_LIMIT
   const partialRequiredFiles =
     isPreviewFoundationPass
       ? plannedRequiredFiles
@@ -1079,7 +1175,10 @@ async function attemptTargetedRepair(input: {
 
 function shouldApplySafePreviewFallback(plan: GenerationPlan, validation: ValidationLifecycleResult) {
   const isPreviewFoundationPass =
-    plan.editPlan.mode === "full" && plan.filePlan.length > 0 && plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+    plan.productionMode !== "production_fullstack" &&
+    plan.editPlan.mode === "full" &&
+    plan.filePlan.length > 0 &&
+    plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
   if (!isPreviewFoundationPass) return false
 
   const failureMessage = validation.failure?.message || ""
@@ -1422,6 +1521,8 @@ export async function executeGenerationJob(
       data: {
         objective: plan.objective,
         appType: plan.appType,
+        productionMode: plan.productionMode,
+        maxFilesThisPass: plan.maxFilesThisPass,
         intent: plan.intent,
         blueprint: plan.blueprint,
         editPlan: {
@@ -1437,25 +1538,36 @@ export async function executeGenerationJob(
     let workingFiles = [...existingFiles]
 
     const usePreviewFoundationBatch =
-      plan.editPlan.mode === "full" && plan.filePlan.length > 1 && plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+      plan.productionMode !== "production_fullstack" &&
+      plan.editPlan.mode === "full" &&
+      plan.filePlan.length > 1 &&
+      plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+    const sliceBatchSize = plan.productionMode === "production_fullstack"
+      ? PRODUCTION_FULLSTACK_BATCH_SIZE
+      : usePreviewFoundationBatch
+        ? plan.filePlan.length
+        : 1
 
     for (
       let index = 0;
       index < plan.filePlan.length;
-      index += usePreviewFoundationBatch ? plan.filePlan.length : 1
+      index += sliceBatchSize
     ) {
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
-      const targets = usePreviewFoundationBatch ? plan.filePlan : [plan.filePlan[index]]
-      const target = usePreviewFoundationBatch
+      const targets = plan.filePlan.slice(index, index + sliceBatchSize)
+      const target = targets.length > 1
         ? {
             path: targets.map((item) => item.path).join(", "),
-            reason: "Preview-first foundation batch keeps the first render inside the timeout budget",
+            reason:
+              plan.productionMode === "production_fullstack"
+                ? "Production full-stack batch keeps the job inside timeout while covering UI, API, data, and config"
+                : "Preview-first foundation batch keeps the first render inside the timeout budget",
             action: "create_or_update" as const,
           }
         : plan.filePlan[index]
-      const sliceIndex = usePreviewFoundationBatch ? 1 : index + 1
-      const sliceTotal = usePreviewFoundationBatch ? 1 : plan.filePlan.length
+      const sliceIndex = Math.floor(index / sliceBatchSize) + 1
+      const sliceTotal = Math.ceil(plan.filePlan.length / sliceBatchSize)
       const previousWorkingFiles = workingFiles
       const providerStartedAt = performance.now()
       const response = await runProviderAttempt({

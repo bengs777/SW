@@ -349,7 +349,7 @@ export function buildDependencyMap(files: GeneratedFile[]): DependencyMap {
 
   for (const node of graph.nodes) {
     for (const edge of node.imports) {
-      const unsupportedReason = unsupportedPreviewReason(edge.specifier)
+      const unsupportedReason = isBrowserPreviewFile(node.file) ? unsupportedPreviewReason(edge.specifier) : null
       if (unsupportedReason) {
         unsupportedPreviewImports.push({ file: node.file, specifier: edge.specifier, reason: unsupportedReason })
       }
@@ -534,6 +534,15 @@ function scoreFileRelevance(
 function unsupportedPreviewReason(specifier: string) {
   const root = packageRoot(specifier)
   return UNSUPPORTED_PREVIEW_IMPORTS.get(specifier) || UNSUPPORTED_PREVIEW_IMPORTS.get(root) || null
+}
+
+function isBrowserPreviewFile(filePath: string) {
+  const normalized = normalizePath(filePath).toLowerCase()
+  if (normalized.startsWith("app/api/")) return false
+  if (normalized.startsWith("lib/services/")) return false
+  if (normalized.startsWith("lib/db/")) return false
+  if (normalized === "prisma/schema.prisma") return false
+  return /\.(tsx|jsx)$/.test(normalized) || /^app\/(?:.+\/)?page\.(ts|js)$/i.test(normalized)
 }
 
 function packageRoot(specifier: string) {

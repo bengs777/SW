@@ -9,7 +9,9 @@ export type ControlledAppType =
   | "landing_auth"
   | "internal_business_tool"
   | "booking_app"
+  | "clinic_management"
   | "lightweight_crm"
+  | "sports_portfolio"
   | "simple_marketplace"
 
 export type ControlledAppBlueprint = {
@@ -108,10 +110,28 @@ const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
     "app/api/bookings/route.ts",
     "lib/services/booking.service.ts",
   ]),
+  clinic_management: blueprint("clinic_management", "Clinic management", "Build a full-stack clinic website and management app with public clinic landing page, admin dashboard, patient registration, appointment scheduling, user roles for admin and staff, Prisma models, route handlers, and safe service boundaries.", [
+    "app/admin/page.tsx",
+    "app/patients/page.tsx",
+    "app/appointments/page.tsx",
+    "app/api/patients/route.ts",
+    "app/api/appointments/route.ts",
+    "app/api/admin/users/route.ts",
+    "lib/services/clinic.service.ts",
+  ]),
   lightweight_crm: blueprint("lightweight_crm", "Lightweight CRM", "Build a lightweight CRM with lead pipeline, customer table, activity timeline, lead API route, Prisma models, and import/export-ready service boundaries.", [
     "app/crm/page.tsx",
     "app/api/leads/route.ts",
     "lib/services/lead.service.ts",
+  ]),
+  sports_portfolio: blueprint("sports_portfolio", "Sports portfolio", "Build a full-stack sports club portfolio website with public profile pages, squad/player showcase, match/news content, admin content management, user roles, Prisma models, route handlers, and service boundaries.", [
+    "app/admin/page.tsx",
+    "app/team/page.tsx",
+    "app/news/page.tsx",
+    "app/api/players/route.ts",
+    "app/api/posts/route.ts",
+    "app/api/admin/users/route.ts",
+    "lib/services/sports.service.ts",
   ]),
   simple_marketplace: blueprint("simple_marketplace", "Simple marketplace", "Build a simple marketplace with storefront, product listing, seller/admin placeholders, product API route, Prisma models, and checkout-safe placeholder flow.", [
     "app/marketplace/page.tsx",
@@ -168,7 +188,18 @@ export function classifyControlledAppType(prompt: string): ControlledAppType {
   }
 
   if (/\b(booking|reservation|appointment|schedule|calendar|slot|reservasi|janji temu|jadwal)\b/.test(text)) {
+    if (/\b(klinik|clinic|healthcare|dokter|doctor|pasien|patient|medical|rekam medis|rumah sakit|hospital)\b/.test(text)) {
+      return "clinic_management"
+    }
     return "booking_app"
+  }
+
+  if (/\b(klinik|clinic|healthcare|dokter|doctor|pasien|patient|medical|rekam medis|rumah sakit|hospital)\b/.test(text)) {
+    return "clinic_management"
+  }
+
+  if (/\b(persib|bola|football|soccer|club|klub|tim|team|pemain|player|match|pertandingan|portfolio|portofolio)\b/.test(text)) {
+    return "sports_portfolio"
   }
 
   if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar|jual|beli|jual beli|shopee|tokopedia|produk)\b/.test(text)) {
@@ -220,6 +251,24 @@ export function buildDynamicSeedDirective(prompt: string) {
       "- Prompt matched commerce/catalog keywords.",
       "- Use open e-commerce catalog seed semantics: products, categories, inventory-safe placeholders, cart or inquiry flow, and seller/admin placeholders.",
       "- Keep payment flow as a safe placeholder unless the user explicitly asks for live checkout integration.",
+    ].join("\n")
+  }
+
+  if (appType === "clinic_management") {
+    return [
+      "DYNAMIC_SEED_STRATEGY:",
+      "- Prompt matched clinic/healthcare keywords.",
+      "- Use clinic management semantics: public clinic page, patient registration, appointment scheduling, admin/staff users, medical-record-safe placeholder data, API routes, Prisma models, and service boundaries.",
+      "- Do not replace clinic intent with generic SaaS metrics or unrelated marketplace content.",
+    ].join("\n")
+  }
+
+  if (appType === "sports_portfolio") {
+    return [
+      "DYNAMIC_SEED_STRATEGY:",
+      "- Prompt matched sports/club/portfolio keywords.",
+      "- Use sports club portfolio semantics: public club profile, players/squad, news or matches, admin content management, user roles, API routes, Prisma models, and service boundaries.",
+      "- Do not replace sports intent with clinic, SaaS, or generic landing content.",
     ].join("\n")
   }
 

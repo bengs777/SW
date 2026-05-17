@@ -11,6 +11,7 @@ export type EditIntent =
   | "runtime_fix"
   | "style_copy_edit"
   | "upload_integration"
+  | "payment_integration"
   | "pricing_page"
 
 export type PartialEditPlan = {
@@ -220,6 +221,10 @@ function classifyEditIntent(prompt: string, mode: string): EditIntent {
     return "upload_integration"
   }
 
+  if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/.test(prompt)) {
+    return "payment_integration"
+  }
+
   if (/\b(schema|prisma|model\s+\w+|database|migration|lead schema|ubah schema)\b/.test(prompt)) {
     return "schema_change"
   }
@@ -271,6 +276,15 @@ function addIntentPaths(input: {
     input.allowedNewPaths.add("app/api/uploads/route.ts")
     input.allowedNewPaths.add("lib/services/storage.service.ts")
     input.allowedNewPaths.add("components/upload-field.tsx")
+    return
+  }
+
+  if (input.intent === "payment_integration") {
+    addExistingMatches([/payment/i, /checkout/i, /billing/i, /^app\/api\/.*webhook.*\/route\.ts$/i, /^\.env\.example$/i, /^lib\/services\//i], 6)
+    input.allowedNewPaths.add("app/api/payments/checkout/route.ts")
+    input.allowedNewPaths.add("app/api/payments/webhook/route.ts")
+    input.allowedNewPaths.add("lib/services/payment.service.ts")
+    input.allowedNewPaths.add(".env.example")
     return
   }
 
@@ -349,8 +363,8 @@ function findPromptMentionedPaths(prompt: string, existingPaths: string[]) {
 }
 
 function shouldIncludeSupportFile(intent: EditIntent, path: string) {
-  if (path === "package.json") return intent === "upload_integration" || intent === "api_change"
-  if (path === ".env.example") return intent === "upload_integration" || intent === "api_change" || intent === "schema_change"
+  if (path === "package.json") return intent === "upload_integration" || intent === "payment_integration" || intent === "api_change"
+  if (path === ".env.example") return intent === "upload_integration" || intent === "payment_integration" || intent === "api_change" || intent === "schema_change"
   if (path === "prisma/schema.prisma") return intent === "schema_change"
   return false
 }
@@ -362,6 +376,7 @@ function isGeneratedSupportFile(path: string, plan: PartialEditPlan) {
 }
 
 function maxSlicesForIntent(intent: EditIntent) {
+  if (intent === "payment_integration") return 6
   if (intent === "schema_change" || intent === "upload_integration") return 4
   if (intent === "api_change" || intent === "pricing_page") return 4
   if (intent === "runtime_fix") return 4
