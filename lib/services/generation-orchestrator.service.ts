@@ -1206,7 +1206,8 @@ export async function executeGenerationJob(
         signal: input.signal,
       })
       assertNotAborted(input.signal)
-      providerLatencyMs += Math.round(performance.now() - providerStartedAt)
+      const sliceDurationMs = Math.round(performance.now() - providerStartedAt)
+      providerLatencyMs += sliceDurationMs
       promptTokens += Math.max(0, response.tokenUsage?.promptTokens || 0)
       completionTokens += Math.max(0, response.tokenUsage?.completionTokens || 0)
       totalTokens += Math.max(0, response.tokenUsage?.totalTokens || 0)
@@ -1237,6 +1238,7 @@ export async function executeGenerationJob(
         Math.min(55, 15 + Math.round(((index + 1) / Math.max(1, plan.filePlan.length)) * 35)),
         {
           target: target.path,
+          sliceDurationMs,
           parseFileCount: parsed.files.length,
           acceptedFileCount: scoped.acceptedFiles.length,
           rejectedFileCount: scoped.rejectedFiles.length,
@@ -1261,6 +1263,7 @@ export async function executeGenerationJob(
             target: target.path,
             sliceIndex: index + 1,
             sliceTotal: plan.filePlan.length,
+            sliceDurationMs,
             acceptedFileCount: scoped.acceptedFiles.length,
             rejectedFileCount: scoped.rejectedFiles.length,
             taskOperationCount: parsed.taskGraph?.operations.length || 0,
@@ -1270,6 +1273,14 @@ export async function executeGenerationJob(
           },
         })
       }
+
+      log("info", "generation_slice_completed", {
+        jobId: input.jobId,
+        sliceIndex: index + 1,
+        sliceTotal: plan.filePlan.length,
+        target: target.path,
+        durationMs: sliceDurationMs,
+      })
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)

@@ -115,7 +115,7 @@ export const env = {
     Math.round(getEnvNumber(86_400_000, "PROVIDER_STATUS_CACHE_TTL_MS"))
   ),
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
-  aiQueueTimeoutMs: Math.max(10_000, Math.round(getEnvNumber(180_000, "AI_QUEUE_TIMEOUT_MS"))),
+  aiQueueTimeoutMs: Math.max(10_000, Math.round(getEnvNumber(120_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || "https://openrouter.ai/api/v1"),
   openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),

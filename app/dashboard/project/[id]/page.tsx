@@ -32,7 +32,7 @@ import {
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
-const GENERATE_CLIENT_TIMEOUT_MS = 180_000
+const GENERATE_CLIENT_TIMEOUT_MS = 120_000
 const COLLABORATION_MODE_INSTRUCTIONS: Record<PromptLanguage, Record<CollaborationMode, string>> = {
   id: {
     build:

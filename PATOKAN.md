@@ -142,6 +142,8 @@ Konfigurasi API wajib:
 *   **Model**: `deepseek/deepseek-v4-flash` via `OPENROUTER_DEEPSEEK_FLASH_V4_MODEL`.
 *   **Temperature**: `0.2` untuk output lebih deterministik.
 *   **Max tokens**: `4096` per request agar tidak mengulang dan timeout.
+*   **Provider timeout**: slice cepat `45_000ms`, slice fullstack/builder `90_000ms`, total job `120_000ms`.
+*   **Vercel Pro route**: endpoint job generation wajib `export const maxDuration = 300`; Hobby tetap wajib selesai di bawah batas platform.
 *   **Reasoning**: `include_reasoning = false`; jangan kirim `reasoning_effort: high`.
 *   **Cache**: aktifkan header OpenRouter response cache untuk request identik. Gunakan `cache_control` hanya untuk provider yang mendukung prompt caching eksplisit.
 *   **Output**: JSON task graph atau daftar file terstruktur, tanpa markdown dan tanpa teks di luar JSON.
