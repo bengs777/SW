@@ -1870,12 +1870,32 @@ export async function executeGenerationJob(
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
     })
+    log("info", "files_written", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      historyId: saveResult.historyId,
+      fileDiff: saveResult.fileDiff,
+      manifest: saveResult.manifest,
+    })
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
       type: "job.files.persisted",
       stage: "persisting",
       status: "running",
       message: "Project filesystem persisted",
+      data: {
+        source: "persisted",
+        historyId: saveResult.historyId,
+        fileDiff: saveResult.fileDiff,
+        manifest: saveResult.manifest,
+      },
+    })
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "files_written",
+      stage: "persisting",
+      status: "running",
+      message: "Files written to project filesystem",
       data: {
         source: "persisted",
         historyId: saveResult.historyId,
@@ -1893,6 +1913,27 @@ export async function executeGenerationJob(
     await GenerationJobService.update(input.jobId, {
       metrics,
       previewUrl: validation.previewUrl,
+    })
+    log("info", "preview_ready", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      historyId: saveResult.historyId,
+      previewUrl: validation.previewUrl,
+      previewStatus: validation.previewStatus,
+      fileCount: workingFiles.length,
+    })
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "preview_ready",
+      stage: "completed",
+      status: "running",
+      message: "Preview artifacts ready",
+      data: {
+        previewUrl: validation.previewUrl,
+        historyId: saveResult.historyId,
+        fileCount: workingFiles.length,
+        previewStatus: validation.previewStatus,
+      },
     })
     await recordGenerationQuality({
       jobId: input.jobId,

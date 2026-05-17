@@ -49,6 +49,13 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       requestHash: payload.requestHash,
       traceId: payload.traceId,
     })
+    log("info", "worker_started", {
+      jobId: payload.jobId,
+      queueJobId: resolvedQueueJobId,
+      projectId: payload.projectId,
+      userId: payload.userId,
+      traceId: payload.traceId,
+    })
 
     const execution = executeGenerationJob(
       {
@@ -99,6 +106,15 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       userId: payload.userId,
       traceId: payload.traceId,
       durationMs: Date.now() - startedAt,
+    })
+    log("info", "worker_completed", {
+      jobId: payload.jobId,
+      queueJobId: resolvedQueueJobId,
+      projectId: payload.projectId,
+      userId: payload.userId,
+      traceId: payload.traceId,
+      durationMs: Date.now() - startedAt,
+      executionMode: String(resolvedQueueJobId).startsWith("serverless:") ? "serverless_fallback" : "queue",
     })
   } catch (error) {
     const isTimeout = timeoutTriggered || error instanceof GenerationJobTimeoutError

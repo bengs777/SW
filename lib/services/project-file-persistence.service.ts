@@ -78,7 +78,9 @@ export class ProjectFilePersistenceService {
         })
 
         log("info", "files_written", {
+          jobId: opts?.generationJobId || null,
           projectId,
+          historyId: createdHistory.id,
           fileDiff: filesystemWrite.fileDiff,
           manifest: filesystemWrite.manifest,
         })

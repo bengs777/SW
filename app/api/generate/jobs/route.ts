@@ -536,14 +536,26 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    const queueJob = shouldUseServerlessFallback
-      ? null
-      : await enqueueGenerationTask(
+    let queueJob: Awaited<ReturnType<typeof enqueueGenerationTask>> | null = null
+    if (!shouldUseServerlessFallback) {
+      try {
+        queueJob = await enqueueGenerationTask(
           generationPayload,
           {
             jobId: queueId,
           }
         )
+      } catch (error) {
+        log("warn", "generation_queue_enqueue_failed_falling_back", {
+          requestId,
+          jobId: job.id,
+          queueId,
+          error: error instanceof Error ? error.message : String(error),
+          code: error && typeof error === "object" && "code" in error ? String(error.code) : null,
+          fallback: "serverless",
+        })
+      }
+    }
 
     if (!queueJob) {
       fallbackScheduled = true

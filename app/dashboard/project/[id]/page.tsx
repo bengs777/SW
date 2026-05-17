@@ -478,6 +478,30 @@ export default function EditorPage() {
     }))
   }, [projectId, pushErrorLog, refreshProjectState])
 
+  const applyPreviewReady = useCallback((rawPayload: unknown) => {
+    const payload = rawPayload && typeof rawPayload === "object"
+      ? rawPayload as { data?: { previewUrl?: string | null; historyId?: string | null; fileCount?: number | null; previewStatus?: string | null } }
+      : null
+    const data = payload?.data || {}
+
+    console.info(JSON.stringify({
+      level: "info",
+      msg: "preview_ready_received",
+      projectId,
+      previewUrl: data.previewUrl || null,
+      historyId: data.historyId || null,
+      fileCount: data.fileCount ?? null,
+      previewStatus: data.previewStatus || null,
+    }))
+
+    void refreshProjectState("generation-completed").then(() => {
+      setActivePreviewTab("preview")
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : "Gagal refresh preview setelah file siap."
+      pushErrorLog("project", message)
+    })
+  }, [projectId, pushErrorLog, refreshProjectState])
+
   const applyJobProgress = useCallback((job: {
     id: string
     stage: string
@@ -645,6 +669,28 @@ export default function EditorPage() {
       }
     })
 
+    stream.addEventListener("files_written", (event) => {
+      try {
+        recordEventId(event as MessageEvent)
+        const payload = JSON.parse((event as MessageEvent).data)
+        applyStreamedGeneratedFiles(payload)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gagal membaca event files_written dari stream."
+        pushErrorLog("project", message)
+      }
+    })
+
+    stream.addEventListener("preview_ready", (event) => {
+      try {
+        recordEventId(event as MessageEvent)
+        const payload = JSON.parse((event as MessageEvent).data)
+        applyPreviewReady(payload)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gagal membaca event preview_ready dari stream."
+        pushErrorLog("project", message)
+      }
+    })
+
     stream.onerror = () => {
       stream.close()
       if (activeGenerationStreamRef.current === stream) {
@@ -672,7 +718,7 @@ export default function EditorPage() {
         startGenerationStream(jobId, nextAttempt)
       }, delay)
     }
-  }, [applyJobProgress, applyStreamedGeneratedFiles, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
+  }, [applyJobProgress, applyPreviewReady, applyStreamedGeneratedFiles, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
 
   useEffect(() => {
     return () => {

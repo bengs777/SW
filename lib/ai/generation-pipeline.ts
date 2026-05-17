@@ -140,7 +140,7 @@ const SIMPLE_UI_RE =
   /\b(hero|landing|section|tailwind|component|button|card|copy|headline|pricing section|testimonial|navbar|footer|ubah warna|ganti teks|format|autocomplete)\b/i
 const DASHBOARD_RE = /\b(dashboard|admin|analytics|chart|metric|table|kanban|workspace|panel)\b/i
 const FULLSTACK_RE =
-  /\b(fullstack|full-stack|saas|crud|database|postgres|postgresql|prisma|auth|login|register|api route|backend|webhook|payment|stripe|pakasir|role|rbac)\b/i
+  /\b(full\s*stack|fullstack|full-stack|saas|crud|database|postgres|postgresql|prisma|auth|login|register|api route|route handler|backend|webhook|payment|stripe|pakasir|role|rbac|bpjs|integrasi|integration|pengelola|dokter|pasien)\b/i
 const ARCH_RE = /\b(architecture|arsitektur|design system|multi-file|multi module|plan|roadmap|schema|data model|refactor besar)\b/i
 const REPAIR_RE = /\b(fix|repair|perbaiki|error|bug|crash|failed|gagal|module not found|cannot find module|jsx-runtime|runtime|stack trace)\b/i
 const REFACTOR_RE = /\b(refactor|rewrite|migrate|cleanup|restructure|split files|large edit|ubah struktur)\b/i
@@ -173,8 +173,8 @@ export function classifyPrompt(
   if (PREMIUM_REPAIR_RE.test(text) && REPAIR_RE.test(text)) return "runtime_debug"
   if (REPAIR_RE.test(text)) return "repair"
   if (REFACTOR_RE.test(text)) return "refactor"
-  if (ARCH_RE.test(text)) return "architecture"
   if (FULLSTACK_RE.test(text)) return "fullstack_app"
+  if (ARCH_RE.test(text)) return "architecture"
   if (DASHBOARD_RE.test(text)) return "dashboard"
   if (COMPONENT_EDIT_RE.test(text)) return "component_edit"
   if (SIMPLE_UI_RE.test(text)) return "simple_ui"
