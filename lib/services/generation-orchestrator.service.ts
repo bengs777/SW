@@ -89,8 +89,8 @@ type ExecuteGenerationJobDeps = {
 
 const MAX_REPAIR_ATTEMPTS = 1
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
-const PRODUCTION_FULLSTACK_FILE_LIMIT = 14
-const PRODUCTION_FULLSTACK_BATCH_SIZE = 4
+const PRODUCTION_FULLSTACK_FILE_LIMIT = 24
+const PRODUCTION_FULLSTACK_BATCH_SIZE = 6
 
 type ValidationLifecycleStep =
   | "normalize"
@@ -243,9 +243,9 @@ function assertNotAborted(signal?: AbortSignal) {
 function shouldUseProductionFullStackMode(prompt: string, input?: { collaborationMode?: string | null }) {
   const text = `${prompt}\n${input?.collaborationMode || ""}`.toLowerCase()
   const explicitFullStack =
-    /\b(full\s*stack|fullstack|backend|database|db|prisma|postgres|api route|route handler|crud|auth|login|register|role|rbac|admin|pengelola|user|payment|checkout|webhook|integrasi|integration)\b/i.test(text)
+    /\b(full\s*stack|fullstack|backend|database|db|prisma|postgres|api route|route handler|crud|auth|login|register|role|rbac|admin|pengelola|user|payment|checkout|webhook|integrasi|integration|bpjs|klinik|clinic|rumah sakit|hospital|pasien|patient|dokter|doctor|appointment|janji temu|jadwal)\b/i.test(text)
   const explicitBuild =
-    /\b(buat|bikin|generate|build|jadikan|create|website|web|app|aplikasi)\b/i.test(text)
+    /\b(buat|bikin|generate|build|jadikan|create|website|web|app|aplikasi|desain|rancang|struktur)\b/i.test(text)
 
   return explicitFullStack && explicitBuild
 }
@@ -277,6 +277,26 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
   if (/\b(admin|pengelola|staff|role|rbac|user|login|auth)\b/i.test(text)) {
     required.add("app/admin/page.tsx")
     required.add("app/api/admin/users/route.ts")
+    required.add("app/api/auth/route.ts")
+  }
+
+  if (/\b(klinik|clinic|rumah sakit|hospital|pasien|patient|dokter|doctor|bpjs|appointment|janji temu|jadwal)\b/i.test(text)) {
+    required.add("app/dashboard/page.tsx")
+    required.add("app/patients/page.tsx")
+    required.add("app/doctors/page.tsx")
+    required.add("app/appointments/page.tsx")
+    required.add("app/api/patients/route.ts")
+    required.add("app/api/doctors/route.ts")
+    required.add("app/api/appointments/route.ts")
+    required.add("app/api/auth/route.ts")
+    required.add("lib/services/clinic.service.ts")
+    required.add("components/clinic-dashboard.tsx")
+    required.add("hooks/use-clinic-data.ts")
+  }
+
+  if (/\b(bpjs)\b/i.test(text)) {
+    required.add("app/api/integrations/bpjs/route.ts")
+    required.add("lib/services/bpjs.service.ts")
   }
 
   if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/i.test(text)) {
@@ -609,15 +629,25 @@ function buildSlicePrompt(input: {
     productionFullStack
       ? `- Production pass budget: this job may create up to ${input.plan.maxFilesThisPass} files across batched slices.`
       : `- Preview-first budget: the full generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files for the first pass.`,
-    batchedFoundation
-      ? `- For this provider call, return at most ${targets.length} create/modify operations, one per listed target file.`
-      : "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
+    productionFullStack && batchedFoundation
+      ? `- For this provider call, return exactly ${targets.length} create/modify operations, one per listed target file. Do not skip API, Prisma, service, hook, or page targets.`
+      : batchedFoundation
+        ? `- For this provider call, return at most ${targets.length} create/modify operations, one per listed target file.`
+        : productionFullStack
+          ? "- For this provider call, return the requested file and any direct imports required to keep this production slice buildable."
+          : "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
     productionFullStack
       ? "- Use the existing locked stack. You MAY use Prisma schema, server-only service files, Route Handlers, NextAuth-compatible placeholders, and payment/API integration placeholders when the prompt asks for them."
       : "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
     productionFullStack
       ? "- Do not use UI-only dummy output. If real external credentials are not available, create server-side integration boundaries, env placeholders, zod validation, and clear TODO-safe service functions instead of fake-only UI."
       : "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
+    productionFullStack
+      ? "- MOCK_DATA_FORBIDDEN_IN_UI: do not create const dummy*, mock*, fake*, or sample* arrays in app pages/components. Pages must call local service/API boundaries or render empty/loading/error states backed by typed service contracts."
+      : "- Preview mock data is allowed only inside the generated preview file.",
+    productionFullStack && input.plan.appType === "clinic_management"
+      ? "- CLINIC_FULLSTACK_REQUIRED: include dashboard, patients, doctors, appointments, auth/roles, Prisma schema, clinic service, BPJS integration service/route, and a hook or component boundary as planned."
+      : "- Follow the controlled app blueprint exactly.",
     "- Keep each returned file under 4000 output tokens when possible.",
     "- Stop after the requested slice; do not create extra support files speculatively.",
     "- Return ONLY a JSON object with taskGraph; include changed files as taskGraph.operations.",
@@ -700,6 +730,54 @@ function extractFilePathsFromError(message: string) {
 
 function normalizePath(value: string) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function buildAppPlan(input: { prompt: string; plan: GenerationPlan }) {
+  const text = input.prompt.toLowerCase()
+  const rolePatterns: Array<[string, RegExp]> = [
+    ["admin", /\b(admin)\b/i],
+    ["dokter", /\b(dokter|doctor)\b/i],
+    ["pengelola", /\b(pengelola|staff)\b/i],
+    ["user", /\b(user|pasien|patient)\b/i],
+  ]
+  const roles = rolePatterns
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([role]) => role)
+  const integrationPatterns: Array<[string, RegExp]> = [
+    ["bpjs", /\bbpjs\b/i],
+  ]
+  const integrations = integrationPatterns
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([integration]) => integration)
+
+  return {
+    appType: input.plan.appType,
+    objective: input.plan.objective,
+    productionMode: input.plan.productionMode,
+    database: input.plan.productionMode === "production_fullstack",
+    authentication: /\b(auth|login|register|role|rbac|admin|user|pengelola|dokter|pasien|patient)\b/i.test(text),
+    api: input.plan.productionMode === "production_fullstack",
+    roles: Array.from(new Set(roles)),
+    integrations: Array.from(new Set(integrations)),
+    fileCount: input.plan.filePlan.length,
+    generatedFiles: input.plan.filePlan.map((file) => file.path),
+  }
+}
+
+function summarizeGeneratedManifest(files: GeneratedFile[]) {
+  return files.map((file) => normalizePath(file.path)).sort()
+}
+
+function findProductionMockArtifacts(files: GeneratedFile[]) {
+  return files
+    .map((file) => ({
+      path: normalizePath(file.path),
+      content: String(file.content || ""),
+    }))
+    .filter((file) => /^(app\/(?:.+\/)?page\.(tsx|jsx|ts|js)|components\/.+\.(tsx|jsx|ts|js))$/i.test(file.path))
+    .filter((file) => /\b(?:const|let|var)\s+(?:dummy|mock|fake|sample)[A-Za-z0-9_]*\s*=/.test(file.content))
+    .map((file) => file.path)
+    .slice(0, 12)
 }
 
 function shouldRequireFullStackCoverage(plan: GenerationPlan) {
@@ -836,6 +914,13 @@ async function runValidationLifecycle(input: {
     staticFailures.push(`Missing required full-stack categories: ${fullstack.missingCategories.join(", ")}`)
   }
 
+  const mockArtifacts = input.plan.productionMode === "production_fullstack"
+    ? findProductionMockArtifacts(files)
+    : []
+  if (mockArtifacts.length > 0) {
+    staticFailures.push(`Production full-stack files contain UI-level mock data: ${mockArtifacts.join(", ")}`)
+  }
+
   if (!blueprintValidation.ok) {
     if (blueprintValidation.missingRequiredFiles.length > 0) {
       staticFailures.push(`Missing blueprint files: ${blueprintValidation.missingRequiredFiles.join(", ")}`)
@@ -856,6 +941,7 @@ async function runValidationLifecycle(input: {
         missingRequiredFiles: blueprintValidation.missingRequiredFiles,
         forbiddenFiles: blueprintValidation.forbiddenFiles,
       },
+      mockArtifacts,
       missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
       unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
     }
@@ -881,6 +967,7 @@ async function runValidationLifecycle(input: {
     missingCategories: fullstack.missingCategories,
     fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
     blueprintRequiredFiles: input.blueprint.requiredFiles.length,
+    mockArtifacts,
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
   })
@@ -1507,6 +1594,20 @@ export async function executeGenerationJob(
       previewContext: input.previewContext,
     })
     blueprint = getControlledAppBlueprint(plan.appType)
+    const appPlan = buildAppPlan({ prompt: input.prompt, plan })
+    log("info", "app_plan", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      appPlan,
+    })
+    log("info", "generation_manifest_planned", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      classification: plan.objective,
+      productionMode: plan.productionMode,
+      fileCount: plan.filePlan.length,
+      generatedFiles: plan.filePlan.map((file) => file.path),
+    })
     await GenerationJobService.transition(input.jobId, {
       type: "job.plan.ready",
       status: "running",
@@ -1532,6 +1633,7 @@ export async function executeGenerationJob(
           allowedNewPaths: plan.editPlan.allowedNewPaths,
         },
         filePlan: plan.filePlan,
+        appPlan,
       },
     })
 
@@ -1807,6 +1909,29 @@ export async function executeGenerationJob(
     }
 
     workingFiles = validation.files
+    const generatedFilesManifest = summarizeGeneratedManifest(workingFiles)
+    log("info", "generation_manifest_completed", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      classification: plan.objective,
+      productionMode: plan.productionMode,
+      fileCount: generatedFilesManifest.length,
+      generatedFiles: generatedFilesManifest,
+    })
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "generation.manifest.completed",
+      stage: "validating",
+      status: "running",
+      message: "Generated artifact manifest completed",
+      data: {
+        classification: plan.objective,
+        productionMode: plan.productionMode,
+        fileCount: generatedFilesManifest.length,
+        generatedFiles: generatedFilesManifest,
+        appPlan,
+      },
+    })
     metrics.previewStatus = validation.previewStatus
     metrics.previewError = validation.failure?.message || null
     metrics.validationLifecycle = {

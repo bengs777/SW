@@ -96,8 +96,8 @@ function staticChecks() {
     check(
       "ai.production-fullstack-mode",
       /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
-        /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*14/.test(generationOrchestrator) &&
-        /PRODUCTION_FULLSTACK_BATCH_SIZE\s*=\s*4/.test(generationOrchestrator) &&
+        /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*24/.test(generationOrchestrator) &&
+        /PRODUCTION_FULLSTACK_BATCH_SIZE\s*=\s*6/.test(generationOrchestrator) &&
         /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator),
       "Explicit full-stack/admin/API/payment prompts use a production full-stack orchestration mode"
     ),
