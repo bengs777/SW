@@ -2781,6 +2781,9 @@ export async function executeGenerationJob(
         generatedFiles: summarizeGeneratedManifest(workingFiles),
       })
     } else {
+      if (plan.editPlan.mode === "partial") {
+        console.log("edit_patch_started")
+      }
       const usePreviewFoundationBatch =
         plan.productionMode !== "production_fullstack" &&
         plan.editPlan.mode === "full" &&
@@ -2969,6 +2972,9 @@ export async function executeGenerationJob(
         durationMs: sliceDurationMs,
       })
       }
+    }
+    if (plan.editPlan.mode === "partial") {
+      console.log("edit_patch_completed")
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)

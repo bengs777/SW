@@ -80,6 +80,7 @@ export async function GET(
       const close = () => {
         if (closed) return
         closed = true
+        console.log("sse_closed")
         controller.close()
       }
 

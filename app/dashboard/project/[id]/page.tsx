@@ -32,7 +32,17 @@ import {
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
-const GENERATE_BACKEND_TIMEOUT_MS = 600_000
+
+function readGenerationTimeoutMs() {
+  const value = Number(
+    process.env.NEXT_PUBLIC_SWIFT_GENERATION_JOB_TIMEOUT_MS ||
+      process.env.SWIFT_GENERATION_JOB_TIMEOUT_MS ||
+      600000
+  )
+  return Number.isFinite(value) ? Math.max(10_000, value) : 600000
+}
+
+const GENERATE_BACKEND_TIMEOUT_MS = readGenerationTimeoutMs()
 const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
 const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
 
@@ -560,6 +570,7 @@ export default function EditorPage() {
           setRuntimePreviewUrl(job.previewUrl.trim())
         }
         if (["completed", "failed", "cancelled"].includes(job.status)) {
+          console.log("sse_closed")
           stream.close()
           clearGenerateDeadline()
           activeGenerateControllerRef.current = null
@@ -709,6 +720,7 @@ export default function EditorPage() {
     })
 
     stream.onerror = () => {
+      console.log("sse_closed")
       stream.close()
       if (activeGenerationStreamRef.current === stream) {
         activeGenerationStreamRef.current = null
@@ -1259,6 +1271,9 @@ export default function EditorPage() {
       },
     }
     const workPlan = buildClientWorkPlan(trimmedContent, collaborationMode, promptLanguage)
+    if (collaborationMode === "edit") {
+      console.log("edit_mode_started")
+    }
 
     setMessages((prev) => [...prev, userMessage])
     setIsGenerating(true)
@@ -1309,6 +1324,7 @@ export default function EditorPage() {
     const generateController = new AbortController()
     activeGenerateControllerRef.current = generateController
     activeGenerateTimeoutRef.current = window.setTimeout(() => {
+      console.log("client_timeout_triggered")
       const jobId = activeGenerationJobIdRef.current
       if (jobId) {
         void fetch(`/api/generate/jobs/${jobId}/cancel`, {
