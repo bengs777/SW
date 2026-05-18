@@ -545,7 +545,16 @@ async function main() {
     (item) => item.status === "fulfilled" && item.value.manifest.sha256 === buildManifest(newerFiles).sha256
   )
   assert(staleRejected, "Expected stale older generation to be rejected")
-  assert(newerPersisted, "Expected newer generation to persist successfully")
+  assert(
+    newerPersisted,
+    `Expected newer generation to persist successfully: ${JSON.stringify(
+      persistenceRace.map((item) =>
+        item.status === "fulfilled"
+          ? { status: item.status, manifest: item.value.manifest.sha256 }
+          : { status: item.status, reason: item.reason?.message || String(item.reason) }
+      )
+    )}`
+  )
 
   const finalFiles = await prisma.projectFile.findMany({
     where: { projectId: project.id },

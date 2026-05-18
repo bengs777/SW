@@ -19,10 +19,10 @@
     "deploy:readiness": "node scripts/deploy-readiness.js",
     "db:push:local": "node scripts/db-push.js local",
     "db:push:prod": "node scripts/db-push.js prod",
-    "db:generate": "prisma generate",
+    "db:generate": "node scripts/prisma-generate.js",
     "seed:developer": "node scripts/seed-developer-account.mjs",
     "audit:fullstack": "node scripts/audit_fullstack_generation.js",
-    "postinstall": "prisma generate"
+    "postinstall": "node scripts/prisma-generate.js"
   },
   "dependencies": {
     "@babel/parser": "^7.29.3",

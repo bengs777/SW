@@ -74,7 +74,8 @@ function main() {
 
   assert(
     "path.allowed-roots",
-    /ALLOWED_ROOTS\s*=\s*\["app\/",\s*"components\/",\s*"lib\/",\s*"prisma\/",\s*"public\/"\]/.test(filesystemService) &&
+    /ALLOWED_ROOTS\s*=\s*\["app\/",\s*"components\/",\s*"hooks\/",\s*"lib\/",\s*"prisma\/",\s*"public\/",\s*"services\/"\]/.test(filesystemService) &&
+      /ALLOWED_ROOTS\s*=\s*\["app\/",\s*"components\/",\s*"hooks\/",\s*"lib\/",\s*"prisma\/",\s*"public\/",\s*"services\/"\]/.test(taskGraphExecutor) &&
       /Generated file path is outside allowed project roots/.test(filesystemService) &&
       /Generated file path is outside allowed project roots/.test(taskGraphExecutor),
     "filesystem and executor reject paths outside project roots"
