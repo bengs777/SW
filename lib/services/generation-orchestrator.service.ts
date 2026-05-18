@@ -89,8 +89,8 @@ type ExecuteGenerationJobDeps = {
 
 const MAX_REPAIR_ATTEMPTS = 1
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
-const PRODUCTION_FULLSTACK_FILE_LIMIT = 24
-const PRODUCTION_FULLSTACK_BATCH_SIZE = 6
+const PRODUCTION_FULLSTACK_FILE_LIMIT = 40
+const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
 
 type ValidationLifecycleStep =
   | "normalize"
@@ -289,14 +289,17 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
     required.add("app/api/doctors/route.ts")
     required.add("app/api/appointments/route.ts")
     required.add("app/api/auth/route.ts")
+    required.add("app/api/bpjs/route.ts")
     required.add("lib/services/clinic.service.ts")
     required.add("components/clinic-dashboard.tsx")
     required.add("hooks/use-clinic-data.ts")
   }
 
   if (/\b(bpjs)\b/i.test(text)) {
+    required.add("app/api/bpjs/route.ts")
     required.add("app/api/integrations/bpjs/route.ts")
     required.add("lib/services/bpjs.service.ts")
+    required.add("services/bpjs.ts")
   }
 
   if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/i.test(text)) {
@@ -769,15 +772,94 @@ function summarizeGeneratedManifest(files: GeneratedFile[]) {
 }
 
 function findProductionMockArtifacts(files: GeneratedFile[]) {
+  const bannedMockPattern = /\b(?:const|let|var)\s+[A-Za-z0-9_]*(?:dummy|mock|sample|placeholder|fake)[A-Za-z0-9_]*\s*=/i
+  const suspiciousRecordPattern =
+    /(?:id\s*:\s*["']?1["']?[\s\S]{0,240}(?:name|nama)\s*:)|(?:(?:name|nama)\s*:[\s\S]{0,240}id\s*:\s*["']?1["']?)/i
+
   return files
     .map((file) => ({
       path: normalizePath(file.path),
       content: String(file.content || ""),
     }))
     .filter((file) => /^(app\/(?:.+\/)?page\.(tsx|jsx|ts|js)|components\/.+\.(tsx|jsx|ts|js))$/i.test(file.path))
-    .filter((file) => /\b(?:const|let|var)\s+(?:dummy|mock|fake|sample)[A-Za-z0-9_]*\s*=/.test(file.content))
+    .filter((file) => bannedMockPattern.test(file.content) || suspiciousRecordPattern.test(file.content))
     .map((file) => file.path)
     .slice(0, 12)
+}
+
+function parsePackageJsonFile(files: GeneratedFile[]) {
+  const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
+  if (!packageFile) {
+    return {
+      exists: false,
+      dependencies: {} as Record<string, string>,
+      devDependencies: {} as Record<string, string>,
+      parseError: null as string | null,
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(String(packageFile.content || "{}")) as {
+      dependencies?: Record<string, unknown>
+      devDependencies?: Record<string, unknown>
+    }
+    return {
+      exists: true,
+      dependencies: normalizePackageRecord(parsed.dependencies),
+      devDependencies: normalizePackageRecord(parsed.devDependencies),
+      parseError: null,
+    }
+  } catch (error) {
+    return {
+      exists: true,
+      dependencies: {} as Record<string, string>,
+      devDependencies: {} as Record<string, string>,
+      parseError: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function normalizePackageRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([name, version]) => name.trim() && typeof version === "string" && version.trim())
+      .map(([name, version]) => [name.trim(), String(version).trim()])
+  )
+}
+
+function assertDependenciesForBlueprint(files: GeneratedFile[], blueprint: ControlledAppBlueprint) {
+  const packageJson = parsePackageJsonFile(files)
+  const paths = new Set(files.map((file) => normalizePath(file.path)))
+  const allDeps = {
+    ...packageJson.dependencies,
+    ...packageJson.devDependencies,
+  }
+  const required = new Set<string>(["next", "react", "react-dom", "typescript"])
+
+  if (paths.has("prisma/schema.prisma") || blueprint.requiredFiles.some((file) => normalizePath(file) === "prisma/schema.prisma")) {
+    required.add("@prisma/client")
+    required.add("prisma")
+  }
+
+  if (
+    paths.has("app/api/auth/route.ts") ||
+    blueprint.requiredFiles.some((file) => normalizePath(file) === "app/api/auth/route.ts")
+  ) {
+    required.add("next-auth")
+  }
+
+  if (Array.from(paths).some((path) => path.startsWith("app/api/")) || blueprint.requiredFiles.some((file) => normalizePath(file).startsWith("app/api/"))) {
+    required.add("zod")
+  }
+
+  const missing = Array.from(required).filter((name) => !allDeps[name]).sort()
+  return {
+    ok: packageJson.exists && !packageJson.parseError && missing.length === 0,
+    missing,
+    parseError: packageJson.parseError,
+    required: Array.from(required).sort(),
+  }
 }
 
 function shouldRequireFullStackCoverage(plan: GenerationPlan) {
@@ -899,6 +981,9 @@ async function runValidationLifecycle(input: {
   const blueprintValidation = validateBlueprintConstraints(files, input.blueprint, {
     requiredFiles: partialRequiredFiles,
   })
+  const dependencyContract = input.plan.productionMode === "production_fullstack"
+    ? assertDependenciesForBlueprint(files, input.blueprint)
+    : { ok: true, missing: [] as string[], parseError: null as string | null, required: [] as string[] }
   const staticFailures: string[] = []
   const requiresFullStackCoverage = !isPreviewFoundationPass && shouldRequireFullStackCoverage(input.plan)
 
@@ -930,6 +1015,15 @@ async function runValidationLifecycle(input: {
     }
   }
 
+  if (!dependencyContract.ok) {
+    if (dependencyContract.parseError) {
+      staticFailures.push(`package.json parse error: ${dependencyContract.parseError}`)
+    }
+    if (dependencyContract.missing.length > 0) {
+      staticFailures.push(`Missing blueprint dependencies: ${dependencyContract.missing.join(", ")}`)
+    }
+  }
+
   if (staticFailures.length > 0) {
     const message = staticFailures.join("; ")
     const data = {
@@ -941,6 +1035,7 @@ async function runValidationLifecycle(input: {
         missingRequiredFiles: blueprintValidation.missingRequiredFiles,
         forbiddenFiles: blueprintValidation.forbiddenFiles,
       },
+      dependencies: dependencyContract,
       mockArtifacts,
       missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
       unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
@@ -967,6 +1062,8 @@ async function runValidationLifecycle(input: {
     missingCategories: fullstack.missingCategories,
     fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
     blueprintRequiredFiles: input.blueprint.requiredFiles.length,
+    requiredFilesMissing: blueprintValidation.missingRequiredFiles,
+    dependencies: dependencyContract,
     mockArtifacts,
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
@@ -1007,7 +1104,7 @@ async function runValidationLifecycle(input: {
     const logs = Array.isArray(preview.logs) ? preview.logs : []
     if (preview.error || preview.status !== "running") {
       const message = preview.error || `Sandbox service did not reach running state (${preview.status || "unknown"})`
-      if (isProductionVercel()) {
+      if (isProductionVercel() && input.plan.productionMode !== "production_fullstack") {
         recordStep("build", "skipped", "advisory", stepStartedAt, message, {
           sandboxStatus: preview.status || null,
           logs: logs.slice(-80),
@@ -1071,6 +1168,24 @@ async function runValidationLifecycle(input: {
       previewStatus: preview.status || null,
       steps,
       sandboxValidation: [],
+    }
+  }
+
+  if (isProductionVercel() && input.plan.productionMode === "production_fullstack") {
+    const message = "Production full-stack generation requires SANDBOX_SERVICE_URL so generated artifacts can pass install, build, and runtime smoke before persistence."
+    await input.emit("building", "Runtime sandbox required for production full-stack artifacts", 84)
+    recordStep("build", "failed", "required", stepStartedAt, message)
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: null,
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "build",
+        message,
+      },
     }
   }
 
@@ -1603,7 +1718,8 @@ export async function executeGenerationJob(
     log("info", "generation_manifest_planned", {
       jobId: input.jobId,
       projectId: input.projectId,
-      classification: plan.objective,
+      classification: plan.productionMode,
+      promptClassification: plan.objective,
       productionMode: plan.productionMode,
       fileCount: plan.filePlan.length,
       generatedFiles: plan.filePlan.map((file) => file.path),
@@ -1910,13 +2026,18 @@ export async function executeGenerationJob(
 
     workingFiles = validation.files
     const generatedFilesManifest = summarizeGeneratedManifest(workingFiles)
+    const completedBlueprintValidation = validateBlueprintConstraints(workingFiles, blueprint, {
+      requiredFiles: plan.editPlan.mode === "partial" ? plan.filePlan.map((file) => file.path) : blueprint.requiredFiles,
+    })
     log("info", "generation_manifest_completed", {
       jobId: input.jobId,
       projectId: input.projectId,
-      classification: plan.objective,
+      classification: plan.productionMode,
+      promptClassification: plan.objective,
       productionMode: plan.productionMode,
       fileCount: generatedFilesManifest.length,
       generatedFiles: generatedFilesManifest,
+      requiredFilesMissing: completedBlueprintValidation.missingRequiredFiles,
     })
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
@@ -1925,10 +2046,12 @@ export async function executeGenerationJob(
       status: "running",
       message: "Generated artifact manifest completed",
       data: {
-        classification: plan.objective,
+        classification: plan.productionMode,
+        promptClassification: plan.objective,
         productionMode: plan.productionMode,
         fileCount: generatedFilesManifest.length,
         generatedFiles: generatedFilesManifest,
+        requiredFilesMissing: completedBlueprintValidation.missingRequiredFiles,
         appPlan,
       },
     })

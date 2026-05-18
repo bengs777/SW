@@ -83,7 +83,7 @@ assert(
   "explicit fullstack uses production mode",
     /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator) &&
     /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
-    /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*24/.test(generationOrchestrator) &&
+    /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*40/.test(generationOrchestrator) &&
     /Production pass budget/.test(generationOrchestrator),
   "full-stack/admin/database/payment prompts must not be forced through the 3-file preview contract"
 )
