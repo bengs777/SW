@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useMemo } from "react"
 import dynamic from "next/dynamic"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
@@ -20,6 +20,7 @@ import {
   Square,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { buildBrowserPreviewFiles } from "@/lib/preview/sanitizer"
 import type { GeneratedFile } from "@/lib/types"
 import type { GenerationProgress } from "@/app/dashboard/project/[id]/page"
 
@@ -150,6 +151,10 @@ export function PreviewPanel({
   }
   const activePath = files[activeFileIndex]?.path || ""
   const isActiveFileLocked = isGenerating && streamLockedPaths.includes(normalizePath(activePath))
+  const browserPreviewFiles = useMemo(
+    () => buildBrowserPreviewFiles(previewFiles ?? files),
+    [files, previewFiles]
+  )
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-muted/30">
@@ -291,7 +296,7 @@ export function PreviewPanel({
             ) : files.length > 0 ? (
               <SandboxPreview 
                 key={previewKey}
-                files={previewFiles ?? files}
+                files={browserPreviewFiles}
                 onError={handlePreviewError}
                 projectId={projectId}
               />

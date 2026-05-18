@@ -2136,7 +2136,11 @@ async function runValidationLifecycle(input: {
     }
   }
 
-  if (isProductionVercel() && input.plan.productionMode === "production_fullstack") {
+  if (
+    isProductionVercel() &&
+    input.plan.productionMode === "production_fullstack" &&
+    process.env.SWIFT_REQUIRE_SANDBOX_FOR_PRODUCTION_FULLSTACK === "true"
+  ) {
     const message = "Production full-stack generation requires SANDBOX_SERVICE_URL so generated artifacts can pass install, build, and runtime smoke before persistence."
     await input.emit("building", "Runtime sandbox required for production full-stack artifacts", 84)
     recordStep("build", "failed", "required", stepStartedAt, message)
@@ -2161,14 +2165,18 @@ async function runValidationLifecycle(input: {
       "skipped",
       "advisory",
       stepStartedAt,
-      "Skipped in Vercel production because SANDBOX_SERVICE_URL is not configured."
+      input.plan.productionMode === "production_fullstack"
+        ? "Skipped full-stack runtime validation because SANDBOX_SERVICE_URL/SANDBOX_SERVICE_TOKEN is not configured; artifacts are persisted for editing and browser preview."
+        : "Skipped in Vercel production because SANDBOX_SERVICE_URL is not configured."
     )
     recordStep(
       "runtime-smoke",
       "skipped",
       "advisory",
       stepStartedAt,
-      "Browser iframe preview will validate client-side after persistence."
+      input.plan.productionMode === "production_fullstack"
+        ? "Runtime smoke skipped; browser iframe preview will validate the visible UI after persistence."
+        : "Browser iframe preview will validate client-side after persistence."
     )
 
     return {

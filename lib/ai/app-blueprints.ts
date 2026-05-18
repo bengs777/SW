@@ -70,7 +70,7 @@ const BASE_REQUIRED_FILES = [
 ]
 
 const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
-  village_news_portal: blueprint("village_news_portal", "Portal berita desa", "Build an official village news portal for Desa Buntu. Public home must show hero with village identity, latest village news, citizen announcements, and village agenda. Include full article reading pages with comments and Google/Gmail-ready login placeholders. Include admin CRUD for posts and categories. Prisma schema must model posts, categories, and comments. Do not include SaaS finance metrics, revenue, orders, conversion cards, or business analytics.", [
+  village_news_portal: blueprint("village_news_portal", "Portal informasi pemerintahan", "Build an official local government public information portal. Use the institution, city, village, agency, or ministry named by the user; if none is named, use a neutral Pemerintah Daerah identity. Public home must show hero with government identity, public services, latest news, citizen announcements, and agenda. Include full article reading pages with comments and Google/Gmail-ready login placeholders. Include admin CRUD for posts and categories. Prisma schema must model posts, categories, and comments. Do not include SaaS finance metrics, revenue, orders, conversion cards, or business analytics.", [
     "app/posts/[slug]/page.tsx",
     "app/admin/posts/page.tsx",
     "app/admin/categories/page.tsx",
@@ -190,7 +190,7 @@ function blueprint(appType: ControlledAppType, label: string, starterPrompt: str
 export function classifyControlledAppType(prompt: string): ControlledAppType {
   const text = String(prompt || "").toLowerCase()
 
-  if (/\b(berita|news|artikel|article|majalah|blog|portal berita|portal desa|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)\b/.test(text)) {
+  if (/\b(berita|news|artikel|article|majalah|blog|portal berita|portal desa|portal pemerintahan|pemerintah|pemerintahan|layanan publik|dinas|kelurahan|kecamatan|kabupaten|kota|provinsi|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)\b/.test(text)) {
     return "village_news_portal"
   }
 
@@ -250,8 +250,8 @@ export function buildDynamicSeedDirective(prompt: string) {
   if (appType === "village_news_portal") {
     return [
       "DYNAMIC_SEED_STRATEGY:",
-      "- Prompt matched article/blog/news keywords.",
-      "- Use static article/blog seed semantics: posts, categories, announcements, agendas, authors, and public article detail pages.",
+      "- Prompt matched government, article, public-service, or news portal keywords.",
+      "- Use public-sector portal semantics: services, posts, categories, announcements, agendas, authors, and public detail pages.",
       "- Do not add commerce revenue cards, conversion charts, order metrics, or SaaS finance dashboards unless explicitly requested.",
     ].join("\n")
   }

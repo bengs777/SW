@@ -27,6 +27,12 @@ const states = new Map()
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL || ""
 
+console.log({
+  nodeEnv: process.env.NODE_ENV,
+  hasSandboxToken: !!process.env.SANDBOX_SERVICE_TOKEN,
+  sandboxUrl: process.env.SANDBOX_SERVICE_URL,
+})
+
 if (IS_PRODUCTION && !SERVICE_TOKEN) {
   throw new Error("SANDBOX_SERVICE_TOKEN is required in production")
 }

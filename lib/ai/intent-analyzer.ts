@@ -25,9 +25,9 @@ const INTENT_RULES: Array<{
   },
   {
     appType: "village_news_portal",
-    domain: "article_news_portal",
-    keywords: ["berita", "news", "artikel", "article", "majalah", "blog", "portal", "desa", "warga", "pengumuman"],
-    requiredCapabilities: ["article_listing", "article_detail", "category_filter", "announcement_or_agenda"],
+    domain: "government_public_portal",
+    keywords: ["berita", "news", "artikel", "article", "majalah", "blog", "portal", "pemerintah", "pemerintahan", "layanan publik", "dinas", "kelurahan", "kecamatan", "kabupaten", "kota", "provinsi", "desa", "warga", "pengumuman"],
+    requiredCapabilities: ["public_service_listing", "article_listing", "article_detail", "category_filter", "announcement_or_agenda"],
     forbiddenAssumptions: ["checkout", "revenue_dashboard", "conversion_metrics"],
   },
   {
