@@ -2,8 +2,8 @@ import type { ProviderFailureReason } from "@/lib/ai/swift-tiers"
 import { isTransientFailure } from "@/lib/ai/errors"
 import { env } from "@/lib/env"
 
-export const MAX_RETRIES_PER_MODEL = Math.max(0, env.aiMaxRetries)
-export const MAX_PROVIDER_ATTEMPTS_PER_REQUEST = Math.max(1, MAX_RETRIES_PER_MODEL + 1)
+export const MAX_RETRIES_PER_MODEL = Math.min(2, Math.max(0, env.aiMaxRetries))
+export const MAX_PROVIDER_ATTEMPTS_PER_REQUEST = 64
 
 export function shouldRetryModel(reason: ProviderFailureReason, retryCount: number) {
   return retryCount < MAX_RETRIES_PER_MODEL && isTransientFailure(reason)

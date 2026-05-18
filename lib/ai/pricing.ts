@@ -1,6 +1,5 @@
 import { DEFAULT_MODEL_KEY, SWIFT_BUILD_MODEL_KEY } from "@/lib/ai/models"
 import {
-  DEEPSEEK_V4_PRO_MODEL_ID,
   SWIFT_FAST_MODEL_KEY,
   SWIFT_PUBLIC_PRICE_IDR,
   SWIFT_PREMIUM_REPAIR_MODEL_KEY,
@@ -26,15 +25,16 @@ type PricingResult = {
 const USD_TO_IDR = Number(process.env.SWIFT_USD_TO_IDR || 16000)
 const MIN_PROFIT_MULTIPLIER = 4
 const DEFAULT_PROFIT_MULTIPLIER = 5
+const DEFAULT_TOKEN_PRICING: TokenPricing = {
+  inputUsdPer1m: Number(process.env.SWIFT_PRIMARY_INPUT_USD_PER_1M || 0.435),
+  outputUsdPer1m: Number(process.env.SWIFT_PRIMARY_OUTPUT_USD_PER_1M || 0.87),
+  minimumCharge: SWIFT_PUBLIC_PRICE_IDR,
+}
 
 const FIXED_MODEL_PRICES: Record<string, number> = {
   [SWIFT_FAST_MODEL_KEY]: Number(process.env.SWIFT_FAST_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
   [SWIFT_BUILD_MODEL_KEY]: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
   [SWIFT_PREMIUM_REPAIR_MODEL_KEY]: Number(process.env.SWIFT_PREMIUM_REPAIR_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-}
-
-const TOKEN_PRICING_BY_MODEL: Record<string, TokenPricing> = {
-  [DEEPSEEK_V4_PRO_MODEL_ID]: { inputUsdPer1m: 0.435, outputUsdPer1m: 0.87, minimumCharge: SWIFT_PUBLIC_PRICE_IDR },
 }
 
 export function estimateRequestTokens(prompt: string) {
@@ -63,7 +63,7 @@ export function calculateModelRequestPrice({
   const estimatedInputTokens = estimateRequestTokens(prompt)
   const estimatedOutputTokens = outputTokens ?? estimateOutputTokens(estimatedInputTokens)
   const estimatedTokens = estimatedInputTokens + estimatedOutputTokens
-  const rawCost = calculateDeepSeekRawCostIdr(estimatedInputTokens, estimatedOutputTokens)
+  const rawCost = calculateDefaultRawCostIdr(estimatedInputTokens, estimatedOutputTokens)
   const fixedPrice = FIXED_MODEL_PRICES[modelKey]
 
   if (fixedPrice) {
@@ -79,7 +79,7 @@ export function calculateModelRequestPrice({
     }
   }
 
-  const pricing = modelName ? TOKEN_PRICING_BY_MODEL[modelName] : null
+  const pricing = modelName ? DEFAULT_TOKEN_PRICING : null
   if (!pricing) {
     const estimatedCost = Math.max(FIXED_MODEL_PRICES[DEFAULT_MODEL_KEY] || SWIFT_PUBLIC_PRICE_IDR, enforceProfitFloor(rawCost))
     return {
@@ -112,8 +112,8 @@ export function calculateModelRequestPrice({
   }
 }
 
-function calculateDeepSeekRawCostIdr(inputTokens: number, outputTokens: number) {
-  const pricing = TOKEN_PRICING_BY_MODEL[DEEPSEEK_V4_PRO_MODEL_ID]
+function calculateDefaultRawCostIdr(inputTokens: number, outputTokens: number) {
+  const pricing = DEFAULT_TOKEN_PRICING
   return roundUpToNearest(
     ((inputTokens / 1_000_000) * pricing.inputUsdPer1m +
       (outputTokens / 1_000_000) * pricing.outputUsdPer1m) *

@@ -4,10 +4,12 @@ import {
   DEFAULT_SWIFT_TIER_KEY,
   USER_FRIENDLY_AI_ENGINE_ERROR,
   getSwiftTierConfig,
+  getSwiftModelTargets,
   hasOpenRouterGatewayKey,
   isSwiftFreeAiMode,
   type ProviderFailureReason,
   type SwiftModelTarget,
+  type SwiftModelRoutingTask,
   type SwiftTierConfig,
   type SwiftTierKey,
 } from "@/lib/ai/swift-tiers"
@@ -61,6 +63,25 @@ type ProviderRequest = {
   temperatureOverride?: number
   attachments?: PromptAttachment[]
   signal?: AbortSignal
+}
+
+function nextAvailableTarget(targets: SwiftModelTarget[], currentModelId: string) {
+  const currentIndex = targets.findIndex((target) => target.modelId === currentModelId)
+  const next = targets.slice(currentIndex + 1).find((target) => !isModelTemporarilyUnavailable(target.modelId))
+  return next?.modelId || null
+}
+
+function modelRoutingTaskForRequest(prompt: string, mode: "chat" | "files" | "inspect"): SwiftModelRoutingTask {
+  const text = String(prompt || "")
+  if (mode !== "files") return "edit_patch"
+
+  if (
+    /PARTIAL_REGENERATION_CONTRACT|component_scoped_edit|file_scoped_edit|style_copy_edit|runtime_fix|Current file objective/i.test(text)
+  ) {
+    return "edit_patch"
+  }
+
+  return "large_generation"
 }
 
 export type ProviderAttemptLog = {
@@ -184,12 +205,34 @@ export class ProviderRouter {
   }: ProviderRequest): Promise<ProviderResponse> {
     validateProvider(provider)
     const tier = this.resolveTier(modelName, mode)
+    const routingTask = modelRoutingTaskForRequest(prompt, mode)
+    const targets = getSwiftModelTargets(routingTask)
     const attempts: ProviderAttemptLog[] = []
 
-    if (!hasOpenRouterGatewayKey()) {
+    if (targets.length === 0) {
+      console.log("provider_attempt", "openrouter")
+      console.log("model", tier.key)
+      console.log("provider_error", "No Swift AI model chain is configured")
+      console.log("failover_exhausted")
       attempts.push({
         provider: "openrouter",
-        modelName: tier.targets[0]?.modelId || tier.key,
+        modelName: tier.key,
+        status: "failed",
+        failureReason: "config",
+        latencyMs: 0,
+        errorMessage: "No Swift AI model chain is configured",
+      })
+      throw new SwiftProviderFailureError(tier.key, attempts)
+    }
+
+    if (!hasOpenRouterGatewayKey()) {
+      console.log("provider_attempt", "openrouter")
+      console.log("model", targets[0]?.modelId || tier.key)
+      console.log("provider_error", "OPENROUTER_API_KEY is not configured")
+      console.log("failover_exhausted")
+      attempts.push({
+        provider: "openrouter",
+        modelName: targets[0]?.modelId || tier.key,
         status: "failed",
         failureReason: "config",
         latencyMs: 0,
@@ -207,7 +250,7 @@ export class ProviderRouter {
     const cacheable = mode === "chat" || mode === "inspect"
     const systemPrompt = this.getSystemPrompt(mode, promptLanguage)
     const temperature = this.getTemperature(mode, temperatureOverride)
-    const primaryModelId = tier.targets[0]?.modelId || tier.key
+    const primaryModelId = targets[0]?.modelId || tier.key
     const cacheKey = cacheable
       ? buildCacheKey({
           mode,
@@ -247,8 +290,15 @@ export class ProviderRouter {
     let totalAttempts = 0
     let firstError: string | undefined
 
-    for (const target of tier.targets) {
+    const maxAttemptsForChain = Math.min(MAX_PROVIDER_ATTEMPTS_PER_REQUEST, targets.length * 3)
+
+    for (const [targetIndex, target] of targets.entries()) {
       if (isModelTemporarilyUnavailable(target.modelId)) {
+        const nextProvider = nextAvailableTarget(targets, target.modelId)
+        console.log("provider_attempt", "openrouter")
+        console.log("model", target.modelId)
+        console.log("provider_error", "Model is cooling down after repeated failures")
+        console.log("failover_next", nextProvider || null)
         attempts.push({
           provider: "openrouter",
           modelName: target.modelId,
@@ -262,12 +312,15 @@ export class ProviderRouter {
 
       let retryCount = 0
       while (true) {
-        if (totalAttempts >= Math.min(MAX_PROVIDER_ATTEMPTS_PER_REQUEST, tier.targets.length * 2)) {
+        if (totalAttempts >= maxAttemptsForChain) {
+          console.log("failover_exhausted")
           throw new SwiftProviderFailureError(tier.key, attempts)
         }
 
         totalAttempts += 1
         const startedAt = Date.now()
+        console.log("provider_attempt", "openrouter")
+        console.log("model", target.modelId)
 
         try {
           const result = await this.callOpenRouterTarget(target, {
@@ -280,8 +333,8 @@ export class ProviderRouter {
           })
           const latencyMs = Date.now() - startedAt
           attempts.push({
-            provider: "swift",
-            modelName: tier.key,
+            provider: "openrouter",
+            modelName: target.modelId,
             status: "success",
             latencyMs,
             requestId: result.requestId,
@@ -301,7 +354,7 @@ export class ProviderRouter {
             providerUsed: "swift",
             modelUsed: tier.key,
             selectedTier: tier.key,
-            usedFallback: false,
+            usedFallback: targetIndex > 0,
             primaryError: firstError,
             attempts,
             tokenUsage: result.tokenUsage,
@@ -309,25 +362,32 @@ export class ProviderRouter {
         } catch (error) {
           const normalized = this.normalizeError(error, target)
           const latencyMs = Date.now() - startedAt
+          const redactedErrorMessage = redactAiSecret(normalized.message)
+          const willRetrySameModel = shouldRetryModel(normalized.reason, retryCount)
+          const nextProvider = willRetrySameModel
+            ? target.modelId
+            : nextAvailableTarget(targets, target.modelId)
+          console.log("provider_error", redactedErrorMessage)
+          console.log("failover_next", nextProvider || null)
           firstError = firstError || normalized.message
           attempts.push({
-            provider: "swift",
-            modelName: tier.key,
+            provider: "openrouter",
+            modelName: target.modelId,
             status: "failed",
             failureReason: normalized.reason,
             statusCode: normalized.statusCode,
             latencyMs,
             requestId: normalized.requestId,
-            errorMessage: redactAiSecret(normalized.message),
+            errorMessage: redactedErrorMessage,
           })
           markModelFailure(target.modelId, {
             reason: normalized.reason,
             latencyMs,
             statusCode: normalized.statusCode,
-            message: redactAiSecret(normalized.message),
+            message: redactedErrorMessage,
           })
 
-          if (!shouldRetryModel(normalized.reason, retryCount)) {
+          if (!willRetrySameModel) {
             break
           }
 
@@ -360,6 +420,7 @@ export class ProviderRouter {
       })),
     })
 
+    console.log("failover_exhausted")
     throw new SwiftProviderFailureError(tier.key, attempts)
   }
 

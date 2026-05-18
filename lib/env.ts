@@ -74,6 +74,8 @@ const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const verdiTeamId = getEnv("VERDI_TEAM")
 const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
+const swiftPrimaryModel = getEnv("SWIFT_PRIMARY_MODEL")
+const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
 const hasRedisRestConfig = Boolean(upstashRedisRestUrl && upstashRedisRestToken)
@@ -108,7 +110,7 @@ export const env = {
   googleClientId: getEnv("GOOGLE_CLIENT_ID"),
   googleClientSecret: getEnv("GOOGLE_CLIENT_SECRET"),
   aiTimeoutMs: getEnvNumber(20_000, "AI_TIMEOUT_MS"),
-  aiMaxRetries: Math.max(1, Math.round(getEnvNumber(2, "AI_MAX_RETRIES"))),
+  aiMaxRetries: Math.max(0, Math.round(getEnvNumber(2, "AI_MAX_RETRIES"))),
   aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "OPENROUTER_MAX_TOKENS")),
   providerStatusCacheTtlMs: Math.max(
     60_000,
@@ -117,6 +119,8 @@ export const env = {
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
   aiQueueTimeoutMs: Math.max(10_000, Math.round(getEnvNumber(120_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
+  swiftPrimaryModel,
+  swiftFallbackModel1,
   openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || "https://openrouter.ai/api/v1"),
   openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),
   openRouterAppName: getEnv("OPENROUTER_APP_NAME") || "Swift AI",
@@ -175,6 +179,8 @@ export function getMissingProductionEnvVars() {
   if (!env.verdiTeamId) missing.push("VERDI_TEAM")
 
   if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
+  if (!env.swiftPrimaryModel) missing.push("SWIFT_PRIMARY_MODEL")
+  if (!env.swiftFallbackModel1) missing.push("SWIFT_FALLBACK_MODEL_1")
 
   return missing
 }

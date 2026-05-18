@@ -6,19 +6,14 @@ export const SWIFT_2_MODEL_KEY = SWIFT_BUILDER_MODEL_KEY
 export const DEFAULT_SWIFT_TIER_KEY = SWIFT_BUILDER_MODEL_KEY
 export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
-export const SWIFT_CANONICAL_MODEL_ID = "deepseek/deepseek-v4-pro"
-export const SWIFT_FREE_ROUTER_MODEL_ID = "openrouter/free"
 const freeAiMode = process.env.SWIFT_AI_FREE_MODE === "true"
-const configuredFreeModel = process.env.OPENROUTER_FREE_MODEL?.trim()
-const configuredCanonicalModel = process.env.OPENROUTER_DEEPSEEK_V4_PRO_MODEL?.trim()
-export const DEEPSEEK_V4_PRO_MODEL_ID =
-  freeAiMode
-    ? configuredFreeModel || SWIFT_FREE_ROUTER_MODEL_ID
-    : configuredCanonicalModel === SWIFT_CANONICAL_MODEL_ID
-      ? configuredCanonicalModel
-      : SWIFT_CANONICAL_MODEL_ID
-export const DEEPSEEK_V32_MODEL_ID = DEEPSEEK_V4_PRO_MODEL_ID
-export const DEEPSEEK_V32_PRO_MODEL_ID = DEEPSEEK_V4_PRO_MODEL_ID
+const envValue = (key: string) => process.env[key]?.trim() || ""
+const configuredPrimaryModel = () => envValue("SWIFT_PRIMARY_MODEL")
+const configuredFallbackModels = () => [
+  envValue("SWIFT_FALLBACK_MODEL_1"),
+  envValue("SWIFT_FALLBACK_MODEL_2"),
+  envValue("SWIFT_FALLBACK_MODEL_3"),
+]
 
 export type SwiftTierKey =
   | typeof SWIFT_FAST_MODEL_KEY
@@ -42,10 +37,12 @@ export type ProviderFailureReason =
 
 export type SwiftModelTarget = {
   modelId: string
-  role: "primary"
+  role: "primary" | "fallback"
   timeoutMs?: number
   maxOutputTokens?: number
 }
+
+export type SwiftModelRoutingTask = "large_generation" | "edit_patch"
 
 export type SwiftTierConfig = {
   key: SwiftTierKey
@@ -88,7 +85,34 @@ const SWIFT_FULLSTACK_OUTPUT_TOKENS = Math.max(
   Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)
 )
 
+function uniqueModelIds(modelIds: string[]) {
+  const seen = new Set<string>()
+  return modelIds.filter((modelId) => {
+    const normalized = modelId.trim()
+    if (!normalized || seen.has(normalized)) return false
+    seen.add(normalized)
+    return true
+  })
+}
+
+export function getSwiftModelTargets(task: SwiftModelRoutingTask = "large_generation"): SwiftModelTarget[] {
+  const primary = configuredPrimaryModel()
+  const fallbacks = configuredFallbackModels()
+  const orderedModelIds =
+    task === "edit_patch"
+      ? uniqueModelIds([...fallbacks, primary])
+      : uniqueModelIds([primary, ...fallbacks])
+
+  return orderedModelIds.map((modelId, index) => ({
+    modelId,
+    role: index === 0 ? "primary" : "fallback",
+    timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS,
+    maxOutputTokens: SWIFT_FULLSTACK_OUTPUT_TOKENS,
+  }))
+}
+
 export function getSwiftTierConfigs(): SwiftTierConfig[] {
+  const targets = getSwiftModelTargets("large_generation")
   const builderTier: SwiftTierConfig = {
     key: SWIFT_BUILDER_MODEL_KEY,
     label: "Swift AI Orchestrator",
@@ -96,7 +120,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     description: "Satu-satunya engine produksi Swift untuk full-stack, dashboard, CRUD, Prisma, API route, repair, dan arsitektur project.",
     note: freeAiMode
       ? "Mode evaluasi gratis aktif. Request Swift dirutekan ke OpenRouter Free Models Router."
-      : "Semua request Swift dirutekan ke DeepSeek V4 Pro melalui OpenRouter dengan routing internal yang efisien.",
+      : "Semua request Swift dirutekan melalui chain model OpenRouter dari konfigurasi environment.",
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS,
@@ -105,9 +129,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     public: true,
     generationLayer: "builder",
     queue: { concurrency: 3, maxQueueDepth: 36 },
-    targets: [
-      { modelId: DEEPSEEK_V4_PRO_MODEL_ID, role: "primary", timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS, maxOutputTokens: SWIFT_FULLSTACK_OUTPUT_TOKENS },
-    ],
+    targets,
   }
 
   return [
@@ -120,7 +142,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       key: SWIFT_FAST_MODEL_KEY,
       label: "Swift AI Compatibility",
       shortLabel: "Swift",
-      description: "Alias internal lama yang tetap diarahkan ke DeepSeek V4 Pro.",
+      description: "Alias internal lama yang tetap diarahkan ke chain model Swift dari environment.",
       note: "Compatibility alias. Tidak ditampilkan ke user.",
       priceIdr: builderTier.priceIdr,
       price: builderTier.price,
@@ -132,7 +154,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       key: LEGACY_SWIFT_2_MODEL_KEY,
       label: "Swift AI Compatibility",
       shortLabel: "Swift",
-      description: "Legacy alias yang diarahkan ke DeepSeek V4 Pro agar request lama tetap berjalan.",
+      description: "Legacy alias yang diarahkan ke chain model Swift agar request lama tetap berjalan.",
       note: "Compatibility alias. Tidak ditampilkan ke user.",
       rank: 100,
       public: false,
@@ -142,7 +164,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
       key: SWIFT_PREMIUM_REPAIR_MODEL_KEY,
       label: "Swift AI Compatibility",
       shortLabel: "Swift",
-      description: "Alias repair lama yang tetap diarahkan ke DeepSeek V4 Pro.",
+      description: "Alias repair lama yang tetap diarahkan ke chain model Swift dari environment.",
       note: "Compatibility alias. Tidak ditampilkan ke user.",
       rank: 101,
       public: false,
