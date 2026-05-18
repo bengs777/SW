@@ -515,6 +515,19 @@ export async function POST(request: NextRequest) {
       previewContext: parsed.data.previewContext,
       attachments: parsed.data.attachments,
     }
+    const generationStartedEndedAt = new Date()
+    log("info", "generation_started", {
+      event: "generation_started",
+      requestId,
+      traceId,
+      jobId: job.id,
+      projectId: project.id,
+      userId: user.id,
+      startedAt: new Date(startedAt).toISOString(),
+      endedAt: generationStartedEndedAt.toISOString(),
+      durationMs: generationStartedEndedAt.getTime() - startedAt,
+      requestHash,
+    })
 
     const preferServerlessExecution = generationExecutionMode === "serverless"
     const queueHealth = preferServerlessExecution

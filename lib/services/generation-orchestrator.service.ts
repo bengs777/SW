@@ -1386,6 +1386,7 @@ async function emitGeneratedFilesUpdate(input: {
 
 async function runProviderAttempt(input: {
   jobId: string
+  projectId?: string | null
   prompt: string
   purpose: "generate" | "repair"
   selectedModel: string
@@ -1414,6 +1415,7 @@ async function runProviderAttempt(input: {
       }
     : routed
   const startedAt = performance.now()
+  const startedAtWall = Date.now()
   log("info", "generation_provider_attempt_started", {
     jobId: input.jobId,
     purpose: input.purpose,
@@ -1457,8 +1459,15 @@ async function runProviderAttempt(input: {
       promptLanguage: input.promptLanguage,
       signal: input.signal,
     })
+    const endedAtWall = Date.now()
+    const providerDurationMs = endedAtWall - startedAtWall
     log("info", "ai_response_received", {
+      event: "ai_response_received",
       jobId: input.jobId,
+      projectId: input.projectId ?? input.generationContext?.projectId ?? null,
+      startedAt: new Date(startedAtWall).toISOString(),
+      endedAt: new Date(endedAtWall).toISOString(),
+      durationMs: providerDurationMs,
       purpose: input.purpose,
       provider: route.provider,
       model: route.modelName,
@@ -2315,6 +2324,7 @@ async function runValidationLifecycle(input: {
 
 async function attemptTargetedRepair(input: {
   jobId: string
+  projectId: string
   prompt: string
   files: GeneratedFile[]
   blueprint: ControlledAppBlueprint
@@ -2359,6 +2369,7 @@ async function attemptTargetedRepair(input: {
 
   const response = await runProviderAttempt({
     jobId: input.jobId,
+    projectId: input.projectId,
     prompt: repairPrompt,
     purpose: "repair",
     selectedModel: "repair",
@@ -2872,6 +2883,7 @@ export async function executeGenerationJob(
       for (let parseAttempt = 1; parseAttempt <= 2; parseAttempt += 1) {
         response = await runProviderAttempt({
           jobId: input.jobId,
+          projectId: input.projectId,
           prompt: parseAttempt === 1
             ? baseSlicePrompt
             : [
@@ -3050,6 +3062,7 @@ export async function executeGenerationJob(
 
       const repaired = await attemptTargetedRepair({
         jobId: input.jobId,
+        projectId: input.projectId,
         prompt: input.prompt,
         files: validation.files,
         blueprint,
@@ -3241,6 +3254,7 @@ export async function executeGenerationJob(
       })),
     })
 
+    const persistenceStartedAt = Date.now()
     const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
       projectId: input.projectId,
       prompt: input.prompt,
@@ -3250,10 +3264,16 @@ export async function executeGenerationJob(
       intent: intentStorageKey(plan.intent),
       usedAutoRepair: repairAttempt > 0,
     })
+    const persistenceEndedAt = Date.now()
     log("info", "database_persisted", {
+      event: "database_persisted",
       jobId: input.jobId,
       projectId: input.projectId,
+      startedAt: new Date(persistenceStartedAt).toISOString(),
+      endedAt: new Date(persistenceEndedAt).toISOString(),
+      durationMs: persistenceEndedAt - persistenceStartedAt,
       historyId: saveResult.historyId,
+      fileCount: saveResult.files.length,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
     })
@@ -3261,13 +3281,19 @@ export async function executeGenerationJob(
       jobId: input.jobId,
       projectId: input.projectId,
       historyId: saveResult.historyId,
+      fileCount: saveResult.files.length,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
     })
     log("info", "files_written", {
+      event: "files_written",
       jobId: input.jobId,
       projectId: input.projectId,
+      startedAt: new Date(persistenceStartedAt).toISOString(),
+      endedAt: new Date(persistenceEndedAt).toISOString(),
+      durationMs: persistenceEndedAt - persistenceStartedAt,
       historyId: saveResult.historyId,
+      fileCount: saveResult.files.length,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
     })
@@ -3278,8 +3304,13 @@ export async function executeGenerationJob(
       status: "running",
       message: "Project filesystem persisted",
       data: {
+        event: "database_persisted",
         source: "persisted",
         historyId: saveResult.historyId,
+        startedAt: new Date(persistenceStartedAt).toISOString(),
+        endedAt: new Date(persistenceEndedAt).toISOString(),
+        durationMs: persistenceEndedAt - persistenceStartedAt,
+        fileCount: saveResult.files.length,
         fileDiff: saveResult.fileDiff,
         manifest: saveResult.manifest,
       },
@@ -3291,8 +3322,13 @@ export async function executeGenerationJob(
       status: "running",
       message: "Files written to project filesystem",
       data: {
+        event: "files_written",
         source: "persisted",
         historyId: saveResult.historyId,
+        startedAt: new Date(persistenceStartedAt).toISOString(),
+        endedAt: new Date(persistenceEndedAt).toISOString(),
+        durationMs: persistenceEndedAt - persistenceStartedAt,
+        fileCount: saveResult.files.length,
         fileDiff: saveResult.fileDiff,
         manifest: saveResult.manifest,
       },

@@ -80,14 +80,20 @@ export async function GET(
       durationMs: Date.now() - startedAt,
     })
     if (refreshReason === "generation-completed" || refreshReason === "explorer-refresh") {
+      const endedAt = Date.now()
       log("info", "explorer_refreshed", {
+        event: "explorer_refreshed",
         requestId,
+        jobId: request.nextUrl.searchParams.get("jobId"),
         projectId: id,
         userId: session.user.id,
+        startedAt: new Date(startedAt).toISOString(),
+        endedAt: new Date(endedAt).toISOString(),
+        durationMs: endedAt - startedAt,
+        explorerItemCount: visibleFiles.length,
         fileCount: visibleFiles.length,
         latestHistoryId,
         latestFileUpdatedAt: latestUpdatedAt,
-        durationMs: Date.now() - startedAt,
       })
     }
 

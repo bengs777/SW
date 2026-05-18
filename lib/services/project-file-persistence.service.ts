@@ -42,6 +42,7 @@ export class ProjectFilePersistenceService {
     manifest: ProjectFileManifest
   }> {
     const normalizedFiles = ProjectFilesystemService.normalizeFiles(files)
+    const startedAt = Date.now()
 
     return withDatabaseWriteRetry(() =>
       prisma.$transaction(async (tx) => {
@@ -86,10 +87,16 @@ export class ProjectFilePersistenceService {
           tx,
         })
 
+        const endedAt = Date.now()
         log("info", "files_written", {
+          event: "files_written",
           jobId: opts?.generationJobId || null,
           projectId,
+          startedAt: new Date(startedAt).toISOString(),
+          endedAt: new Date(endedAt).toISOString(),
+          durationMs: endedAt - startedAt,
           historyId: createdHistory.id,
+          fileCount: filesystemWrite.files.length,
           fileDiff: filesystemWrite.fileDiff,
           manifest: filesystemWrite.manifest,
         })

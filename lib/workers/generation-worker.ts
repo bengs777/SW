@@ -3,6 +3,7 @@ import { env } from "@/lib/env"
 import { timeoutConfig } from "@/lib/timeouts"
 import {
   createGenerationWorker,
+  getGenerationQueue,
   moveGenerationJobToDeadLetter,
   recordGenerationWorkerHeartbeat,
   type GenerationQueuePayload,
@@ -43,6 +44,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   const abortController = new AbortController()
   const unregisterAbort = registerGenerationAbortController(payload.jobId, abortController)
   const startedAt = Date.now()
+  const startedAtIso = new Date(startedAt).toISOString()
   const resolvedQueueJobId = queueJobId ? String(queueJobId) : payload.jobId
   let timeoutTriggered = false
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
@@ -118,11 +120,14 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       durationMs: Date.now() - startedAt,
     })
     log("info", "worker_completed", {
+      event: "worker_completed",
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
       userId: payload.userId,
       traceId: payload.traceId,
+      startedAt: startedAtIso,
+      endedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
       executionMode: String(resolvedQueueJobId).startsWith("serverless:") ? "serverless_fallback" : "queue",
     })
@@ -164,7 +169,22 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       log("error", "Generation worker failed", {
         jobId: payload.jobId,
         queueJobId: resolvedQueueJobId,
+        projectId: payload.projectId,
         error: errorMessage,
+        durationMs: Date.now() - startedAt,
+        timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+        timeoutTriggered: isTimeout,
+        traceId: payload.traceId,
+      })
+      log("error", "worker_failed", {
+        event: "worker_failed",
+        jobId: payload.jobId,
+        queueJobId: resolvedQueueJobId,
+        projectId: payload.projectId,
+        userId: payload.userId,
+        error: errorMessage,
+        startedAt: startedAtIso,
+        endedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAt,
         timeoutMs: GENERATION_JOB_TIMEOUT_MS,
         timeoutTriggered: isTimeout,
@@ -192,6 +212,7 @@ export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>
 }
 
 export function startGenerationWorker() {
+  const bootStartedAt = Date.now()
   const worker = createGenerationWorker(processGenerationQueueJob)
   const workerId = `generation:${process.env.VERCEL_REGION || "local"}:${process.pid}`
 
@@ -202,10 +223,16 @@ export function startGenerationWorker() {
     timeoutMs: GENERATION_JOB_TIMEOUT_MS,
   })
   log("info", "worker_boot", {
+    event: "worker_boot",
     workerId,
+    jobId: null,
     pid: process.pid,
     concurrency: Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2),
     timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+    startedAt: new Date(bootStartedAt).toISOString(),
+    endedAt: new Date().toISOString(),
+    durationMs: Date.now() - bootStartedAt,
+    error: null,
   })
 
   void reconcileStaleGenerationJobs().catch((error) => {
@@ -229,6 +256,8 @@ export function startGenerationWorker() {
 
   worker.on("active", async (job) => {
     if (!job) return
+    const endedAt = job.processedOn || Date.now()
+    const startedAt = job.timestamp || endedAt
     await GenerationJobService.attachQueueJob(job.data.jobId, job.id || job.data.jobId)
     log("info", "generation_worker_job_active", {
       workerId,
@@ -240,12 +269,18 @@ export function startGenerationWorker() {
       traceId: job.data.traceId,
     })
     log("info", "worker_active", {
+      event: "worker_active",
       workerId,
       jobId: job.data.jobId,
       queueJobId: job.id,
       projectId: job.data.projectId,
       userId: job.data.userId,
       attemptsMade: job.attemptsMade,
+      startedAt: new Date(startedAt).toISOString(),
+      endedAt: new Date(endedAt).toISOString(),
+      durationMs: endedAt - startedAt,
+      queueWaitMs: job.processedOn && job.timestamp ? job.processedOn - job.timestamp : null,
+      error: null,
       traceId: job.data.traceId,
     })
   })
@@ -263,6 +298,7 @@ export function startGenerationWorker() {
       source: "generation_worker_failed_event",
     })
     log("error", "worker_failed", {
+      event: "worker_failed",
       workerId,
       jobId: job.data.jobId,
       queueJobId: job.id,
@@ -270,6 +306,9 @@ export function startGenerationWorker() {
       userId: job.data.userId,
       attemptsMade: job.attemptsMade,
       error: error.message,
+      startedAt: job.processedOn ? new Date(job.processedOn).toISOString() : null,
+      endedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : new Date().toISOString(),
+      durationMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
       traceId: job.data.traceId,
     })
     await moveGenerationJobToDeadLetter({
@@ -299,25 +338,42 @@ export function startGenerationWorker() {
       traceId: job.data.traceId,
     })
     log("info", "worker_completed", {
+      event: "worker_completed",
       workerId,
       jobId: job.data.jobId,
       queueJobId: job.id,
       projectId: job.data.projectId,
       userId: job.data.userId,
       attemptsMade: job.attemptsMade,
+      startedAt: job.processedOn ? new Date(job.processedOn).toISOString() : null,
+      endedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : new Date().toISOString(),
+      durationMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
       latencyMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
+      error: null,
       traceId: job.data.traceId,
     })
   })
 
-  worker.on("stalled", (jobId) => {
+  worker.on("stalled", async (jobId) => {
+    const queue = getGenerationQueue()
+    const stalledJob = queue ? await queue.getJob(String(jobId)).catch(() => null) : null
+    const payload = stalledJob?.data
     log("warn", "generation_worker_job_stalled", {
       workerId,
       queueJobId: jobId,
     })
     log("warn", "worker_stalled", {
+      event: "worker_stalled",
       workerId,
+      jobId: payload?.jobId || String(jobId),
       queueJobId: jobId,
+      projectId: payload?.projectId || null,
+      userId: payload?.userId || null,
+      startedAt: stalledJob?.processedOn ? new Date(stalledJob.processedOn).toISOString() : null,
+      endedAt: new Date().toISOString(),
+      durationMs: null,
+      error: null,
+      traceId: payload?.traceId,
     })
   })
 
