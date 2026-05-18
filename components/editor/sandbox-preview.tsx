@@ -345,7 +345,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://unpkg.com https://esm.sh blob:; connect-src https://esm.sh https://unpkg.com blob: data:; img-src data: blob: https:; style-src 'unsafe-inline'; font-src data: https:; worker-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://esm.sh blob:; connect-src https://esm.sh https://unpkg.com blob: data:; img-src data: blob: https:; style-src 'unsafe-inline'; font-src data: https:; worker-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
 <title>Preview</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
@@ -366,6 +366,16 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   body.ready .loader{display:none}
   body.error .loader{display:none}
 </style>
+<script>
+  window.tailwind = window.tailwind || {};
+  window.tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {}
+    }
+  };
+<\/script>
+<script src="https://cdn.tailwindcss.com"><\/script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
 </head>
 <body class="compiling">

@@ -28,6 +28,14 @@ assert(
 )
 
 assert(
+  "browser preview loads tailwind runtime",
+  sandboxPreview.includes("https://cdn.tailwindcss.com") &&
+    sandboxPreview.includes("window.tailwind.config") &&
+    /script-src[^"]*https:\/\/cdn\.tailwindcss\.com/.test(sandboxPreview),
+  "browser preview must generate Tailwind utility CSS inside the iframe"
+)
+
+assert(
   "runtime repair never injects raw safe-boundary alias",
   !/source\s*=\s*['"`]import\s+\{\s*SwiftSafeErrorBoundary\s*\}\s+from\s+["']@\/components\/swift-safe-error-boundary/.test(sandboxPreview),
   "raw @/ safe-boundary import cannot be injected after compileProject"
