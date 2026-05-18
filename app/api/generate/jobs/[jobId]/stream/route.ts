@@ -71,6 +71,9 @@ export async function GET(
       const send = (event: string, id: number | string, data: unknown) => {
         if (closed) return
         controller.enqueue(encoder.encode(eventFrame(event, id, data)))
+        if (event !== "heartbeat") {
+          console.log("frontend_notified")
+        }
         lastSentAt = Date.now()
       }
 

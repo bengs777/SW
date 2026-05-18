@@ -282,9 +282,28 @@ export class GenerationJobService {
     const stage = input.stage || "queued"
     const status = input.status || "queued"
 
-    const updated = await this.update(jobId, input)
+    let updated = await this.update(jobId, input)
     if (!updated?.count) {
-      return this.findById(jobId)
+      const fresh = await this.findById(jobId)
+      const requestedStatus = input.status
+      const shouldRetryTerminalUpdate =
+        requestedStatus
+          ? (
+              GENERATION_TERMINAL_STATUSES.has(requestedStatus) &&
+              fresh &&
+              !GENERATION_TERMINAL_STATUSES.has(fresh.status) &&
+              !fresh.cancelRequested
+            )
+          : false
+
+      if (!shouldRetryTerminalUpdate) {
+        return fresh
+      }
+
+      updated = await this.update(jobId, input)
+      if (!updated?.count) {
+        return this.findById(jobId)
+      }
     }
 
     await this.appendEvent({
@@ -295,6 +314,7 @@ export class GenerationJobService {
       message: input.message,
       data: input.data,
     })
+    console.log("status_updated")
 
     return this.findById(jobId)
   }

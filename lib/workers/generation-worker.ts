@@ -48,6 +48,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
 
   try {
+    console.log("worker_started")
     log("info", "Generation worker started", {
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,
@@ -92,6 +93,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         }, GENERATION_JOB_TIMEOUT_MS)
       }),
     ])
+    console.log("generation_finished")
     await BillingService.markCompleted(payload.usageLogId, {
       provider: payload.provider,
       model: payload.model,
