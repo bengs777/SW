@@ -12,7 +12,7 @@ import {
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
-import { ProviderRouter } from "@/lib/ai/provider-router"
+import { ProviderRouter, SwiftProviderFailureError } from "@/lib/ai/provider-router"
 import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
@@ -336,6 +336,29 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
   }
 
   return Array.from(required).slice(0, PRODUCTION_FULLSTACK_FILE_LIMIT)
+}
+
+function detectIntent(prompt: string) {
+  return analyzePromptIntent(prompt)
+}
+
+function getRequiredFiles(
+  intent: IntentAnalysis,
+  input: {
+    prompt: string
+    productionMode: GenerationPlan["productionMode"]
+  }
+) {
+  const blueprint = getControlledAppBlueprint(intent.appType)
+  if (input.productionMode === "production_fullstack") {
+    return productionRequiredFiles(blueprint, input.prompt)
+  }
+
+  return blueprint.requiredFiles.slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)
+}
+
+function intentStorageKey(intent: IntentAnalysis) {
+  return `${intent.appType}:${intent.domain}`
 }
 
 function buildFastClinicFullStackScaffold(input: {
@@ -1192,7 +1215,7 @@ function buildGenerationPlan(input: {
     collaborationMode: input.collaborationMode || undefined,
     previewError: previewContext?.previewError?.message || null,
   })
-  const intent = analyzePromptIntent(input.prompt)
+  const intent = detectIntent(input.prompt)
   const editPlan = buildPartialEditPlan({
     prompt: input.prompt,
     existingFiles: input.existingFiles,
@@ -1206,6 +1229,10 @@ function buildGenerationPlan(input: {
   })
     ? "production_fullstack"
     : "preview"
+  const requiredFilesForIntent = getRequiredFiles(intent, {
+    prompt: input.prompt,
+    productionMode,
+  })
   const maxFilesThisPass =
     productionMode === "production_fullstack" ? PRODUCTION_FULLSTACK_FILE_LIMIT : editPlan.maxSlices
   const trimmed = trimContextForGeneration({
@@ -1241,12 +1268,7 @@ function buildGenerationPlan(input: {
       })
     }
 
-    const requiredFiles =
-      productionMode === "production_fullstack"
-        ? productionRequiredFiles(blueprint, input.prompt)
-        : blueprint.requiredFiles.slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)
-
-    for (const filePath of requiredFiles) {
+    for (const filePath of requiredFilesForIntent) {
       if (plannedByPath.size >= maxFilesThisPass) break
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
@@ -1296,7 +1318,7 @@ function buildGenerationPlan(input: {
     maxFilesThisPass,
     blueprint: {
       label: blueprint.label,
-      requiredFiles: blueprint.requiredFiles,
+      requiredFiles: requiredFilesForIntent,
       stack: blueprint.dependencyPolicy.stack,
     },
     filePlan,
@@ -1460,12 +1482,28 @@ async function runProviderAttempt(input: {
 
     return response
   } catch (error) {
+    const providerFailureMetadata =
+      error instanceof SwiftProviderFailureError
+        ? {
+            selectedTier: error.selectedTier,
+            providerAttempts: error.attempts,
+            lastProviderAttempt: error.attempts.at(-1) || null,
+          }
+        : undefined
+    if (providerFailureMetadata) {
+      log("error", "generation_provider_failover_exhausted", {
+        jobId: input.jobId,
+        purpose: input.purpose,
+        ...providerFailureMetadata,
+      })
+    }
     await GenerationJobService.finishAttempt({
       jobId: input.jobId,
       sequence: attempt.sequence,
       status: error instanceof GenerationJobCancelledError ? "cancelled" : "failed",
       latencyMs: performance.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
+      metadata: providerFailureMetadata,
     })
     throw error
   }
@@ -1908,7 +1946,7 @@ async function runValidationLifecycle(input: {
   const productionRequiredFilesForValidation =
     input.plan.productionMode === "production_fullstack"
       ? plannedRequiredFiles
-      : input.blueprint.requiredFiles
+      : input.plan.blueprint.requiredFiles
   const isPreviewFoundationPass =
     input.plan.productionMode !== "production_fullstack" &&
     input.plan.editPlan.mode === "full" &&
@@ -1917,7 +1955,7 @@ async function runValidationLifecycle(input: {
     isPreviewFoundationPass
       ? plannedRequiredFiles
       : input.plan.editPlan.mode === "partial"
-      ? input.blueprint.requiredFiles.filter((filePath) => {
+      ? input.plan.blueprint.requiredFiles.filter((filePath) => {
           const normalized = normalizePath(filePath)
           return (
             normalized === "app/layout.tsx" ||
@@ -2012,7 +2050,7 @@ async function runValidationLifecycle(input: {
     coverage: fullstack.coverage,
     missingCategories: fullstack.missingCategories,
     fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
-    blueprintRequiredFiles: input.blueprint.requiredFiles.length,
+    blueprintRequiredFiles: input.plan.blueprint.requiredFiles.length,
     requiredFilesMissing: blueprintValidation.missingRequiredFiles,
     dependencies: dependencyContract,
     mockArtifacts,
@@ -2715,6 +2753,8 @@ export async function executeGenerationJob(
       stage: "planning",
       label: "Architecture plan ready",
       progress: 10,
+      intent: intentStorageKey(plan.intent),
+      usedAutoRepair: false,
       plan,
       context: {
         fileCount: existingFiles.length,
@@ -2992,6 +3032,9 @@ export async function executeGenerationJob(
 
     while (!validation.ok && repairAttempt < MAX_REPAIR_ATTEMPTS) {
       repairAttempt += 1
+      await GenerationJobService.update(input.jobId, {
+        usedAutoRepair: true,
+      })
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
       await transition(
@@ -3126,7 +3169,7 @@ export async function executeGenerationJob(
       requiredFiles:
         plan.productionMode === "production_fullstack" || plan.editPlan.mode === "partial"
           ? plan.filePlan.map((file) => file.path)
-          : blueprint.requiredFiles,
+          : plan.blueprint.requiredFiles,
     })
     log("info", "generation_manifest_completed", {
       jobId: input.jobId,
@@ -3165,6 +3208,8 @@ export async function executeGenerationJob(
     }
     metrics.quality = {
       appType: plan.appType,
+      intent: intentStorageKey(plan.intent),
+      usedAutoRepair: repairAttempt > 0,
       editMode: plan.editPlan.mode,
       editIntent: plan.editPlan.intent,
       targetFileCount: plan.editPlan.targetPaths.length,
@@ -3202,6 +3247,8 @@ export async function executeGenerationJob(
       files: workingFiles,
       idempotencyKey: input.persistenceKey,
       generationJobId: input.jobId,
+      intent: intentStorageKey(plan.intent),
+      usedAutoRepair: repairAttempt > 0,
     })
     log("info", "database_persisted", {
       jobId: input.jobId,
@@ -3259,6 +3306,8 @@ export async function executeGenerationJob(
     }
     await GenerationJobService.update(input.jobId, {
       metrics,
+      intent: intentStorageKey(plan.intent),
+      usedAutoRepair: repairAttempt > 0,
       previewUrl: validation.previewUrl,
     })
     log("info", "preview_ready", {
@@ -3338,9 +3387,21 @@ export async function executeGenerationJob(
     }
 
     const serialized = serializeError(error)
+    const publicErrorMessage =
+      error instanceof SwiftProviderFailureError
+        ? error.userMessage
+        : serialized.message
     await GenerationJobService.update(input.jobId, {
-      diagnostics: serialized,
+      diagnostics: {
+        ...serialized,
+        publicMessage: publicErrorMessage,
+        providerAttempts:
+          error instanceof SwiftProviderFailureError
+            ? error.attempts
+            : undefined,
+      },
       metrics,
+      ...(plan ? { intent: intentStorageKey(plan.intent), usedAutoRepair: repairAttempt > 0 } : {}),
     })
     await recordGenerationQuality({
       jobId: input.jobId,
@@ -3358,6 +3419,7 @@ export async function executeGenerationJob(
       failureCode: serialized.message,
       metadata: {
         errorName: serialized.name,
+        publicErrorMessage,
         editPlan: plan
           ? {
               mode: plan.editPlan.mode,
@@ -3368,7 +3430,7 @@ export async function executeGenerationJob(
           : null,
       },
     }).catch(() => null)
-    await GenerationJobService.markFailed(input.jobId, serialized.message)
+    await GenerationJobService.markFailed(input.jobId, publicErrorMessage)
     throw error
   }
 }

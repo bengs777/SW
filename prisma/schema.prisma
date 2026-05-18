@@ -194,6 +194,8 @@ model GenerationHistory {
   prompt      String
   result      String
   tokensUsed  Int      @default(0)
+  intent      String?
+  usedAutoRepair Boolean @default(false) @map("used_auto_repair")
   idempotencyKey String?
   cost           Decimal  @default(0)
   createdAt      DateTime @default(now())
@@ -213,6 +215,8 @@ model GenerationJob {
   prompt          String
   model           String
   provider        String   @default("swift")
+  intent          String?
+  usedAutoRepair  Boolean  @default(false) @map("used_auto_repair")
   status          String   @default("queued")
   stage           String   @default("queued")
   label           String   @default("Prompt diterima")

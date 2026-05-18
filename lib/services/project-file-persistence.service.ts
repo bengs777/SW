@@ -12,6 +12,8 @@ import type { GeneratedFile } from "@/lib/types"
 type PersistProjectFilesOptions = {
   idempotencyKey?: string | null
   cost?: number | null
+  intent?: string | null
+  usedAutoRepair?: boolean
   projectMemoryJson?: string | null
   tokensUsed?: number | null
   generationJobId?: string | null
@@ -52,6 +54,8 @@ export class ProjectFilePersistenceService {
           result: JSON.stringify(normalizedFiles),
           tokensUsed: opts?.tokensUsed ?? 0,
           cost: opts?.cost ?? 0,
+          intent: opts?.intent || null,
+          usedAutoRepair: Boolean(opts?.usedAutoRepair),
         }
 
         const createdHistory = opts?.idempotencyKey
@@ -117,6 +121,8 @@ export class ProjectFilePersistenceService {
     projectMemoryJson?: string | null
     idempotencyKey?: string | null
     cost?: number | null
+    intent?: string | null
+    usedAutoRepair?: boolean
     tokensUsed?: number | null
     generationJobId?: string | null
   }) {
@@ -124,6 +130,8 @@ export class ProjectFilePersistenceService {
       projectMemoryJson: input.projectMemoryJson,
       idempotencyKey: input.idempotencyKey,
       cost: input.cost,
+      intent: input.intent,
+      usedAutoRepair: input.usedAutoRepair,
       tokensUsed: input.tokensUsed,
       generationJobId: input.generationJobId,
     })

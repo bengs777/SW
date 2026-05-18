@@ -34,6 +34,8 @@ type CreateGenerationJobInput = {
   prompt: string
   model: string
   provider?: string
+  intent?: string | null
+  usedAutoRepair?: boolean
   idempotencyKey?: string | null
   requestHash?: string | null
   plan?: unknown
@@ -52,6 +54,8 @@ type UpdateGenerationJobInput = {
   context?: Record<string, unknown> | null
   diagnostics?: Record<string, unknown> | null
   metrics?: Record<string, unknown> | null
+  intent?: string | null
+  usedAutoRepair?: boolean
   previewUrl?: string | null
   error?: string | null
   resultHistoryId?: string | null
@@ -106,6 +110,8 @@ export class GenerationJobService {
           prompt: input.prompt,
           model: input.model,
           provider: input.provider || "swift",
+          intent: input.intent || null,
+          usedAutoRepair: Boolean(input.usedAutoRepair),
           idempotencyKey: input.idempotencyKey || null,
           requestHash: input.requestHash || null,
           status: "queued",
@@ -255,6 +261,8 @@ export class GenerationJobService {
         ...(input.context !== undefined ? { contextJson: safeStringify(input.context) } : {}),
         ...(input.diagnostics !== undefined ? { diagnosticsJson: safeStringify(input.diagnostics) } : {}),
         ...(input.metrics !== undefined ? { metricsJson: safeStringify(input.metrics) } : {}),
+        ...(input.intent !== undefined ? { intent: input.intent } : {}),
+        ...(input.usedAutoRepair !== undefined ? { usedAutoRepair: input.usedAutoRepair } : {}),
         ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
         ...(input.error !== undefined ? { error: input.error } : {}),
         ...(input.resultHistoryId !== undefined ? { resultHistoryId: input.resultHistoryId } : {}),
@@ -458,6 +466,8 @@ export class GenerationJobService {
     prompt: string
     model: string
     provider: string
+    intent?: string | null
+    usedAutoRepair?: boolean
     status: string
     stage: string
     label: string
@@ -487,6 +497,8 @@ export class GenerationJobService {
       prompt: job.prompt,
       model: job.model,
       provider: job.provider,
+      intent: job.intent || null,
+      usedAutoRepair: Boolean(job.usedAutoRepair),
       status: job.status,
       stage: job.stage,
       label: job.label,

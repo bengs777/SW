@@ -208,6 +208,12 @@ export class ProviderRouter {
     const routingTask = modelRoutingTaskForRequest(prompt, mode)
     const targets = getSwiftModelTargets(routingTask)
     const attempts: ProviderAttemptLog[] = []
+    log("info", "swift_model_route", {
+      mode,
+      routingTask,
+      targetCount: targets.length,
+      models: targets.map((target) => target.modelId),
+    })
 
     if (targets.length === 0) {
       console.log("provider_attempt", "openrouter")
