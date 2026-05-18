@@ -74,6 +74,7 @@ const nextAuthUrl = value("NEXTAUTH_URL")
 const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
 const databaseUrl = value("DATABASE_URL")
 const directDatabaseUrl = value("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
+const generationExecutionMode = value("SWIFT_GENERATION_EXECUTION_MODE").toLowerCase()
 
 const checks = [
   required("DATABASE_URL", "Neon pooled PostgreSQL app URL", isPostgresUrl(databaseUrl), databaseUrl ? "Must be a PostgreSQL URL." : "Set the Neon pooled connection string."),
@@ -96,6 +97,14 @@ const checks = [
       : value("UPSTASH_REDIS_REST_URL") && value("UPSTASH_REDIS_REST_TOKEN")
         ? "Upstash REST is configured, but BullMQ workers still require native REDIS_URL."
         : "Set REDIS_URL to a native redis:// or rediss:// connection string"
+  ),
+  required(
+    "SWIFT_GENERATION_EXECUTION_MODE",
+    "Queued generation execution for production",
+    !generationExecutionMode || generationExecutionMode === "queue",
+    generationExecutionMode
+      ? "Use queue mode in production; serverless generation can hit platform execution limits."
+      : "Defaults to queue mode."
   ),
   required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
   required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),

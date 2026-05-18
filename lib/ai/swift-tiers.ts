@@ -7,11 +7,16 @@ export const DEFAULT_SWIFT_TIER_KEY = SWIFT_BUILDER_MODEL_KEY
 export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
 export const SWIFT_CANONICAL_MODEL_ID = "deepseek/deepseek-v4-pro"
+export const SWIFT_FREE_ROUTER_MODEL_ID = "openrouter/free"
+const freeAiMode = process.env.SWIFT_AI_FREE_MODE === "true"
+const configuredFreeModel = process.env.OPENROUTER_FREE_MODEL?.trim()
 const configuredCanonicalModel = process.env.OPENROUTER_DEEPSEEK_V4_PRO_MODEL?.trim()
 export const DEEPSEEK_V4_PRO_MODEL_ID =
-  configuredCanonicalModel === SWIFT_CANONICAL_MODEL_ID
-    ? configuredCanonicalModel
-    : SWIFT_CANONICAL_MODEL_ID
+  freeAiMode
+    ? configuredFreeModel || SWIFT_FREE_ROUTER_MODEL_ID
+    : configuredCanonicalModel === SWIFT_CANONICAL_MODEL_ID
+      ? configuredCanonicalModel
+      : SWIFT_CANONICAL_MODEL_ID
 export const DEEPSEEK_V32_MODEL_ID = DEEPSEEK_V4_PRO_MODEL_ID
 export const DEEPSEEK_V32_PRO_MODEL_ID = DEEPSEEK_V4_PRO_MODEL_ID
 
@@ -84,7 +89,9 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     label: "Swift AI Orchestrator",
     shortLabel: "Builder",
     description: "Satu-satunya engine produksi Swift untuk full-stack, dashboard, CRUD, Prisma, API route, repair, dan arsitektur project.",
-    note: "Semua request Swift dirutekan ke DeepSeek V4 Pro melalui OpenRouter dengan routing internal yang efisien.",
+    note: freeAiMode
+      ? "Mode evaluasi gratis aktif. Request Swift dirutekan ke OpenRouter Free Models Router."
+      : "Semua request Swift dirutekan ke DeepSeek V4 Pro melalui OpenRouter dengan routing internal yang efisien.",
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS,
@@ -159,6 +166,10 @@ export function getDefaultSwiftTier() {
 
 export function hasOpenRouterGatewayKey() {
   return Boolean(process.env.OPENROUTER_API_KEY?.trim())
+}
+
+export function isSwiftFreeAiMode() {
+  return freeAiMode
 }
 
 export function getSwiftTierOptions() {

@@ -1382,7 +1382,7 @@ function GenerationProgressCard({
       </div>
       {isOverdue && (
         <p className="mt-2 text-[11px] text-amber-300">
-          Batas 180 detik tercapai. Swift sedang menghentikan job dan memproses refund bila diperlukan.
+          Batas {timeoutSeconds} detik tercapai. Swift sedang menghentikan job dan memproses refund bila diperlukan.
         </p>
       )}
       {progress.prompt && (

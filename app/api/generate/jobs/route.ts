@@ -19,7 +19,10 @@ import { ModelConfigService } from "@/lib/services/model-config.service"
 export const runtime = "nodejs"
 export const maxDuration = 300
 const routeRuntime: string = runtime
-const generationExecutionMode = process.env.SWIFT_GENERATION_EXECUTION_MODE || (process.env.VERCEL ? "serverless" : "queue")
+const generationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
+const allowServerlessGenerationFallback =
+  generationExecutionMode === "serverless" ||
+  process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true"
 
 const CreateJobSchema = z.object({
   projectId: z.string().min(1),
@@ -513,7 +516,7 @@ export async function POST(request: NextRequest) {
       attachments: parsed.data.attachments,
     }
 
-    const preferServerlessExecution = generationExecutionMode !== "queue"
+    const preferServerlessExecution = generationExecutionMode === "serverless"
     const queueHealth = preferServerlessExecution
       ? null
       : await getGenerationQueueHealth().catch((error) => {
@@ -524,7 +527,8 @@ export async function POST(request: NextRequest) {
           })
           return null
         })
-    const shouldUseServerlessFallback = preferServerlessExecution || !queueHealth || queueHealth.status !== "healthy"
+    const queueUnavailable = !queueHealth || queueHealth.status !== "healthy"
+    const shouldUseServerlessFallback = preferServerlessExecution || (allowServerlessGenerationFallback && queueUnavailable)
     if (shouldUseServerlessFallback) {
       log("warn", "generation_queue_worker_unavailable", {
         requestId,
@@ -534,6 +538,11 @@ export async function POST(request: NextRequest) {
         queueEnabled: queueHealth?.enabled ?? false,
         workerHeartbeat: queueHealth?.workerHeartbeat || null,
       })
+    }
+    if (!preferServerlessExecution && queueUnavailable && !allowServerlessGenerationFallback) {
+      throw new Error(
+        `Generation worker unavailable; queue status is ${queueHealth?.status || "unknown"}. Start the dedicated worker or set SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK=true for short local tests.`
+      )
     }
 
     let queueJob: Awaited<ReturnType<typeof enqueueGenerationTask>> | null = null
@@ -546,6 +555,10 @@ export async function POST(request: NextRequest) {
           }
         )
       } catch (error) {
+        if (!allowServerlessGenerationFallback) {
+          throw error
+        }
+
         log("warn", "generation_queue_enqueue_failed_falling_back", {
           requestId,
           jobId: job.id,

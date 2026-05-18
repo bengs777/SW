@@ -31,6 +31,10 @@ const prisma = new PrismaClient({
 const runId = `chaos-${Date.now()}`
 const cost = 3000
 const concurrency = Math.min(100, Math.max(5, Math.round(Number(process.env.CHAOS_CONCURRENCY || 50))))
+const transactionOptions = {
+  maxWait: 15_000,
+  timeout: 30_000,
+}
 
 function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
@@ -180,7 +184,7 @@ async function guardedPersist({ projectId, generationJobId, idempotencyKey, prom
     })
     const manifest = await syncProjectFiles(tx, projectId, files)
     return { historyId: history.id, manifest }
-  })
+  }, transactionOptions)
 }
 
 async function reserveGeneration({ userId, projectId, modelConfigId, requestHash }) {
@@ -260,7 +264,7 @@ async function reserveGeneration({ userId, projectId, modelConfigId, requestHash
     })
 
     return { job, usageLog }
-  })
+  }, transactionOptions)
 }
 
 async function refundReservation({ usageLogId, userId }) {
@@ -324,7 +328,7 @@ async function refundReservation({ usageLogId, userId }) {
     })
 
     return true
-  })
+  }, transactionOptions)
 }
 
 function assert(condition, message) {
@@ -464,7 +468,7 @@ async function main() {
       },
     })
     throw new Error("SIMULATED_DB_TIMEOUT_AFTER_HALF_WRITE")
-  }).catch((error) => {
+  }, transactionOptions).catch((error) => {
     assert(/SIMULATED_DB_TIMEOUT/.test(error.message), `Unexpected rollback simulation error: ${error.message}`)
   })
   const partialWriteCount = await prisma.projectFile.count({

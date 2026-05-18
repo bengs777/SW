@@ -17,6 +17,11 @@ type PersistProjectFilesOptions = {
   generationJobId?: string | null
 }
 
+const PERSISTENCE_TRANSACTION_OPTIONS = {
+  maxWait: 15_000,
+  timeout: 30_000,
+}
+
 export class ProjectFilePersistenceService {
   static normalizeFiles(files: GeneratedFile[]) {
     return ProjectFilesystemService.normalizeFiles(files)
@@ -100,7 +105,7 @@ export class ProjectFilePersistenceService {
           integrity: filesystemWrite.manifest,
           manifest: filesystemWrite.manifest,
         }
-      })
+      }, PERSISTENCE_TRANSACTION_OPTIONS)
     )
   }
 

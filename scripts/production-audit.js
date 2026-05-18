@@ -82,10 +82,12 @@ function staticChecks() {
     check(
       "ai.single-orchestrator-model",
       /SWIFT_CANONICAL_MODEL_ID\s*=\s*"deepseek\/deepseek-v4-pro"/.test(swiftTiers) &&
+        /SWIFT_FREE_ROUTER_MODEL_ID\s*=\s*"openrouter\/free"/.test(swiftTiers) &&
+        /SWIFT_AI_FREE_MODE/.test(swiftTiers) &&
         !/deepseek-v4-flash|deepseek-v3\.2|OPENROUTER_DEEPSEEK_FLASH|OPENROUTER_DEEPSEEK_V32/.test(
           [swiftTiers, providerRouter, generationPipeline].join("\n")
         ),
-      "Swift AI runtime is locked to deepseek/deepseek-v4-pro only"
+      "Swift AI runtime uses one orchestrator route, with an explicit OpenRouter free evaluation mode"
     ),
     check(
       "ai.single-public-model-option",

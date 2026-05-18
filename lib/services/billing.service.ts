@@ -3,6 +3,11 @@ import { addDays } from "date-fns"
 import { prisma } from "@/lib/db/client"
 import { getBillingPlan, isSubscriptionPurchasePayload, parseBillingOrderPayload } from "@/lib/billing/plans"
 
+const BILLING_TRANSACTION_OPTIONS = {
+  maxWait: 15_000,
+  timeout: 30_000,
+}
+
 type BalanceTransactionInput = {
   userId: string
   kind: string
@@ -282,7 +287,7 @@ export class BillingService {
         alreadyProcessed: false,
         creditedBalance: balanceAfter,
       }
-    })
+    }, BILLING_TRANSACTION_OPTIONS)
   }
 
   static async reserveBalance(userId: string, modelConfigId: string, model: string, provider: string, prompt: string, cost: number) {
@@ -350,7 +355,7 @@ export class BillingService {
       })
 
       return usageLog
-    })
+    }, BILLING_TRANSACTION_OPTIONS)
   }
 
   static async reserveGenerationJob(input: ReserveGenerationJobInput) {
@@ -476,7 +481,7 @@ export class BillingService {
         job: updatedJob,
         usageLog,
       }
-    })
+    }, BILLING_TRANSACTION_OPTIONS)
   }
 
   static async markCompleted(
@@ -620,6 +625,6 @@ export class BillingService {
           refundedAt: new Date(),
         },
       })
-    })
+    }, BILLING_TRANSACTION_OPTIONS)
   }
 }

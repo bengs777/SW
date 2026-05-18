@@ -138,7 +138,7 @@ export async function GET(request: NextRequest) {
           nodeEnv: env.nodeEnv,
           vercel: Boolean(process.env.VERCEL),
           region: process.env.VERCEL_REGION || null,
-          generationExecutionMode: process.env.SWIFT_GENERATION_EXECUTION_MODE || (process.env.VERCEL ? "serverless" : "queue"),
+          generationExecutionMode: process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue",
           aiTimeoutMs: env.aiTimeoutMs,
           aiQueueTimeoutMs: env.aiQueueTimeoutMs,
           timeouts: timeoutConfig,
