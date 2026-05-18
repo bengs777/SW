@@ -9,6 +9,7 @@ import {
 } from "@/lib/queue/generation-queue"
 import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
+import { prisma } from "@/lib/db/client"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
@@ -30,6 +31,12 @@ class GenerationJobTimeoutError extends Error {
 
 async function loadProjectFiles(projectId: string) {
   return ProjectFilesystemService.readFiles(projectId)
+}
+
+async function loadGenerationHistoryCount(projectId: string) {
+  return prisma.generationHistory.count({
+    where: { projectId },
+  })
 }
 
 export async function processGenerationPayload(payload: GenerationQueuePayload, queueJobId?: string | number) {
@@ -71,6 +78,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       },
       {
         loadProjectFiles,
+        loadGenerationHistoryCount,
       }
     )
 

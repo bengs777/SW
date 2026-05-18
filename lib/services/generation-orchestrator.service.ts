@@ -85,6 +85,7 @@ type ExecuteGenerationJobInput = {
 
 type ExecuteGenerationJobDeps = {
   loadProjectFiles: (projectId: string) => Promise<GeneratedFile[]>
+  loadGenerationHistoryCount?: (projectId: string) => Promise<number>
 }
 
 const MAX_REPAIR_ATTEMPTS = 1
@@ -1368,6 +1369,14 @@ async function runProviderAttempt(input: {
   selectedModel: string
   promptLanguage: "id" | "en"
   signal?: AbortSignal
+  generationContext?: {
+    projectId: string
+    generationMode: string
+    prompt: string
+    previousPromptCount: number
+    existingFiles: GeneratedFile[]
+    existingFileCount?: number
+  }
 }) {
   const routed = routeModelForRequest({
     prompt: input.prompt,
@@ -1407,6 +1416,17 @@ async function runProviderAttempt(input: {
   })
 
   try {
+    if (input.generationContext) {
+      log("info", "generation_context", {
+        projectId: input.generationContext.projectId,
+        generationMode: input.generationContext.generationMode,
+        prompt: input.generationContext.prompt,
+        previousPromptCount: input.generationContext.previousPromptCount,
+        existingFileCount: input.generationContext.existingFileCount ?? input.generationContext.existingFiles.length,
+        files: summarizeContextFiles(input.generationContext.existingFiles).slice(0, 10),
+      })
+    }
+
     const response = await ProviderRouter.generate({
       provider: route.provider,
       modelName: route.modelName,
@@ -1628,6 +1648,14 @@ function buildAppPlan(input: { prompt: string; plan: GenerationPlan }) {
 
 function summarizeGeneratedManifest(files: GeneratedFile[]) {
   return files.map((file) => normalizePath(file.path)).sort()
+}
+
+function summarizeContextFiles(files: GeneratedFile[]) {
+  return files.map((file) => ({
+    path: normalizePath(file.path),
+    language: file.language || null,
+    bytes: Buffer.byteLength(file.content || "", "utf8"),
+  }))
 }
 
 function mergeFilesByPath(currentFiles: GeneratedFile[], nextFiles: GeneratedFile[]) {
@@ -2637,7 +2665,19 @@ export async function executeGenerationJob(
     })
     await GenerationJobService.assertNotCancelled(input.jobId)
 
-    const existingFiles = await deps.loadProjectFiles(input.projectId)
+    const [existingFiles, previousPromptCount] = await Promise.all([
+      deps.loadProjectFiles(input.projectId),
+      deps.loadGenerationHistoryCount
+        ? deps.loadGenerationHistoryCount(input.projectId).catch((error) => {
+            log("warn", "generation_history_count_failed", {
+              jobId: input.jobId,
+              projectId: input.projectId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return 0
+          })
+        : Promise.resolve(0),
+    ])
     assertNotAborted(input.signal)
     plan = buildGenerationPlan({
       prompt: input.prompt,
@@ -2796,6 +2836,14 @@ export async function executeGenerationJob(
           selectedModel: input.selectedModel,
           promptLanguage,
           signal: input.signal,
+          generationContext: {
+            projectId: input.projectId,
+            generationMode: `${plan.productionMode}:${plan.editPlan.mode}`,
+            prompt: input.prompt,
+            previousPromptCount,
+            existingFileCount: workingFiles.length,
+            existingFiles: workingFiles,
+          },
         })
         assertNotAborted(input.signal)
         try {
