@@ -54,6 +54,7 @@ interface PreviewPanelProps {
   generationProgress?: GenerationProgress | null
   onCancelGeneration?: () => void
   projectId?: string
+  runtimePreviewUrl?: string | null
 }
 
 export function PreviewPanel({
@@ -75,6 +76,7 @@ export function PreviewPanel({
   generationProgress = null,
   onCancelGeneration,
   projectId,
+  runtimePreviewUrl = null,
 }: PreviewPanelProps) {
   const [internalActiveTab, setInternalActiveTab] = useState<"preview" | "code" | "explorer">("preview")
   const [viewport, setViewport] = useState<ViewportSize>("desktop")
@@ -109,6 +111,12 @@ export function PreviewPanel({
   const handleRefresh = () => {
     setPreviewKey((k) => k + 1)
     setPreviewError(null)
+  }
+
+  const handleOpenPreview = () => {
+    if (runtimePreviewUrl) {
+      window.open(runtimePreviewUrl, "_blank", "noopener,noreferrer")
+    }
   }
 
   const handlePreviewError = useCallback((error: string) => {
@@ -218,7 +226,14 @@ export function PreviewPanel({
             >
               <RefreshCw className="h-4 w-4" />
             </Button>
-            <Button variant="ghost" size="icon" className="h-8 w-8" title="Open in new tab">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              title="Open in new tab"
+              onClick={handleOpenPreview}
+              disabled={!runtimePreviewUrl}
+            >
               <ExternalLink className="h-4 w-4" />
             </Button>
           </div>
@@ -263,7 +278,17 @@ export function PreviewPanel({
             )}
             style={{ width: viewportWidths[viewport], maxWidth: "100%" }}
           >
-            {files.length > 0 ? (
+            {runtimePreviewUrl ? (
+              <iframe
+                key={`${previewKey}:${runtimePreviewUrl}`}
+                src={runtimePreviewUrl}
+                title="Runtime preview"
+                className="h-full w-full border-0 bg-background"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
+                referrerPolicy="no-referrer"
+                onLoad={() => setPreviewError(null)}
+              />
+            ) : files.length > 0 ? (
               <SandboxPreview 
                 key={previewKey}
                 files={previewFiles ?? files}

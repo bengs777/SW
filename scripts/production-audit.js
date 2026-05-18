@@ -96,8 +96,9 @@ function staticChecks() {
     check(
       "ai.production-fullstack-mode",
       /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
-        /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*40/.test(generationOrchestrator) &&
+        /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*16/.test(generationOrchestrator) &&
         /PRODUCTION_FULLSTACK_BATCH_SIZE\s*=\s*8/.test(generationOrchestrator) &&
+        /buildFastClinicFullStackScaffold/.test(generationOrchestrator) &&
         /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator),
       "Explicit full-stack/admin/API/payment prompts use a production full-stack orchestration mode"
     ),
@@ -132,8 +133,8 @@ function staticChecks() {
       "Sandbox commands have timeout cleanup"
     ),
     check("sandbox.process-restart", /stopProcess/.test(sandboxRuntime) && /resetRuntimeSandbox/.test(sandboxRuntime), "Sandbox supports process stop and reset"),
-    check("sandbox.npm-ci-ignore-scripts", /npm["'], \["ci", "--ignore-scripts"/.test(sandboxRuntime), "Runtime sandbox installs deterministically without lifecycle scripts"),
-    check("sandbox.build-before-preview", /npm["'], \["run", "build"/.test(sandboxRuntime), "Runtime sandbox runs build before preview"),
+    check("sandbox.npm-install-ignore-scripts", /npm["'], \["install", "--ignore-scripts"/.test(sandboxRuntime) && /SWIFT_SANDBOX_COPY_ROOT_LOCK/.test(sandboxRuntime), "Runtime sandbox installs generated apps without lifecycle scripts or root lockfile drift"),
+    check("sandbox.build-before-preview", /npm["'], \["run", "db:generate"/.test(sandboxRuntime) && /npm["'], \["run", "build"/.test(sandboxRuntime), "Runtime sandbox runs Prisma generate and build before preview"),
     check("ops.health-route", /getGenerationQueueHealth/.test(healthRoute) && /ProviderRouter/.test(healthRoute), "Health endpoint reports database, queue, env, and provider status"),
     check("ops.worker-heartbeat", /recordGenerationWorkerHeartbeat/.test(generationQueue) && /recordGenerationWorkerHeartbeat/.test(generationWorker), "Queue health includes worker heartbeat reporting"),
     check("ops.sentry-config", exists("instrumentation.ts") && exists("instrumentation-client.ts") && exists("sentry.server.config.ts"), "Sentry instrumentation exists for client and server runtimes"),

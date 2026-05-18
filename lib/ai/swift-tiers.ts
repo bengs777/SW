@@ -69,6 +69,14 @@ export const USER_FRIENDLY_QUEUE_OVERLOAD_ERROR =
   "Swift sedang ramai. Coba lagi sebentar lagi."
 
 export const SWIFT_PUBLIC_PRICE_IDR = 3000
+const SWIFT_FULLSTACK_TIMEOUT_MS = Math.max(
+  180_000,
+  Number(process.env.AI_TIMEOUT_MS || process.env.SWIFT_PROVIDER_TIMEOUT_MS || 240_000)
+)
+const SWIFT_FULLSTACK_OUTPUT_TOKENS = Math.max(
+  12_000,
+  Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)
+)
 
 export function getSwiftTierConfigs(): SwiftTierConfig[] {
   const builderTier: SwiftTierConfig = {
@@ -79,14 +87,14 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     note: "Semua request Swift dirutekan ke DeepSeek V4 Pro melalui OpenRouter dengan routing internal yang efisien.",
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
-    timeoutMs: 120_000,
-    maxOutputTokens: 8192,
+    timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS,
+    maxOutputTokens: SWIFT_FULLSTACK_OUTPUT_TOKENS,
     rank: 2,
     public: true,
     generationLayer: "builder",
     queue: { concurrency: 3, maxQueueDepth: 36 },
     targets: [
-      { modelId: DEEPSEEK_V4_PRO_MODEL_ID, role: "primary", timeoutMs: 120_000, maxOutputTokens: 8192 },
+      { modelId: DEEPSEEK_V4_PRO_MODEL_ID, role: "primary", timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS, maxOutputTokens: SWIFT_FULLSTACK_OUTPUT_TOKENS },
     ],
   }
 

@@ -12,7 +12,7 @@ type SandboxState = {
   port: number
   process: ChildProcessWithoutNullStreams | null
   logs: string[]
-  status: "idle" | "installing" | "typechecking" | "linting" | "building" | "verifying" | "running" | "error"
+  status: "idle" | "installing" | "generating" | "typechecking" | "linting" | "building" | "verifying" | "running" | "error"
   previewUrl: string | null
   lastError: string | null
   fileHash: string | null
@@ -20,7 +20,7 @@ type SandboxState = {
 }
 
 export type SandboxValidationStep = {
-  name: "install" | "typecheck" | "lint" | "build"
+  name: "install" | "prisma-generate" | "typecheck" | "lint" | "build"
   status: "passed" | "failed" | "skipped"
   policy: "required" | "advisory"
   command?: string
@@ -94,6 +94,7 @@ const ALLOWED_PACKAGES = new Set([
   "framer-motion",
   "lucide-react",
   "next",
+  "next-auth",
   "postcss",
   "prisma",
   "react",
@@ -285,7 +286,7 @@ function runCommand(
     const child = spawn(commandName(command), args, {
       cwd: state.rootDir,
       env: sandboxProcessEnv(state.port),
-      shell: false,
+      shell: process.platform === "win32",
       detached: process.platform !== "win32",
       windowsHide: true,
     })
@@ -349,6 +350,7 @@ function mergePackageJson(existingContent: string | null) {
       clsx: "^2.1.1",
       "lucide-react": "^0.564.0",
       next: "^16.2.6",
+      "next-auth": "^5.0.0-beta.20",
       react: "^19.2.5",
       "react-dom": "^19.2.5",
       "tailwind-merge": "^3.3.1",
@@ -433,7 +435,7 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
   )
 
   const rootPackageLockPath = path.join(process.cwd(), "package-lock.json")
-  if (await fileExists(rootPackageLockPath)) {
+  if (process.env.SWIFT_SANDBOX_COPY_ROOT_LOCK === "true" && await fileExists(rootPackageLockPath)) {
     const lockContent = await readFile(rootPackageLockPath, "utf8")
     await writeFile(path.join(state.rootDir, "package-lock.json"), lockContent, "utf8")
   }
@@ -564,7 +566,7 @@ function startPreviewServer(state: SandboxState) {
   const child = spawn(commandName("npm"), ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
     cwd: state.rootDir,
     env: sandboxProcessEnv(state.port),
-    shell: false,
+    shell: process.platform === "win32",
     detached: process.platform !== "win32",
     windowsHide: true,
   })
@@ -613,12 +615,12 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
     const nextPackageHash = createHash("sha256").update(packageContent).digest("hex")
     if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
-      const install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], 120_000, options?.signal)
+      const install = await runCommand(state, "npm", ["install", "--ignore-scripts"], 120_000, options?.signal)
       validation.push({
         name: "install",
         status: install.code === 0 ? "passed" : "failed",
         policy: "required",
-        command: "npm ci --ignore-scripts",
+        command: "npm install --ignore-scripts",
         durationMs: install.durationMs,
         output: install.code === 0 ? undefined : tailOutput(install.output),
         reason: install.timedOut ? "timeout" : install.aborted ? "aborted" : undefined,
@@ -637,6 +639,27 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
         policy: "required",
         reason: "node_modules and package hash are unchanged",
       })
+    }
+
+    const hasPrismaSchema = files.some((file) => normalizePath(file.path) === "prisma/schema.prisma")
+    if (hasPrismaSchema) {
+      state.status = "generating"
+      const prismaGenerate = await runCommand(state, "npm", ["run", "db:generate"], 90_000, options?.signal)
+      validation.push({
+        name: "prisma-generate",
+        status: prismaGenerate.code === 0 ? "passed" : "failed",
+        policy: "required",
+        command: "npm run db:generate",
+        durationMs: prismaGenerate.durationMs,
+        output: prismaGenerate.code === 0 ? undefined : tailOutput(prismaGenerate.output),
+        reason: prismaGenerate.timedOut ? "timeout" : prismaGenerate.aborted ? "aborted" : undefined,
+      })
+      if (options?.signal?.aborted) {
+        throw new Error("GENERATION_JOB_CANCELLED")
+      }
+      if (prismaGenerate.code !== 0) {
+        throw new Error(commandFailureMessage(validation[validation.length - 1]))
+      }
     }
 
     state.status = "typechecking"

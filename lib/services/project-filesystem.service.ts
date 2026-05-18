@@ -47,7 +47,7 @@ const FORBIDDEN_EXACT_FILES = new Set([
   "pnpm-lock.yaml",
   "yarn.lock",
 ])
-const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
+const ALLOWED_ROOTS = ["app/", "components/", "hooks/", "lib/", "prisma/", "public/", "services/"]
 const ALLOWED_EXACT_FILES = new Set([
   ".swift/workspace-state.json",
   ".env.example",

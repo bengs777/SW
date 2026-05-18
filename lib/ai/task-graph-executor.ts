@@ -14,7 +14,7 @@ const PACKAGE_JSON_PATH = "package.json"
 const MAX_OPERATIONS = 100
 const MAX_TOTAL_BYTES = 5 * 1024 * 1024
 const MAX_FILE_BYTES = 200 * 1024
-const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
+const ALLOWED_ROOTS = ["app/", "components/", "hooks/", "lib/", "prisma/", "public/", "services/"]
 const ALLOWED_EXACT_FILES = new Set([
   ".swift/workspace-state.json",
   ".env.example",

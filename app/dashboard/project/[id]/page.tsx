@@ -32,7 +32,7 @@ import {
 import { ChevronDown } from "lucide-react"
 
 const MAX_PROMPT_LENGTH = 12000
-const GENERATE_BACKEND_TIMEOUT_MS = 120_000
+const GENERATE_BACKEND_TIMEOUT_MS = 600_000
 const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
 const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
 
@@ -297,6 +297,7 @@ export default function EditorPage() {
   const [errorLogs, setErrorLogs] = useState<ErrorLogEntry[]>([])
   const [showLogsPanel, setShowLogsPanel] = useState(false)
   const [latestPreviewError, setLatestPreviewError] = useState<string | null>(null)
+  const [runtimePreviewUrl, setRuntimePreviewUrl] = useState<string | null>(null)
   const [customDomain, setCustomDomain] = useState<string | null>(null)
   const [, setDomainVerified] = useState<boolean>(false)
   const [subscriptionPlan, setSubscriptionPlan] = useState<string>("free")
@@ -402,6 +403,9 @@ export default function EditorPage() {
 
     setGeneratedFiles(files)
     setPreviewFiles(null)
+    if (reason === "project-load") {
+      setRuntimePreviewUrl(null)
+    }
     setCurrentVersion(serverWorkspaceState.version)
     setActiveFileIndex(0)
     setIsDirty(false)
@@ -483,16 +487,23 @@ export default function EditorPage() {
       ? rawPayload as { data?: { previewUrl?: string | null; historyId?: string | null; fileCount?: number | null; previewStatus?: string | null } }
       : null
     const data = payload?.data || {}
+    const previewUrl = typeof data.previewUrl === "string" && data.previewUrl.trim()
+      ? data.previewUrl.trim()
+      : null
 
     console.info(JSON.stringify({
       level: "info",
       msg: "preview_ready_received",
       projectId,
-      previewUrl: data.previewUrl || null,
+      previewUrl,
       historyId: data.historyId || null,
       fileCount: data.fileCount ?? null,
       previewStatus: data.previewStatus || null,
     }))
+
+    if (previewUrl) {
+      setRuntimePreviewUrl(previewUrl)
+    }
 
     void refreshProjectState("generation-completed").then(() => {
       setActivePreviewTab("preview")
@@ -545,6 +556,9 @@ export default function EditorPage() {
         recordEventId(event as MessageEvent)
         const job = JSON.parse((event as MessageEvent).data)
         applyJobProgress(job)
+        if (typeof job.previewUrl === "string" && job.previewUrl.trim()) {
+          setRuntimePreviewUrl(job.previewUrl.trim())
+        }
         if (["completed", "failed", "cancelled"].includes(job.status)) {
           stream.close()
           clearGenerateDeadline()
@@ -568,6 +582,9 @@ export default function EditorPage() {
             void (async () => {
               try {
                 await refreshProjectState("generation-completed")
+                if (typeof job.previewUrl === "string" && job.previewUrl.trim()) {
+                  setRuntimePreviewUrl(job.previewUrl.trim())
+                }
                 setActivePreviewTab("preview")
                 setMessages((prev) =>
                   prev.map((msg) =>
@@ -1855,6 +1872,7 @@ export default function EditorPage() {
                 generationProgress={generationProgress}
                 onCancelGeneration={handleCancelGeneration}
                 projectId={projectId}
+                runtimePreviewUrl={runtimePreviewUrl}
               />
             )}
           </div>
@@ -1938,6 +1956,7 @@ export default function EditorPage() {
                 generationProgress={generationProgress}
                 onCancelGeneration={handleCancelGeneration}
                 projectId={projectId}
+                runtimePreviewUrl={runtimePreviewUrl}
               />
             </ResizablePanel>
             {showLogsPanel && (

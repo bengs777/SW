@@ -40,7 +40,7 @@ const normalizeTokenLimit = (value: number) => {
     return 3000
   }
 
-  return Math.min(12_000, Math.max(256, rounded))
+  return Math.min(32_000, Math.max(256, rounded))
 }
 
 const normalizeUrl = (url: string) => url.replace(/\/+$/, "")

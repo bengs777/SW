@@ -20,7 +20,7 @@ const PROTECTED_DELETE_FILES = new Set([
   "app/layout.tsx",
   "app/page.tsx",
 ])
-const ALLOWED_ROOTS = ["app/", "components/", "lib/", "prisma/", "public/"]
+const ALLOWED_ROOTS = ["app/", "components/", "hooks/", "lib/", "prisma/", "public/", "services/"]
 const ALLOWED_EXACT_FILES = new Set([
   ".swift/workspace-state.json",
   ".env.example",

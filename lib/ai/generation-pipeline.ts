@@ -72,9 +72,21 @@ export const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
   "@prisma/client": "^5.22.0",
   prisma: "^5.22.0",
   "next-auth": "^5.0.0-beta.20",
+  "react-hook-form": "^7.54.1",
+  "@hookform/resolvers": "^3.9.1",
+  "@supabase/supabase-js": "^2.104.0",
+  axios: "^1.7.9",
+  bcryptjs: "^3.0.3",
   recharts: "2.15.0",
   "date-fns": "4.1.0",
   sonner: "^1.7.1",
+  "@tailwindcss/postcss": "^4.2.0",
+  "@types/node": "^22",
+  "@types/react": "19.2.14",
+  "@types/react-dom": "19.2.3",
+  autoprefixer: "^10.4.20",
+  postcss: "8.5.14",
+  tailwindcss: "^4.2.0",
   "@radix-ui/react-slot": "1.2.4",
   "@radix-ui/react-tabs": "1.1.13",
   "@radix-ui/react-dialog": "1.1.15",
@@ -102,7 +114,17 @@ export const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
   "@radix-ui/react-tooltip": "1.2.8",
 }
 
-export const PACKAGE_DEV_DEPENDENCIES = new Set(["typescript", "prisma"])
+export const PACKAGE_DEV_DEPENDENCIES = new Set([
+  "@tailwindcss/postcss",
+  "@types/node",
+  "@types/react",
+  "@types/react-dom",
+  "autoprefixer",
+  "postcss",
+  "prisma",
+  "tailwindcss",
+  "typescript",
+])
 const BUILTIN_PACKAGES = new Set([
   "assert",
   "buffer",

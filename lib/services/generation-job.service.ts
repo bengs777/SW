@@ -414,12 +414,10 @@ export class GenerationJobService {
     error?: string | null
     metadata?: Record<string, unknown>
   }) {
-    return prisma.generationAttempt.update({
+    return prisma.generationAttempt.updateMany({
       where: {
-        jobId_sequence: {
-          jobId: input.jobId,
-          sequence: input.sequence,
-        },
+        jobId: input.jobId,
+        sequence: input.sequence,
       },
       data: {
         status: input.status,

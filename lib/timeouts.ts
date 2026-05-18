@@ -8,8 +8,8 @@ export function getTimeoutMs(name: string, fallbackMs: number, minMs = 1_000) {
 
 export const timeoutConfig = {
   aiRequestMs: env.aiTimeoutMs,
-  generationJobMs: getTimeoutMs("SWIFT_GENERATION_JOB_TIMEOUT_MS", env.aiQueueTimeoutMs, 10_000),
-  staleGenerationMs: getTimeoutMs("SWIFT_STALE_GENERATION_TIMEOUT_MS", env.aiQueueTimeoutMs, 10_000),
-  sandboxServiceMs: getTimeoutMs("SANDBOX_SERVICE_TIMEOUT_MS", 25_000, 1_000),
+  generationJobMs: getTimeoutMs("SWIFT_GENERATION_JOB_TIMEOUT_MS", Math.max(env.aiQueueTimeoutMs, 600_000), 10_000),
+  staleGenerationMs: getTimeoutMs("SWIFT_STALE_GENERATION_TIMEOUT_MS", Math.max(env.aiQueueTimeoutMs, 600_000), 10_000),
+  sandboxServiceMs: getTimeoutMs("SANDBOX_SERVICE_TIMEOUT_MS", 300_000, 1_000),
   healthProviderMs: getTimeoutMs("HEALTH_PROVIDER_TIMEOUT_MS", 8_000, 1_000),
 }
