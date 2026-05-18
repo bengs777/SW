@@ -519,7 +519,11 @@ function serialize(state) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "swift-sandbox-runtime" })
+  res.status(200).json({
+    status: "healthy",
+    ok: true,
+    service: "swift-sandbox-runtime",
+  })
 })
 
 app.get("/sandbox/:projectId", requireAuth, (req, res) => {
@@ -588,7 +592,13 @@ app.use("/preview/:projectId", (req, res, next) => {
   })(req, res, next)
 })
 
-const port = Number(process.env.PORT || 8080)
-app.listen(port, () => {
-  console.log(`swift-sandbox-runtime listening on ${port}`)
+const PORT = Number(process.env.PORT || 8080)
+const HOST = process.env.HOST || "0.0.0.0"
+
+if (!Number.isInteger(PORT) || PORT <= 0) {
+  throw new Error(`Invalid PORT value: ${process.env.PORT}`)
+}
+
+app.listen(PORT, HOST, () => {
+  console.log(`swift-sandbox-runtime listening on ${HOST}:${PORT}`)
 })
