@@ -44,6 +44,7 @@ const SANDBOX_ROOT =
 const BASE_PORT = Number(process.env.SWIFT_SANDBOX_BASE_PORT || 4300)
 const MAX_LOG_LINES = 500
 const RUNTIME_CONFIG_VERSION = "validation-v2"
+const VALIDATION_INSTALL_POLICY_VERSION = "include-dev-dependencies-v1"
 const SANDBOX_MEMORY_MB = Math.max(128, Number(process.env.SWIFT_SANDBOX_MEMORY_MB || 768))
 const MAX_SANDBOX_SOURCE_BYTES = Number(process.env.SWIFT_SANDBOX_SOURCE_BYTES || 8 * 1024 * 1024)
 const MAX_SANDBOX_WORKSPACE_BYTES = Number(process.env.SWIFT_SANDBOX_WORKSPACE_BYTES || 160 * 1024 * 1024)
@@ -213,8 +214,8 @@ function sandboxNodeOptions() {
   return `${withoutMemory} --max-old-space-size=${SANDBOX_MEMORY_MB}`.trim()
 }
 
-function sandboxProcessEnv(port: number): NodeJS.ProcessEnv {
-  return {
+function sandboxProcessEnv(port: number, mode: "validation" | "runtime" = "runtime"): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH || "",
     Path: process.env.Path || process.env.PATH || "",
     SystemRoot: process.env.SystemRoot || "",
@@ -235,6 +236,13 @@ function sandboxProcessEnv(port: number): NodeJS.ProcessEnv {
     NEXT_PUBLIC_APP_URL: `http://localhost:${port}`,
     PORT: String(port),
   }
+
+  if (mode === "validation") {
+    env.npm_config_include = "dev"
+    env.npm_config_omit = ""
+  }
+
+  return env
 }
 
 async function killProcessTree(child: ChildProcessWithoutNullStreams | null) {
@@ -285,7 +293,7 @@ function runCommand(
 
     const child = spawn(commandName(command), args, {
       cwd: state.rootDir,
-      env: sandboxProcessEnv(state.port),
+      env: sandboxProcessEnv(state.port, "validation"),
       shell: process.platform === "win32",
       detached: process.platform !== "win32",
       windowsHide: true,
@@ -565,7 +573,7 @@ function startPreviewServer(state: SandboxState) {
 
   const child = spawn(commandName("npm"), ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
     cwd: state.rootDir,
-    env: sandboxProcessEnv(state.port),
+    env: sandboxProcessEnv(state.port, "runtime"),
     shell: process.platform === "win32",
     detached: process.platform !== "win32",
     windowsHide: true,
@@ -612,15 +620,19 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
     }
 
     const packageContent = await readFile(path.join(state.rootDir, "package.json"), "utf8")
-    const nextPackageHash = createHash("sha256").update(packageContent).digest("hex")
+    const nextPackageHash = createHash("sha256")
+      .update(packageContent)
+      .update("\0")
+      .update(VALIDATION_INSTALL_POLICY_VERSION)
+      .digest("hex")
     if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
-      const install = await runCommand(state, "npm", ["install", "--ignore-scripts"], 120_000, options?.signal)
+      const install = await runCommand(state, "npm", ["install", "--ignore-scripts", "--include=dev"], 120_000, options?.signal)
       validation.push({
         name: "install",
         status: install.code === 0 ? "passed" : "failed",
         policy: "required",
-        command: "npm install --ignore-scripts",
+        command: "npm install --ignore-scripts --include=dev",
         durationMs: install.durationMs,
         output: install.code === 0 ? undefined : tailOutput(install.output),
         reason: install.timedOut ? "timeout" : install.aborted ? "aborted" : undefined,
