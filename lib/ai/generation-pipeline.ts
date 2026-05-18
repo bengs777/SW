@@ -5,6 +5,7 @@ import {
   SWIFT_PROVIDER,
   type SwiftTierKey,
 } from "@/lib/ai/swift-tiers"
+import { analyzePromptIntent } from "@/lib/ai/intent-analyzer"
 
 export type PromptClassification =
   | "simple_ui"
@@ -169,6 +170,8 @@ const REFACTOR_RE = /\b(refactor|rewrite|migrate|cleanup|restructure|split files
 const COMPONENT_EDIT_RE = /\b(edit component|component edit|ubah komponen|update component|small edit|minor edit)\b/i
 const PREMIUM_REPAIR_RE =
   /\b(repeated|berulang|persist|persistent|dependency graph|build error|preview crash|runtime crash|cannot resolve|module not found|jsx-runtime|react module)\b/i
+const LARGE_GENERATION_RE =
+  /\b(full\s*stack|fullstack|full-stack|multi-file|multi file|multi module|production|deployable|crud|database|postgres|postgresql|prisma|auth|login|register|api route|route handler|backend|webhook|payment|stripe|pakasir|role|rbac|bpjs|integrasi|integration|admin|pengelola|staff)\b/i
 
 const UNSUPPORTED_PREVIEW_IMPORTS = new Map<string, string>([
   ["fs", "Node filesystem APIs cannot run in the browser preview."],
@@ -190,19 +193,24 @@ export function classifyPrompt(
   }
 ): PromptClassification {
   const text = `${prompt}\n${input?.previewError || ""}`.toLowerCase()
+  const intent = analyzePromptIntent(prompt)
+  const hasExistingProject = (input?.existingFiles?.length || 0) > 0
+  const backendIntent = intent.requiredCapabilities.some((capability) =>
+    /api|prisma|model|admin|crud|management|persistence|route|service/i.test(capability)
+  )
 
   if (input?.collaborationMode === "fix" && input.previewError) return "runtime_debug"
   if (PREMIUM_REPAIR_RE.test(text) && REPAIR_RE.test(text)) return "runtime_debug"
   if (REPAIR_RE.test(text)) return "repair"
   if (REFACTOR_RE.test(text)) return "refactor"
-  if (FULLSTACK_RE.test(text)) return "fullstack_app"
+  if (FULLSTACK_RE.test(text) || (backendIntent && LARGE_GENERATION_RE.test(text))) return "fullstack_app"
   if (ARCH_RE.test(text)) return "architecture"
   if (DASHBOARD_RE.test(text)) return "dashboard"
   if (COMPONENT_EDIT_RE.test(text)) return "component_edit"
   if (SIMPLE_UI_RE.test(text)) return "simple_ui"
 
-  const existingFileCount = input?.existingFiles?.length || 0
-  return existingFileCount > 0 ? "component_edit" : "simple_ui"
+  if (hasExistingProject) return "component_edit"
+  return backendIntent ? "fullstack_app" : "simple_ui"
 }
 
 export function scorePromptComplexity(

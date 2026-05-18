@@ -1,5 +1,6 @@
 import type { GeneratedFile } from "@/lib/types"
 import { buildProjectFiles } from "@/lib/ai/project-scaffold"
+import { analyzePromptIntent } from "@/lib/ai/intent-analyzer"
 
 export type ControlledAppType =
   | "saas_dashboard"
@@ -188,60 +189,7 @@ function blueprint(appType: ControlledAppType, label: string, starterPrompt: str
 }
 
 export function classifyControlledAppType(prompt: string): ControlledAppType {
-  const text = String(prompt || "").toLowerCase()
-
-  if (/\b(berita|news|artikel|article|majalah|blog|portal berita|portal desa|portal pemerintahan|pemerintah|pemerintahan|layanan publik|dinas|kelurahan|kecamatan|kabupaten|kota|provinsi|desa|warga|bumdes|pengumuman|agenda desa|kegiatan desa)\b/.test(text)) {
-    return "village_news_portal"
-  }
-
-  if (/\b(ai chat|chatbot|chat app|conversation|assistant|llm|openai|claude)\b/.test(text)) {
-    return "ai_chat_app"
-  }
-
-  if (/\b(booking|reservation|appointment|schedule|calendar|slot|reservasi|janji temu|jadwal)\b/.test(text)) {
-    if (/\b(klinik|clinic|healthcare|dokter|doctor|pasien|patient|medical|rekam medis|rumah sakit|hospital)\b/.test(text)) {
-      return "clinic_management"
-    }
-    return "booking_app"
-  }
-
-  if (/\b(klinik|clinic|healthcare|dokter|doctor|pasien|patient|medical|rekam medis|rumah sakit|hospital)\b/.test(text)) {
-    return "clinic_management"
-  }
-
-  if (/\b(persib|bola|football|soccer|club|klub|tim|team|pemain|player|match|pertandingan|portfolio|portofolio)\b/.test(text)) {
-    return "sports_portfolio"
-  }
-
-  if (/\b(marketplace|e-?commerce|seller|buyer|storefront|product catalog|catalog|katalog|cart|checkout|toko|dagang|pasar|jual|beli|jual beli|shopee|tokopedia|produk)\b/.test(text)) {
-    return "simple_marketplace"
-  }
-
-  if (/\b(crm|lead|pipeline|sales|customer relationship|pelanggan|prospect)\b/.test(text)) {
-    return "lightweight_crm"
-  }
-
-  if (/\b(saas|dashboard|workspace metrics|workspace|activity feed|settings)\b/.test(text)) {
-    return "saas_dashboard"
-  }
-
-  if (/\b(komunitas|community|social|sosial|feed|moderation admin)\b|\bpost\b/.test(text)) {
-    return "internal_business_tool"
-  }
-
-  if (/\b(crud|admin panel|cms|manage records|data table|moderation|moderasi)\b/.test(text)) {
-    return "crud_admin_panel"
-  }
-
-  if (/\b(landing|marketing page|pricing|hero|cta|sign in|sign up|login|register|auth)\b/.test(text)) {
-    return "landing_auth"
-  }
-
-  if (/\b(internal tool|ops|operation|inventory|approval|workflow|back office|business tool)\b/.test(text)) {
-    return "internal_business_tool"
-  }
-
-  return "saas_dashboard"
+  return analyzePromptIntent(prompt).appType
 }
 
 export function buildDynamicSeedDirective(prompt: string) {

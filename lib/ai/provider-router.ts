@@ -62,6 +62,7 @@ type ProviderRequest = {
   promptLanguage?: PromptLanguage
   temperatureOverride?: number
   attachments?: PromptAttachment[]
+  routingTask?: SwiftModelRoutingTask
   signal?: AbortSignal
 }
 
@@ -200,17 +201,18 @@ export class ProviderRouter {
     mode = "files",
     promptLanguage = "id",
     temperatureOverride,
+    routingTask,
     signal,
     provider,
   }: ProviderRequest): Promise<ProviderResponse> {
     validateProvider(provider)
     const tier = this.resolveTier(modelName, mode)
-    const routingTask = modelRoutingTaskForRequest(prompt, mode)
-    const targets = getSwiftModelTargets(routingTask)
+    const resolvedRoutingTask = routingTask || modelRoutingTaskForRequest(prompt, mode)
+    const targets = getSwiftModelTargets(resolvedRoutingTask)
     const attempts: ProviderAttemptLog[] = []
     log("info", "swift_model_route", {
       mode,
-      routingTask,
+      routingTask: resolvedRoutingTask,
       targetCount: targets.length,
       models: targets.map((target) => target.modelId),
     })
