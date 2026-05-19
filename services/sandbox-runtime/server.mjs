@@ -357,7 +357,21 @@ async function ensureFiles(state, files) {
   }
 
   if (!(await fileExists(path.join(state.rootDir, "next.config.js")))) {
-    await writeFile(path.join(state.rootDir, "next.config.js"), "/** @type {import('next').NextConfig} */\nmodule.exports = {}\n", "utf8")
+    await writeFile(
+      path.join(state.rootDir, "next.config.js"),
+      [
+        'const path = require("node:path")',
+        "",
+        "/** @type {import('next').NextConfig} */",
+        "module.exports = {",
+        "  turbopack: {",
+        "    root: path.resolve(__dirname),",
+        "  },",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8"
+    )
   }
 
   if (!(await fileExists(path.join(state.rootDir, "tsconfig.json")))) {

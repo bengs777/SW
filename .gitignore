@@ -19,3 +19,4 @@ tsconfig.tsbuildinfo
 prisma/dev.db
 .vercel
 .swift-sandboxes
+.swift-reports

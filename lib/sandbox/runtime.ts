@@ -216,6 +216,20 @@ function commandName(command: string) {
   return process.platform === "win32" ? `${command}.cmd` : command
 }
 
+function commandInvocation(command: string, args: string[]) {
+  if (process.platform === "win32") {
+    return {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", commandName(command), ...args],
+    }
+  }
+
+  return {
+    command: commandName(command),
+    args,
+  }
+}
+
 function sandboxNodeOptions() {
   const existing = process.env.NODE_OPTIONS || ""
   const withoutMemory = existing.replace(/--max-old-space-size=\S+/g, "").trim()
@@ -299,10 +313,11 @@ function runCommand(
       return
     }
 
-    const child = spawn(commandName(command), args, {
+    const invocation = commandInvocation(command, args)
+    const child = spawn(invocation.command, invocation.args, {
       cwd: state.rootDir,
       env: sandboxProcessEnv(state.port, "validation"),
-      shell: process.platform === "win32",
+      shell: false,
       detached: process.platform !== "win32",
       windowsHide: true,
     })
@@ -469,7 +484,21 @@ async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
 
   const nextConfigPath = path.join(state.rootDir, "next.config.js")
   if (!(await fileExists(nextConfigPath))) {
-    await writeFile(nextConfigPath, "/** @type {import('next').NextConfig} */\nmodule.exports = {}\n", "utf8")
+    await writeFile(
+      nextConfigPath,
+      [
+        'const path = require("node:path")',
+        "",
+        "/** @type {import('next').NextConfig} */",
+        "module.exports = {",
+        "  turbopack: {",
+        "    root: path.resolve(__dirname),",
+        "  },",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8"
+    )
   }
 
   const eslintConfigPath = path.join(state.rootDir, "eslint.config.mjs")
@@ -590,10 +619,11 @@ function startPreviewServer(state: SandboxState) {
     return
   }
 
-  const child = spawn(commandName("npm"), ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
+  const invocation = commandInvocation("npm", ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(state.port)])
+  const child = spawn(invocation.command, invocation.args, {
     cwd: state.rootDir,
     env: sandboxProcessEnv(state.port, "runtime"),
-    shell: process.platform === "win32",
+    shell: false,
     detached: process.platform !== "win32",
     windowsHide: true,
   })
