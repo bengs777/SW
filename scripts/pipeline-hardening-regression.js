@@ -129,10 +129,11 @@ function main() {
     "json.strict-schema",
     /generatedArtifactSchema/.test(artifactParser) &&
       /\.strict\(\)/.test(artifactParser) &&
-      /commands:\s*z\.array\(z\.never\(\)\)/.test(artifactParser) &&
+      /runtimeCommandSchema/.test(artifactParser) &&
+      /runtime commands are metadata only and are not accepted as executable artifacts/.test(artifactParser) &&
       /strict-json-schema-required/.test(artifactParser) &&
       !/extractJsonFragments/.test(artifactParser),
-    "AI JSON parser rejects freeform text, command intents, and schema drift"
+    "AI JSON parser rejects freeform text, executable command intents, and schema drift"
   )
 
   assert(

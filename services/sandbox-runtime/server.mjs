@@ -23,6 +23,19 @@ const MAX_FILE_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_FILE_BYTES || 512 * 
 const PROJECT_IDLE_TTL_MS = Number(process.env.SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS || 30 * 60 * 1000)
 const PROCESS_MAX_UPTIME_MS = Number(process.env.SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS || 20 * 60 * 1000)
 const CLEANUP_INTERVAL_MS = Number(process.env.SWIFT_SANDBOX_CLEANUP_INTERVAL_MS || 60 * 1000)
+const ALLOWED_GENERATED_ROOTS = ["src", "app", "components", "lib", "prisma"]
+const SAFE_GENERATED_ROOT_FILES = new Set([
+  "package.json",
+  "tsconfig.json",
+  "next.config.ts",
+  "next.config.js",
+  "tailwind.config.ts",
+  "tailwind.config.js",
+  "postcss.config.js",
+  "readme.md",
+  ".env.example",
+])
+const BLOCKED_EXACT_FILES = new Set([".env", ".git", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"])
 const states = new Map()
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL || ""
@@ -215,13 +228,15 @@ function assertSafeFilePath(rootDir, filePath, options = {}) {
   }
 
   const lower = normalized.toLowerCase()
-  if (lower.includes("..") || lower.includes("~") || lower.includes(".env") || lower === "package-lock.json" || lower === "pnpm-lock.yaml") {
+  const blockedEnvPath = lower !== ".env.example" && lower.split("/").some((segment) => segment === ".env" || segment.startsWith(".env."))
+  if (lower.includes("..") || lower.includes("~") || BLOCKED_EXACT_FILES.has(lower) || blockedEnvPath) {
     throw new Error(`Blocked sandbox file path rejected: ${filePath}`)
   }
 
-  const allowedRoot = ["src", "app", "components", "lib", "prisma"].some((root) => lower === root || lower.startsWith(`${root}/`))
+  const allowedRoot = ALLOWED_GENERATED_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`))
+  const safeRootFile = SAFE_GENERATED_ROOT_FILES.has(lower)
   const managedPackageJson = options.allowManagedPackageJson === true && lower === "package.json"
-  if (!allowedRoot && !managedPackageJson) {
+  if (!allowedRoot && !safeRootFile && !managedPackageJson) {
     throw new Error(`Sandbox file path is outside allowed project roots: ${filePath}`)
   }
 

@@ -2,8 +2,21 @@ import path from "node:path"
 import { canonicalizeGeneratedPath } from "@/lib/ai/canonical-path"
 
 const WORKSPACE_ROOT = process.cwd()
-const ALLOWED_GENERATED_ROOTS = ["src", "app", "components", "lib", "prisma"] as const
-const BLOCKED_EXACT_FILES = new Set(["package-lock.json", "pnpm-lock.yaml"])
+export const ALLOWED_GENERATED_ROOTS = ["src", "app", "components", "lib", "prisma"] as const
+export const SAFE_GENERATED_ROOT_FILES = [
+  "package.json",
+  "tsconfig.json",
+  "next.config.ts",
+  "next.config.js",
+  "tailwind.config.ts",
+  "tailwind.config.js",
+  "postcss.config.js",
+  "README.md",
+  ".env.example",
+] as const
+
+const SAFE_GENERATED_ROOT_FILE_SET = new Set(SAFE_GENERATED_ROOT_FILES.map((file) => file.toLowerCase()))
+const BLOCKED_EXACT_FILES = new Set([".env", ".git", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"])
 const BLOCKED_SEGMENTS = new Set(["..", "~", "node_modules", ".git"])
 
 export type GeneratedPathValidationDiagnostic = {
@@ -11,6 +24,7 @@ export type GeneratedPathValidationDiagnostic = {
   reason: string
   received: string
   expected?: string
+  allowedRootFiles?: readonly string[]
 }
 
 export type GeneratedPathValidationResult = {
@@ -66,19 +80,21 @@ export function validateGeneratedPath(
   }
 
   const lower = normalized.toLowerCase()
-  if (
-    lower.includes("..") ||
-    lower.includes("~") ||
-    lower.includes(".env") ||
-    BLOCKED_EXACT_FILES.has(lower)
-  ) {
+  if (lower.includes("..") || lower.includes("~") || BLOCKED_EXACT_FILES.has(lower) || isBlockedEnvPath(lower)) {
     throwPathError("Blocked path pattern not allowed", rawPath, normalized)
   }
 
   const isAllowedRoot = ALLOWED_GENERATED_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`))
+  const isSafeRootFile = SAFE_GENERATED_ROOT_FILE_SET.has(lower)
   const isManagedPackageJson = options.allowManagedPackageJson === true && lower === "package.json"
-  if (!isAllowedRoot && !isManagedPackageJson) {
-    throwPathError("Path must start with an allowed generated root", rawPath, normalized)
+  if (!isAllowedRoot && !isSafeRootFile && !isManagedPackageJson) {
+    const isRootFile = !normalized.includes("/")
+    throwPathError(
+      isRootFile ? "Root file not allowlisted" : "Path must start with an allowed generated root",
+      rawPath,
+      normalized,
+      isRootFile ? SAFE_GENERATED_ROOT_FILES : undefined
+    )
   }
 
   const resolvedPath = resolveGeneratedPath(normalized, workspaceRoot)
@@ -117,11 +133,24 @@ export function formatGeneratedPathValidationError(error: unknown) {
   }
 }
 
-function throwPathError(reason: string, received: string, expected?: string): never {
+function isBlockedEnvPath(lowerPath: string) {
+  if (lowerPath === ".env.example") return false
+  return lowerPath
+    .split("/")
+    .some((segment) => segment === ".env" || segment.startsWith(".env."))
+}
+
+function throwPathError(
+  reason: string,
+  received: string,
+  expected?: string,
+  allowedRootFiles?: readonly string[]
+): never {
   throw new GeneratedPathValidationError({
     error: "PATH_ERROR",
     reason,
     received,
     ...(expected && expected !== received ? { expected } : {}),
+    ...(allowedRootFiles ? { allowedRootFiles } : {}),
   })
 }

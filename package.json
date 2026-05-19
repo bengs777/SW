@@ -18,6 +18,7 @@
     "test:corpus": "node scripts/prompt-corpus-regression.js",
     "test:hardening": "node scripts/pipeline-hardening-regression.js",
     "test:path-policy": "node scripts/path-policy-regression.js",
+    "test:artifact-schema": "node scripts/artifact-schema-regression.js",
     "test:resilience": "node scripts/pipeline-resilience-smoke.js",
     "test:regression": "node scripts/regression-tests.js",
     "demo:readiness": "node scripts/demo-readiness.js",

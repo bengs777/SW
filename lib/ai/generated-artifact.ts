@@ -10,6 +10,8 @@ const PROTECTED_DELETE_FILES = new Set([
   "app/page.tsx",
 ])
 
+const artifactMetadataSchema = z.record(z.unknown())
+
 const generatedPathSchema = z.string().trim().min(1).transform((path, ctx) => {
   try {
     return validateGeneratedPath(path).path
@@ -23,13 +25,23 @@ const generatedPathSchema = z.string().trim().min(1).transform((path, ctx) => {
 })
 
 const generatedFileSchema = z.object({
+  kind: z.enum(["file", "filesystem_write"]).optional().default("file"),
   path: generatedPathSchema,
   content: z.string().refine(
     (content) => Buffer.byteLength(content, "utf8") <= MAX_SINGLE_FILE_BYTES,
     "generated file exceeds single-file size limit"
   ),
   language: z.string().trim().optional(),
-})
+}).strict()
+
+const runtimeCommandSchema = z.object({
+  kind: z.literal("runtime_command").optional().default("runtime_command"),
+  label: z.string().trim().min(1),
+  command: z.string().trim().min(1),
+  args: z.array(z.string()).optional().default([]),
+}).strict()
+
+const dependencySchema = z.string().trim().min(1)
 
 const taskGraphOperationSchema = z.object({
   id: z.string().trim().min(1).optional(),
@@ -61,24 +73,34 @@ const taskGraphOperationSchema = z.object({
 const taskGraphSchema = z.object({
   intent: z.string().optional(),
   summary: z.string().optional(),
-  dependencies: z.array(z.string().trim().min(1)).optional().default([]),
+  dependencies: z.array(dependencySchema).optional().default([]),
   operations: z.array(taskGraphOperationSchema).min(1).max(MAX_GENERATED_FILES),
 }).strict()
 
 const generatedArtifactSchema = z.object({
+  kind: z.literal("generated_project_artifact").optional().default("generated_project_artifact"),
+  framework: z.string().trim().min(1).optional(),
   files: z.array(generatedFileSchema).max(MAX_GENERATED_FILES).default([]),
-  dependencies: z.array(z.string().trim().min(1)).optional().default([]),
-  commands: z.array(z.never()).optional().default([]),
+  dependencies: z.array(dependencySchema).optional().default([]),
+  commands: z.array(runtimeCommandSchema).optional().default([]),
   summary: z.string().optional().default(""),
   diagnostics: z.array(z.string()).optional().default([]),
-  metadata: z.record(z.unknown()).optional().default({}),
+  metadata: artifactMetadataSchema.optional().default({}),
   repairs: z.array(generatedFileSchema).max(MAX_GENERATED_FILES).optional().default([]),
   taskGraph: taskGraphSchema.optional(),
 }).strict().superRefine((artifact, ctx) => {
+  if (artifact.commands.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "runtime commands are metadata only and are not accepted as executable artifacts",
+      path: ["commands"],
+    })
+  }
+
   if (artifact.files.length === 0 && !artifact.taskGraph) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "artifact requires files or taskGraph.operations",
+      message: "artifact requires filesystem writes in files or taskGraph.operations",
       path: ["files"],
     })
   }
@@ -122,7 +144,7 @@ export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifa
         commands: [],
         summary: strict.data.summary,
         diagnostics: strict.data.diagnostics,
-        metadata: strict.data.metadata,
+        metadata: normalizeArtifactMetadata(strict.data.metadata, strict.data.framework),
         repairs: strict.data.repairs.map(toGeneratedFile),
         taskGraph: strict.data.taskGraph ? toGeneratedTaskGraph(strict.data.taskGraph) : undefined,
       }
@@ -130,12 +152,21 @@ export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifa
 
     const taskGraphOnly = z.object({
       taskGraph: taskGraphSchema,
-      dependencies: z.array(z.string().trim().min(1)).optional().default([]),
-      commands: z.array(z.never()).optional().default([]),
+      framework: z.string().trim().min(1).optional(),
+      dependencies: z.array(dependencySchema).optional().default([]),
+      commands: z.array(runtimeCommandSchema).optional().default([]),
       summary: z.string().optional().default(""),
       diagnostics: z.array(z.string()).optional().default([]),
-      metadata: z.record(z.unknown()).optional().default({}),
-    }).strict().safeParse(parsedJson)
+      metadata: artifactMetadataSchema.optional().default({}),
+    }).strict().superRefine((artifact, ctx) => {
+      if (artifact.commands.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "runtime commands are metadata only and are not accepted as executable artifacts",
+          path: ["commands"],
+        })
+      }
+    }).safeParse(parsedJson)
 
     if (taskGraphOnly.success) {
       const taskGraph = toGeneratedTaskGraph(taskGraphOnly.data.taskGraph)
@@ -151,7 +182,7 @@ export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifa
         commands: [],
         summary: taskGraphOnly.data.summary,
         diagnostics: taskGraphOnly.data.diagnostics,
-        metadata: taskGraphOnly.data.metadata,
+        metadata: normalizeArtifactMetadata(taskGraphOnly.data.metadata, taskGraphOnly.data.framework),
         repairs: [],
         taskGraph,
       }
@@ -164,6 +195,13 @@ export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifa
   }
 
   throw new Error("MALFORMED_GENERATED_ARTIFACT:strict-json-schema-required")
+}
+
+function normalizeArtifactMetadata(metadata: Record<string, unknown>, framework?: string): Record<string, unknown> {
+  return {
+    ...metadata,
+    ...(framework ? { framework } : {}),
+  }
 }
 
 function toGeneratedFile(file: z.infer<typeof generatedFileSchema>): GeneratedFile {

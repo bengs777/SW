@@ -110,8 +110,8 @@ function main() {
 
   assert(
     "prompts.canonical-examples",
-    /Use app\/page\.tsx, components\/Button\.tsx, or lib\/utils\.ts/.test(providerRouter) &&
-      /Use app\/page\.tsx, components\/Button\.tsx, or lib\/utils\.ts/.test(orchestrator),
+    /Use app\/page\.tsx, components\/Button\.tsx, lib\/utils\.ts, or package\.json/.test(providerRouter) &&
+      /Use app\/page\.tsx, components\/Button\.tsx, lib\/utils\.ts, or package\.json/.test(orchestrator),
     "generation prompts instruct canonical workspace-relative paths"
   )
 
