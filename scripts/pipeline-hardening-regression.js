@@ -26,6 +26,8 @@ function main() {
   const artifactParser = read("lib/ai/generated-artifact.ts")
   const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
   const generationPipeline = read("lib/ai/generation-pipeline.ts")
+  const adminMonitoring = read("lib/services/admin-monitoring.service.ts")
+  const systemPage = read("app/dashboard/system/page.tsx")
 
   assert(
     "script.registered",
@@ -124,6 +126,43 @@ function main() {
       /```\(\?:json\)\?/.test(artifactParser) &&
       /value\.slice\(firstObject,\s*lastObject\s*\+\s*1\)/.test(artifactParser),
     "AI JSON parser accepts fenced or text-wrapped JSON fragments"
+  )
+
+  assert(
+    "alerts.threshold-constants",
+    /const ALERT_THRESHOLDS\s*=\s*\{[\s\S]*workerHeartbeatStaleMs:\s*90_000[\s\S]*queueFailedJobsWarning:\s*1[\s\S]*deadLetterWaitingWarning:\s*1[\s\S]*databaseLatencyWarningMs:\s*1000[\s\S]*apiLatencyWarningMs:\s*2000[\s\S]*queueLatencyWarningMs:\s*1000[\s\S]*generationFailureRateWarningPct:\s*10/.test(adminMonitoring),
+    "monitoring alert thresholds are centralized"
+  )
+
+  assert(
+    "alerts.helper-isolated",
+    /export function buildMonitoringAlerts\(metrics: MonitoringAlertMetrics\)/.test(adminMonitoring) &&
+      /buildMonitoringAlerts\(\{[\s\S]*databaseLatencyMs[\s\S]*apiLatencyMs[\s\S]*queueLatencyMs/.test(adminMonitoring),
+    "alert logic is separated from DB and Redis fetches"
+  )
+
+  assert(
+    "alerts.latency-and-deadletter",
+    /type:\s*"database_latency_high"[\s\S]*severity:\s*"warning"/.test(adminMonitoring) &&
+      /type:\s*"api_latency_high"[\s\S]*severity:\s*"warning"/.test(adminMonitoring) &&
+      /type:\s*"queue_latency_high"[\s\S]*severity:\s*"warning"/.test(adminMonitoring) &&
+      /type:\s*"dead_letter_jobs"[\s\S]*ALERT_THRESHOLDS\.deadLetterWaitingWarning/.test(adminMonitoring),
+    "DB/API/queue latency and dead-letter thresholds produce warning alerts"
+  )
+
+  assert(
+    "alerts.failure-rate-denominator",
+    /countMetric\(metrics\.queueCounts\.completed\)\s*\+\s*failedJobs\s*\+\s*countMetric\(metrics\.queueCounts\.active\)\s*\+\s*countMetric\(metrics\.queueCounts\.waiting\)/.test(adminMonitoring) &&
+      !/failed\s*\|\|\s*0\)\s*\/\s*generation\.latency\.sampleCount/.test(systemPage) &&
+      /const totalJobs\s*=[\s\S]*queueCounts\.completed[\s\S]*queueCounts\.failed[\s\S]*queueCounts\.active[\s\S]*queueCounts\.waiting/.test(systemPage),
+    "failure rate uses completed + failed + active + waiting jobs, not sampleCount"
+  )
+
+  assert(
+    "alerts.severity",
+    /type:\s*"worker_heartbeat_stale"[\s\S]*severity:\s*"critical"/.test(adminMonitoring) &&
+      /type:\s*"generation_failure_rate_high"[\s\S]*severity:\s*"warning"/.test(adminMonitoring),
+    "worker heartbeat is critical and generation failure rate is warning"
   )
 
   console.log("\n[hardening] pipeline hardening regression checks passed")

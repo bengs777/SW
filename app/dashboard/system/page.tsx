@@ -113,8 +113,14 @@ export default async function SystemDashboardPage() {
   const jobsByStatus = generation.jobsByStatus || {}
   const attemptsByStatus = generation.attemptsByStatus || {}
   const alerts = overview.alerts || []
-  const failureRate = generation.latency.sampleCount > 0
-    ? Math.round(((jobsByStatus.failed || 0) / generation.latency.sampleCount) * 100)
+  const queueCounts = queue.counts || {}
+  const totalJobs =
+    (queueCounts.completed || 0) +
+    (queueCounts.failed || 0) +
+    (queueCounts.active || 0) +
+    (queueCounts.waiting || 0)
+  const failureRate = totalJobs > 0
+    ? Math.round(((queueCounts.failed || 0) / totalJobs) * 100)
     : 0
 
   return (

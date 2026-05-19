@@ -4,6 +4,48 @@ import { getProductionReadiness } from "@/lib/production/readiness"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 
 const DEFAULT_WINDOW_HOURS = 24
+export const ALERT_THRESHOLDS = {
+  workerHeartbeatStaleMs: 90_000,
+  queueFailedJobsWarning: 1,
+  deadLetterWaitingWarning: 1,
+  databaseLatencyWarningMs: 1000,
+  apiLatencyWarningMs: 2000,
+  queueLatencyWarningMs: 1000,
+  generationFailureRateWarningPct: 10,
+} as const
+
+type MonitoringAlertSeverity = "warning" | "critical"
+
+type MonitoringAlertType =
+  | "redis_down"
+  | "queue_unhealthy"
+  | "queue_failed_jobs"
+  | "database_latency_high"
+  | "api_latency_high"
+  | "queue_latency_high"
+  | "dead_letter_jobs"
+  | "generation_failure_rate_high"
+  | "worker_heartbeat_stale"
+
+type MonitoringAlert = {
+  key: MonitoringAlertType
+  type: MonitoringAlertType
+  severity: MonitoringAlertSeverity
+  message: string
+  value?: number | string | null
+  threshold?: number | string
+}
+
+type MonitoringAlertMetrics = {
+  queueStatus: string
+  queueCounts: Record<string, number>
+  deadLetterCounts?: Record<string, number> | null
+  workerHeartbeatAgeMs?: number | null
+  redisError?: string | null
+  databaseLatencyMs: number
+  apiLatencyMs: number
+  queueLatencyMs: number
+}
 
 function clampWindowHours(value: number) {
   if (!Number.isFinite(value)) {
@@ -38,6 +80,134 @@ async function measureLatency(operation: () => Promise<unknown>) {
   const startedAt = Date.now()
   await operation()
   return Date.now() - startedAt
+}
+
+function countMetric(value: unknown) {
+  const current = Number(value || 0)
+  return Number.isFinite(current) ? current : 0
+}
+
+function pushAlert(alerts: MonitoringAlert[], alert: MonitoringAlert) {
+  alerts.push({
+    ...alert,
+    key: alert.type,
+  })
+}
+
+export function buildMonitoringAlerts(metrics: MonitoringAlertMetrics): MonitoringAlert[] {
+  const alerts: MonitoringAlert[] = []
+  const failedJobs = countMetric(metrics.queueCounts.failed)
+  const totalJobs =
+    countMetric(metrics.queueCounts.completed) +
+    failedJobs +
+    countMetric(metrics.queueCounts.active) +
+    countMetric(metrics.queueCounts.waiting)
+  const generationFailureRatePct = totalJobs > 0 ? Math.round((failedJobs / totalJobs) * 100) : 0
+  const deadLetterWaiting = countMetric(metrics.deadLetterCounts?.waiting)
+  const workerHeartbeatAgeMs = metrics.workerHeartbeatAgeMs
+
+  if (metrics.redisError) {
+    pushAlert(alerts, {
+      type: "redis_down",
+      key: "redis_down",
+      severity: "critical",
+      message: metrics.redisError,
+      value: metrics.redisError,
+    })
+  }
+
+  if (
+    workerHeartbeatAgeMs === null ||
+    workerHeartbeatAgeMs === undefined ||
+    workerHeartbeatAgeMs > ALERT_THRESHOLDS.workerHeartbeatStaleMs
+  ) {
+    pushAlert(alerts, {
+      type: "worker_heartbeat_stale",
+      key: "worker_heartbeat_stale",
+      severity: "critical",
+      message: "Generation worker heartbeat is missing or stale.",
+      value: workerHeartbeatAgeMs ?? "missing",
+      threshold: ALERT_THRESHOLDS.workerHeartbeatStaleMs,
+    })
+  }
+
+  if (["disabled", "degraded", "stale", "unhealthy"].includes(metrics.queueStatus)) {
+    pushAlert(alerts, {
+      type: "queue_unhealthy",
+      key: "queue_unhealthy",
+      severity: "warning",
+      message: `Generation queue status is ${metrics.queueStatus}.`,
+      value: metrics.queueStatus,
+    })
+  }
+
+  if (failedJobs >= ALERT_THRESHOLDS.queueFailedJobsWarning) {
+    pushAlert(alerts, {
+      type: "queue_failed_jobs",
+      key: "queue_failed_jobs",
+      severity: "warning",
+      message: `${failedJobs} failed BullMQ jobs retained.`,
+      value: failedJobs,
+      threshold: ALERT_THRESHOLDS.queueFailedJobsWarning,
+    })
+  }
+
+  if (deadLetterWaiting >= ALERT_THRESHOLDS.deadLetterWaitingWarning) {
+    pushAlert(alerts, {
+      type: "dead_letter_jobs",
+      key: "dead_letter_jobs",
+      severity: "warning",
+      message: `${deadLetterWaiting} dead-letter jobs are waiting.`,
+      value: deadLetterWaiting,
+      threshold: ALERT_THRESHOLDS.deadLetterWaitingWarning,
+    })
+  }
+
+  if (metrics.databaseLatencyMs >= ALERT_THRESHOLDS.databaseLatencyWarningMs) {
+    pushAlert(alerts, {
+      type: "database_latency_high",
+      key: "database_latency_high",
+      severity: "warning",
+      message: `Database latency is ${metrics.databaseLatencyMs}ms.`,
+      value: metrics.databaseLatencyMs,
+      threshold: ALERT_THRESHOLDS.databaseLatencyWarningMs,
+    })
+  }
+
+  if (metrics.apiLatencyMs >= ALERT_THRESHOLDS.apiLatencyWarningMs) {
+    pushAlert(alerts, {
+      type: "api_latency_high",
+      key: "api_latency_high",
+      severity: "warning",
+      message: `Monitoring API latency is ${metrics.apiLatencyMs}ms.`,
+      value: metrics.apiLatencyMs,
+      threshold: ALERT_THRESHOLDS.apiLatencyWarningMs,
+    })
+  }
+
+  if (metrics.queueLatencyMs >= ALERT_THRESHOLDS.queueLatencyWarningMs) {
+    pushAlert(alerts, {
+      type: "queue_latency_high",
+      key: "queue_latency_high",
+      severity: "warning",
+      message: `Queue latency is ${metrics.queueLatencyMs}ms.`,
+      value: metrics.queueLatencyMs,
+      threshold: ALERT_THRESHOLDS.queueLatencyWarningMs,
+    })
+  }
+
+  if (generationFailureRatePct >= ALERT_THRESHOLDS.generationFailureRateWarningPct) {
+    pushAlert(alerts, {
+      type: "generation_failure_rate_high",
+      key: "generation_failure_rate_high",
+      severity: "warning",
+      message: `Generation failure rate is ${generationFailureRatePct}%.`,
+      value: generationFailureRatePct,
+      threshold: ALERT_THRESHOLDS.generationFailureRateWarningPct,
+    })
+  }
+
+  return alerts
 }
 
 export class AdminMonitoringService {
@@ -258,20 +428,19 @@ export class AdminMonitoringService {
     const queueCounts = (queueHealth as { counts?: Record<string, number> | null }).counts || {}
     const workerHeartbeat = (queueHealth as { workerHeartbeat?: { ageMs?: number | null } | null }).workerHeartbeat
     const redis = (queueHealth as { redis?: { error?: string | null; status?: string | null } | null }).redis
-    const alerts = [
-      redis?.error
-        ? { key: "redis_down", severity: "critical", message: redis.error }
-        : null,
-      !workerHeartbeat || Number(workerHeartbeat.ageMs || 0) > 90_000
-        ? { key: "worker_dead", severity: "critical", message: "Generation worker heartbeat is missing or stale." }
-        : null,
-      queueStatus === "disabled" || queueStatus === "degraded" || queueStatus === "stale" || queueStatus === "unhealthy"
-        ? { key: "queue_unhealthy", severity: "warning", message: `Generation queue status is ${queueStatus}.` }
-        : null,
-      Number(queueCounts.failed || 0) > 0
-        ? { key: "queue_failed_jobs", severity: "warning", message: `${queueCounts.failed} failed BullMQ jobs retained.` }
-        : null,
-    ].filter((alert): alert is { key: string; severity: string; message: string } => Boolean(alert))
+    const deadLetterCounts = (queueHealth as { deadLetter?: { counts?: Record<string, number> | null } | null }).deadLetter?.counts || null
+    const queueLatencyMs = Number((queueHealth as { redis?: { latencyMs?: number } }).redis?.latencyMs || 0)
+    const apiLatencyMs = Date.now() - overviewStartedAt
+    const alerts = buildMonitoringAlerts({
+      queueStatus,
+      queueCounts,
+      deadLetterCounts,
+      workerHeartbeatAgeMs: workerHeartbeat?.ageMs ?? null,
+      redisError: redis?.error || null,
+      databaseLatencyMs,
+      apiLatencyMs,
+      queueLatencyMs,
+    })
 
     return {
       windowHours: hours,
@@ -311,8 +480,8 @@ export class AdminMonitoringService {
       queue: queueHealth,
       observability: {
         databaseLatencyMs,
-        apiLatencyMs: Date.now() - overviewStartedAt,
-        queueLatencyMs: Number((queueHealth as { redis?: { latencyMs?: number } }).redis?.latencyMs || 0),
+        apiLatencyMs,
+        queueLatencyMs,
       },
       alerts,
       recentUsage,
