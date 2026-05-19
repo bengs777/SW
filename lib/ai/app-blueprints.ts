@@ -66,7 +66,6 @@ const BASE_REQUIRED_FILES = [
   "components/build-status-panel.tsx",
   "lib/services/project.service.ts",
   "prisma/schema.prisma",
-  ".env.example",
   "package.json",
 ]
 
@@ -96,10 +95,10 @@ const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
     "app/api/chat/route.ts",
     "lib/services/chat.service.ts",
   ]),
-  landing_auth: blueprint("landing_auth", "Landing page + auth", "Build a conversion landing page with auth-ready sign in/sign up screens, pricing, trust sections, env template, and route-safe auth placeholders.", [
+  landing_auth: blueprint("landing_auth", "Landing page + auth", "Build a conversion landing page with auth-ready sign in/sign up screens, pricing, trust sections, and route-safe auth placeholders.", [
     "app/(auth)/sign-in/page.tsx",
     "app/(auth)/sign-up/page.tsx",
-    "auth.ts",
+    "lib/auth/config.ts",
   ]),
   internal_business_tool: blueprint("internal_business_tool", "Internal business tool", "Build an internal business tool with operational dashboard, task/table workflow, API route handlers, Prisma-backed service placeholders, and audit-friendly status states.", [
     "app/operations/page.tsx",
@@ -126,9 +125,9 @@ const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
     "app/api/integrations/bpjs/route.ts",
     "lib/services/clinic.service.ts",
     "lib/services/bpjs.service.ts",
-    "services/bpjs.ts",
+    "lib/services/bpjs.ts",
     "components/clinic-dashboard.tsx",
-    "hooks/use-clinic-data.ts",
+    "lib/hooks/use-clinic-data.ts",
   ]),
   lightweight_crm: blueprint("lightweight_crm", "Lightweight CRM", "Build a lightweight CRM with lead pipeline, customer table, activity timeline, lead API route, Prisma models, and import/export-ready service boundaries.", [
     "app/crm/page.tsx",
@@ -177,7 +176,7 @@ function blueprint(appType: ControlledAppType, label: string, starterPrompt: str
       "Use mock data only behind explicit service/API placeholders.",
       "Keep route handlers small and validate request bodies with zod when accepting input.",
       "Keep package dependencies inside the allowed stack; prefer existing generated utilities.",
-      "For production full-stack prompts, create real route handlers, Prisma models, service functions, and env placeholders. Do not collapse the app into a single static mock page.",
+      "For production full-stack prompts, create real route handlers, Prisma models, service functions, and typed config placeholders under lib/. Do not collapse the app into a single static mock page.",
     ],
     editingRules: [
       "Preserve existing working files unless the prompt directly targets them.",

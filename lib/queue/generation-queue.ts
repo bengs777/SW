@@ -2,6 +2,8 @@ import { Queue, QueueEvents, Worker, type JobsOptions, type Processor } from "bu
 import IORedis from "ioredis"
 import { env } from "@/lib/env"
 import { log } from "@/lib/logging"
+import { warnIfSlow } from "@/lib/observability/performance-monitor"
+import { recordRedisLatency, recordWorkerUtilization } from "@/lib/observability/runtime-metrics"
 
 export type GenerationQueueJobName = "generation.execute"
 
@@ -19,7 +21,9 @@ export type GenerationQueuePayload = {
   promptLanguage?: "id" | "en"
   idempotencyKey?: string
   requestHash?: string
+  correlationId?: string
   traceId?: string
+  executionChainId?: string
   previewContext?: unknown
   attachments?: unknown[]
 }
@@ -205,6 +209,7 @@ export async function enqueueGenerationTask(
   payload: GenerationQueuePayload,
   options?: JobsOptions
 ) {
+  const startedAt = Date.now()
   try {
     const queue = getGenerationQueue()
     
@@ -226,12 +231,19 @@ export async function enqueueGenerationTask(
       ...options,
       jobId: dedupeJobId,
     })
+    const latencyMs = Date.now() - startedAt
+    recordRedisLatency(latencyMs, { operation: "enqueueGenerationTask", jobId: payload.jobId })
+    warnIfSlow("redis", latencyMs, { operation: "enqueueGenerationTask", jobId: payload.jobId })
     log("info", "generation_queue_enqueued", {
       jobId: payload.jobId,
       queueJobId: queued.id,
       dedupeJobId,
       projectId: payload.projectId,
       userId: payload.userId,
+      correlationId: payload.correlationId,
+      traceId: payload.traceId,
+      executionChainId: payload.executionChainId,
+      latencyMs,
     })
     return queued
   } catch (error) {
@@ -345,6 +357,7 @@ export async function replayGenerationDeadLetterJob(input: {
 export async function recordGenerationWorkerHeartbeat(workerId: string) {
   const connection = getRedisConnection()
   if (!connection) return null
+  const startedAt = Date.now()
 
   const payload = JSON.stringify({
     workerId,
@@ -353,6 +366,9 @@ export async function recordGenerationWorkerHeartbeat(workerId: string) {
   })
 
   await connection.set(GENERATION_WORKER_HEARTBEAT_KEY, payload, "PX", 120_000)
+  const latencyMs = Date.now() - startedAt
+  recordRedisLatency(latencyMs, { operation: "workerHeartbeat", workerId })
+  warnIfSlow("redis", latencyMs, { operation: "workerHeartbeat", workerId })
   return payload
 }
 
@@ -369,6 +385,8 @@ export async function getGenerationQueueHealth() {
     })
   }
   const redisLatencyMs = Date.now() - redisStartedAt
+  recordRedisLatency(redisLatencyMs, { operation: "queueHealth" })
+  warnIfSlow("redis", redisLatencyMs, { operation: "queueHealth" })
 
   if (!queue) {
     return {
@@ -388,6 +406,9 @@ export async function getGenerationQueueHealth() {
   }
 
   const counts = await queue.getJobCounts("waiting", "active", "delayed", "failed", "completed", "paused")
+  recordWorkerUtilization(Number(counts.active || 0), Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2), {
+    queueName: QUEUE_NAME,
+  })
   const rawHeartbeat = connection ? await connection.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null) : null
   const deadLetterQueue = getGenerationDeadLetterQueue()
   const deadLetterCounts = deadLetterQueue

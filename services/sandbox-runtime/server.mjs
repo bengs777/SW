@@ -136,7 +136,7 @@ function safeSegment(value) {
 }
 
 function normalizePath(filePath) {
-  return String(filePath || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "")
+  return String(filePath || "").replace(/\\/g, "/").replace(/^\.\//, "").trim()
 }
 
 function stateFor(projectId) {
@@ -184,20 +184,46 @@ function appendLog(state, message) {
   state.logs = state.logs.slice(-MAX_LOG_LINES)
 }
 
-function assertSafeFilePath(rootDir, filePath) {
+function assertSafeFilePath(rootDir, filePath, options = {}) {
+  const rawPath = String(filePath || "")
   const normalized = normalizePath(filePath)
-  if (!normalized || normalized.includes("\0")) {
+  if (!normalized || normalized.includes("\0") || /[\u0000-\u001f\u007f]/.test(normalized)) {
     throw new Error(`Invalid file path: ${filePath}`)
+  }
+
+  if (rawPath.startsWith("/") || rawPath.startsWith("\\") || path.isAbsolute(rawPath) || /^[a-zA-Z]:/.test(rawPath)) {
+    throw new Error(`Absolute sandbox file path rejected: ${filePath}`)
+  }
+
+  const segments = normalized.split("/")
+  if (
+    segments.some((segment) =>
+      !segment ||
+      segment === "." ||
+      segment === ".." ||
+      segment === "~" ||
+      segment.toLowerCase() === "node_modules" ||
+      segment.toLowerCase() === ".git"
+    )
+  ) {
+    throw new Error(`Blocked sandbox file path rejected: ${filePath}`)
+  }
+
+  const lower = normalized.toLowerCase()
+  if (lower.includes("..") || lower.includes("~") || lower.includes(".env") || lower === "package-lock.json" || lower === "pnpm-lock.yaml") {
+    throw new Error(`Blocked sandbox file path rejected: ${filePath}`)
+  }
+
+  const allowedRoot = ["src", "app", "components", "lib", "prisma"].some((root) => lower === root || lower.startsWith(`${root}/`))
+  const managedPackageJson = options.allowManagedPackageJson === true && lower === "package.json"
+  if (!allowedRoot && !managedPackageJson) {
+    throw new Error(`Sandbox file path is outside allowed project roots: ${filePath}`)
   }
 
   const resolved = path.resolve(rootDir, normalized)
   const root = path.resolve(rootDir)
   if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
     throw new Error(`Unsafe sandbox file path rejected: ${filePath}`)
-  }
-
-  if (/(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i.test(normalized)) {
-    throw new Error(`Generated files cannot write into runtime output folders: ${filePath}`)
   }
 
   return { normalized, resolved }
@@ -225,7 +251,7 @@ function validateFiles(files) {
 
   let totalBytes = 0
   for (const file of files) {
-    assertSafeFilePath(ROOT_DIR, file.path)
+    assertSafeFilePath(ROOT_DIR, file.path, { allowManagedPackageJson: true })
     const size = Buffer.byteLength(String(file.content || ""), "utf8")
     if (size > MAX_FILE_BYTES) {
       throw new Error(`File ${file.path} exceeds sandbox file size limit.`)

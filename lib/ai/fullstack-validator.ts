@@ -25,7 +25,7 @@ const FRONTEND_PAGE_PATTERN = /^app\/(?:.+\/)?page\.(tsx|ts|jsx|js)$/i
 const API_ROUTE_PATTERN = /^app\/api\/.+\/route\.ts$/i
 const PRISMA_PATTERN = /^prisma\/schema\.prisma$/i
 const DATA_LAYER_PATTERN = /^lib\/(db|services)\/.+\.(ts|tsx)$/i
-const CONFIG_PATTERN = /^\.env\.example$/i
+const CONFIG_PATTERN = /^(package\.json|lib\/config\/.+\.(ts|tsx))$/i
 
 export function validateFullStackFiles(files: GeneratedFile[]): FullStackValidationResult {
   const normalizedFiles = files.map((file) => ({
@@ -48,7 +48,7 @@ export function validateFullStackFiles(files: GeneratedFile[]): FullStackValidat
     return DATA_LAYER_PATTERN.test(file.path) && isMeaningfulServiceFile(file.content)
   })
   const hasConfig = normalizedFiles.some(
-    (file) => CONFIG_PATTERN.test(file.path) && isMeaningfulEnvExample(file.content)
+    (file) => CONFIG_PATTERN.test(file.path) && isMeaningfulConfigFile(file.content)
   )
 
   const missingCategories: FullStackCategory[] = []
@@ -124,7 +124,7 @@ function pickFallbackFileForCategory(
         ? ["app/api/health/route.ts", "app/api/projects/route.ts", "app/api/generate/route.ts"]
         : category === "data"
           ? ["prisma/schema.prisma", "lib/services/project.service.ts", "lib/db/client.ts"]
-          : [".env.example"]
+          : ["package.json", "lib/config/env.ts"]
 
   for (const preferred of preferredCandidates) {
     const exact = scaffoldFiles.find(
@@ -176,6 +176,6 @@ function isMeaningfulServiceFile(content: string) {
   return /export\s+(async\s+)?function\s+[A-Za-z0-9_]+\s*\(|export\s+class\s+[A-Za-z0-9_]+|export\s+const\s+[A-Za-z0-9_]+\s*=/.test(content)
 }
 
-function isMeaningfulEnvExample(content: string) {
-  return /^[A-Z][A-Z0-9_]*=.+/m.test(content)
+function isMeaningfulConfigFile(content: string) {
+  return /"scripts"\s*:|"dependencies"\s*:|process\.env|export\s+const\s+[A-Za-z0-9_]+\s*=/.test(content)
 }

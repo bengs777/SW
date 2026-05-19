@@ -35,7 +35,6 @@ type BuildEditPlanInput = {
 
 const ALWAYS_ALLOWED_PATCH_FILES = new Set([
   "package.json",
-  ".env.example",
   "prisma/schema.prisma",
   "app/globals.css",
   "lib/utils.ts",
@@ -272,7 +271,7 @@ function addIntentPaths(input: {
   }
 
   if (input.intent === "upload_integration") {
-    addExistingMatches([/upload/i, /storage/i, /supabase/i, /^app\/api\/.*upload.*\/route\.ts$/i, /^\.env\.example$/i])
+    addExistingMatches([/upload/i, /storage/i, /supabase/i, /^app\/api\/.*upload.*\/route\.ts$/i])
     input.allowedNewPaths.add("app/api/uploads/route.ts")
     input.allowedNewPaths.add("lib/services/storage.service.ts")
     input.allowedNewPaths.add("components/upload-field.tsx")
@@ -280,11 +279,10 @@ function addIntentPaths(input: {
   }
 
   if (input.intent === "payment_integration") {
-    addExistingMatches([/payment/i, /checkout/i, /billing/i, /^app\/api\/.*webhook.*\/route\.ts$/i, /^\.env\.example$/i, /^lib\/services\//i], 6)
+    addExistingMatches([/payment/i, /checkout/i, /billing/i, /^app\/api\/.*webhook.*\/route\.ts$/i, /^lib\/services\//i], 6)
     input.allowedNewPaths.add("app/api/payments/checkout/route.ts")
     input.allowedNewPaths.add("app/api/payments/webhook/route.ts")
     input.allowedNewPaths.add("lib/services/payment.service.ts")
-    input.allowedNewPaths.add(".env.example")
     return
   }
 
@@ -364,7 +362,6 @@ function findPromptMentionedPaths(prompt: string, existingPaths: string[]) {
 
 function shouldIncludeSupportFile(intent: EditIntent, path: string) {
   if (path === "package.json") return intent === "upload_integration" || intent === "payment_integration" || intent === "api_change"
-  if (path === ".env.example") return intent === "upload_integration" || intent === "payment_integration" || intent === "api_change" || intent === "schema_change"
   if (path === "prisma/schema.prisma") return intent === "schema_change"
   return false
 }

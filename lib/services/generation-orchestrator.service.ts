@@ -38,6 +38,15 @@ import {
 import { analyzePromptIntent, buildIntentInstructionBlock, type IntentAnalysis } from "@/lib/ai/intent-analyzer"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
+import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
+import { warnIfSlow } from "@/lib/observability/performance-monitor"
+import {
+  recordBuildDuration,
+  recordOpenRouterLatency,
+  recordRetry,
+  recordValidationResult,
+  updateAiTask,
+} from "@/lib/observability/runtime-metrics"
 import { timeoutConfig } from "@/lib/timeouts"
 
 type GenerationPlannerFile = {
@@ -125,6 +134,9 @@ type ExecuteGenerationJobInput = {
   collaborationMode?: string
   previewContext?: unknown
   persistenceKey?: string | null
+  correlationId?: string
+  traceId?: string
+  executionChainId?: string
   signal?: AbortSignal
 }
 
@@ -305,7 +317,6 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
     "app/page.tsx",
     "app/globals.css",
     "prisma/schema.prisma",
-    ".env.example",
     "package.json",
   ]
 
@@ -356,14 +367,14 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
     required.add("app/api/bpjs/route.ts")
     required.add("lib/services/clinic.service.ts")
     required.add("components/clinic-dashboard.tsx")
-    required.add("hooks/use-clinic-data.ts")
+    required.add("lib/hooks/use-clinic-data.ts")
   }
 
   if (/\b(bpjs)\b/i.test(text)) {
     required.add("app/api/bpjs/route.ts")
     required.add("app/api/integrations/bpjs/route.ts")
     required.add("lib/services/bpjs.service.ts")
-    required.add("services/bpjs.ts")
+    required.add("lib/services/bpjs.ts")
   }
 
   if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/i.test(text)) {
@@ -670,19 +681,6 @@ select {
         null,
         2
       )}\n`,
-    },
-    {
-      path: ".env.example",
-      language: "env",
-      content: `DATABASE_URL="postgresql://user:password@host:5432/swift_clinic"
-DIRECT_DATABASE_URL=""
-NEXTAUTH_SECRET="change-me"
-NEXTAUTH_URL="http://localhost:3000"
-BPJS_API_BASE_URL=""
-BPJS_CONS_ID=""
-BPJS_SECRET_KEY=""
-BPJS_USER_KEY=""
-`,
     },
     {
       path: "prisma/schema.prisma",
@@ -1600,13 +1598,13 @@ function contextFileLimitForTask(task: string) {
 
 function coreContextFilesForTask(task: string) {
   if (task === "setup auth") {
-    return ["package.json", "auth.ts", "app/api/auth/route.ts", "prisma/schema.prisma"]
+    return ["package.json", "lib/auth/config.ts", "app/api/auth/route.ts", "prisma/schema.prisma"]
   }
   if (task === "create APIs") {
     return ["package.json", "prisma/schema.prisma"]
   }
   if (task === "setup prisma") {
-    return ["package.json", "prisma/schema.prisma", ".env.example"]
+    return ["package.json", "prisma/schema.prisma", "lib/db/client.ts"]
   }
   return ["package.json", "app/layout.tsx", "app/page.tsx"]
 }
@@ -1617,7 +1615,7 @@ function isPathRelevantToTask(path: string, task: string, targetPaths: Set<strin
     return (
       path === "package.json" ||
       path === "prisma/schema.prisma" ||
-      path === "auth.ts" ||
+      path === "lib/auth/config.ts" ||
       /^app\/api\/auth\/route\.ts$/i.test(path) ||
       /^app\/api\/admin\/users\/route\.ts$/i.test(path) ||
       /^app\/\(auth\)\//i.test(path) ||
@@ -1637,7 +1635,6 @@ function isPathRelevantToTask(path: string, task: string, targetPaths: Set<strin
     return (
       path === "package.json" ||
       path === "prisma/schema.prisma" ||
-      path === ".env.example" ||
       /^lib\/db\//i.test(path) ||
       /^lib\/services\//i.test(path)
     )
@@ -1812,6 +1809,20 @@ async function runProviderAttempt(input: {
     : routed
   const startedAt = performance.now()
   const startedAtWall = Date.now()
+  const correlation = createCorrelationIds({ correlationId: input.jobId })
+  const traceContext = {
+    taskId: input.jobId,
+    sessionId: null,
+    agentType: input.purpose,
+    correlationId: correlation.correlationId,
+    traceId: correlation.traceId,
+    executionChainId: correlation.executionChainId,
+  }
+  traceExecution(traceContext, "provider_started", {
+    projectId: input.projectId ?? input.generationContext?.projectId ?? null,
+    purpose: input.purpose,
+    model: route.modelName,
+  })
   log("info", "generation_provider_attempt_started", {
     jobId: input.jobId,
     purpose: input.purpose,
@@ -1857,6 +1868,23 @@ async function runProviderAttempt(input: {
     })
     const endedAtWall = Date.now()
     const providerDurationMs = endedAtWall - startedAtWall
+    recordOpenRouterLatency(providerDurationMs, {
+      jobId: input.jobId,
+      purpose: input.purpose,
+      model: route.modelName,
+    })
+    warnIfSlow("openrouter", providerDurationMs, {
+      jobId: input.jobId,
+      purpose: input.purpose,
+      model: route.modelName,
+    })
+    traceExecution(traceContext, "provider_finished", {
+      projectId: input.projectId ?? input.generationContext?.projectId ?? null,
+      purpose: input.purpose,
+      model: route.modelName,
+      durationMs: providerDurationMs,
+      attempts: response.attempts.length,
+    })
     log("info", "ai_response_received", {
       event: "ai_response_received",
       jobId: input.jobId,
@@ -1896,6 +1924,11 @@ async function runProviderAttempt(input: {
           }
         : undefined
     if (providerFailureMetadata) {
+      traceError(traceContext, error, {
+        projectId: input.projectId ?? input.generationContext?.projectId ?? null,
+        purpose: input.purpose,
+        model: route.modelName,
+      })
       log("error", "generation_provider_failover_exhausted", {
         jobId: input.jobId,
         purpose: input.purpose,
@@ -1960,7 +1993,7 @@ function buildSlicePrompt(input: {
     productionFullStack
       ? "- Use the existing locked stack. You MAY use Prisma schema, server-only service files, Route Handlers, NextAuth-compatible placeholders, and payment/API integration placeholders when the prompt asks for them."
       : "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
-    "- NEXTAUTH_PATH_POLICY: never create or modify next-auth.d.ts from generated artifacts. Put NextAuth runtime/config changes in auth.ts, route handlers under app/, or helper modules under lib/.",
+    "- NEXTAUTH_PATH_POLICY: never create or modify next-auth.d.ts, root auth.ts, or any .env file from generated artifacts. Put NextAuth runtime/config changes in route handlers under app/ or helper modules under lib/.",
     productionFullStack
       ? "- Do not use UI-only dummy output. If real external credentials are not available, create server-side integration boundaries, env placeholders, zod validation, and clear TODO-safe service functions instead of fake-only UI."
       : "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
@@ -1972,8 +2005,11 @@ function buildSlicePrompt(input: {
       : "- Follow the controlled app blueprint exactly.",
     "- Keep each returned file under 4000 output tokens when possible.",
     "- Stop after the requested slice; do not create extra support files speculatively.",
-    "- Return ONLY a JSON object with taskGraph; include changed files as taskGraph.operations.",
-    '- taskGraph schema: {"taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]}}',
+    "- PATH POLICY: every path must normalize and resolve inside the workspace, and must start with src/, app/, components/, lib/, or prisma/.",
+    "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, or pnpm-lock.yaml.",
+    "- Return ONLY a JSON object matching the schema; include changed files as taskGraph.operations.",
+    '- Required schema: {"files":[],"dependencies":[],"commands":[],"summary":"...","taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]},"diagnostics":[],"metadata":{},"repairs":[]}',
+    "- commands must always be an empty array. Never ask to run shell commands or mutate files outside taskGraph operations.",
     "- For delete operations, omit content. For create/modify operations, content must be the full file content.",
     "- TSX_PARSE_LOCK: every returned .tsx/.ts/.jsx/.js file must parse with @babel/parser using jsx + typescript plugins.",
     "- Do not use raw emoji or decorative non-ASCII symbols in TSX code. Use plain text labels or imported icons only.",
@@ -2088,6 +2124,23 @@ function extractFilePathsFromError(message: string) {
 
 function normalizePath(value: string) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function extractPackageNames(files: GeneratedFile[]) {
+  const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
+  if (!packageFile) return []
+  try {
+    const parsed = JSON.parse(packageFile.content) as {
+      dependencies?: Record<string, unknown>
+      devDependencies?: Record<string, unknown>
+    }
+    return Array.from(new Set([
+      ...Object.keys(parsed.dependencies || {}),
+      ...Object.keys(parsed.devDependencies || {}),
+    ])).sort()
+  } catch {
+    return []
+  }
 }
 
 function buildAppPlan(input: { prompt: string; plan: GenerationPlan }) {
@@ -2828,7 +2881,10 @@ async function attemptTargetedRepair(input: {
     "- Repair only the failing files or their direct imports.",
     "- Do not regenerate the entire project.",
     "- Return only changed files.",
-    "- Never create or modify next-auth.d.ts during repair; use auth.ts, app/ route handlers, or lib/ helpers for NextAuth changes.",
+    "- Never create or modify next-auth.d.ts, root auth.ts, or any .env file during repair; use app/ route handlers or lib/ helpers for NextAuth changes.",
+    "- PATH POLICY: every path must normalize and resolve inside the workspace, and must start with src/, app/, components/, lib/, or prisma/.",
+    "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, or pnpm-lock.yaml.",
+    "- Return ONLY strict JSON with files, dependencies, commands, summary, taskGraph, diagnostics, metadata, and repairs keys. commands must be [].",
     "- The repaired file must be syntactically valid TSX/TypeScript. No raw emoji, no unterminated strings, no split quoted strings.",
     "- If a fancy design is causing syntax risk, replace it with a minimal compile-safe version of the failing file.",
     "- The result will be revalidated through normalize -> static validation -> preview compile -> typecheck -> lint -> build before persistence.",
@@ -3178,8 +3234,22 @@ export async function executeGenerationJob(
 ) {
   const promptLanguage = input.promptLanguage || "id"
   const jobStartedAt = performance.now()
+  const correlation = createCorrelationIds({
+    correlationId: input.correlationId || input.jobId,
+    traceId: input.traceId,
+    executionChainId: input.executionChainId,
+  })
+  const traceContext = {
+    taskId: input.jobId,
+    sessionId: null,
+    agentType: "generation-orchestrator",
+    correlationId: correlation.correlationId,
+    traceId: correlation.traceId,
+    executionChainId: correlation.executionChainId,
+  }
   const metrics: Record<string, unknown> = {
     startedAt: new Date().toISOString(),
+    correlation,
   }
   let plan: GenerationPlan | null = null
   let blueprint: ControlledAppBlueprint | null = null
@@ -3197,6 +3267,10 @@ export async function executeGenerationJob(
 
   try {
     assertNotAborted(input.signal)
+    traceExecution(traceContext, "planner_started", {
+      projectId: input.projectId,
+      selectedModel: input.selectedModel,
+    })
     await GenerationJobService.transition(input.jobId, {
       type: "job.stage.planning",
       status: "running",
@@ -3233,6 +3307,9 @@ export async function executeGenerationJob(
     log("info", "intent", {
       jobId: input.jobId,
       projectId: input.projectId,
+      correlationId: correlation.correlationId,
+      traceId: correlation.traceId,
+      executionChainId: correlation.executionChainId,
       objective: plan.objective,
       appType: plan.appType,
       productionMode: plan.productionMode,
@@ -3385,7 +3462,13 @@ export async function executeGenerationJob(
       })
     } else {
       if (plan.editPlan.mode === "partial") {
-        console.log("edit_patch_started")
+        log("info", "edit_patch_started", {
+          jobId: input.jobId,
+          projectId: input.projectId,
+          correlationId: correlation.correlationId,
+          traceId: correlation.traceId,
+          executionChainId: correlation.executionChainId,
+        })
       }
       const usePreviewFoundationBatch =
         plan.productionMode !== "production_fullstack" &&
@@ -3418,6 +3501,11 @@ export async function executeGenerationJob(
         : plan.filePlan[index]
       const sliceIndex = Math.floor(index / sliceBatchSize) + 1
       const sliceTotal = Math.ceil(plan.filePlan.length / sliceBatchSize)
+      traceExecution(traceContext, "generation_started", {
+        sliceIndex,
+        sliceTotal,
+        targetPaths: targets.map((item) => item.path),
+      })
       const previousWorkingFiles = workingFiles
       const providerStartedAt = performance.now()
       const sliceObservation = observeAgentContext({
@@ -3473,6 +3561,9 @@ export async function executeGenerationJob(
                 "RETRY_DUE_TO_MALFORMED_ARTIFACT:",
                 "- Your previous response could not be parsed as a GeneratedArtifact.",
                 "- Return ONLY valid JSON. No Markdown fences, no prose, no comments.",
+                "- Include the strict keys files, dependencies, commands, summary, taskGraph, diagnostics, metadata, and repairs.",
+                "- commands must be []. Never request shell commands.",
+                "- Paths must start with src/, app/, components/, lib/, or prisma/ and must not contain .., ~, node_modules, .env, .git, package-lock.json, or pnpm-lock.yaml.",
                 "- Include either {\"files\":[...]} or {\"taskGraph\":{\"operations\":[...]}}.",
                 `- Cover exactly this slice target: ${target.path}.`,
               ].join("\n"),
@@ -3634,11 +3725,25 @@ export async function executeGenerationJob(
       }
     }
     if (plan.editPlan.mode === "partial") {
-      console.log("edit_patch_completed")
+      log("info", "edit_patch_completed", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        correlationId: correlation.correlationId,
+        traceId: correlation.traceId,
+        executionChainId: correlation.executionChainId,
+      })
     }
 
     await GenerationJobService.assertNotCancelled(input.jobId)
     assertNotAborted(input.signal)
+    traceExecution(traceContext, "validation_started", {
+      projectId: input.projectId,
+      fileCount: workingFiles.length,
+    })
+    traceExecution(traceContext, "build_started", {
+      projectId: input.projectId,
+      fileCount: workingFiles.length,
+    })
     validation = await runValidationLifecycle({
       jobId: input.jobId,
       projectId: input.projectId,
@@ -3649,6 +3754,22 @@ export async function executeGenerationJob(
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
+    traceExecution(traceContext, "build_finished", {
+      projectId: input.projectId,
+      ok: validation.ok,
+      failure: validation.failure || null,
+    })
+    recordValidationResult(validation.ok, {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      failureStep: validation.failure?.step || null,
+    })
+    for (const step of validation.steps) {
+      if (step.name === "build") {
+        recordBuildDuration(step.durationMs, { jobId: input.jobId, projectId: input.projectId, status: step.status })
+        warnIfSlow("build", step.durationMs, { jobId: input.jobId, projectId: input.projectId })
+      }
+    }
     const verificationCommands = await Promise.all(
       (["lint", "typecheck", "build", "preview validation"] as const)
         .map((command) => tools.runCommand(command))
@@ -3682,6 +3803,9 @@ export async function executeGenerationJob(
       failure: validation.failure || null,
     })
     if (!validation.ok) {
+      updateAiTask(input.jobId, {
+        validatorFailures: [validation.failure?.message || "Validation failed"],
+      })
       lastErrorSignature = validationErrorSignature(validation)
       const contextMemoryEntry: AgentWorkflowMemoryEntry = {
         iteration: 1,
@@ -3703,6 +3827,12 @@ export async function executeGenerationJob(
 
     while (!validation.ok && repairAttempt < MAX_REPAIR_ATTEMPTS) {
       repairAttempt += 1
+      recordRetry({ jobId: input.jobId, projectId: input.projectId, phase: "repair", repairAttempt })
+      traceExecution(traceContext, "repair_retry", {
+        projectId: input.projectId,
+        repairAttempt,
+        failure: validation.failure,
+      })
       const iteration = repairAttempt + 1
       await GenerationJobService.update(input.jobId, {
         usedAutoRepair: true,
@@ -3861,6 +3991,11 @@ export async function executeGenerationJob(
         },
       })
 
+      traceExecution(traceContext, "build_started", {
+        projectId: input.projectId,
+        repairAttempt,
+        fileCount: workingFiles.length,
+      })
       validation = await runValidationLifecycle({
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3871,6 +4006,24 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      traceExecution(traceContext, "build_finished", {
+        projectId: input.projectId,
+        repairAttempt,
+        ok: validation.ok,
+        failure: validation.failure || null,
+      })
+      recordValidationResult(validation.ok, {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        repairAttempt,
+        failureStep: validation.failure?.step || null,
+      })
+      for (const step of validation.steps) {
+        if (step.name === "build") {
+          recordBuildDuration(step.durationMs, { jobId: input.jobId, projectId: input.projectId, status: step.status })
+          warnIfSlow("build", step.durationMs, { jobId: input.jobId, projectId: input.projectId, repairAttempt })
+        }
+      }
       const repairVerificationCommands = await Promise.all(
         (["lint", "typecheck", "build", "preview validation"] as const)
           .map((command) => tools.runCommand(command))
@@ -4000,6 +4153,12 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      recordValidationResult(validation.ok, {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        fallbackApplied: true,
+        failureStep: validation.failure?.step || null,
+      })
       assertNotAborted(input.signal)
     }
 
@@ -4077,6 +4236,17 @@ export async function executeGenerationJob(
       })
       throw new Error(validation.failure?.message || "Validation lifecycle failed")
     }
+    updateAiTask(input.jobId, {
+      filesChanged: workingFiles.map((file) => normalizePath(file.path)),
+      repairAttempts: repairAttempt,
+      tokenUsage: {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+      },
+      modelUsed: input.selectedModel,
+      dependenciesAdded: extractPackageNames(workingFiles),
+    })
 
     await GenerationJobService.assertNotCancelled(input.jobId)
     assertNotAborted(input.signal)
@@ -4234,6 +4404,13 @@ export async function executeGenerationJob(
       },
     })
     await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, validation.previewUrl)
+    traceExecution(traceContext, "task_completed", {
+      projectId: input.projectId,
+      historyId: saveResult.historyId,
+      durationMs: Math.round(performance.now() - jobStartedAt),
+      repairAttempts: repairAttempt,
+      tokenUsage: { promptTokens, completionTokens, totalTokens },
+    })
 
     return {
       historyId: saveResult.historyId,
@@ -4241,6 +4418,11 @@ export async function executeGenerationJob(
       previewUrl: validation.previewUrl,
     }
   } catch (error) {
+    traceError(traceContext, error, {
+      projectId: input.projectId,
+      repairAttempts: repairAttempt,
+      durationMs: Math.round(performance.now() - jobStartedAt),
+    })
     const cancelledBySignal =
       error instanceof Error && error.message === "GENERATION_JOB_CANCELLED"
 

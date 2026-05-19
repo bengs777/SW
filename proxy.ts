@@ -115,6 +115,7 @@ export const proxy = auth((req) => {
     "/api/ai",
     "/api/admin",
     "/api/billing",
+    "/api/debug",
     "/api/models",
     "/api/templates",
     "/api/crypto",

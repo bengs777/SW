@@ -427,79 +427,11 @@ model Project {
 `,
     },
     {
-      path: "public/site.webmanifest",
-      language: "json",
-      content: `{
-  "name": "Swift Generated App",
-  "short_name": "SwiftApp",
-  "start_url": "/",
-  "display": "standalone",
-  "background_color": "#0a0a0a",
-  "theme_color": "#0a0a0a"
-}
-`,
-    },
-    
-    {
-      path: ".env.example",
-      language: "env",
-      content: `DATABASE_URL="postgresql://user:password@ep-example-pooler.region.aws.neon.tech/neondb?sslmode=require"
-DIRECT_DATABASE_URL="postgresql://user:password@ep-example.region.aws.neon.tech/neondb?sslmode=require"
-NEXTAUTH_SECRET="replace-me"
-OPENROUTER_API_KEY="replace-me"
-OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
-`,
-    },
-    {
-      path: "auth.ts",
+      path: "lib/auth/config.ts",
       language: "ts",
       content: `export const authConfig = {
   providers: ["credentials", "google"],
 }
-`,
-    },
-    {
-      path: "components.json",
-      language: "json",
-      content: `{
-  "$schema": "https://ui.shadcn.com/schema.json",
-  "style": "default",
-  "rsc": true,
-  "tsx": true,
-  "tailwind": {
-    "config": "tailwind.config.ts",
-    "css": "app/globals.css",
-    "baseColor": "neutral",
-    "cssVariables": true
-  },
-  "aliases": {
-    "components": "@/components",
-    "utils": "@/lib/utils"
-  }
-}
-`,
-    },
-    {
-      path: "middleware.ts",
-      language: "ts",
-      content: `import { NextResponse } from "next/server"
-
-export function middleware() {
-  return NextResponse.next()
-}
-`,
-    },
-    {
-      path: "next.config.mjs",
-      language: "ts",
-      content: `/** @type {import('next').NextConfig} */
-const nextConfig = {
-  images: {
-    unoptimized: true,
-  },
-}
-
-export default nextConfig
 `,
     },
     {
@@ -526,44 +458,7 @@ export default nextConfig
 `,
     },
     {
-      path: "postcss.config.mjs",
-      language: "ts",
-      content: `export default {
-  plugins: {},
-}
-`,
-    },
-    {
-      path: "tsconfig.json",
-      language: "json",
-      content: `{
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": false,
-    "skipLibCheck": true,
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "preserve",
-    "incremental": true,
-    "plugins": [{ "name": "next" }],
-    "paths": {
-      "@/*": ["./src/*", "./*"],
-      "~/*": ["./src/*", "./*"]
-    }
-  },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules"]
-}
-`,
-    },
-    {
-      path: "styles/globals.css",
+      path: "app/globals.css",
       language: "css",
       content: `/* global styles (no Tailwind) */
 html, body { height: 100%; }
@@ -1425,15 +1320,6 @@ model Comment {
 }
 `,
     },
-    {
-      path: ".env.example",
-      language: "env",
-      content: `DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/desa_buntu"
-NEXTAUTH_SECRET="replace-with-secret"
-GOOGLE_CLIENT_ID=""
-GOOGLE_CLIENT_SECRET=""
-`,
-    },
   ]
 }
 
@@ -1926,16 +1812,12 @@ Generated with fixed Swift project structure.
 - hooks/
 - lib/
 - prisma/
-- public/
-- styles/
-- .env.example
-- auth.ts
-- components.json
-- middleware.ts
-- next.config.mjs
+- src/
+- app/
+- components/
+- lib/
+- prisma/
 - package.json
-- postcss.config.mjs
-- tsconfig.json
 
 ## Original Prompt
 

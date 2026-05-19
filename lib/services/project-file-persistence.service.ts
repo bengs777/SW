@@ -100,7 +100,6 @@ export class ProjectFilePersistenceService {
           fileDiff: filesystemWrite.fileDiff,
           manifest: filesystemWrite.manifest,
         })
-        console.log("project_saved")
 
         await tx.project.update({
           where: { id: projectId },

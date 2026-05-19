@@ -3,6 +3,7 @@ import { createHash } from "crypto"
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import path from "path"
+import { validateGeneratedPath } from "@/lib/ai/file-policy"
 import type { GeneratedFile } from "@/lib/types"
 import { verifyRuntimeSmoke, type RuntimeSmokeResult } from "@/lib/sandbox/runtime-smoke"
 
@@ -165,19 +166,11 @@ function normalizePath(filePath: string) {
 }
 
 function assertSafeFilePath(rootDir: string, filePath: string) {
-  const normalized = normalizePath(filePath)
-  if (!normalized || normalized.includes("\0")) {
-    throw new Error(`Invalid file path: ${filePath}`)
-  }
-
+  const { path: normalized } = validateGeneratedPath(filePath)
   const resolved = path.resolve(rootDir, normalized)
   const root = path.resolve(rootDir)
   if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
     throw new Error(`Unsafe sandbox file path rejected: ${filePath}`)
-  }
-
-  if (/(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i.test(normalized)) {
-    throw new Error(`Generated files cannot write into runtime output folders: ${filePath}`)
   }
 
   return { normalized, resolved }

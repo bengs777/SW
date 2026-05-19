@@ -25,6 +25,7 @@ function main() {
   const projectPage = read("app/dashboard/project/[id]/page.tsx")
   const artifactParser = read("lib/ai/generated-artifact.ts")
   const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
+  const filePolicy = read("lib/ai/file-policy.ts")
   const generationPipeline = read("lib/ai/generation-pipeline.ts")
   const adminMonitoring = read("lib/services/admin-monitoring.service.ts")
   const systemPage = read("app/dashboard/system/page.tsx")
@@ -76,11 +77,13 @@ function main() {
 
   assert(
     "path.allowed-roots",
-    /ALLOWED_ROOTS\s*=\s*\["app\/",\s*"components\/",\s*"hooks\/",\s*"lib\/",\s*"prisma\/",\s*"public\/",\s*"services\/"\]/.test(filesystemService) &&
-      /ALLOWED_ROOTS\s*=\s*\["app\/",\s*"components\/",\s*"hooks\/",\s*"lib\/",\s*"prisma\/",\s*"public\/",\s*"services\/"\]/.test(taskGraphExecutor) &&
-      /Generated file path is outside allowed project roots/.test(filesystemService) &&
-      /Generated file path is outside allowed project roots/.test(taskGraphExecutor),
-    "filesystem and executor reject paths outside project roots"
+    /ALLOWED_GENERATED_ROOTS\s*=\s*\["src",\s*"app",\s*"components",\s*"lib",\s*"prisma"\]/.test(filePolicy) &&
+      /normalizeGeneratedPath/.test(filePolicy) &&
+      /resolveGeneratedPath/.test(filePolicy) &&
+      /validateGeneratedPath/.test(filesystemService) &&
+      /validateGeneratedPath/.test(taskGraphExecutor) &&
+      /Generated file path is outside allowed project roots/.test(filePolicy),
+    "filesystem and executor reject paths outside strict generated roots"
   )
 
   assert(
@@ -121,11 +124,13 @@ function main() {
   )
 
   assert(
-    "json.fragment-parser",
-    /extractJsonFragments/.test(artifactParser) &&
-      /```\(\?:json\)\?/.test(artifactParser) &&
-      /value\.slice\(firstObject,\s*lastObject\s*\+\s*1\)/.test(artifactParser),
-    "AI JSON parser accepts fenced or text-wrapped JSON fragments"
+    "json.strict-schema",
+    /generatedArtifactSchema/.test(artifactParser) &&
+      /\.strict\(\)/.test(artifactParser) &&
+      /commands:\s*z\.array\(z\.never\(\)\)/.test(artifactParser) &&
+      /strict-json-schema-required/.test(artifactParser) &&
+      !/extractJsonFragments/.test(artifactParser),
+    "AI JSON parser rejects freeform text, command intents, and schema drift"
   )
 
   assert(

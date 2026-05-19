@@ -1,5 +1,6 @@
 import type { GeneratedFile } from "@/lib/types"
 import type { GeneratedTaskGraph, GeneratedTaskOperation } from "@/lib/ai/generated-artifact"
+import { normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
 import { PACKAGE_DEV_DEPENDENCIES, PACKAGE_VERSION_ALLOWLIST } from "@/lib/ai/generation-pipeline"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
@@ -14,34 +15,6 @@ const PACKAGE_JSON_PATH = "package.json"
 const MAX_OPERATIONS = 100
 const MAX_TOTAL_BYTES = 5 * 1024 * 1024
 const MAX_FILE_BYTES = 200 * 1024
-const ALLOWED_ROOTS = ["app/", "components/", "hooks/", "lib/", "prisma/", "public/", "services/"]
-const ALLOWED_EXACT_FILES = new Set([
-  ".swift/workspace-state.json",
-  ".env.example",
-  "auth.ts",
-  "instrumentation.ts",
-  "package.json",
-  "components.json",
-  "next.config.js",
-  "next.config.mjs",
-  "next.config.ts",
-  "tsconfig.json",
-  "postcss.config.js",
-  "postcss.config.mjs",
-  "tailwind.config.js",
-  "tailwind.config.ts",
-  "middleware.ts",
-])
-const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
-const FORBIDDEN_EXACT_FILES = new Set([
-  ".env",
-  ".env.local",
-  ".env.production",
-  ".env.development",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-])
 
 export function executeGeneratedTaskGraph(
   currentFiles: GeneratedFile[],
@@ -51,13 +24,13 @@ export function executeGeneratedTaskGraph(
 ): TaskGraphExecutionResult {
   const byPath = new Map<string, GeneratedFile>()
   for (const file of currentFiles) {
-    byPath.set(normalizePath(file.path), normalizeGeneratedFile(file))
+    byPath.set(normalizeGeneratedPath(file.path), normalizeGeneratedFile(file))
   }
 
   const operations = collapseOperations(taskGraph?.operations?.length
     ? taskGraph.operations
     : fallbackFiles.map((file): GeneratedTaskOperation => ({
-        action: byPath.has(normalizePath(file.path)) ? "modify" : "create",
+        action: byPath.has(normalizeGeneratedPath(file.path)) ? "modify" : "create",
         path: file.path,
         content: file.content,
         language: file.language,
@@ -67,7 +40,7 @@ export function executeGeneratedTaskGraph(
   const deletedPaths: string[] = []
 
   for (const operation of operations) {
-    const path = normalizePath(operation.path)
+    const path = normalizeGeneratedPath(operation.path)
     if (!path) continue
 
     if (operation.action === "delete") {
@@ -103,7 +76,7 @@ export function executeGeneratedTaskGraph(
 
   return {
     files,
-    changedFiles: files.filter((file) => changedPaths.has(normalizePath(file.path))),
+    changedFiles: files.filter((file) => changedPaths.has(normalizeGeneratedPath(file.path))),
     deletedPaths,
     installedDependencies: dependencies,
   }
@@ -220,17 +193,12 @@ function normalizeRecord(value: unknown): Record<string, string> {
 }
 
 function normalizeGeneratedFile(file: GeneratedFile): GeneratedFile {
-  const path = normalizePath(file.path)
-  assertSafePath(path)
+  const path = validateGeneratedPath(file.path, process.cwd(), { allowManagedPackageJson: true }).path
   return {
     path,
     content: String(file.content ?? ""),
     language: normalizeFileLanguage(file.language) || inferLanguageFromPath(path),
   }
-}
-
-function normalizePath(path: string) {
-  return String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
 }
 
 function collapseOperations(operations: GeneratedTaskOperation[]) {
@@ -242,9 +210,9 @@ function collapseOperations(operations: GeneratedTaskOperation[]) {
   const createdPaths = new Set<string>()
 
   for (const operation of operations) {
-    const path = normalizePath(operation.path)
+    const path = normalizeGeneratedPath(operation.path)
     if (!path) continue
-    assertSafePath(path)
+    validateGeneratedPath(path)
     if (operation.action === "create") {
       createdPaths.add(path)
     }
@@ -265,26 +233,6 @@ function collapseOperations(operations: GeneratedTaskOperation[]) {
   }
 
   return Array.from(byPath.values())
-}
-
-function assertSafePath(path: string) {
-  if (!path || path.includes("\0") || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new Error(`Invalid generated file path: ${path}`)
-  }
-
-  const segments = path.split("/")
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new Error(`Unsafe generated file path rejected: ${path}`)
-  }
-
-  const lower = path.toLowerCase()
-  if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
-    throw new Error(`Forbidden generated file path rejected: ${path}`)
-  }
-
-  if (!ALLOWED_EXACT_FILES.has(lower) && !ALLOWED_ROOTS.some((root) => lower.startsWith(root))) {
-    throw new Error(`Generated file path is outside allowed project roots: ${path}`)
-  }
 }
 
 function assertResourceLimits(files: GeneratedFile[], operationCount: number) {

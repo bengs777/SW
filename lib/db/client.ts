@@ -1,5 +1,8 @@
 import { PrismaClient } from '@prisma/client'
 import { env } from '@/lib/env'
+import { log } from '@/lib/logging'
+import { warnIfSlow } from '@/lib/observability/performance-monitor'
+import { recordPrismaDuration } from '@/lib/observability/runtime-metrics'
 
 const globalForPrisma = global as unknown as { prisma?: PrismaClient }
 let prismaSingleton: PrismaClient | undefined
@@ -17,9 +20,34 @@ function assertPostgresDatabaseUrl() {
 function createPrismaClient(): PrismaClient {
   assertPostgresDatabaseUrl()
 
-  return new PrismaClient({
-    log: ['warn', 'error'],
+  const client = new PrismaClient({
+    log: [
+      { emit: 'event', level: 'query' },
+      { emit: 'event', level: 'warn' },
+      { emit: 'event', level: 'error' },
+    ],
   })
+
+  client.$on('query', (event) => {
+    recordPrismaDuration(event.duration, { target: event.target })
+    warnIfSlow('prisma', event.duration, { target: event.target })
+  })
+
+  client.$on('warn', (event) => {
+    log('warn', 'prisma_warning', {
+      message: event.message,
+      target: event.target,
+    })
+  })
+
+  client.$on('error', (event) => {
+    log('error', 'prisma_error', {
+      message: event.message,
+      target: event.target,
+    })
+  })
+
+  return client
 }
 
 export function getPrisma(): PrismaClient {

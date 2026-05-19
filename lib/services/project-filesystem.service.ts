@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client"
 import { createHash, randomUUID } from "node:crypto"
 import { prisma } from "@/lib/db/client"
+import { normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
 import type { GeneratedFile } from "@/lib/types"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
@@ -37,34 +38,6 @@ type ProjectFilesystemWriteResult = {
 const MAX_PROJECT_FILES = 100
 const MAX_TOTAL_FILE_BYTES = 5 * 1024 * 1024
 const MAX_SINGLE_FILE_BYTES = 200 * 1024
-const FORBIDDEN_PATH_SEGMENTS = /(^|\/)(node_modules|\.next|\.git|dist|build)(\/|$)/i
-const FORBIDDEN_EXACT_FILES = new Set([
-  ".env",
-  ".env.local",
-  ".env.production",
-  ".env.development",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-])
-const ALLOWED_ROOTS = ["app/", "components/", "hooks/", "lib/", "prisma/", "public/", "services/"]
-const ALLOWED_EXACT_FILES = new Set([
-  ".swift/workspace-state.json",
-  ".env.example",
-  "auth.ts",
-  "instrumentation.ts",
-  "package.json",
-  "components.json",
-  "next.config.js",
-  "next.config.mjs",
-  "next.config.ts",
-  "tsconfig.json",
-  "postcss.config.js",
-  "postcss.config.mjs",
-  "tailwind.config.js",
-  "tailwind.config.ts",
-  "middleware.ts",
-])
 
 export class PersistenceIntegrityError extends Error {
   constructor(message: string, public expected: ProjectFileManifest, public actual: ProjectFileManifest) {
@@ -117,11 +90,10 @@ export class ProjectFilesystemService {
     }
 
     const currentFiles = await this.readFiles(input.projectId, input.tx || prisma)
-    const nextByPath = new Map(currentFiles.map((file) => [normalizeFilePath(file.path), file]))
+    const nextByPath = new Map(currentFiles.map((file) => [normalizeGeneratedPath(file.path), file]))
 
     for (const operation of input.operations) {
-      const path = normalizeFilePath(operation.path)
-      assertSafeProjectPath(path)
+      const path = validateGeneratedPath(operation.path, process.cwd(), { allowManagedPackageJson: true }).path
 
       if (operation.action === "delete") {
         nextByPath.delete(path)
@@ -290,9 +262,8 @@ function normalizeFiles(files: GeneratedFile[]) {
   let totalBytes = 0
 
   for (const file of files) {
-    const path = normalizeFilePath(file.path)
+    const path = validateGeneratedPath(file.path, process.cwd(), { allowManagedPackageJson: true }).path
     if (!path) continue
-    assertSafeProjectPath(path)
 
     const content = String(file.content ?? "")
     const size = Buffer.byteLength(content, "utf8")
@@ -369,29 +340,5 @@ function buildTree(files: GeneratedFile[]) {
       bytes: Buffer.byteLength(file.content, "utf8"),
     })),
     manifest: buildManifest(files),
-  }
-}
-
-function normalizeFilePath(path: string) {
-  return String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
-}
-
-function assertSafeProjectPath(path: string) {
-  if (!path || path.includes("\0") || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new Error(`Invalid generated file path: ${path}`)
-  }
-
-  const segments = path.split("/")
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new Error(`Unsafe generated file path rejected: ${path}`)
-  }
-
-  const lower = path.toLowerCase()
-  if (FORBIDDEN_PATH_SEGMENTS.test(lower) || FORBIDDEN_EXACT_FILES.has(lower)) {
-    throw new Error(`Forbidden generated file path rejected: ${path}`)
-  }
-
-  if (!ALLOWED_EXACT_FILES.has(lower) && !ALLOWED_ROOTS.some((root) => lower.startsWith(root))) {
-    throw new Error(`Generated file path is outside allowed project roots: ${path}`)
   }
 }

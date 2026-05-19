@@ -322,8 +322,6 @@ export class GenerationJobService {
       message: input.message,
       data: input.data,
     })
-    console.log("status_updated")
-
     return this.findById(jobId)
   }
 

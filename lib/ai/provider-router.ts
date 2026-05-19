@@ -142,11 +142,14 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "ATURAN KERAS SWIFT BUILDER: ikuti EXECUTION_RULES dari prompt user. Preview mode dibatasi kecil; PRODUCTION_FULLSTACK_MODE boleh multi-file dan wajib mencakup backend bila prompt meminta full-stack.",
   "PAKAI DATA DUMMY hanya untuk preview mode. Dalam PRODUCTION_FULLSTACK_MODE, buat Prisma schema, API routes, service layer, env placeholder, auth/payment/API boundaries sesuai permintaan prompt.",
   "MAX 4000 TOKEN PER FILE dan jangan bikin file lebih dari 150 baris bila bisa dibuat ringkas.",
-  "PATH HARUS BENAR: root Next.js adalah /app. Jangan buat /src/app.",
-  "Jangan pernah generate next-auth.d.ts. Untuk jalur NextAuth gunakan auth.ts atau file allowed di lib/ dan app/ saja.",
+  "PATH POLICY: every generated path must normalize and resolve inside the workspace, and must start with src/, app/, components/, lib/, or prisma/.",
+  "BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, or pnpm-lock.yaml.",
+  "PATH HARUS BENAR: root Next.js adalah /app. Jangan buat /src/app kecuali user secara eksplisit meminta src/ layout.",
+  "Jangan pernah generate next-auth.d.ts. Untuk jalur NextAuth gunakan file allowed di lib/ dan app/ saja.",
   "Kalau prompt user terlalu besar, pecah otomatis menjadi slice produksi yang tetap deployable. Sertakan next_steps di metadata untuk tahap lanjutan.",
-  "Return ONLY a valid JSON object. No markdown, no code fences, no preamble, no chat.",
-  'Preferred JSON schema: {"taskGraph":{"intent":"domain-specific intent","summary":"short execution summary","dependencies":["lucide-react"],"operations":[{"id":"op-1","action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"why this operation is needed"}]},"files":[],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}',
+  "Return ONLY a valid JSON object that matches the schema. No markdown, no code fences, no preamble, no chat.",
+  'Required JSON schema: {"files":[],"dependencies":[],"commands":[],"summary":"short execution summary","taskGraph":{"intent":"domain-specific intent","summary":"short execution summary","dependencies":["lucide-react"],"operations":[{"id":"op-1","action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"why this operation is needed"}]},"diagnostics":[],"metadata":{},"repairs":[]}.',
+  "commands must always be an empty array. Never ask to run shell commands, write files directly, delete files directly, mutate arbitrary paths, or modify lockfiles.",
   'For planning metadata, use metadata.next_steps like ["Hubungkan ke Turso","Ganti dummy jadi Prisma query"].',
   "Use taskGraph.operations for every file mutation. Use action delete only when the user asks to remove a file or a file is clearly obsolete.",
   "Never generate an entire application at once, never regenerate the whole repository, and never rewrite unrelated files.",
@@ -219,10 +222,12 @@ export class ProviderRouter {
     })
 
     if (targets.length === 0) {
-      console.log("provider_attempt", "openrouter")
-      console.log("model", tier.key)
-      console.log("provider_error", "No Swift AI model chain is configured")
-      console.log("failover_exhausted")
+      log("error", "provider_attempt_failed", {
+        provider: "openrouter",
+        model: tier.key,
+        error: "No Swift AI model chain is configured",
+        failover: "exhausted",
+      })
       attempts.push({
         provider: "openrouter",
         modelName: tier.key,
@@ -235,10 +240,12 @@ export class ProviderRouter {
     }
 
     if (!hasOpenRouterGatewayKey()) {
-      console.log("provider_attempt", "openrouter")
-      console.log("model", targets[0]?.modelId || tier.key)
-      console.log("provider_error", "OPENROUTER_API_KEY is not configured")
-      console.log("failover_exhausted")
+      log("error", "provider_attempt_failed", {
+        provider: "openrouter",
+        model: targets[0]?.modelId || tier.key,
+        error: "OPENROUTER_API_KEY is not configured",
+        failover: "exhausted",
+      })
       attempts.push({
         provider: "openrouter",
         modelName: targets[0]?.modelId || tier.key,
@@ -304,10 +311,12 @@ export class ProviderRouter {
     for (const [targetIndex, target] of targets.entries()) {
       if (isModelTemporarilyUnavailable(target.modelId)) {
         const nextProvider = nextAvailableTarget(targets, target.modelId)
-        console.log("provider_attempt", "openrouter")
-        console.log("model", target.modelId)
-        console.log("provider_error", "Model is cooling down after repeated failures")
-        console.log("failover_next", nextProvider || null)
+        log("warn", "provider_attempt_skipped", {
+          provider: "openrouter",
+          model: target.modelId,
+          error: "Model is cooling down after repeated failures",
+          failoverNext: nextProvider || null,
+        })
         attempts.push({
           provider: "openrouter",
           modelName: target.modelId,
@@ -322,14 +331,21 @@ export class ProviderRouter {
       let retryCount = 0
       while (true) {
         if (totalAttempts >= maxAttemptsForChain) {
-          console.log("failover_exhausted")
+          log("error", "provider_failover_exhausted", {
+            provider: "openrouter",
+            tier: tier.key,
+            totalAttempts,
+          })
           throw new SwiftProviderFailureError(tier.key, attempts)
         }
 
         totalAttempts += 1
         const startedAt = Date.now()
-        console.log("provider_attempt", "openrouter")
-        console.log("model", target.modelId)
+        log("info", "provider_attempt", {
+          provider: "openrouter",
+          model: target.modelId,
+          attempt: totalAttempts,
+        })
 
         try {
           const result = await this.callOpenRouterTarget(target, {
@@ -376,8 +392,15 @@ export class ProviderRouter {
           const nextProvider = willRetrySameModel
             ? target.modelId
             : nextAvailableTarget(targets, target.modelId)
-          console.log("provider_error", redactedErrorMessage)
-          console.log("failover_next", nextProvider || null)
+          log("warn", "provider_attempt_failed", {
+            provider: "openrouter",
+            model: target.modelId,
+            error: redactedErrorMessage,
+            failureReason: normalized.reason,
+            statusCode: normalized.statusCode,
+            failoverNext: nextProvider || null,
+            latencyMs,
+          })
           firstError = firstError || normalized.message
           attempts.push({
             provider: "openrouter",
@@ -429,7 +452,11 @@ export class ProviderRouter {
       })),
     })
 
-    console.log("failover_exhausted")
+    log("error", "provider_failover_exhausted", {
+      provider: "openrouter",
+      tier: tier.key,
+      totalAttempts,
+    })
     throw new SwiftProviderFailureError(tier.key, attempts)
   }
 

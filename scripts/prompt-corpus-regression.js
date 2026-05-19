@@ -124,9 +124,9 @@ function main() {
 
   assert(
     "malicious.path-policy",
-    /FORBIDDEN_PATH_SEGMENTS/.test(generatedArtifact) &&
+    /validateGeneratedPath/.test(generatedArtifact) &&
       /PROTECTED_DELETE_FILES/.test(generatedArtifact) &&
-      /Generated file path is outside allowed project roots/.test(taskGraphExecutor),
+      /validateGeneratedPath/.test(taskGraphExecutor),
     "malicious prompt is covered by path and protected-delete policy"
   )
 

@@ -11,6 +11,9 @@ import { enqueueGenerationTask, getGenerationQueueHealth } from "@/lib/queue/gen
 import { processGenerationPayload } from "@/lib/workers/generation-worker"
 import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
+import { createCorrelationIds, traceExecution } from "@/lib/observability/execution-tracer"
+import { monitorOperation, warnIfSlow } from "@/lib/observability/performance-monitor"
+import { recordPrismaDuration } from "@/lib/observability/runtime-metrics"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/services/generation-job-request.service"
@@ -82,6 +85,8 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now()
   let requestId = "unassigned"
   let traceId = requestId
+  let correlationId = requestId
+  let executionChainId = requestId
   let currentStage = "route_start"
   let failedStage: string | null = null
   let payloadSize = 0
@@ -137,19 +142,38 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-  requestId = request.headers.get("x-request-id") || randomUUID()
-  traceId = request.headers.get("x-vercel-id") || requestId
+  const correlation = createCorrelationIds({
+    correlationId: request.headers.get("x-correlation-id") || request.headers.get("x-request-id") || randomUUID(),
+    traceId: request.headers.get("x-trace-id") || request.headers.get("x-vercel-id"),
+    executionChainId: request.headers.get("x-execution-chain-id"),
+  })
+  correlationId = correlation.correlationId
+  requestId = correlationId
+  traceId = correlation.traceId
+  executionChainId = correlation.executionChainId
   currentStage = "request_received"
 
+  traceExecution({
+    taskId: requestId,
+    sessionId: null,
+    agentType: "api-route",
+    correlationId,
+    traceId,
+    executionChainId,
+  }, "request_received", {
+    runtime: routeRuntime,
+  })
   logStage("request_received", true, {
     requestId,
+    correlationId,
     traceId,
+    executionChainId,
     runtime: routeRuntime,
     runtimeCompatibility: routeRuntime === "edge" ? "risk" : "nodejs_ok",
   })
 
   if (routeRuntime === "edge") {
-    console.warn("[JOB_RUNTIME_COMPATIBILITY_RISK]", {
+    log("warn", "job_runtime_compatibility_risk", {
       runtime: routeRuntime,
       nodeOnlyApis: ["node:crypto.createHash", "Buffer"],
     })
@@ -161,7 +185,7 @@ export async function POST(request: NextRequest) {
   try {
     session = await auth()
   } catch (error) {
-    console.error("[AUTH_FATAL]", {
+    log("error", "auth_fatal", {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
       requestId,
@@ -185,7 +209,7 @@ export async function POST(request: NextRequest) {
     currentStage = "body_parse_success"
     logEarlyStage("body_parse_success", requestId, { payloadSize })
   } catch (error) {
-    console.error("[BODY_PARSE_FATAL]", {
+    log("error", "body_parse_fatal", {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
       contentType: request.headers.get("content-type"),
@@ -201,7 +225,7 @@ export async function POST(request: NextRequest) {
 
   if (!parsed.success) {
     failedStage = "payload_validation"
-    console.error("[JOB_FATAL]", {
+    log("error", "job_payload_validation_failed", {
       stage: "payload_validation",
       error: "Invalid generation job payload",
       issues: parsed.error.issues.map((issue) => ({
@@ -234,7 +258,7 @@ export async function POST(request: NextRequest) {
   try {
     JSON.stringify(parsed.data.previewContext ?? null)
   } catch (error) {
-    console.error("[PREVIEW_CONTEXT_SERIALIZATION_FAILED]", {
+    log("error", "preview_context_serialization_failed", {
       keys: previewAudit.keys,
       filesCount: previewAudit.filesCount,
       previewFilesCount: previewAudit.previewFilesCount,
@@ -246,13 +270,19 @@ export async function POST(request: NextRequest) {
     return fatalResponse("previewContext_normalization", error, 400, false)
   }
 
-  console.info("[HASH_AUDIT]", {
+  log("info", "hash_audit", {
+    requestId,
+    correlationId,
+    traceId,
     hasPreviewContext: previewAudit.hasPreviewContext,
     activeFile: previewAudit.activeFile,
     diagnosticsCount: previewAudit.diagnosticsCount,
     selectedPathsCount: previewAudit.selectedPathsCount,
   })
-  console.info("[PAYLOAD_SIZE_AUDIT]", {
+  log("info", "payload_size_audit", {
+    requestId,
+    correlationId,
+    traceId,
     payloadSize,
     previewContextSize,
     diagnosticsCount: previewAudit.diagnosticsCount,
@@ -261,7 +291,7 @@ export async function POST(request: NextRequest) {
     previewContextWarning: previewContextSize > 250 * 1024,
   })
   if (payloadSize > 500 * 1024 || previewContextSize > 250 * 1024) {
-    console.warn("[JOB_PAYLOAD_SIZE_WARNING]", {
+    log("warn", "job_payload_size_warning", {
       payloadSize,
       previewContextSize,
       payloadLimit: 500 * 1024,
@@ -275,15 +305,20 @@ export async function POST(request: NextRequest) {
     previewContextSize,
   })
 
+  const userLookupStartedAt = Date.now()
   const user = await prisma.user.findUnique({
     where: { email },
     select: { id: true },
   })
+  const userLookupDurationMs = Date.now() - userLookupStartedAt
+  recordPrismaDuration(userLookupDurationMs, { operation: "user.findUnique", requestId })
+  warnIfSlow("prisma", userLookupDurationMs, { operation: "user.findUnique", requestId })
 
   if (!user) {
     return NextResponse.json({ error: "Authenticated user not found", requestId }, { status: 404 })
   }
 
+  const projectLookupStartedAt = Date.now()
   const project = await prisma.project.findFirst({
     where: {
       id: parsed.data.projectId,
@@ -297,6 +332,9 @@ export async function POST(request: NextRequest) {
     },
     select: { id: true },
   })
+  const projectLookupDurationMs = Date.now() - projectLookupStartedAt
+  recordPrismaDuration(projectLookupDurationMs, { operation: "project.findFirst", requestId })
+  warnIfSlow("prisma", projectLookupDurationMs, { operation: "project.findFirst", requestId })
 
   if (!project) {
     auditSummary()
@@ -338,7 +376,7 @@ export async function POST(request: NextRequest) {
   })
 
   if (existingJob) {
-    console.info("[JOB_AUDIT_SUMMARY]", {
+    log("info", "job_audit_summary", {
       failedStage,
       payloadSize,
       hashCreated,
@@ -440,7 +478,7 @@ export async function POST(request: NextRequest) {
 
   try {
     currentStage = "db_job_creation"
-    console.info("[JOB_DB_CREATE]", {
+    log("info", "job_db_create", {
       stage: "db_job_creation",
       success: false,
       requestId,
@@ -449,7 +487,7 @@ export async function POST(request: NextRequest) {
       requestHash,
       cost: pricing.estimatedCost,
     })
-    const reservation = await BillingService.reserveGenerationJob({
+    const reservation = await monitorOperation("prisma", "job_db_reservation", () => BillingService.reserveGenerationJob({
       userId: user.id,
       projectId: project.id,
       prompt: parsed.data.prompt,
@@ -463,6 +501,8 @@ export async function POST(request: NextRequest) {
       context: {
         requestId,
         traceId,
+        correlationId,
+        executionChainId,
         requestHash,
         requestedModel: parsed.data.model,
         routedModel: routingDecision.modelName,
@@ -472,15 +512,18 @@ export async function POST(request: NextRequest) {
           reason: routingDecision.reason,
         },
       },
-    })
+    }), { requestId, correlationId, traceId, executionChainId, projectId: project.id, userId: user.id })
     const { job, usageLog } = reservation
     usageLogId = usageLog.id
     jobId = job.id
     dbCreated = true
-    console.info("[JOB_DB_CREATE]", {
+    log("info", "job_db_create", {
       stage: "db_job_creation",
       success: true,
       requestId,
+      correlationId,
+      traceId,
+      executionChainId,
       jobId,
       usageLogId,
       requestHash,
@@ -490,10 +533,13 @@ export async function POST(request: NextRequest) {
       : ["generation", user.id, project.id, requestHash].join("__")
 
     currentStage = "queue_enqueue"
-    console.info("[QUEUE_ENQUEUE]", {
+    log("info", "queue_enqueue", {
       stage: "queue_enqueue",
       success: false,
       requestId,
+      correlationId,
+      traceId,
+      executionChainId,
       jobId,
       queueId,
     })
@@ -511,15 +557,30 @@ export async function POST(request: NextRequest) {
       collaborationMode: parsed.data.collaborationMode,
       idempotencyKey: parsed.data.idempotencyKey,
       requestHash,
+      correlationId,
       traceId,
+      executionChainId,
       previewContext: parsed.data.previewContext,
       attachments: parsed.data.attachments,
     }
     const generationStartedEndedAt = new Date()
+    traceExecution({
+      taskId: job.id,
+      sessionId: user.id,
+      agentType: "generation",
+      correlationId,
+      traceId,
+      executionChainId,
+    }, "generation_started", {
+      projectId: project.id,
+      model: modelConfig.key,
+    })
     log("info", "generation_started", {
       event: "generation_started",
       requestId,
+      correlationId,
       traceId,
+      executionChainId,
       jobId: job.id,
       projectId: project.id,
       userId: user.id,
@@ -574,6 +635,9 @@ export async function POST(request: NextRequest) {
 
         log("warn", "generation_queue_enqueue_failed_falling_back", {
           requestId,
+          correlationId,
+          traceId,
+          executionChainId,
           jobId: job.id,
           queueId,
           error: error instanceof Error ? error.message : String(error),
@@ -597,6 +661,9 @@ export async function POST(request: NextRequest) {
       after(async () => {
         log("warn", "generation_serverless_fallback_started", {
           requestId,
+          correlationId,
+          traceId,
+          executionChainId,
           jobId: job.id,
           queueJobId: fallbackQueueJobId,
           reason: preferServerlessExecution
@@ -609,12 +676,18 @@ export async function POST(request: NextRequest) {
           await processGenerationPayload(generationPayload, fallbackQueueJobId)
           log("info", "generation_serverless_fallback_completed", {
             requestId,
+            correlationId,
+            traceId,
+            executionChainId,
             jobId: job.id,
             queueJobId: fallbackQueueJobId,
           })
         } catch (error) {
           log("error", "generation_serverless_fallback_failed", {
             requestId,
+            correlationId,
+            traceId,
+            executionChainId,
             jobId: job.id,
             queueJobId: fallbackQueueJobId,
             error: error instanceof Error ? error.message : String(error),
@@ -623,7 +696,7 @@ export async function POST(request: NextRequest) {
       })
 
       currentStage = "response_return"
-      console.warn("[QUEUE_FALLBACK_SCHEDULED]", {
+      log("warn", "queue_fallback_scheduled", {
         stage: "queue_enqueue",
         success: false,
         fallbackScheduled,
@@ -631,7 +704,7 @@ export async function POST(request: NextRequest) {
         jobId,
         queueJobId: fallbackQueueJobId,
       })
-      console.info("[JOB_AUDIT_SUMMARY]", {
+      log("info", "job_audit_summary", {
         failedStage,
         payloadSize,
         hashCreated,
@@ -646,7 +719,9 @@ export async function POST(request: NextRequest) {
       })
       logStage("response_return", true, {
         requestId,
+        correlationId,
         traceId,
+        executionChainId,
         jobId: job.id,
         queueJobId: fallbackQueueJobId,
         usageLogId,
@@ -662,6 +737,9 @@ export async function POST(request: NextRequest) {
         job: GenerationJobService.toPublicJob(job),
         idempotent: false,
         requestId,
+        correlationId,
+        traceId,
+        executionChainId,
         queueFallback: true,
         billing: {
           usageLogId,
@@ -669,14 +747,32 @@ export async function POST(request: NextRequest) {
         },
       }, {
         status: 202,
-        headers: { "X-Request-Id": requestId },
+        headers: {
+          "X-Request-Id": requestId,
+          "X-Correlation-Id": correlationId,
+          "X-Trace-Id": traceId,
+          "X-Execution-Chain-Id": executionChainId,
+        },
       })
     }
     enqueueSuccess = true
-    console.info("[QUEUE_ENQUEUE]", {
+    traceExecution({
+      taskId: job.id,
+      sessionId: user.id,
+      agentType: "generation",
+      correlationId,
+      traceId,
+      executionChainId,
+    }, "queue_enqueued", {
+      queueJobId: queueJob.id || job.id,
+    })
+    log("info", "queue_enqueue", {
       stage: "queue_enqueue",
       success: true,
       requestId,
+      correlationId,
+      traceId,
+      executionChainId,
       jobId,
       queueJobId: queueJob.id || job.id,
     })
@@ -685,7 +781,7 @@ export async function POST(request: NextRequest) {
     const publicJob = await GenerationJobService.findById(job.id)
 
     currentStage = "response_return"
-    console.info("[JOB_AUDIT_SUMMARY]", {
+    log("info", "job_audit_summary", {
       failedStage,
       payloadSize,
       hashCreated,
@@ -696,7 +792,9 @@ export async function POST(request: NextRequest) {
     })
     logStage("response_return", true, {
       requestId,
+      correlationId,
       traceId,
+      executionChainId,
       jobId: job.id,
       queueJobId: queueJob.id || job.id,
       usageLogId,
@@ -711,33 +809,47 @@ export async function POST(request: NextRequest) {
       job: GenerationJobService.toPublicJob(publicJob || job),
       idempotent: false,
       requestId,
+      correlationId,
+      traceId,
+      executionChainId,
       billing: {
         usageLogId,
         reservedCost: pricing.estimatedCost,
       },
     }, {
       status: 202,
-      headers: { "X-Request-Id": requestId },
+      headers: {
+        "X-Request-Id": requestId,
+        "X-Correlation-Id": correlationId,
+        "X-Trace-Id": traceId,
+        "X-Execution-Chain-Id": executionChainId,
+      },
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to enqueue generation"
     const failureStage = currentStage === "queue_enqueue" ? "queue_enqueue" : "db_job_creation"
     failedStage = failureStage
     if (failureStage === "queue_enqueue") {
-      console.error("[QUEUE_ENQUEUE_FAILED]", {
+      log("error", "queue_enqueue_failed", {
         stage: failureStage,
         success: false,
         requestId,
+        correlationId,
+        traceId,
+        executionChainId,
         jobId,
         usageLogId,
         error: message,
         stack: error instanceof Error ? error.stack : undefined,
       })
     } else {
-      console.error("[JOB_DB_CREATE_FAILED]", {
+      log("error", "job_db_create_failed", {
         stage: failureStage,
         success: false,
         requestId,
+        correlationId,
+        traceId,
+        executionChainId,
         jobId,
         usageLogId,
         error: message,
@@ -765,7 +877,7 @@ export async function POST(request: NextRequest) {
       })
 
       if (existing) {
-        console.info("[JOB_AUDIT_SUMMARY]", {
+        log("info", "job_audit_summary", {
           failedStage,
           payloadSize,
           hashCreated,
@@ -776,16 +888,26 @@ export async function POST(request: NextRequest) {
         })
         logStage("response_return", true, {
           requestId,
+          correlationId,
           traceId,
+          executionChainId,
           jobId: existing.id,
         })
         return NextResponse.json({
           job: GenerationJobService.toPublicJob(existing),
           idempotent: true,
           requestId,
+          correlationId,
+          traceId,
+          executionChainId,
         }, {
           status: 202,
-          headers: { "X-Request-Id": requestId },
+          headers: {
+            "X-Request-Id": requestId,
+            "X-Correlation-Id": correlationId,
+            "X-Trace-Id": traceId,
+            "X-Execution-Chain-Id": executionChainId,
+          },
         })
       }
     }

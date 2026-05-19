@@ -17,6 +17,9 @@ import { ProjectFilesystemService } from "@/lib/services/project-filesystem.serv
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
 import { captureException } from "@/lib/observability"
+import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
+import { classifyRuntimeError, warnIfSlow } from "@/lib/observability/performance-monitor"
+import { finishAiTask, recordRetry, startAiTask, updateAiTask } from "@/lib/observability/runtime-metrics"
 
 const GENERATION_JOB_TIMEOUT_MS = Math.max(
   10_000,
@@ -46,25 +49,57 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   const startedAt = Date.now()
   const startedAtIso = new Date(startedAt).toISOString()
   const resolvedQueueJobId = queueJobId ? String(queueJobId) : payload.jobId
+  const correlation = createCorrelationIds({
+    correlationId: payload.correlationId || payload.traceId || payload.jobId,
+    traceId: payload.traceId,
+    executionChainId: payload.executionChainId,
+  })
+  const traceContext = {
+    taskId: payload.jobId,
+    sessionId: payload.userId,
+    workerId: null as string | null,
+    agentType: "generation-worker",
+    correlationId: correlation.correlationId,
+    traceId: correlation.traceId,
+    executionChainId: correlation.executionChainId,
+  }
   let timeoutTriggered = false
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
 
   try {
-    console.log("worker_started")
+    startAiTask({
+      taskId: payload.jobId,
+      sessionId: payload.userId,
+      workerId: null,
+      agentType: "generation",
+      modelUsed: payload.model,
+      correlationId: correlation.correlationId,
+      traceId: correlation.traceId,
+      executionChainId: correlation.executionChainId,
+    })
+    traceExecution(traceContext, "worker_started", {
+      queueJobId: resolvedQueueJobId,
+      projectId: payload.projectId,
+      retryCount: 0,
+    })
     log("info", "Generation worker started", {
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
       userId: payload.userId,
       requestHash: payload.requestHash,
-      traceId: payload.traceId,
+      correlationId: correlation.correlationId,
+      traceId: correlation.traceId,
+      executionChainId: correlation.executionChainId,
     })
     log("info", "worker_started", {
       jobId: payload.jobId,
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
       userId: payload.userId,
-      traceId: payload.traceId,
+      correlationId: correlation.correlationId,
+      traceId: correlation.traceId,
+      executionChainId: correlation.executionChainId,
     })
 
     const execution = executeGenerationJob(
@@ -76,6 +111,9 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         promptLanguage: payload.promptLanguage,
         collaborationMode: payload.collaborationMode,
         previewContext: payload.previewContext,
+        correlationId: correlation.correlationId,
+        traceId: correlation.traceId,
+        executionChainId: correlation.executionChainId,
         persistenceKey: payload.idempotencyKey || payload.requestHash || payload.jobId,
         signal: abortController.signal,
       },
@@ -95,7 +133,13 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         }, GENERATION_JOB_TIMEOUT_MS)
       }),
     ])
-    console.log("generation_finished")
+    const durationMs = Date.now() - startedAt
+    warnIfSlow("generation", durationMs, { jobId: payload.jobId, projectId: payload.projectId })
+    finishAiTask(payload.jobId, "completed", durationMs)
+    traceExecution(traceContext, "task_completed", {
+      queueJobId: resolvedQueueJobId,
+      durationMs,
+    })
     await BillingService.markCompleted(payload.usageLogId, {
       provider: payload.provider,
       model: payload.model,
@@ -116,8 +160,10 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
       userId: payload.userId,
-      traceId: payload.traceId,
-      durationMs: Date.now() - startedAt,
+      correlationId: correlation.correlationId,
+      traceId: correlation.traceId,
+      executionChainId: correlation.executionChainId,
+      durationMs,
     })
     log("info", "worker_completed", {
       event: "worker_completed",
@@ -125,7 +171,9 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       queueJobId: resolvedQueueJobId,
       projectId: payload.projectId,
       userId: payload.userId,
-      traceId: payload.traceId,
+      correlationId: correlation.correlationId,
+      traceId: correlation.traceId,
+      executionChainId: correlation.executionChainId,
       startedAt: startedAtIso,
       endedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
@@ -166,15 +214,25 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     }
 
     if (!isCancelled) {
+      const durationMs = Date.now() - startedAt
+      finishAiTask(payload.jobId, "failed", durationMs)
+      traceError(traceContext, error, {
+        queueJobId: resolvedQueueJobId,
+        durationMs,
+        timeoutTriggered: isTimeout,
+      })
       log("error", "Generation worker failed", {
         jobId: payload.jobId,
         queueJobId: resolvedQueueJobId,
         projectId: payload.projectId,
         error: errorMessage,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         timeoutMs: GENERATION_JOB_TIMEOUT_MS,
         timeoutTriggered: isTimeout,
-        traceId: payload.traceId,
+        errorCode: classifyRuntimeError(error),
+        correlationId: correlation.correlationId,
+        traceId: correlation.traceId,
+        executionChainId: correlation.executionChainId,
       })
       log("error", "worker_failed", {
         event: "worker_failed",
@@ -185,10 +243,13 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         error: errorMessage,
         startedAt: startedAtIso,
         endedAt: new Date().toISOString(),
-        durationMs: Date.now() - startedAt,
+        durationMs,
         timeoutMs: GENERATION_JOB_TIMEOUT_MS,
         timeoutTriggered: isTimeout,
-        traceId: payload.traceId,
+        errorCode: classifyRuntimeError(error),
+        correlationId: correlation.correlationId,
+        traceId: correlation.traceId,
+        executionChainId: correlation.executionChainId,
       })
       captureException(error, {
         jobId: payload.jobId,
@@ -259,6 +320,13 @@ export function startGenerationWorker() {
     const endedAt = job.processedOn || Date.now()
     const startedAt = job.timestamp || endedAt
     await GenerationJobService.attachQueueJob(job.data.jobId, job.id || job.data.jobId)
+    updateAiTask(job.data.jobId, {
+      workerId,
+      retryCount: job.attemptsMade,
+    })
+    if (job.attemptsMade > 0) {
+      recordRetry({ jobId: job.data.jobId, queueJobId: job.id, attemptsMade: job.attemptsMade })
+    }
     log("info", "generation_worker_job_active", {
       workerId,
       jobId: job.data.jobId,
@@ -266,7 +334,9 @@ export function startGenerationWorker() {
       attemptsMade: job.attemptsMade,
       projectId: job.data.projectId,
       userId: job.data.userId,
+      correlationId: job.data.correlationId,
       traceId: job.data.traceId,
+      executionChainId: job.data.executionChainId,
     })
     log("info", "worker_active", {
       event: "worker_active",
@@ -281,7 +351,9 @@ export function startGenerationWorker() {
       durationMs: endedAt - startedAt,
       queueWaitMs: job.processedOn && job.timestamp ? job.processedOn - job.timestamp : null,
       error: null,
+      correlationId: job.data.correlationId,
       traceId: job.data.traceId,
+      executionChainId: job.data.executionChainId,
     })
   })
 
@@ -310,6 +382,8 @@ export function startGenerationWorker() {
       endedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : new Date().toISOString(),
       durationMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
       traceId: job.data.traceId,
+      correlationId: job.data.correlationId,
+      executionChainId: job.data.executionChainId,
     })
     await moveGenerationJobToDeadLetter({
       payload: job.data,
@@ -336,6 +410,8 @@ export function startGenerationWorker() {
       processedOn: job.processedOn,
       latencyMs: job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : null,
       traceId: job.data.traceId,
+      correlationId: job.data.correlationId,
+      executionChainId: job.data.executionChainId,
     })
     log("info", "worker_completed", {
       event: "worker_completed",
