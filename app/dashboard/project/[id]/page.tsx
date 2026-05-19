@@ -249,6 +249,15 @@ export type ProviderStatus = {
   checkedAt?: string
 }
 
+function publicGenerationErrorMessage(message: string) {
+  if (
+    /MALFORMED_GENERATED_ARTIFACT|Unrecognized key\(s\)|strict-json-schema|required|PATH_ERROR|diagnostic payload/i.test(message)
+  ) {
+    return "AI generated invalid project structure. Repair loop attempting automatic correction..."
+  }
+  return message
+}
+
 export type GenerationProgress = {
   stage:
     | "context"
@@ -651,7 +660,7 @@ export default function EditorPage() {
             return
           }
           if (job.status === "failed") {
-            const message = job.error || job.label || "Generate gagal. Buka Logs untuk detail error."
+            const message = publicGenerationErrorMessage(job.error || job.label || "Generate gagal. Buka Logs untuk detail error.")
             pushErrorLog("generate", message)
             setShowLogsPanel(true)
             setMessages((prev) =>
@@ -1454,7 +1463,7 @@ export default function EditorPage() {
 
       const finalMessage =
         error instanceof Error
-          ? message
+          ? publicGenerationErrorMessage(message)
           : message
 
       pushErrorLog("generate", finalMessage)

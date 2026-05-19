@@ -1,6 +1,7 @@
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
 import { formatGeneratedPathValidationError, normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
+import { isValidatorDiagnosticPayload, parseRuntimeMessage } from "@/lib/ai/runtime-contracts"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 const MAX_GENERATED_FILES = 100
@@ -136,6 +137,15 @@ export type GeneratedTaskOperation = {
 export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifact {
   const parsedJson = tryParseJson(providerMessage)
   if (parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)) {
+    const runtimeMessage = parseRuntimeMessage(parsedJson)
+    if (runtimeMessage && runtimeMessage.kind !== "artifact") {
+      throw new Error(`MALFORMED_GENERATED_ARTIFACT:runtime-message:${runtimeMessage.kind}`)
+    }
+
+    if (isValidatorDiagnosticPayload(parsedJson)) {
+      throw new Error("MALFORMED_GENERATED_ARTIFACT:diagnostic-payload")
+    }
+
     const strict = generatedArtifactSchema.safeParse(parsedJson)
     if (strict.success) {
       return {

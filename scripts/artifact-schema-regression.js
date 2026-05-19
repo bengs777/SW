@@ -36,6 +36,7 @@ function loadModule(file) {
   const localRequire = (request) => {
     if (request === "@/lib/ai/canonical-path") return loadModule("lib/ai/canonical-path.ts")
     if (request === "@/lib/ai/file-policy") return loadModule("lib/ai/file-policy.ts")
+    if (request === "@/lib/ai/runtime-contracts") return loadModule("lib/ai/runtime-contracts.ts")
     if (request === "@/lib/workspace-state") return loadModule("lib/workspace-state.ts")
     return require(request)
   }
@@ -62,7 +63,10 @@ function parseError(value) {
 
 function main() {
   const packageJson = JSON.parse(read("package.json"))
+  const orchestrator = read("lib/services/generation-orchestrator.service.ts")
+  const projectPage = read("app/dashboard/project/[id]/page.tsx")
   const { parseGeneratedArtifact } = loadModule("lib/ai/generated-artifact.ts")
+  const { parseRuntimeMessage, publicGenerationStructureErrorMessage } = loadModule("lib/ai/runtime-contracts.ts")
   const { SAFE_GENERATED_ROOT_FILES, validateGeneratedPath, formatGeneratedPathValidationError } =
     loadModule("lib/ai/file-policy.ts")
 
@@ -164,6 +168,101 @@ function main() {
       rootDiagnostic.allowedRootFiles.includes("package.json") &&
       SAFE_GENERATED_ROOT_FILES.includes("package.json"),
     "root-file diagnostics include the safe root allowlist"
+  )
+
+  let diagnosticPayloadError = null
+  const diagnosticPayload = {
+    error: "PATH_ERROR",
+    reason: "Root file not allowlisted",
+    received: "vite.config.ts",
+    allowedRootFiles: SAFE_GENERATED_ROOT_FILES,
+  }
+  try {
+    parseGeneratedArtifact(JSON.stringify(diagnosticPayload))
+  } catch (error) {
+    diagnosticPayloadError = error
+  }
+  assert(
+    "diagnostic.isolation",
+    diagnosticPayloadError &&
+      /MALFORMED_GENERATED_ARTIFACT:(runtime-message:diagnostic|diagnostic-payload)/.test(diagnosticPayloadError.message) &&
+      !/Unrecognized key\(s\).*reason/.test(diagnosticPayloadError.message),
+    "validator diagnostics are identified before strict artifact parsing"
+  )
+
+  let strictUnknownError = null
+  try {
+    parseGeneratedArtifact(JSON.stringify({
+      files: [{ path: "app/page.tsx", content: "export default function Page(){return null}" }],
+      dependencies: [],
+      commands: [],
+      summary: "extra field",
+      diagnostics: [],
+      metadata: {},
+      repairs: [],
+      reason: "not allowed in artifact schema",
+    }))
+  } catch (error) {
+    strictUnknownError = error
+  }
+  assert(
+    "artifact.strict-unknown-fields",
+    strictUnknownError && /Unrecognized key\(s\).*reason/.test(strictUnknownError.message),
+    "artifact schemas still reject unknown artifact fields"
+  )
+
+  let mixedPayloadError = null
+  try {
+    parseGeneratedArtifact(JSON.stringify({
+      kind: "diagnostic",
+      data: diagnosticPayload,
+      files: [{ path: "app/page.tsx", content: "export default function Page(){return null}" }],
+    }))
+  } catch (error) {
+    mixedPayloadError = error
+  }
+  assert(
+    "mixed-payload.rejected",
+    mixedPayloadError && /MALFORMED_GENERATED_ARTIFACT:runtime-message:diagnostic/.test(mixedPayloadError.message),
+    "mixed runtime diagnostic/artifact payloads are rejected"
+  )
+
+  const telemetryMessage = parseRuntimeMessage({
+    kind: "telemetry",
+    data: { event: "generation.validation", stage: "validate", durationMs: 12, reason: "metadata allowed" },
+  })
+  let telemetryArtifactError = null
+  try {
+    parseGeneratedArtifact(JSON.stringify({
+      kind: "telemetry",
+      data: { event: "generation.validation", stage: "validate", durationMs: 12 },
+    }))
+  } catch (error) {
+    telemetryArtifactError = error
+  }
+  assert(
+    "telemetry.isolation",
+    telemetryMessage &&
+      telemetryMessage.kind === "telemetry" &&
+      telemetryArtifactError &&
+      /MALFORMED_GENERATED_ARTIFACT:runtime-message:telemetry/.test(telemetryArtifactError.message),
+    "runtime telemetry is parsed separately and never accepted as an artifact"
+  )
+
+  assert(
+    "repair-loop.diagnostic-routing",
+    /publicGenerationStructureErrorMessage/.test(orchestrator) &&
+      /generation_slice_parse_retry/.test(orchestrator) &&
+      /Repairing validation failure/.test(orchestrator),
+    "orchestrator routes parser diagnostics to retry/repair flow"
+  )
+
+  assert(
+    "frontend.public-schema-error",
+    /AI generated invalid project structure\. Repair loop attempting automatic correction\.\.\./.test(projectPage) &&
+      publicGenerationStructureErrorMessage(new Error("MALFORMED_GENERATED_ARTIFACT:schema:artifact: Unrecognized key(s) in object: 'reason'")) ===
+        "AI generated invalid project structure. Repair loop attempting automatic correction...",
+    "frontend and shared helper hide raw schema dumps"
   )
 
   console.log("[artifact-schema] artifact schema regression checks passed")

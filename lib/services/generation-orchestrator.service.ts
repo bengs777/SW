@@ -12,6 +12,7 @@ import {
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
+import { publicGenerationStructureErrorMessage } from "@/lib/ai/runtime-contracts"
 import { ProviderRouter, SwiftProviderFailureError } from "@/lib/ai/provider-router"
 import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
@@ -292,6 +293,14 @@ function serializeError(error: unknown) {
     message: String(error),
     stack: null,
   }
+}
+
+function publicGenerationErrorMessage(error: unknown) {
+  if (error instanceof SwiftProviderFailureError) {
+    return error.userMessage
+  }
+
+  return publicGenerationStructureErrorMessage(error)
 }
 
 function assertNotAborted(signal?: AbortSignal) {
@@ -3591,6 +3600,7 @@ export async function executeGenerationJob(
           if (!(error instanceof Error) || !error.message.startsWith("MALFORMED_GENERATED_ARTIFACT") || parseAttempt >= 2) {
             throw error
           }
+          const publicMessage = publicGenerationStructureErrorMessage(error)
           log("warn", "generation_slice_parse_retry", {
             jobId: input.jobId,
             projectId: input.projectId,
@@ -3598,16 +3608,18 @@ export async function executeGenerationJob(
             sliceTotal,
             target: target.path,
             error: error.message,
+            publicMessage,
           })
           await transition(
             input.jobId,
             "parsing",
-            `Retrying malformed file slice ${sliceIndex}/${sliceTotal}`,
+            publicMessage,
             Math.min(55, 15 + Math.round((sliceIndex / Math.max(1, sliceTotal)) * 35)),
             {
               target: target.path,
               parseAttempt,
               error: error.message,
+              publicMessage,
             }
           )
         }
@@ -4448,10 +4460,7 @@ export async function executeGenerationJob(
     }
 
     const serialized = serializeError(error)
-    const publicErrorMessage =
-      error instanceof SwiftProviderFailureError
-        ? error.userMessage
-        : serialized.message
+    const publicErrorMessage = publicGenerationErrorMessage(error)
     await GenerationJobService.update(input.jobId, {
       diagnostics: {
         ...serialized,
