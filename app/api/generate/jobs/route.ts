@@ -67,6 +67,13 @@ function logFatal(stage: string, error: unknown, detail?: Record<string, unknown
 
 function probableRootCause(stage: string, error?: unknown) {
   const message = error instanceof Error ? error.message : String(error || "")
+  const prismaCode = error instanceof Prisma.PrismaClientKnownRequestError ? error.code : ""
+  if (
+    prismaCode === "P2022" ||
+    /column .* does not exist|table .* does not exist|relation .* does not exist|schema mismatch/i.test(message)
+  ) {
+    return "database schema mismatch"
+  }
   if (stage === "auth_start") return "Auth session lookup failed before request body parsing."
   if (stage === "body_parse_start") return "Malformed JSON request body or request stream could not be read."
   if (stage === "request_body_parse") return "Malformed JSON request body."
@@ -79,6 +86,23 @@ function probableRootCause(stage: string, error?: unknown) {
   if (stage === "queue_enqueue") return "Redis/BullMQ generation queue is unavailable or rejected the job."
   if (stage === "response_return") return "Response serialization failed after job creation."
   return "Unknown route failure; inspect stack and previous stage logs."
+}
+
+function developerGenerationFailureMessage(input: {
+  stage: string
+  probableRootCause: string
+  traceId: string
+}) {
+  return [
+    "Generation failed during:",
+    input.stage,
+    "",
+    "Probable cause:",
+    input.probableRootCause,
+    "",
+    "Trace:",
+    input.traceId,
+  ].join("\n")
 }
 
 export async function POST(request: NextRequest) {
@@ -97,6 +121,7 @@ export async function POST(request: NextRequest) {
   let fallbackScheduled = false
   let requestHash: string | null = null
   let body: unknown = null
+  let developerDiagnosticsAllowed = false
 
   const auditSummary = (error?: unknown) => {
     const summary = {
@@ -127,13 +152,31 @@ export async function POST(request: NextRequest) {
     const summary = auditSummary(error)
     // SECURITY: In production, hide internal stage/root cause details from client
     const isProduction = process.env.NODE_ENV === "production"
+    const developerError = developerGenerationFailureMessage({
+      stage,
+      probableRootCause: summary.probableRootCause,
+      traceId,
+    })
     const safeError = isProduction
-      ? "An internal error occurred. Please try again."
+      ? developerDiagnosticsAllowed
+        ? developerError
+        : "An internal error occurred. Please try again."
       : (error instanceof Error ? error.message : String(error))
     return NextResponse.json(
       {
         error: safeError,
-        ...(isProduction ? {} : { stage, probableRootCause: summary.probableRootCause }),
+        ...(developerDiagnosticsAllowed || !isProduction
+          ? {
+              stage,
+              probableRootCause: summary.probableRootCause,
+              traceId,
+              diagnostics: {
+                failedDuring: stage,
+                probableCause: summary.probableRootCause,
+                traceId,
+              },
+            }
+          : {}),
         retryable,
         requestId,
       },
@@ -195,6 +238,9 @@ export async function POST(request: NextRequest) {
   currentStage = "auth_success"
   logEarlyStage("auth_success", requestId)
   const email = session?.user?.email
+  developerDiagnosticsAllowed =
+    Boolean(email && email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()) ||
+    Boolean(email?.endsWith("@swift.local"))
 
   if (!email) {
     auditSummary()
@@ -308,8 +354,9 @@ export async function POST(request: NextRequest) {
   const userLookupStartedAt = Date.now()
   const user = await prisma.user.findUnique({
     where: { email },
-    select: { id: true },
+    select: { id: true, isDeveloperAccount: true },
   })
+  developerDiagnosticsAllowed = developerDiagnosticsAllowed || Boolean(user?.isDeveloperAccount)
   const userLookupDurationMs = Date.now() - userLookupStartedAt
   recordPrismaDuration(userLookupDurationMs, { operation: "user.findUnique", requestId })
   warnIfSlow("prisma", userLookupDurationMs, { operation: "user.findUnique", requestId })
@@ -931,13 +978,31 @@ export async function POST(request: NextRequest) {
     const status = /insufficient balance/i.test(message) ? 402 : 503
     // SECURITY: In production, hide internal stage/root cause from client
     const isProduction = process.env.NODE_ENV === "production"
+    const developerError = developerGenerationFailureMessage({
+      stage: failureStage,
+      probableRootCause: summary.probableRootCause,
+      traceId,
+    })
     const safeMessage = isProduction
-      ? (status === 402 ? "Insufficient balance" : "Service temporarily unavailable. Please try again.")
+      ? developerDiagnosticsAllowed
+        ? developerError
+        : (status === 402 ? "Insufficient balance" : "Service temporarily unavailable. Please try again.")
       : message
     return NextResponse.json(
       {
         error: safeMessage,
-        ...(isProduction ? {} : { stage: failureStage, probableRootCause: summary.probableRootCause }),
+        ...(developerDiagnosticsAllowed || !isProduction
+          ? {
+              stage: failureStage,
+              probableRootCause: summary.probableRootCause,
+              traceId,
+              diagnostics: {
+                failedDuring: failureStage,
+                probableCause: summary.probableRootCause,
+                traceId,
+              },
+            }
+          : {}),
         retryable: status !== 402,
         requestId,
       },
@@ -960,13 +1025,31 @@ export async function POST(request: NextRequest) {
     const summary = auditSummary(error)
     // SECURITY: In production, hide internal error details from client
     const isProduction = process.env.NODE_ENV === "production"
+    const developerError = developerGenerationFailureMessage({
+      stage,
+      probableRootCause: summary.probableRootCause,
+      traceId,
+    })
     const safeError = isProduction
-      ? "An unexpected error occurred. Please try again."
+      ? developerDiagnosticsAllowed
+        ? developerError
+        : "An unexpected error occurred. Please try again."
       : (error instanceof Error ? error.message : String(error))
     return NextResponse.json(
       {
         error: safeError,
-        ...(isProduction ? {} : { stage, probableRootCause: summary.probableRootCause }),
+        ...(developerDiagnosticsAllowed || !isProduction
+          ? {
+              stage,
+              probableRootCause: summary.probableRootCause,
+              traceId,
+              diagnostics: {
+                failedDuring: stage,
+                probableCause: summary.probableRootCause,
+                traceId,
+              },
+            }
+          : {}),
         requestId,
       },
       { status: 500 }
