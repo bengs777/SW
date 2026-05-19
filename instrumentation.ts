@@ -119,6 +119,10 @@ export async function register() {
   // Only runs in nodejs runtime (not edge) since it uses keep-alive HTTP agents.
   if (process.env.NEXT_RUNTIME === "nodejs") {
     await runFailOpen("ai_warmup", async () => {
+      if (process.env.SWIFT_ENABLE_AI_WARMUP === "false") {
+        return
+      }
+
       const { initializeAiWarmup } = await import("@/lib/ai/warmup")
       initializeAiWarmup()
     })

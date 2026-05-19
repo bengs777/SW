@@ -49,7 +49,9 @@ export function ProjectList({ searchQuery, workspaceId }: ProjectListProps) {
       setError("")
 
       try {
-        const response = await fetch(`/api/projects?workspaceId=${workspaceId}`)
+        const response = await fetch(`/api/projects?workspaceId=${workspaceId}`, {
+          cache: "no-store",
+        })
         const data = await response.json().catch(() => ({}))
 
         if (!response.ok) {

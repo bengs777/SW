@@ -87,14 +87,14 @@ async function testWorkerRecovery() {
   const queue = new Queue(queueName, { connection })
   let attempts = 0
 
-  await queue.add("recoverable", { ok: true }, { attempts: 2, backoff: { type: "fixed", delay: 250 } })
+  await queue.add("recoverable", { ok: true }, { attempts: 3, backoff: { type: "exponential", delay: 2000 } })
   const completed = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Worker recovery timed out")), 15_000)
     const worker = new Worker(
       queueName,
       async () => {
         attempts += 1
-        if (attempts === 1) {
+        if (attempts < 3) {
           throw new Error("simulated worker failure")
         }
         return { recovered: true }
@@ -111,7 +111,7 @@ async function testWorkerRecovery() {
       resolve(true)
     })
     worker.on("failed", (_job, error) => {
-      if (attempts >= 2) {
+      if (attempts >= 3) {
         clearTimeout(timeout)
         reject(error)
       }
@@ -120,7 +120,7 @@ async function testWorkerRecovery() {
   })
 
   await completed
-  assert(attempts === 2, `Expected retry recovery in 2 attempts, got ${attempts}`)
+  assert(attempts === 3, `Expected retry recovery in 3 attempts, got ${attempts}`)
   await queue.drain(true)
   await queue.close()
   await connection.quit()

@@ -28,7 +28,11 @@ const QUEUE_NAME = "swift-generation-v2"
 const DEAD_LETTER_QUEUE_NAME = "swift-generation-dead-letter-v1"
 const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
-  attempts: 1,
+  attempts: 3,
+  backoff: {
+    type: "exponential",
+    delay: 2000,
+  },
   removeOnComplete: 200,
   removeOnFail: 500,
 }

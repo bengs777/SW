@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { revalidatePath } from "next/cache"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { auth } from "@/auth"
@@ -110,7 +111,10 @@ export async function GET(
         },
       },
     }, {
-      headers: { "X-Request-Id": requestId },
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Request-Id": requestId,
+      },
     })
   } catch (error) {
     log("error", "project_state_load_failed", {
@@ -236,6 +240,10 @@ export async function DELETE(
       where: { id },
     })
 
+    revalidatePath("/dashboard")
+    revalidatePath("/dashboard/projects")
+    revalidatePath(`/dashboard/workspace/${project.workspaceId}`)
+
     return NextResponse.json({ success: true })
   } catch (error) {
     console.error("[v0] Error deleting project:", error)
@@ -296,6 +304,8 @@ export async function POST(
       files,
       { tokensUsed }
     )
+
+    revalidatePath(`/dashboard/project/${id}`)
 
     return NextResponse.json({
       success: true,

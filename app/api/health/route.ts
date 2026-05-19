@@ -17,6 +17,11 @@ type HealthCheck = {
   detail?: unknown
 }
 
+type ProviderHealthSummary = {
+  status: string
+  cached?: boolean
+}
+
 async function timed<T>(fn: () => Promise<T>) {
   const startedAt = Date.now()
   const result = await fn()
@@ -26,9 +31,25 @@ async function timed<T>(fn: () => Promise<T>) {
   }
 }
 
+async function withHealthTimeout<T>(name: string, timeoutMs: number, fn: () => Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${name} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
 async function checkDatabase(): Promise<HealthCheck> {
   try {
-    const { latencyMs } = await timed(() => prisma.$queryRaw`SELECT 1`)
+    const { latencyMs } = await timed(() =>
+      withHealthTimeout("database health check", 2_000, () => prisma.$queryRaw`SELECT 1`)
+    )
     return { status: "healthy", latencyMs }
   } catch (error) {
     return {
@@ -40,7 +61,9 @@ async function checkDatabase(): Promise<HealthCheck> {
 
 async function checkQueue(): Promise<HealthCheck> {
   try {
-    const { result, latencyMs } = await timed(() => getGenerationQueueHealth())
+    const { result, latencyMs } = await timed(() =>
+      withHealthTimeout("queue health check", 2_000, () => getGenerationQueueHealth())
+    )
     return {
       status: result.status === "healthy" ? "healthy" : result.status === "disabled" ? "disabled" : "degraded",
       latencyMs,
@@ -56,11 +79,22 @@ async function checkQueue(): Promise<HealthCheck> {
 
 async function checkProviders(refresh: boolean): Promise<HealthCheck> {
   try {
-    const { result, latencyMs } = await timed(async () =>
-      refresh
-        ? Promise.all(getConfiguredSwiftModelIds().map((modelId) => ProviderRouter.checkProviderHealth(modelId)))
-        : ProviderRouter.getConfiguredProviderHealth()
-    )
+    const { result, latencyMs } = await timed(async () => {
+      return withHealthTimeout<ProviderHealthSummary[]>(
+        "provider health check",
+        refresh ? timeoutConfig.healthProviderMs : 2_000,
+        async () => {
+          const providers = refresh
+            ? await Promise.all(getConfiguredSwiftModelIds().map((modelId) => ProviderRouter.checkProviderHealth(modelId)))
+            : await ProviderRouter.getConfiguredProviderHealth()
+          return providers.map((provider) => ({
+            ...provider,
+            status: String(provider.status),
+            cached: Boolean(provider.cached),
+          }))
+        }
+      )
+    })
     const hasHealthy = result.some((provider) => provider.status === "healthy")
     const hasDegraded = result.some((provider) => provider.status === "degraded")
 
@@ -80,10 +114,62 @@ async function checkProviders(refresh: boolean): Promise<HealthCheck> {
   }
 }
 
+function okLabel(check: HealthCheck) {
+  return check.status === "healthy" || check.status === "degraded" ? "ok" : check.status
+}
+
+function workerLabel(queue: HealthCheck) {
+  if (queue.status === "disabled") return "disabled"
+  if (queue.status === "unhealthy") return "unhealthy"
+
+  const detail = queue.detail as { workerHeartbeat?: { ageMs?: number | null } | null } | undefined
+  const ageMs = detail?.workerHeartbeat?.ageMs
+  return typeof ageMs === "number" && ageMs <= 90_000 ? "ok" : "degraded"
+}
+
 export async function GET(request: NextRequest) {
   const startedAt = Date.now()
   const requestId = request.headers.get("x-request-id") || request.headers.get("x-vercel-id") || randomUUID()
+  const coldStartProbe = request.nextUrl.searchParams.get("coldStart") === "true"
   const refreshProvider = request.nextUrl.searchParams.get("refreshProvider") === "true"
+
+  if (coldStartProbe) {
+    const envReport = validateEnv()
+    return NextResponse.json({
+      status: "healthy",
+      database: "skipped",
+      worker: "skipped",
+      queue: "skipped",
+      checkedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      requestId,
+      service: "swift-ai",
+      environment: env.nodeEnv,
+      checks: {
+        startup: {
+          status: "healthy",
+          mode: "cold-start",
+        },
+        environment: {
+          status: envReport.issues.every((issue) => issue.severity !== "error") ? "healthy" : "unhealthy",
+          audit: {
+            ok: envReport.ok,
+            issues: envReport.issues.map((issue) => ({
+              key: issue.key,
+              severity: issue.severity,
+              message: issue.message,
+            })),
+          },
+        },
+      },
+    }, {
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Request-Id": requestId,
+      },
+    })
+  }
+
   const [database, queue, providers] = await Promise.all([
     checkDatabase(),
     checkQueue(),
@@ -112,6 +198,9 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     status,
+    database: okLabel(database),
+    worker: workerLabel(queue),
+    queue: okLabel(queue),
     checkedAt: new Date().toISOString(),
     durationMs,
     requestId,

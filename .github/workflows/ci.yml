@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install chromium
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm run runtime-smoke
+
+      - run: npm run real-e2e
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DEPLOY_GATE_WORKER_FAILED_WINDOW_MINUTES: "60"

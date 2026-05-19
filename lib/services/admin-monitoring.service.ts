@@ -34,8 +34,15 @@ function successCountMap(items: Array<{ success: boolean; _count: { _all: number
   )
 }
 
+async function measureLatency(operation: () => Promise<unknown>) {
+  const startedAt = Date.now()
+  await operation()
+  return Date.now() - startedAt
+}
+
 export class AdminMonitoringService {
   static async getOverview(windowHours = DEFAULT_WINDOW_HOURS) {
+    const overviewStartedAt = Date.now()
     const hours = clampWindowHours(windowHours)
     const since = subHours(new Date(), hours)
 
@@ -58,6 +65,7 @@ export class AdminMonitoringService {
       generationJobsInWindow,
       recentGenerationJobs,
       queueHealth,
+      databaseLatencyMs,
     ] = await Promise.all([
       prisma.user.count(),
       prisma.project.count(),
@@ -210,6 +218,7 @@ export class AdminMonitoringService {
           latencyMs: 0,
         },
       })),
+      measureLatency(() => prisma.$queryRaw`SELECT 1`).catch(() => 0),
     ])
 
     const usage = statusCountMap(usageStatus)
@@ -300,6 +309,11 @@ export class AdminMonitoringService {
         history: hourlyGeneration,
       },
       queue: queueHealth,
+      observability: {
+        databaseLatencyMs,
+        apiLatencyMs: Date.now() - overviewStartedAt,
+        queueLatencyMs: Number((queueHealth as { redis?: { latencyMs?: number } }).redis?.latencyMs || 0),
+      },
       alerts,
       recentUsage,
       recentRequests,

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { revalidatePath } from "next/cache"
 import { z } from "zod"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
@@ -141,7 +142,9 @@ export async function GET(request: NextRequest) {
       orderBy: { updatedAt: "desc" },
     })
 
-    return NextResponse.json({ projects })
+    return NextResponse.json({ projects }, {
+      headers: { "Cache-Control": "no-store" },
+    })
   } catch (error) {
     console.error("[projects:GET] Error:", error)
     return NextResponse.json(
@@ -187,6 +190,10 @@ export async function POST(request: NextRequest) {
         workspaceId: resolvedWorkspaceId,
       },
     })
+
+    revalidatePath("/dashboard")
+    revalidatePath("/dashboard/projects")
+    revalidatePath(`/dashboard/workspace/${resolvedWorkspaceId}`)
 
     return NextResponse.json({ project }, { status: 201 })
   } catch (error) {
