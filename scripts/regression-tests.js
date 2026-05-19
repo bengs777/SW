@@ -19,6 +19,9 @@ const sandboxPreview = read("components/editor/sandbox-preview.tsx")
 const generationOrchestrator = read("lib/services/generation-orchestrator.service.ts")
 const sandboxRuntime = read("lib/sandbox/runtime.ts")
 const generationJobService = read("lib/services/generation-job.service.ts")
+const generationJobStream = read("app/api/generate/jobs/[jobId]/stream/route.ts")
+const projectPage = read("app/dashboard/project/[id]/page.tsx")
+const developerDiagnostics = read("lib/ai/developer-diagnostics.ts")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -128,6 +131,32 @@ assert(
     /existing\.cancelRequested/.test(generationJobService) &&
     /requestedStatus !== "cancelled"/.test(generationJobService),
   "late completion/failure must not overwrite terminal or cancellation-locked jobs"
+)
+
+assert(
+  "developer diagnostics are gated",
+  /developerDiagnosticsAllowed/.test(generationJobStream) &&
+    /isDeveloperAccount/.test(generationJobStream) &&
+    /process\.env\.NODE_ENV !== "production"/.test(generationJobStream) &&
+    /send\("developer\.diagnostics"/.test(generationJobStream),
+  "developer diagnostics SSE payloads must only be sent to developer/local users"
+)
+
+assert(
+  "developer diagnostics panel wired",
+  /DeveloperDiagnosticsPanel/.test(projectPage) &&
+    /developer\.diagnostics/.test(projectPage) &&
+    /showDeveloperDiagnostics/.test(projectPage),
+  "project UI must expose expandable diagnostics only when developer payloads arrive"
+)
+
+assert(
+  "repair introspection captures failed artifacts",
+  /persistInvalidArtifactReport/.test(generationOrchestrator) &&
+    /\.swift-reports", "failed-generations"/.test(developerDiagnostics) &&
+    /repairPromptPreview/.test(generationOrchestrator) &&
+    /validatorResult/.test(generationOrchestrator),
+  "orchestrator must capture invalid artifacts and repair-chain details"
 )
 
 console.log("[regression] all checks passed")

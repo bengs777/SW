@@ -519,6 +519,28 @@ export class GenerationJobService {
       timedOutAt: job.timedOutAt?.toISOString() || null,
     }
   }
+
+  static toDeveloperDiagnostics(job: {
+    diagnosticsJson?: string | null
+    metricsJson?: string | null
+    planJson?: string | null
+    contextJson?: string | null
+    stage: string
+    status: string
+    retryCount: number
+    attemptCount: number
+  }) {
+    return {
+      stage: job.stage,
+      status: job.status,
+      retryCount: job.retryCount,
+      attemptCount: job.attemptCount,
+      plan: safeJsonParse(job.planJson),
+      context: safeJsonParse(job.contextJson),
+      diagnostics: stripRawStacks(safeJsonParse(job.diagnosticsJson)),
+      metrics: safeJsonParse(job.metricsJson),
+    }
+  }
 }
 
 function parsePlan(value?: string | null) {
@@ -544,4 +566,23 @@ function parsePlan(value?: string | null) {
   }
 
   return []
+}
+
+function safeJsonParse(value?: string | null) {
+  if (!value) return null
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+function stripRawStacks(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value
+  if (Array.isArray(value)) return value.map(stripRawStacks)
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== "stack")
+      .map(([key, item]) => [key, stripRawStacks(item)])
+  )
 }

@@ -47,7 +47,7 @@ export async function GET(
   const { jobId } = await context.params
   const user = await prisma.user.findUnique({
     where: { email },
-    select: { id: true },
+    select: { id: true, isDeveloperAccount: true },
   })
 
   if (!user) {
@@ -65,6 +65,7 @@ export async function GET(
   let closed = false
   let lastEventSequence = parseLastEventSequence(request)
   let lastSentAt = 0
+  const developerDiagnosticsAllowed = Boolean(user.isDeveloperAccount || process.env.NODE_ENV !== "production")
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -87,6 +88,9 @@ export async function GET(
       abortSignal.addEventListener("abort", close, { once: true })
 
       send("job", lastEventSequence, GenerationJobService.toPublicJob(initialJob))
+      if (developerDiagnosticsAllowed) {
+        send("developer.diagnostics", `${lastEventSequence}:diagnostics`, GenerationJobService.toDeveloperDiagnostics(initialJob))
+      }
 
       while (!closed) {
         let events: Awaited<ReturnType<typeof GenerationJobService.listEvents>> = []
@@ -121,6 +125,9 @@ export async function GET(
         }
 
         send("job", lastEventSequence, GenerationJobService.toPublicJob(freshJob))
+        if (developerDiagnosticsAllowed) {
+          send("developer.diagnostics", `${lastEventSequence}:diagnostics`, GenerationJobService.toDeveloperDiagnostics(freshJob))
+        }
 
         if (GENERATION_TERMINAL_STATUSES.has(freshJob.status)) {
           close()

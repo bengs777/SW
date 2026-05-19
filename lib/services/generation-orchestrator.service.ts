@@ -12,6 +12,13 @@ import {
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
+import {
+  createDeveloperGenerationDiagnostics,
+  persistInvalidArtifactReport,
+  recordDeveloperDiagnostic,
+  summarizeArtifactPayload,
+  summarizeGeneratedFiles,
+} from "@/lib/ai/developer-diagnostics"
 import { publicGenerationStructureErrorMessage } from "@/lib/ai/runtime-contracts"
 import { ProviderRouter, SwiftProviderFailureError } from "@/lib/ai/provider-router"
 import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
@@ -1460,6 +1467,14 @@ async function transition(jobId: string, stage: GenerationJobStage, label: strin
     message: label,
     data,
   })
+}
+
+async function updateDeveloperDiagnostics(jobId: string, diagnostics: ReturnType<typeof createDeveloperGenerationDiagnostics>) {
+  await GenerationJobService.update(jobId, {
+    diagnostics: {
+      developer: diagnostics,
+    },
+  }).catch(() => null)
 }
 
 const totalFileBytes = (files: GeneratedFile[]) =>
@@ -2941,6 +2956,12 @@ async function attemptTargetedRepair(input: {
     installedDependencies: executed.installedDependencies,
     normalizedPackages: normalized.normalizedPackages,
     addedPackages: normalized.addedPackages,
+    repairPromptPreview: repairPrompt.slice(0, 6000),
+    repairedArtifactSummary: summarizeArtifactPayload({
+      files: parsed.files,
+      dependencies: parsed.dependencies,
+      operations: parsed.taskGraph?.operations,
+    }),
   }
 }
 
@@ -3261,6 +3282,7 @@ export async function executeGenerationJob(
     startedAt: new Date().toISOString(),
     correlation,
   }
+  const developerDiagnostics = createDeveloperGenerationDiagnostics()
   let plan: GenerationPlan | null = null
   let blueprint: ControlledAppBlueprint | null = null
   let validation: ValidationLifecycleResult | null = null
@@ -3277,6 +3299,12 @@ export async function executeGenerationJob(
 
   try {
     assertNotAborted(input.signal)
+    recordDeveloperDiagnostic(developerDiagnostics, {
+      stage: "PLANNING",
+      status: "started",
+      reason: "Generation planner started",
+    })
+    await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
     traceExecution(traceContext, "planner_started", {
       projectId: input.projectId,
       selectedModel: input.selectedModel,
@@ -3314,6 +3342,27 @@ export async function executeGenerationJob(
     })
     blueprint = getControlledAppBlueprint(plan.appType)
     const appPlan = buildAppPlan({ prompt: input.prompt, plan })
+    developerDiagnostics.plannerOutput = {
+      objective: plan.objective,
+      appType: plan.appType,
+      productionMode: plan.productionMode,
+      intent: plan.intent,
+      filePlan: plan.filePlan,
+      agentTasks: plan.agentTasks,
+      actionPlan: plan.actionPlan,
+      appPlan,
+    }
+    recordDeveloperDiagnostic(developerDiagnostics, {
+      stage: "PLANNING",
+      status: "passed",
+      reason: "Architecture plan ready",
+      data: {
+        appType: plan.appType,
+        productionMode: plan.productionMode,
+        fileCount: plan.filePlan.length,
+      },
+    })
+    await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
     log("info", "intent", {
       jobId: input.jobId,
       projectId: input.projectId,
@@ -3424,6 +3473,18 @@ export async function executeGenerationJob(
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
       tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "VALIDATING",
+        status: "passed",
+        reason: "Fast full-stack scaffold accepted by validator",
+        data: {
+          acceptedFileCount: fastScaffoldFiles.length,
+          rejectedFileCount: 0,
+          changedFiles: fastScaffoldFiles.map((file) => normalizePath(file.path)).slice(0, 40),
+          addedPackages: normalized.addedPackages,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       log("info", "agent_execute_tools", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3560,6 +3621,16 @@ export async function executeGenerationJob(
       let parseError: unknown = null
 
       for (let parseAttempt = 1; parseAttempt <= 2; parseAttempt += 1) {
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "GENERATING",
+          status: "started",
+          reason: `Generating artifact slice ${sliceIndex}/${sliceTotal}`,
+          data: {
+            target: target.path,
+            parseAttempt,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
         response = await runProviderAttempt({
           jobId: input.jobId,
           projectId: input.projectId,
@@ -3593,14 +3664,80 @@ export async function executeGenerationJob(
         assertNotAborted(input.signal)
         try {
           parsed = parseGeneratedArtifact(response.message)
+          developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({
+            files: parsed.files,
+            dependencies: parsed.dependencies,
+            operations: parsed.taskGraph?.operations,
+          })
+          recordDeveloperDiagnostic(developerDiagnostics, {
+            stage: "GENERATING",
+            status: "passed",
+            reason: `Artifact slice ${sliceIndex}/${sliceTotal} parsed`,
+            data: developerDiagnostics.generatedArtifactSummary,
+          })
+          await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
           parseError = null
           break
         } catch (error) {
           parseError = error
           if (!(error instanceof Error) || !error.message.startsWith("MALFORMED_GENERATED_ARTIFACT") || parseAttempt >= 2) {
+            const invalidArtifactPath = await persistInvalidArtifactReport({
+              jobId: input.jobId,
+              projectId: input.projectId,
+              payload: response.message,
+              parseFailure: error instanceof Error ? error.message : String(error),
+              schemaMismatch: error instanceof Error ? error.message : String(error),
+            }).catch(() => null)
+            developerDiagnostics.artifactParseFailures.push({
+              stage: "artifact_parsing",
+              status: "failed",
+              reason: error instanceof Error ? error.message : String(error),
+              parseAttempt,
+              target: target.path,
+              reportPath: invalidArtifactPath,
+            })
+            developerDiagnostics.reports.lastInvalidArtifactPath = invalidArtifactPath
+            recordDeveloperDiagnostic(developerDiagnostics, {
+              stage: "GENERATING",
+              status: "failed",
+              reason: "Generated artifact failed strict parsing",
+              data: {
+                parseAttempt,
+                target: target.path,
+                reportPath: invalidArtifactPath,
+              },
+            })
+            await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
             throw error
           }
           const publicMessage = publicGenerationStructureErrorMessage(error)
+          const invalidArtifactPath = await persistInvalidArtifactReport({
+            jobId: input.jobId,
+            projectId: input.projectId,
+            payload: response.message,
+            parseFailure: error.message,
+            schemaMismatch: error.message,
+          }).catch(() => null)
+          developerDiagnostics.artifactParseFailures.push({
+            stage: "artifact_parsing",
+            status: "failed",
+            reason: error.message,
+            parseAttempt,
+            target: target.path,
+            reportPath: invalidArtifactPath,
+          })
+          developerDiagnostics.reports.lastInvalidArtifactPath = invalidArtifactPath
+          recordDeveloperDiagnostic(developerDiagnostics, {
+            stage: "GENERATING",
+            status: "failed",
+            reason: "Generated artifact failed strict parsing; retrying",
+            data: {
+              parseAttempt,
+              target: target.path,
+              reportPath: invalidArtifactPath,
+            },
+          })
+          await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
           log("warn", "generation_slice_parse_retry", {
             jobId: input.jobId,
             projectId: input.projectId,
@@ -3669,6 +3806,26 @@ export async function executeGenerationJob(
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
       tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+      if (scoped.rejectedFiles.length > 0) {
+        developerDiagnostics.validatorFailures.push({
+          stage: "scope_filter",
+          status: "failed",
+          reason: "Generated files rejected by edit scope",
+          rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 20),
+        })
+      }
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "VALIDATING",
+        status: scoped.rejectedFiles.length > 0 ? "failed" : "passed",
+        reason: scoped.rejectedFiles.length > 0 ? "Some generated files were rejected by scope validation" : "Generated artifact accepted by validator",
+        data: {
+          acceptedFileCount: scoped.acceptedFiles.length,
+          rejectedFileCount: scoped.rejectedFiles.length,
+          changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)).slice(0, 40),
+          addedPackages: normalized.addedPackages,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       log("info", "agent_execute_tools", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3767,6 +3924,47 @@ export async function executeGenerationJob(
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
+    recordDeveloperDiagnostic(developerDiagnostics, {
+      stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
+      status: validation.ok ? "passed" : "failed",
+      reason: validation.ok ? "Validation lifecycle passed" : validation.failure?.message || "Validation lifecycle failed",
+      data: {
+        previewStatus: validation.previewStatus,
+        failure: validation.failure || null,
+        steps: validation.steps.map((step) => ({
+          name: step.name,
+          status: step.status,
+          policy: step.policy,
+          durationMs: step.durationMs,
+          reason: step.message || null,
+        })),
+      },
+    })
+    if (!validation.ok) {
+      developerDiagnostics.validatorFailures.push({
+        stage: validation.failure?.step || "validation",
+        status: "failed",
+        reason: validation.failure?.message || "Validation lifecycle failed",
+      })
+      const buildFailure = validation.steps.find((step) => step.name === "build" && step.status === "failed")
+      if (buildFailure) {
+        developerDiagnostics.buildFailures.push({
+          stage: "build",
+          status: "failed",
+          reason: buildFailure.message || validation.failure?.message || "Build failed",
+          output: buildFailure.data?.output || null,
+        })
+      }
+      const previewFailure = validation.steps.find((step) => step.name === "runtime-smoke" && step.status === "failed")
+      if (previewFailure || validation.previewStatus === "error") {
+        developerDiagnostics.previewStartupFailures.push({
+          stage: "runtime-smoke",
+          status: "failed",
+          reason: previewFailure?.message || validation.failure?.message || "Preview startup failed",
+        })
+      }
+    }
+    await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
     traceExecution(traceContext, "build_finished", {
       projectId: input.projectId,
       ok: validation.ok,
@@ -3898,6 +4096,21 @@ export async function executeGenerationJob(
           steps: validation.steps,
         }
       )
+      developerDiagnostics.repairAttempts.push({
+        attempt: repairAttempt,
+        reason: validation.failure?.message || "Validation lifecycle failed",
+        targetFiles: repairActions.map((action) => action.file),
+      })
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "REPAIRING",
+        status: "started",
+        reason: validation.failure?.message || "Repair loop started",
+        repairAttempt,
+        data: {
+          targetFiles: repairActions.map((action) => action.file),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
 
       const previousRepairFiles = validation.files
       const previousRepairFileHash = hashGeneratedFiles(previousRepairFiles)
@@ -3918,6 +4131,29 @@ export async function executeGenerationJob(
 
       assertNotAborted(input.signal)
       workingFiles = repaired.files
+      const repairDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt)
+      if (repairDiagnostic) {
+        repairDiagnostic.repairPromptPreview = repaired.repairPromptPreview
+        repairDiagnostic.repairedArtifactSummary = repaired.repairedArtifactSummary
+        repairDiagnostic.failedBecause =
+          repaired.acceptedFileCount === 0 || !repaired.repaired
+            ? "No accepted repaired files"
+            : undefined
+      }
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "REPAIRING",
+        status: repaired.repaired ? "passed" : "failed",
+        reason: repaired.repaired ? "Repair artifact accepted" : "Repair artifact produced no accepted file changes",
+        repairAttempt,
+        data: {
+          parsedFileCount: repaired.parsedFileCount,
+          acceptedFileCount: repaired.acceptedFileCount,
+          rejectedFiles: repaired.rejectedFiles,
+          deletedPaths: repaired.deletedPaths,
+          addedPackages: repaired.addedPackages,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
       const repairedFileHash = hashGeneratedFiles(workingFiles)
       log("info", "repair_result", {
@@ -4019,6 +4255,64 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      const repairValidationDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt)
+      if (repairValidationDiagnostic) {
+        repairValidationDiagnostic.validatorResult = {
+          status: validation.ok ? "passed" : "failed",
+          failure: validation.failure || null,
+          steps: validation.steps.map((step) => ({
+            name: step.name,
+            status: step.status,
+            policy: step.policy,
+            reason: step.message || null,
+          })),
+        }
+        repairValidationDiagnostic.failedBecause = validation.ok ? undefined : validation.failure?.message || "Validation failed after repair"
+      }
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
+        status: validation.ok ? "passed" : "failed",
+        reason: validation.ok ? "Repaired artifacts passed validation" : validation.failure?.message || "Validation failed after repair",
+        repairAttempt,
+        data: {
+          failure: validation.failure || null,
+          steps: validation.steps.map((step) => ({
+            name: step.name,
+            status: step.status,
+            policy: step.policy,
+            durationMs: step.durationMs,
+            reason: step.message || null,
+          })),
+        },
+      })
+      if (!validation.ok) {
+        developerDiagnostics.validatorFailures.push({
+          stage: validation.failure?.step || "validation",
+          status: "failed",
+          reason: validation.failure?.message || "Validation failed after repair",
+          repairAttempt,
+        })
+        const buildFailure = validation.steps.find((step) => step.name === "build" && step.status === "failed")
+        if (buildFailure) {
+          developerDiagnostics.buildFailures.push({
+            stage: "build",
+            status: "failed",
+            reason: buildFailure.message || validation.failure?.message || "Build failed after repair",
+            repairAttempt,
+            output: buildFailure.data?.output || null,
+          })
+        }
+        const previewFailure = validation.steps.find((step) => step.name === "runtime-smoke" && step.status === "failed")
+        if (previewFailure || validation.previewStatus === "error") {
+          developerDiagnostics.previewStartupFailures.push({
+            stage: "runtime-smoke",
+            status: "failed",
+            reason: previewFailure?.message || validation.failure?.message || "Preview startup failed after repair",
+            repairAttempt,
+          })
+        }
+      }
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       traceExecution(traceContext, "build_finished", {
         projectId: input.projectId,
         repairAttempt,
@@ -4101,6 +4395,21 @@ export async function executeGenerationJob(
         }
 
         if (repairStopReason) {
+          const repairStopDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt)
+          if (repairStopDiagnostic) {
+            repairStopDiagnostic.failedBecause = repairStopReason
+          }
+          recordDeveloperDiagnostic(developerDiagnostics, {
+            stage: "REPAIRING",
+            status: "failed",
+            reason: repairStopReason,
+            repairAttempt,
+            data: {
+              errorSignature: currentErrorSignature,
+              buildOutputUnchanged,
+            },
+          })
+          await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
           log("warn", "repair_stopped", {
             jobId: input.jobId,
             projectId: input.projectId,
@@ -4137,6 +4446,23 @@ export async function executeGenerationJob(
         addedPackages: fallback.addedPackages,
         normalizedPackages: fallback.normalizedPackages,
       })
+      developerDiagnostics.repairAttempts.push({
+        attempt: repairAttempt + 1,
+        reason: validation.failure?.message || "Preview compile failed after AI repair",
+        targetFiles: workingFiles.map((file) => normalizePath(file.path)).slice(0, 40),
+        repairedArtifactSummary: summarizeGeneratedFiles(workingFiles),
+      })
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "REPAIRING",
+        status: "started",
+        reason: "Applying safe preview fallback",
+        repairAttempt: repairAttempt + 1,
+        data: {
+          fallbackFileCount: workingFiles.length,
+          addedPackages: fallback.addedPackages,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       await emitGeneratedFilesUpdate({
         jobId: input.jobId,
         stage: "repairing",
@@ -4166,6 +4492,24 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      const fallbackRepairDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt + 1)
+      if (fallbackRepairDiagnostic) {
+        fallbackRepairDiagnostic.validatorResult = {
+          status: validation.ok ? "passed" : "failed",
+          failure: validation.failure || null,
+        }
+        fallbackRepairDiagnostic.failedBecause = validation.ok ? undefined : validation.failure?.message || "Fallback validation failed"
+      }
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
+        status: validation.ok ? "passed" : "failed",
+        reason: validation.ok ? "Safe preview fallback passed validation" : validation.failure?.message || "Safe preview fallback failed validation",
+        repairAttempt: repairAttempt + 1,
+        data: {
+          failure: validation.failure || null,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       recordValidationResult(validation.ok, {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -4241,6 +4585,16 @@ export async function executeGenerationJob(
     }
 
     if (!validation.ok) {
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "FAILED",
+        status: "failed",
+        reason: validation.failure?.message || "Validation lifecycle failed",
+        data: {
+          repairAttempts: repairAttempt,
+          failure: validation.failure || null,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       log("warn", "Generation validation lifecycle failed", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -4249,6 +4603,17 @@ export async function executeGenerationJob(
       })
       throw new Error(validation.failure?.message || "Validation lifecycle failed")
     }
+    recordDeveloperDiagnostic(developerDiagnostics, {
+      stage: "READY",
+      status: "passed",
+      reason: "Generation validated and ready to persist",
+      data: {
+        fileCount: workingFiles.length,
+        repairAttempts: repairAttempt,
+        previewStatus: validation.previewStatus,
+      },
+    })
+    await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
     updateAiTask(input.jobId, {
       filesChanged: workingFiles.map((file) => normalizePath(file.path)),
       repairAttempts: repairAttempt,
@@ -4461,10 +4826,21 @@ export async function executeGenerationJob(
 
     const serialized = serializeError(error)
     const publicErrorMessage = publicGenerationErrorMessage(error)
+    recordDeveloperDiagnostic(developerDiagnostics, {
+      stage: "FAILED",
+      status: "failed",
+      reason: serialized.message,
+      repairAttempt: repairAttempt > 0 ? repairAttempt : undefined,
+      data: {
+        publicMessage: publicErrorMessage,
+        validationFailure: validation?.failure || null,
+      },
+    })
     await GenerationJobService.update(input.jobId, {
       diagnostics: {
         ...serialized,
         publicMessage: publicErrorMessage,
+        developer: developerDiagnostics,
         providerAttempts:
           error instanceof SwiftProviderFailureError
             ? error.attempts

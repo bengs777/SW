@@ -7,6 +7,7 @@ import { ChatPanel } from "@/components/editor/chat-panel"
 import type { CollaborationMode } from "@/components/editor/chat-panel"
 import { PreviewPanel } from "@/components/editor/preview-panel"
 import { ErrorLogPanel } from "@/components/editor/error-log-panel"
+import { DeveloperDiagnosticsPanel, type DeveloperDiagnosticsSnapshot } from "@/components/editor/developer-diagnostics-panel"
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable"
 import { Button } from "@/components/ui/button"
 import {
@@ -315,6 +316,8 @@ export default function EditorPage() {
   const [deploymentUrl, setDeploymentUrl] = useState<string | null>(null)
   const [errorLogs, setErrorLogs] = useState<ErrorLogEntry[]>([])
   const [showLogsPanel, setShowLogsPanel] = useState(false)
+  const [developerDiagnostics, setDeveloperDiagnostics] = useState<DeveloperDiagnosticsSnapshot | null>(null)
+  const [showDeveloperDiagnostics, setShowDeveloperDiagnostics] = useState(false)
   const [latestPreviewError, setLatestPreviewError] = useState<string | null>(null)
   const [runtimePreviewUrl, setRuntimePreviewUrl] = useState<string | null>(null)
   const [customDomain, setCustomDomain] = useState<string | null>(null)
@@ -681,6 +684,16 @@ export default function EditorPage() {
         }
       } catch {
         // Ignore malformed progress events and keep the existing client-side state.
+      }
+    })
+
+    stream.addEventListener("developer.diagnostics", (event) => {
+      try {
+        recordEventId(event as MessageEvent)
+        const payload = JSON.parse((event as MessageEvent).data) as DeveloperDiagnosticsSnapshot
+        setDeveloperDiagnostics(payload)
+      } catch {
+        // Developer diagnostics are optional and should never interrupt generation.
       }
     })
 
@@ -1936,10 +1949,19 @@ export default function EditorPage() {
                   </span>
                 )}
               </Button>
+              {developerDiagnostics && (
+                <Button
+                  size="sm"
+                  variant={showDeveloperDiagnostics ? "default" : "outline"}
+                  onClick={() => setShowDeveloperDiagnostics((current) => !current)}
+                >
+                  Diagnostics
+                </Button>
+              )}
             </div>
           </div>
           <ResizablePanelGroup
-            key={`${layoutRenderKey}-${showLogsPanel ? "logs" : "no-logs"}`}
+            key={`${layoutRenderKey}-${showLogsPanel ? "logs" : "no-logs"}-${showDeveloperDiagnostics ? "dev" : "nodev"}`}
             direction="horizontal"
             className="min-h-0 flex-1"
           >
@@ -1989,6 +2011,18 @@ export default function EditorPage() {
                 <ResizableHandle withHandle />
                 <ResizablePanel className="min-h-0" defaultSize={10} minSize={8} maxSize={18}>
                   <ErrorLogPanel logs={errorLogs} onClear={handleClearErrorLogs} />
+                </ResizablePanel>
+              </>
+            )}
+            {developerDiagnostics && showDeveloperDiagnostics && (
+              <>
+                <ResizableHandle withHandle />
+                <ResizablePanel className="min-h-0" defaultSize={18} minSize={12} maxSize={28}>
+                  <DeveloperDiagnosticsPanel
+                    diagnostics={developerDiagnostics}
+                    expanded={showDeveloperDiagnostics}
+                    onToggle={() => setShowDeveloperDiagnostics((current) => !current)}
+                  />
                 </ResizablePanel>
               </>
             )}
