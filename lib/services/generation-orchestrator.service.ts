@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks"
+import { createHash } from "node:crypto"
 import type { GeneratedFile } from "@/lib/types"
-import { buildContextForTask } from "@/lib/ai/context-builder"
 import {
   buildDependencyMap,
   buildStaticValidationPrompt,
@@ -16,7 +16,7 @@ import { ProviderRouter, SwiftProviderFailureError } from "@/lib/ai/provider-rou
 import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
-import { startRuntimeSandbox, type SandboxValidationStep } from "@/lib/sandbox/runtime"
+import { runRuntimeCommand, startRuntimeSandbox, type RuntimeCommandName, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
 import { GenerationQualityService, type GenerationQualityStage } from "@/lib/services/generation-quality.service"
@@ -64,12 +64,15 @@ type AgentWorkflowMemoryEntry = {
 
 type AgentWorkflowObservation = {
   prompt: string
+  activeTask: string
+  targetPaths: string[]
   blueprint: {
     label: string
     requiredFiles: string[]
     stack: string[]
   }
   selectedFiles: Array<{ path: string; reason: string }>
+  fileContext: Array<{ path: string; language: GeneratedFile["language"]; content: string }>
   packageJson: {
     exists: boolean
     dependencies: Record<string, string>
@@ -1487,7 +1490,7 @@ async function emitGeneratedFilesUpdate(input: {
   })
 }
 
-function createAgentWorkflowTools(initialFiles: GeneratedFile[]) {
+function createAgentWorkflowTools(initialFiles: GeneratedFile[], input: { projectId: string; signal?: AbortSignal }) {
   const byPath = new Map<string, GeneratedFile>()
   for (const file of initialFiles) {
     byPath.set(normalizePath(file.path), { ...file, path: normalizePath(file.path) })
@@ -1524,12 +1527,20 @@ function createAgentWorkflowTools(initialFiles: GeneratedFile[]) {
       .slice(0, limit)
   }
 
-  const runCommand = (
-    command: "lint" | "typecheck" | "build" | "preview validation",
-    validationResult: ValidationLifecycleResult | null
-  ) => summarizeVerificationCommand(command, validationResult)
-
   const snapshot = () => Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path))
+
+  const runCommand = async (command: RuntimeCommandName) => {
+    const result = await runRuntimeCommand(input.projectId, snapshot(), command, { signal: input.signal })
+    return {
+      command,
+      success: result.success,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      duration: result.duration,
+      reason: result.reason || null,
+    }
+  }
 
   return {
     listFiles,
@@ -1553,40 +1564,85 @@ function inferLanguageFromPath(path: string): GeneratedFile["language"] {
   return "ts"
 }
 
-function summarizeVerificationCommand(
-  command: "lint" | "typecheck" | "build" | "preview validation",
-  validationResult: ValidationLifecycleResult | null
-) {
-  if (!validationResult) {
-    return {
-      command,
-      status: "not_run",
-      output: "",
-    }
+function inferActiveTask(input: { prompt: string; plan: GenerationPlan; targetPaths: string[] }) {
+  const paths = input.targetPaths.map(normalizePath)
+  const text = input.prompt.toLowerCase()
+  if (paths.some((path) => path === "prisma/schema.prisma" || /^lib\/db\//i.test(path))) {
+    return "setup prisma"
   }
-
-  const stepNames =
-    command === "lint"
-      ? ["lint"]
-      : command === "typecheck"
-        ? ["typecheck"]
-        : command === "build"
-          ? ["build"]
-          : ["preview-compile", "runtime-smoke"]
-  const matchedSteps = validationResult.steps.filter((step) => stepNames.includes(step.name))
-  const failed = matchedSteps.find((step) => step.status === "failed")
-  const passed = matchedSteps.some((step) => step.status === "passed")
-  const skipped = matchedSteps.length > 0 && matchedSteps.every((step) => step.status === "skipped")
-
-  return {
-    command,
-    status: failed ? "failed" : passed ? "passed" : skipped ? "skipped" : "not_run",
-    output:
-      failed?.message ||
-      matchedSteps
-        .map((step) => `${step.name}:${step.status}${step.message ? `:${step.message}` : ""}`)
-        .join("\n"),
+  if (paths.some((path) => /^app\/api\//i.test(path) && !/\/auth\/route\.ts$/i.test(path))) {
+    return "create APIs"
   }
+  if (paths.some((path) => /(^auth\.ts$|\/auth\/|app\/\(auth\)\/|admin\/users)/i.test(path))) {
+    return "setup auth"
+  }
+  if (/\b(prisma|database|db|postgres|schema)\b/i.test(text)) return "setup prisma"
+  if (/\b(api|route|crud|webhook|integration|integrasi)\b/i.test(text)) return "create APIs"
+  if (/\b(auth|login|register|role|rbac|admin|user|session)\b/i.test(text)) return "setup auth"
+  return input.plan.agentTasks.find((task) => task !== "setup project" && task !== "scope edit") || input.plan.agentTasks[0] || "setup project"
+}
+
+function contextBudgetForTask(task: string) {
+  if (task === "setup auth" || task === "setup prisma") {
+    return { maxFiles: 6, maxCharsPerFile: 1600, maxTotalChars: 8000 }
+  }
+  if (task === "create APIs") {
+    return { maxFiles: 7, maxCharsPerFile: 1600, maxTotalChars: 10000 }
+  }
+  return { maxFiles: 8, maxCharsPerFile: 1600, maxTotalChars: 11000 }
+}
+
+function contextFileLimitForTask(task: string) {
+  if (task === "setup auth" || task === "setup prisma") return 6
+  if (task === "create APIs") return 7
+  return 8
+}
+
+function coreContextFilesForTask(task: string) {
+  if (task === "setup auth") {
+    return ["package.json", "auth.ts", "app/api/auth/route.ts", "prisma/schema.prisma"]
+  }
+  if (task === "create APIs") {
+    return ["package.json", "prisma/schema.prisma"]
+  }
+  if (task === "setup prisma") {
+    return ["package.json", "prisma/schema.prisma", ".env.example"]
+  }
+  return ["package.json", "app/layout.tsx", "app/page.tsx"]
+}
+
+function isPathRelevantToTask(path: string, task: string, targetPaths: Set<string>) {
+  if (targetPaths.has(path)) return true
+  if (task === "setup auth") {
+    return (
+      path === "package.json" ||
+      path === "prisma/schema.prisma" ||
+      path === "auth.ts" ||
+      /^app\/api\/auth\/route\.ts$/i.test(path) ||
+      /^app\/api\/admin\/users\/route\.ts$/i.test(path) ||
+      /^app\/\(auth\)\//i.test(path) ||
+      /(^|\/)(login|sign-in|sign-up|register|auth)(\/|\.|$)/i.test(path)
+    )
+  }
+  if (task === "create APIs") {
+    return (
+      path === "package.json" ||
+      path === "prisma/schema.prisma" ||
+      /^app\/api\//i.test(path) ||
+      /^lib\/services\//i.test(path) ||
+      /^lib\/db\//i.test(path)
+    )
+  }
+  if (task === "setup prisma") {
+    return (
+      path === "package.json" ||
+      path === "prisma/schema.prisma" ||
+      path === ".env.example" ||
+      /^lib\/db\//i.test(path) ||
+      /^lib\/services\//i.test(path)
+    )
+  }
+  return true
 }
 
 function selectObservedFiles(input: {
@@ -1594,29 +1650,42 @@ function selectObservedFiles(input: {
   files: GeneratedFile[]
   plan: GenerationPlan
   buildLogs: string[]
+  activeTask?: string
+  targetPaths?: string[]
 }) {
+  const activeTask = input.activeTask || inferActiveTask({
+    prompt: input.prompt,
+    plan: input.plan,
+    targetPaths: input.targetPaths || [],
+  })
+  const targetPathSet = new Set((input.targetPaths || []).map(normalizePath))
   const previewContext = trimContextForGeneration({
     prompt: input.prompt,
     files: input.files,
     layer: input.plan.objective === "simple_ui" ? "fast" : "builder",
+    budget: contextBudgetForTask(activeTask),
   })
   const selected = new Map<string, string>()
   const add = (path: string, reason: string) => {
     const normalizedPath = normalizePath(path)
-    if (normalizedPath) selected.set(normalizedPath, reason)
+    if (normalizedPath && isPathRelevantToTask(normalizedPath, activeTask, targetPathSet)) {
+      selected.set(normalizedPath, reason)
+    }
   }
 
   for (const file of previewContext.files) {
-    add(file.path, "ranked by prompt relevance and import graph")
+    add(file.path, `ranked for active task: ${activeTask}`)
   }
 
   for (const file of input.plan.filePlan) {
-    add(file.path, "planned target file")
+    if (targetPathSet.size === 0 || targetPathSet.has(normalizePath(file.path))) {
+      add(file.path, `planned target for active task: ${activeTask}`)
+    }
   }
 
-  for (const filePath of ["package.json", "prisma/schema.prisma", "app/layout.tsx", "app/page.tsx"]) {
+  for (const filePath of coreContextFilesForTask(activeTask)) {
     if (input.files.some((file) => normalizePath(file.path) === filePath)) {
-      add(filePath, "core project context")
+      add(filePath, `core context for active task: ${activeTask}`)
     }
   }
 
@@ -1627,7 +1696,7 @@ function selectObservedFiles(input: {
   }
 
   return Array.from(selected.entries())
-    .slice(0, 18)
+    .slice(0, contextFileLimitForTask(activeTask))
     .map(([path, reason]) => ({ path, reason }))
 }
 
@@ -1637,8 +1706,24 @@ function observeAgentContext(input: {
   files: GeneratedFile[]
   buildLogs: string[]
   previousAttempts: AgentWorkflowMemoryEntry[]
+  activeTask?: string
+  targetPaths?: string[]
 }): AgentWorkflowObservation {
-  const selectedFiles = selectObservedFiles(input)
+  const activeTask = input.activeTask || inferActiveTask({
+    prompt: input.prompt,
+    plan: input.plan,
+    targetPaths: input.targetPaths || [],
+  })
+  const targetPaths = (input.targetPaths || []).map(normalizePath)
+  const selectedFiles = selectObservedFiles({ ...input, activeTask, targetPaths })
+  const selectedPathSet = new Set(selectedFiles.map((selected) => selected.path))
+  const fileContext = input.files
+    .filter((file) => selectedPathSet.has(normalizePath(file.path)))
+    .map((file) => ({
+      path: normalizePath(file.path),
+      language: file.language || inferLanguageFromPath(file.path),
+      content: String(file.content || "").slice(0, 1600),
+    }))
   const packageJson = parsePackageJsonFile(input.files)
   const dependencies = buildDependencyMap(
     input.files.filter((file) => selectedFiles.some((selected) => selected.path === normalizePath(file.path)))
@@ -1647,8 +1732,11 @@ function observeAgentContext(input: {
 
   return {
     prompt: input.prompt,
+    activeTask,
+    targetPaths,
     blueprint: input.plan.blueprint,
     selectedFiles,
+    fileContext,
     packageJson,
     dependencies,
     prismaSchema: {
@@ -1663,7 +1751,13 @@ function observeAgentContext(input: {
 
 function summarizeAgentObservation(observation: AgentWorkflowObservation) {
   return {
+    activeTask: observation.activeTask,
+    targetPaths: observation.targetPaths,
     selectedFiles: observation.selectedFiles,
+    fileContext: observation.fileContext.map((file) => ({
+      path: file.path,
+      bytes: Buffer.byteLength(file.content || "", "utf8"),
+    })),
     packageJson: {
       exists: observation.packageJson.exists,
       dependencyCount: Object.keys(observation.packageJson.dependencies).length,
@@ -1829,12 +1923,7 @@ function buildSlicePrompt(input: {
   targets?: GenerationPlannerFile[]
   observation?: AgentWorkflowObservation
 }) {
-  const context = buildContextForTask({
-    prompt: input.prompt,
-    files: input.existingFiles,
-    maxFiles: 10,
-    layer: "builder",
-  })
+  const context = formatObservedTaskContext(input.prompt, input.observation)
   const targets = input.targets && input.targets.length > 0 ? input.targets : [input.target]
   const targetPaths = targets.map((target) => target.path)
   const batchedFoundation = targets.length > 1
@@ -1910,6 +1999,31 @@ function buildSlicePrompt(input: {
       2
     ),
   ].join("\n")
+}
+
+function formatObservedTaskContext(prompt: string, observation?: AgentWorkflowObservation) {
+  if (!observation) {
+    return prompt
+  }
+
+  const fileContext = observation.fileContext
+    .map((file) => `FILE: ${file.path}\n${file.content}`)
+    .join("\n\n")
+  return [
+    prompt,
+    "",
+    "### TASK_SCOPED_CONTEXT",
+    JSON.stringify(
+      {
+        activeTask: observation.activeTask,
+        targetPaths: observation.targetPaths,
+        selectedFiles: observation.selectedFiles,
+      },
+      null,
+      2
+    ),
+    fileContext ? `\n### RELEVANT_FILES\n${fileContext}` : "",
+  ].filter(Boolean).join("\n")
 }
 
 function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, compileError: string) {
@@ -2028,6 +2142,42 @@ function mergeFilesByPath(currentFiles: GeneratedFile[], nextFiles: GeneratedFil
     byPath.set(normalizePath(file.path), { ...file, path: normalizePath(file.path) })
   }
   return Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function hashGeneratedFiles(files: GeneratedFile[]) {
+  const hash = createHash("sha256")
+  for (const file of [...files].sort((left, right) => normalizePath(left.path).localeCompare(normalizePath(right.path)))) {
+    hash.update(normalizePath(file.path))
+    hash.update("\0")
+    hash.update(String(file.content || ""))
+    hash.update("\0")
+  }
+  return hash.digest("hex")
+}
+
+function validationErrorSignature(validation: ValidationLifecycleResult | null) {
+  if (!validation?.failure) return ""
+  return [
+    validation.failure.step,
+    String(validation.failure.message || "").replace(/\s+/g, " ").trim().slice(0, 500),
+  ].join(":")
+}
+
+function commandOutputSignature(commands: Array<{ command: string; success: boolean; exitCode: number; stdout: string; stderr: string }>) {
+  const hash = createHash("sha256")
+  for (const command of commands) {
+    hash.update(command.command)
+    hash.update("\0")
+    hash.update(command.success ? "1" : "0")
+    hash.update("\0")
+    hash.update(String(command.exitCode))
+    hash.update("\0")
+    hash.update(command.stdout || "")
+    hash.update("\0")
+    hash.update(command.stderr || "")
+    hash.update("\0")
+  }
+  return hash.digest("hex")
 }
 
 function filterGeneratedFilesToTargets(files: GeneratedFile[], targetPaths: string[]) {
@@ -2185,6 +2335,8 @@ function summarizeSandboxStep(step: SandboxValidationStep): ValidationLifecycleS
       data: {
         command: step.command || null,
         output: step.output || null,
+        stdout: step.stdout || null,
+        stderr: step.stderr || null,
       },
     }
   }
@@ -2202,6 +2354,8 @@ function summarizeSandboxStep(step: SandboxValidationStep): ValidationLifecycleS
     data: {
       command: step.command || null,
       output: step.output || null,
+      stdout: step.stdout || null,
+      stderr: step.stderr || null,
     },
   }
 }
@@ -3035,6 +3189,9 @@ export async function executeGenerationJob(
   let totalTokens = 0
   const workflowMemory: AgentWorkflowMemoryEntry[] = []
   let buildLogs: string[] = []
+  let lastErrorSignature = ""
+  let lastBuildOutputSignature = ""
+  let repairStopReason: string | null = null
 
   try {
     assertNotAborted(input.signal)
@@ -3135,7 +3292,7 @@ export async function executeGenerationJob(
     })
 
     let workingFiles = [...existingFiles]
-    let tools = createAgentWorkflowTools(workingFiles)
+    let tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
     const initialObservation = observeAgentContext({
       prompt: input.prompt,
       plan,
@@ -3177,7 +3334,7 @@ export async function executeGenerationJob(
       workingFiles = mergeFilesByPath(workingFiles, fastScaffoldFiles)
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
-      tools = createAgentWorkflowTools(workingFiles)
+      tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
       log("info", "agent_execute_tools", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3267,6 +3424,7 @@ export async function executeGenerationJob(
         files: workingFiles,
         buildLogs,
         previousAttempts: workflowMemory,
+        targetPaths: targets.map((item) => item.path),
       })
       log("info", "agent_observe", {
         jobId: input.jobId,
@@ -3404,7 +3562,7 @@ export async function executeGenerationJob(
       workingFiles = executed.files
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
-      tools = createAgentWorkflowTools(workingFiles)
+      tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
       log("info", "agent_execute_tools", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3489,11 +3647,17 @@ export async function executeGenerationJob(
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
-    const verificationCommands = (["lint", "typecheck", "build", "preview validation"] as const)
-      .map((command) => tools.runCommand(command, validation))
+    const verificationCommands = await Promise.all(
+      (["lint", "typecheck", "build", "preview validation"] as const)
+        .map((command) => tools.runCommand(command))
+    )
+    lastBuildOutputSignature = commandOutputSignature(verificationCommands)
     buildLogs = [
       ...buildLogs,
-      ...verificationCommands.map((item) => `${item.command}:${item.status}${item.output ? `:${item.output}` : ""}`),
+      ...verificationCommands.map((item) => {
+        const output = [item.stdout, item.stderr].filter(Boolean).join("\n")
+        return `${item.command}:${item.success ? "passed" : "failed"}:${item.exitCode}${output ? `:${output}` : ""}`
+      }),
     ].slice(-60)
     log("info", "build_output", {
       jobId: input.jobId,
@@ -3516,6 +3680,7 @@ export async function executeGenerationJob(
       failure: validation.failure || null,
     })
     if (!validation.ok) {
+      lastErrorSignature = validationErrorSignature(validation)
       const contextMemoryEntry: AgentWorkflowMemoryEntry = {
         iteration: 1,
         changedFiles: plan.actionPlan.map((action) => action.file),
@@ -3542,12 +3707,14 @@ export async function executeGenerationJob(
       })
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
+      const repairTargets = pickFailingFiles(validation.files, buildDependencyMap(validation.files), validation.failure?.message || "")
       const repairObservation = observeAgentContext({
         prompt: input.prompt,
         plan,
         files: validation.files,
         buildLogs,
         previousAttempts: workflowMemory,
+        targetPaths: repairTargets.map((file) => file.path),
       })
       log("info", "agent_observe", {
         jobId: input.jobId,
@@ -3555,7 +3722,6 @@ export async function executeGenerationJob(
         iteration,
         ...summarizeAgentObservation(repairObservation),
       })
-      const repairTargets = pickFailingFiles(validation.files, buildDependencyMap(validation.files), validation.failure?.message || "")
       const repairActions = repairTargets.map((file): AgentWorkflowAction => ({
         action: "modify",
         file: normalizePath(file.path),
@@ -3588,6 +3754,8 @@ export async function executeGenerationJob(
         }
       )
 
+      const previousRepairFiles = validation.files
+      const previousRepairFileHash = hashGeneratedFiles(previousRepairFiles)
       const repaired = await attemptTargetedRepair({
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3605,8 +3773,8 @@ export async function executeGenerationJob(
 
       assertNotAborted(input.signal)
       workingFiles = repaired.files
-      tools = createAgentWorkflowTools(workingFiles)
-      const previousRepairFiles = validation.files
+      tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+      const repairedFileHash = hashGeneratedFiles(workingFiles)
       log("info", "repair_result", {
         jobId: input.jobId,
         projectId: input.projectId,
@@ -3629,6 +3797,32 @@ export async function executeGenerationJob(
         deletedPaths: repaired.deletedPaths,
         fileCount: tools.listFiles().length,
       })
+
+      if (repaired.acceptedFileCount === 0 || !repaired.repaired || repairedFileHash === previousRepairFileHash) {
+        repairStopReason =
+          repaired.acceptedFileCount === 0 || !repaired.repaired
+            ? "accepted_file_changes_zero"
+            : "patch_changed_no_files"
+        log("warn", "repair_stopped", {
+          jobId: input.jobId,
+          projectId: input.projectId,
+          iteration,
+          repairAttempt,
+          reason: repairStopReason,
+          acceptedFileCount: repaired.acceptedFileCount,
+          fileHashChanged: repairedFileHash !== previousRepairFileHash,
+        })
+        workflowMemory.push({
+          iteration,
+          changedFiles: [],
+          errors: [{
+            step: validation.failure?.step,
+            message: validation.failure?.message || "Validation failed before repair could change files",
+          }],
+          fixes: [repairStopReason],
+        })
+        break
+      }
       await transition(
         input.jobId,
         "validating",
@@ -3675,11 +3869,18 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
-      const repairVerificationCommands = (["lint", "typecheck", "build", "preview validation"] as const)
-        .map((command) => tools.runCommand(command, validation))
+      const repairVerificationCommands = await Promise.all(
+        (["lint", "typecheck", "build", "preview validation"] as const)
+          .map((command) => tools.runCommand(command))
+      )
+      const currentBuildOutputSignature = commandOutputSignature(repairVerificationCommands)
+      const buildOutputUnchanged = currentBuildOutputSignature === lastBuildOutputSignature
       buildLogs = [
         ...buildLogs,
-        ...repairVerificationCommands.map((item) => `${item.command}:${item.status}${item.output ? `:${item.output}` : ""}`),
+        ...repairVerificationCommands.map((item) => {
+          const output = [item.stdout, item.stderr].filter(Boolean).join("\n")
+          return `${item.command}:${item.success ? "passed" : "failed"}:${item.exitCode}${output ? `:${output}` : ""}`
+        }),
       ].slice(-60)
       log("info", "build_output", {
         jobId: input.jobId,
@@ -3723,6 +3924,30 @@ export async function executeGenerationJob(
         iteration,
         memory: contextMemoryEntry,
       })
+      if (!validation.ok) {
+        const currentErrorSignature = validationErrorSignature(validation)
+        if (currentErrorSignature && currentErrorSignature === lastErrorSignature) {
+          repairStopReason = "identical_error_repeated"
+        } else if (buildOutputUnchanged) {
+          repairStopReason = "build_output_unchanged"
+        }
+
+        if (repairStopReason) {
+          log("warn", "repair_stopped", {
+            jobId: input.jobId,
+            projectId: input.projectId,
+            iteration,
+            repairAttempt,
+            reason: repairStopReason,
+            errorSignature: currentErrorSignature,
+            buildOutputUnchanged,
+          })
+          break
+        }
+
+        lastErrorSignature = currentErrorSignature
+      }
+      lastBuildOutputSignature = currentBuildOutputSignature
       assertNotAborted(input.signal)
     }
 

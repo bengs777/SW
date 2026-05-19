@@ -26,6 +26,21 @@ export type SandboxValidationStep = {
   command?: string
   durationMs?: number
   output?: string
+  stdout?: string
+  stderr?: string
+  reason?: string
+}
+
+export type RuntimeCommandName = "lint" | "typecheck" | "build" | "preview validation"
+
+export type RuntimeCommandResult = {
+  command: RuntimeCommandName
+  success: boolean
+  exitCode: number
+  stdout: string
+  stderr: string
+  duration: number
+  skipped?: boolean
   reason?: string
 }
 
@@ -284,10 +299,10 @@ function runCommand(
 ) {
   appendLog(state, `$ ${command} ${args.join(" ")}`)
 
-  return new Promise<{ code: number; output: string; durationMs: number; timedOut: boolean; aborted: boolean }>((resolve) => {
+  return new Promise<{ code: number; stdout: string; stderr: string; output: string; durationMs: number; timedOut: boolean; aborted: boolean }>((resolve) => {
     const startedAt = Date.now()
     if (signal?.aborted) {
-      resolve({ code: 1, output: "Command aborted before start", durationMs: 0, timedOut: false, aborted: true })
+      resolve({ code: 1, stdout: "", stderr: "Command aborted before start", output: "Command aborted before start", durationMs: 0, timedOut: false, aborted: true })
       return
     }
 
@@ -299,7 +314,8 @@ function runCommand(
       windowsHide: true,
     })
 
-    let output = ""
+    let stdout = ""
+    let stderr = ""
     let timedOut = false
     let aborted = false
     const timer = setTimeout(() => {
@@ -316,13 +332,13 @@ function runCommand(
 
     child.stdout.on("data", (chunk) => {
       const text = String(chunk)
-      output += text
+      stdout += text
       appendLog(state, text)
     })
 
     child.stderr.on("data", (chunk) => {
       const text = String(chunk)
-      output += text
+      stderr += text
       appendLog(state, text)
     })
 
@@ -331,7 +347,9 @@ function runCommand(
       signal?.removeEventListener("abort", abort)
       resolve({
         code: code ?? 1,
-        output,
+        stdout,
+        stderr,
+        output: `${stdout}${stderr}`,
         durationMs: Date.now() - startedAt,
         timedOut,
         aborted,
@@ -413,6 +431,14 @@ function hasPackageScript(packageContent: string, scriptName: string) {
 function tailOutput(output: string, maxChars = 6000) {
   const normalized = String(output || "").trim()
   return normalized.length <= maxChars ? normalized : normalized.slice(-maxChars)
+}
+
+function tailRuntimeCommandResult(result: { stdout: string; stderr: string }, maxChars = 6000) {
+  return {
+    stdout: tailOutput(result.stdout, maxChars),
+    stderr: tailOutput(result.stderr, maxChars),
+    output: tailOutput(`${result.stdout || ""}${result.stderr || ""}`, maxChars),
+  }
 }
 
 function commandFailureMessage(step: SandboxValidationStep) {
@@ -602,6 +628,108 @@ export async function startRuntimeSandbox(projectId: string, files: GeneratedFil
   return withSandboxLock(projectId, () => startRuntimeSandboxUnlocked(projectId, files, options))
 }
 
+function commandSpec(command: RuntimeCommandName) {
+  if (command === "lint") {
+    return { command: "npm", args: ["run", "lint"], timeoutMs: 90_000, label: "npm run lint" }
+  }
+  if (command === "typecheck") {
+    return { command: "npm", args: ["run", "typecheck"], timeoutMs: 90_000, label: "npm run typecheck" }
+  }
+  return { command: "npm", args: ["run", "build"], timeoutMs: 150_000, label: "npm run build" }
+}
+
+async function prepareRuntimeCommandSandbox(state: SandboxState, files: GeneratedFile[], signal?: AbortSignal) {
+  const nextFileHash = hashFiles(files)
+  if (state.fileHash !== nextFileHash) {
+    await stopProcess(state)
+    await cleanSandboxRoot(state)
+    await ensureRuntimeFiles(state, files)
+    state.fileHash = nextFileHash
+  }
+
+  const packageContent = await readFile(path.join(state.rootDir, "package.json"), "utf8")
+  const nextPackageHash = createHash("sha256")
+    .update(packageContent)
+    .update("\0")
+    .update(VALIDATION_INSTALL_POLICY_VERSION)
+    .digest("hex")
+
+  if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
+    state.status = "installing"
+    const install = await runCommand(state, "npm", ["install", "--ignore-scripts", "--include=dev"], 120_000, signal)
+    if (install.code !== 0) {
+      return {
+        ok: false,
+        result: install,
+        reason: install.timedOut ? "dependency install timed out" : install.aborted ? "dependency install aborted" : "dependency install failed",
+      }
+    }
+    state.packageHash = nextPackageHash
+  }
+
+  if (files.some((file) => normalizePath(file.path) === "prisma/schema.prisma")) {
+    state.status = "generating"
+    const prismaGenerate = await runCommand(state, "npm", ["run", "db:generate"], 90_000, signal)
+    if (prismaGenerate.code !== 0) {
+      return {
+        ok: false,
+        result: prismaGenerate,
+        reason: prismaGenerate.timedOut ? "prisma generate timed out" : prismaGenerate.aborted ? "prisma generate aborted" : "prisma generate failed",
+      }
+    }
+  }
+
+  return { ok: true }
+}
+
+export async function runRuntimeCommand(
+  projectId: string,
+  files: GeneratedFile[],
+  command: RuntimeCommandName,
+  options?: { signal?: AbortSignal }
+): Promise<RuntimeCommandResult> {
+  return withSandboxLock(projectId, async () => {
+    const state = getState(projectId)
+    state.lastError = null
+    appendLog(state, `Preparing runtime command ${command} for project ${projectId}`)
+
+    const prepared = await prepareRuntimeCommandSandbox(state, files, options?.signal)
+    if (!prepared.ok && prepared.result) {
+      const tailed = tailRuntimeCommandResult(prepared.result)
+      return {
+        command,
+        success: false,
+        exitCode: prepared.result.code,
+        stdout: tailed.stdout,
+        stderr: tailed.stderr,
+        duration: prepared.result.durationMs,
+        reason: prepared.reason,
+      }
+    }
+
+    const spec = commandSpec(command)
+    state.status = command === "lint" ? "linting" : command === "typecheck" ? "typechecking" : "building"
+    const result = await runCommand(state, spec.command, spec.args, spec.timeoutMs, options?.signal)
+    const tailed = tailRuntimeCommandResult(result)
+    return {
+      command,
+      success: result.code === 0,
+      exitCode: result.code,
+      stdout: tailed.stdout,
+      stderr: tailed.stderr,
+      duration: result.durationMs,
+      reason:
+        command === "preview validation"
+          ? "preview validation executed through the runtime build gate"
+          : result.timedOut
+            ? "timeout"
+            : result.aborted
+              ? "aborted"
+              : undefined,
+    }
+  })
+}
+
 async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFile[], options?: { signal?: AbortSignal }): Promise<StartSandboxResult> {
   const state = getState(projectId)
   const nextFileHash = hashFiles(files)
@@ -634,7 +762,9 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
         policy: "required",
         command: "npm install --ignore-scripts --include=dev",
         durationMs: install.durationMs,
-        output: install.code === 0 ? undefined : tailOutput(install.output),
+        output: install.code === 0 ? undefined : tailRuntimeCommandResult(install).output,
+        stdout: install.code === 0 ? undefined : tailRuntimeCommandResult(install).stdout,
+        stderr: install.code === 0 ? undefined : tailRuntimeCommandResult(install).stderr,
         reason: install.timedOut ? "timeout" : install.aborted ? "aborted" : undefined,
       })
       if (options?.signal?.aborted) {
@@ -663,7 +793,9 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
         policy: "required",
         command: "npm run db:generate",
         durationMs: prismaGenerate.durationMs,
-        output: prismaGenerate.code === 0 ? undefined : tailOutput(prismaGenerate.output),
+        output: prismaGenerate.code === 0 ? undefined : tailRuntimeCommandResult(prismaGenerate).output,
+        stdout: prismaGenerate.code === 0 ? undefined : tailRuntimeCommandResult(prismaGenerate).stdout,
+        stderr: prismaGenerate.code === 0 ? undefined : tailRuntimeCommandResult(prismaGenerate).stderr,
         reason: prismaGenerate.timedOut ? "timeout" : prismaGenerate.aborted ? "aborted" : undefined,
       })
       if (options?.signal?.aborted) {
@@ -682,7 +814,9 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
       policy: "required",
       command: "npm run typecheck",
       durationMs: typecheck.durationMs,
-      output: typecheck.code === 0 ? undefined : tailOutput(typecheck.output),
+      output: typecheck.code === 0 ? undefined : tailRuntimeCommandResult(typecheck).output,
+      stdout: typecheck.code === 0 ? undefined : tailRuntimeCommandResult(typecheck).stdout,
+      stderr: typecheck.code === 0 ? undefined : tailRuntimeCommandResult(typecheck).stderr,
       reason: typecheck.timedOut ? "timeout" : typecheck.aborted ? "aborted" : undefined,
     })
     if (options?.signal?.aborted) {
@@ -703,7 +837,9 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
         policy: lintPolicy,
         command: "npm run lint",
         durationMs: lint.durationMs,
-        output: lint.code === 0 ? undefined : tailOutput(lint.output),
+        output: lint.code === 0 ? undefined : tailRuntimeCommandResult(lint).output,
+        stdout: lint.code === 0 ? undefined : tailRuntimeCommandResult(lint).stdout,
+        stderr: lint.code === 0 ? undefined : tailRuntimeCommandResult(lint).stderr,
         reason: lint.timedOut ? "timeout" : lint.aborted ? "aborted" : undefined,
       })
       if (options?.signal?.aborted) {
@@ -729,7 +865,9 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
       policy: "required",
       command: "npm run build",
       durationMs: build.durationMs,
-      output: build.code === 0 ? undefined : tailOutput(build.output),
+      output: build.code === 0 ? undefined : tailRuntimeCommandResult(build).output,
+      stdout: build.code === 0 ? undefined : tailRuntimeCommandResult(build).stdout,
+      stderr: build.code === 0 ? undefined : tailRuntimeCommandResult(build).stderr,
       reason: build.timedOut ? "timeout" : build.aborted ? "aborted" : undefined,
     })
     if (options?.signal?.aborted) {
