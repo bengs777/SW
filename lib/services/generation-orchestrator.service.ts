@@ -1960,6 +1960,7 @@ function buildSlicePrompt(input: {
     productionFullStack
       ? "- Use the existing locked stack. You MAY use Prisma schema, server-only service files, Route Handlers, NextAuth-compatible placeholders, and payment/API integration placeholders when the prompt asks for them."
       : "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
+    "- NEXTAUTH_PATH_POLICY: never create or modify next-auth.d.ts from generated artifacts. Put NextAuth runtime/config changes in auth.ts, route handlers under app/, or helper modules under lib/.",
     productionFullStack
       ? "- Do not use UI-only dummy output. If real external credentials are not available, create server-side integration boundaries, env placeholders, zod validation, and clear TODO-safe service functions instead of fake-only UI."
       : "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
@@ -2827,6 +2828,7 @@ async function attemptTargetedRepair(input: {
     "- Repair only the failing files or their direct imports.",
     "- Do not regenerate the entire project.",
     "- Return only changed files.",
+    "- Never create or modify next-auth.d.ts during repair; use auth.ts, app/ route handlers, or lib/ helpers for NextAuth changes.",
     "- The repaired file must be syntactically valid TSX/TypeScript. No raw emoji, no unterminated strings, no split quoted strings.",
     "- If a fancy design is causing syntax risk, replace it with a minimal compile-safe version of the failing file.",
     "- The result will be revalidated through normalize -> static validation -> preview compile -> typecheck -> lint -> build before persistence.",

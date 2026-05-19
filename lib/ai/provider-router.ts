@@ -143,6 +143,7 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "PAKAI DATA DUMMY hanya untuk preview mode. Dalam PRODUCTION_FULLSTACK_MODE, buat Prisma schema, API routes, service layer, env placeholder, auth/payment/API boundaries sesuai permintaan prompt.",
   "MAX 4000 TOKEN PER FILE dan jangan bikin file lebih dari 150 baris bila bisa dibuat ringkas.",
   "PATH HARUS BENAR: root Next.js adalah /app. Jangan buat /src/app.",
+  "Jangan pernah generate next-auth.d.ts. Untuk jalur NextAuth gunakan auth.ts atau file allowed di lib/ dan app/ saja.",
   "Kalau prompt user terlalu besar, pecah otomatis menjadi slice produksi yang tetap deployable. Sertakan next_steps di metadata untuk tahap lanjutan.",
   "Return ONLY a valid JSON object. No markdown, no code fences, no preamble, no chat.",
   'Preferred JSON schema: {"taskGraph":{"intent":"domain-specific intent","summary":"short execution summary","dependencies":["lucide-react"],"operations":[{"id":"op-1","action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"why this operation is needed"}]},"files":[],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}',
