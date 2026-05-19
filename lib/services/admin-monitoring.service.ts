@@ -12,6 +12,9 @@ export const ALERT_THRESHOLDS = {
   apiLatencyWarningMs: 2000,
   queueLatencyWarningMs: 1000,
   generationFailureRateWarningPct: 10,
+  orchestrationDeadlockWarning: 3,
+  sandboxCrashWarning: 2,
+  previewFailureWarning: 3,
 } as const
 
 type MonitoringAlertSeverity = "warning" | "critical"
@@ -26,6 +29,11 @@ type MonitoringAlertType =
   | "dead_letter_jobs"
   | "generation_failure_rate_high"
   | "worker_heartbeat_stale"
+  | "worker_stall_spike"
+  | "preview_failure_spike"
+  | "orchestration_deadlock_spike"
+  | "excessive_retry_loops"
+  | "sandbox_crash_spike"
 
 type MonitoringAlert = {
   key: MonitoringAlertType
@@ -45,6 +53,11 @@ type MonitoringAlertMetrics = {
   databaseLatencyMs: number
   apiLatencyMs: number
   queueLatencyMs: number
+  workerStalls?: number
+  previewFailures?: number
+  orchestrationDeadlocks?: number
+  excessiveRetryLoops?: number
+  sandboxCrashes?: number
 }
 
 function clampWindowHours(value: number) {
@@ -207,6 +220,59 @@ export function buildMonitoringAlerts(metrics: MonitoringAlertMetrics): Monitori
     })
   }
 
+  if (countMetric(metrics.workerStalls) >= 1) {
+    pushAlert(alerts, {
+      type: "worker_stall_spike",
+      key: "worker_stall_spike",
+      severity: "critical",
+      message: `${countMetric(metrics.workerStalls)} worker stall event(s) detected.`,
+      value: countMetric(metrics.workerStalls),
+    })
+  }
+
+  if (countMetric(metrics.previewFailures) >= ALERT_THRESHOLDS.previewFailureWarning) {
+    pushAlert(alerts, {
+      type: "preview_failure_spike",
+      key: "preview_failure_spike",
+      severity: "warning",
+      message: `${countMetric(metrics.previewFailures)} preview failure event(s) detected.`,
+      value: countMetric(metrics.previewFailures),
+      threshold: ALERT_THRESHOLDS.previewFailureWarning,
+    })
+  }
+
+  if (countMetric(metrics.orchestrationDeadlocks) >= ALERT_THRESHOLDS.orchestrationDeadlockWarning) {
+    pushAlert(alerts, {
+      type: "orchestration_deadlock_spike",
+      key: "orchestration_deadlock_spike",
+      severity: "critical",
+      message: `${countMetric(metrics.orchestrationDeadlocks)} validator deadlock event(s) detected.`,
+      value: countMetric(metrics.orchestrationDeadlocks),
+      threshold: ALERT_THRESHOLDS.orchestrationDeadlockWarning,
+    })
+  }
+
+  if (countMetric(metrics.excessiveRetryLoops) >= 1) {
+    pushAlert(alerts, {
+      type: "excessive_retry_loops",
+      key: "excessive_retry_loops",
+      severity: "critical",
+      message: `${countMetric(metrics.excessiveRetryLoops)} excessive retry loop(s) reached terminal state.`,
+      value: countMetric(metrics.excessiveRetryLoops),
+    })
+  }
+
+  if (countMetric(metrics.sandboxCrashes) >= ALERT_THRESHOLDS.sandboxCrashWarning) {
+    pushAlert(alerts, {
+      type: "sandbox_crash_spike",
+      key: "sandbox_crash_spike",
+      severity: "critical",
+      message: `${countMetric(metrics.sandboxCrashes)} sandbox crash/failure event(s) detected.`,
+      value: countMetric(metrics.sandboxCrashes),
+      threshold: ALERT_THRESHOLDS.sandboxCrashWarning,
+    })
+  }
+
   return alerts
 }
 
@@ -236,6 +302,7 @@ export class AdminMonitoringService {
       recentGenerationJobs,
       queueHealth,
       databaseLatencyMs,
+      operationalFailures,
     ] = await Promise.all([
       prisma.user.count(),
       prisma.project.count(),
@@ -389,6 +456,11 @@ export class AdminMonitoringService {
         },
       })),
       measureLatency(() => prisma.$queryRaw`SELECT 1`).catch(() => 0),
+      prisma.orchestrationFailure.groupBy({
+        by: ["eventType", "terminationReason"],
+        where: { createdAt: { gte: since } },
+        _count: { _all: true },
+      }),
     ])
 
     const usage = statusCountMap(usageStatus)
@@ -431,6 +503,13 @@ export class AdminMonitoringService {
     const deadLetterCounts = (queueHealth as { deadLetter?: { counts?: Record<string, number> | null } | null }).deadLetter?.counts || null
     const queueLatencyMs = Number((queueHealth as { redis?: { latencyMs?: number } }).redis?.latencyMs || 0)
     const apiLatencyMs = Date.now() - overviewStartedAt
+    const failureCount = (eventType: string, terminationReason?: string) =>
+      operationalFailures
+        .filter((item) =>
+          item.eventType === eventType &&
+          (terminationReason ? item.terminationReason === terminationReason : true)
+        )
+        .reduce((sum, item) => sum + item._count._all, 0)
     const alerts = buildMonitoringAlerts({
       queueStatus,
       queueCounts,
@@ -440,6 +519,15 @@ export class AdminMonitoringService {
       databaseLatencyMs,
       apiLatencyMs,
       queueLatencyMs,
+      workerStalls: failureCount("worker_stalled"),
+      previewFailures: failureCount("preview_failed"),
+      orchestrationDeadlocks: operationalFailures
+        .filter((item) => item.terminationReason === "validator_deadlock")
+        .reduce((sum, item) => sum + item._count._all, 0),
+      excessiveRetryLoops: operationalFailures
+        .filter((item) => item.terminationReason === "max_retries_exceeded")
+        .reduce((sum, item) => sum + item._count._all, 0),
+      sandboxCrashes: failureCount("preview_failed"),
     })
 
     return {
@@ -482,6 +570,7 @@ export class AdminMonitoringService {
         databaseLatencyMs,
         apiLatencyMs,
         queueLatencyMs,
+        failures: operationalFailures,
       },
       alerts,
       recentUsage,

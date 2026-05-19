@@ -46,6 +46,12 @@ function shouldStartGenerationWorker() {
   return true
 }
 
+function shouldStartOrchestrationCleanup() {
+  if (process.env.SWIFT_ENABLE_ORCHESTRATION_CLEANUP === "false") return false
+  if (process.env.VERCEL === "1") return false
+  return true
+}
+
 export async function register() {
   await runFailOpen("environment", warnMissingProductionEnv)
 
@@ -58,5 +64,27 @@ export async function register() {
         globalState.swiftGenerationWorkerStarted = true
       }
     }
+  })
+
+  await runFailOpen("orchestration_cleanup", async () => {
+    if (!shouldStartOrchestrationCleanup()) return
+    const globalState = globalThis as typeof globalThis & { swiftOrchestrationCleanupStarted?: boolean }
+    if (globalState.swiftOrchestrationCleanupStarted) return
+    const { OrchestrationRuntimeService } = await import("@/lib/services/orchestration-runtime.service")
+    const { cleanupExpiredRuntimeSandboxes } = await import("@/lib/sandbox/runtime")
+    const runCleanup = () => {
+      OrchestrationRuntimeService.cleanupExpiredLifecycle().catch((error) => {
+        console.error("[ORCHESTRATION_CLEANUP_FAILED]", errorPayload(error))
+      })
+      OrchestrationRuntimeService.recoverOrphanedJobs().catch((error) => {
+        console.error("[ORCHESTRATION_RECOVERY_FAILED]", errorPayload(error))
+      })
+      cleanupExpiredRuntimeSandboxes().catch((error) => {
+        console.error("[SANDBOX_CLEANUP_FAILED]", errorPayload(error))
+      })
+    }
+    runCleanup()
+    setInterval(runCleanup, Number(process.env.SWIFT_ORCHESTRATION_CLEANUP_INTERVAL_MS || 60_000))
+    globalState.swiftOrchestrationCleanupStarted = true
   })
 }

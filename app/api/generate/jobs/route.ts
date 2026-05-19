@@ -497,6 +497,7 @@ export async function POST(request: NextRequest) {
       cost: pricing.estimatedCost,
       idempotencyKey: parsed.data.idempotencyKey,
       requestHash,
+      traceId,
       plan: parsed.data.plan,
       context: {
         requestId,

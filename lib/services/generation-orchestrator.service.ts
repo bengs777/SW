@@ -27,6 +27,7 @@ import { compileProject } from "@/lib/preview/module-resolution"
 import { runRuntimeCommand, startRuntimeSandbox, type RuntimeCommandName, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
+import { OrchestrationRuntimeService, type TraceIds } from "@/lib/services/orchestration-runtime.service"
 import { GenerationQualityService, type GenerationQualityStage } from "@/lib/services/generation-quality.service"
 import {
   buildBlueprintInstructionBlock,
@@ -193,6 +194,14 @@ type ValidationLifecycleResult = {
   sandboxValidation: SandboxValidationStep[]
   failure?: ValidationLifecycleFailure
 }
+
+type RepairTerminationReason =
+  | "max_retries_exceeded"
+  | "repeated_identical_artifact"
+  | "validator_deadlock"
+  | "empty_repair_output"
+  | "timeout"
+  | "malformed_repair_payload"
 
 type RemoteSandboxResponse = {
   status?: string | null
@@ -1477,6 +1486,68 @@ async function updateDeveloperDiagnostics(jobId: string, diagnostics: ReturnType
   }).catch(() => null)
 }
 
+async function appendOrchestrationEvent(input: {
+  jobId: string
+  trace?: TraceIds
+  type: string
+  stage: GenerationJobStage
+  status: "queued" | "running" | "completed" | "failed" | "cancelled"
+  message: string
+  data?: Record<string, unknown> | null
+}) {
+  log(input.status === "failed" ? "error" : input.status === "cancelled" ? "warn" : "info", input.type, {
+    event: input.type,
+    jobId: input.jobId,
+    stage: input.stage,
+    status: input.status,
+    message: input.message,
+    ...(input.data || {}),
+  })
+  await OrchestrationRuntimeService.appendEvent(input)
+  if (input.status === "failed") {
+    await OrchestrationRuntimeService.persistFailure({
+      jobId: input.jobId,
+      trace: input.trace,
+      eventType: input.type,
+      stage: input.stage,
+      reason: input.message,
+      retryCount: typeof input.data?.repairAttempts === "number" ? input.data.repairAttempts : 0,
+      terminationReason: typeof input.data?.reason === "string" ? input.data.reason : null,
+      metadata: input.data,
+    }).catch(() => null)
+  }
+}
+
+function classifyRepairTerminationReason(input: {
+  reason?: string | null
+  error?: unknown
+  repairAttempt: number
+  maxRepairAttempts: number
+  validation?: ValidationLifecycleResult | null
+}): RepairTerminationReason | null {
+  const raw = `${input.reason || ""} ${input.error instanceof Error ? input.error.message : input.error ? String(input.error) : ""}`.toLowerCase()
+  if (/abort|timeout|timed out/.test(raw)) return "timeout"
+  if (/parse|json|malformed|schema|strict/i.test(raw)) return "malformed_repair_payload"
+  if (/accepted_file_changes_zero|no accepted|empty|produced no accepted/.test(raw)) return "empty_repair_output"
+  if (/patch_changed_no_files|identical|unchanged|same artifact|repeated/.test(raw)) return "repeated_identical_artifact"
+  if (/identical_error_repeated|build_output_unchanged|deadlock/.test(raw)) return "validator_deadlock"
+  if (!input.validation?.ok && input.repairAttempt >= input.maxRepairAttempts) return "max_retries_exceeded"
+  return null
+}
+
+function publicRepairTerminationReason(reason: RepairTerminationReason | string | null) {
+  if (!reason) return "Unknown orchestration failure"
+  const labels: Record<RepairTerminationReason, string> = {
+    max_retries_exceeded: "Max repair retries exceeded",
+    repeated_identical_artifact: "Repeated identical artifact",
+    validator_deadlock: "Validator deadlock",
+    empty_repair_output: "Empty repair output",
+    timeout: "Repair timeout",
+    malformed_repair_payload: "Malformed repair payload",
+  }
+  return labels[reason as RepairTerminationReason] || reason
+}
+
 const totalFileBytes = (files: GeneratedFile[]) =>
   files.reduce((sum, file) => sum + Buffer.byteLength(String(file.content ?? ""), "utf8"), 0)
 
@@ -2458,6 +2529,7 @@ async function runValidationLifecycle(input: {
   files: GeneratedFile[]
   plan: GenerationPlan
   blueprint: ControlledAppBlueprint
+  trace?: TraceIds
   signal?: AbortSignal
   emit: (stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) => Promise<void>
 }): Promise<ValidationLifecycleResult> {
@@ -2655,6 +2727,27 @@ async function runValidationLifecycle(input: {
   stepStartedAt = performance.now()
   if (canUseRemoteSandboxService()) {
     await input.emit("building", "Validating project in configured sandbox service", 84)
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: input.trace,
+      type: "preview_started",
+      stage: "building",
+      status: "running",
+      message: "Remote sandbox boot started",
+      data: {
+        sandbox: "remote",
+        buildStarted: true,
+      },
+    })
+    await OrchestrationRuntimeService.upsertPreviewSession({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      trace: input.trace,
+      status: "starting",
+      idempotencyKey: `preview:${input.jobId}:remote`,
+      mark: "boot",
+      diagnostics: { sandbox: "remote" },
+    }).catch(() => null)
     const preview = await startConfiguredSandboxService({
       projectId: input.projectId,
       files,
@@ -2693,6 +2786,35 @@ async function runValidationLifecycle(input: {
         sandboxStatus: preview.status || null,
         logs: logs.slice(-80),
       })
+      await appendOrchestrationEvent({
+        jobId: input.jobId,
+        trace: input.trace,
+        type: "preview_failed",
+        stage: "building",
+        status: "failed",
+        message,
+        data: {
+          sandbox: "remote",
+          sandboxStatus: preview.status || null,
+          previewUrl: preview.previewUrl || null,
+          logs: logs.slice(-20),
+        },
+      })
+      await OrchestrationRuntimeService.upsertPreviewSession({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        trace: input.trace,
+        status: "failed",
+        previewUrl: preview.previewUrl || null,
+        terminationReason: message,
+        idempotencyKey: `preview:${input.jobId}:remote`,
+        mark: "terminated",
+        diagnostics: {
+          sandbox: "remote",
+          sandboxStatus: preview.status || null,
+          logs: logs.slice(-20),
+        },
+      }).catch(() => null)
       return {
         ok: false,
         files,
@@ -2715,6 +2837,34 @@ async function runValidationLifecycle(input: {
       sandboxStatus: preview.status,
       logs: logs.slice(-20),
     })
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: input.trace,
+      type: "preview_ready",
+      stage: "building",
+      status: "running",
+      message: "Remote sandbox preview reachable",
+      data: {
+        sandbox: "remote",
+        sandboxStatus: preview.status,
+        previewUrl: preview.previewUrl || null,
+        buildCompleted: true,
+      },
+    })
+    await OrchestrationRuntimeService.upsertPreviewSession({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      trace: input.trace,
+      status: "ready",
+      previewUrl: preview.previewUrl || null,
+      idempotencyKey: `preview:${input.jobId}:remote`,
+      mark: "reachable",
+      diagnostics: {
+        sandbox: "remote",
+        sandboxStatus: preview.status,
+        logs: logs.slice(-20),
+      },
+    }).catch(() => null)
     recordStep("runtime-smoke", "passed", "required", stepStartedAt, undefined, {
       sandboxStatus: preview.status,
       previewUrl: preview.previewUrl || null,
@@ -2784,6 +2934,28 @@ async function runValidationLifecycle(input: {
   }
 
   await input.emit("building", "Running typecheck, lint, and production build", 84)
+  await appendOrchestrationEvent({
+    jobId: input.jobId,
+    trace: input.trace,
+    type: "preview_started",
+    stage: "building",
+    status: "running",
+    message: "Runtime sandbox boot started",
+    data: {
+      sandbox: "local",
+      buildStarted: true,
+      devServerStartup: "pending",
+    },
+  })
+  await OrchestrationRuntimeService.upsertPreviewSession({
+    jobId: input.jobId,
+    projectId: input.projectId,
+    trace: input.trace,
+    status: "starting",
+    idempotencyKey: `preview:${input.jobId}:local`,
+    mark: "boot",
+    diagnostics: { sandbox: "local" },
+  }).catch(() => null)
   const preview = await startRuntimeSandbox(input.projectId, files, { signal: input.signal })
   for (const sandboxStep of preview.validation) {
     const lifecycleStep = summarizeSandboxStep(sandboxStep)
@@ -2815,6 +2987,38 @@ async function runValidationLifecycle(input: {
         logs: preview.logs.slice(-80),
       })
     }
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: input.trace,
+      type: "preview_failed",
+      stage: "building",
+      status: "failed",
+      message: preview.error,
+      data: {
+        sandbox: "local",
+        sandboxStatus: preview.status,
+        previewUrl: preview.previewUrl,
+        runtimeVerification: runtimeFailed,
+        logs: preview.logs.slice(-20),
+        previewTimeout: /timeout|timed out/i.test(preview.error),
+      },
+    })
+    await OrchestrationRuntimeService.upsertPreviewSession({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      trace: input.trace,
+      status: "failed",
+      previewUrl: preview.previewUrl,
+      terminationReason: preview.error,
+      idempotencyKey: `preview:${input.jobId}:local`,
+      mark: "terminated",
+      diagnostics: {
+        sandbox: "local",
+        sandboxStatus: preview.status,
+        runtimeVerification: runtimeFailed,
+        logs: preview.logs.slice(-20),
+      },
+    }).catch(() => null)
     return {
       ok: false,
       files,
@@ -2840,6 +3044,35 @@ async function runValidationLifecycle(input: {
       sandboxStatus: preview.status,
       sandboxValidation: preview.validation,
     })
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: input.trace,
+      type: "preview_failed",
+      stage: "building",
+      status: "failed",
+      message,
+      data: {
+        sandbox: "local",
+        sandboxStatus: preview.status,
+        previewUrl: preview.previewUrl,
+        sandboxValidation: preview.validation,
+      },
+    })
+    await OrchestrationRuntimeService.upsertPreviewSession({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      trace: input.trace,
+      status: "failed",
+      previewUrl: preview.previewUrl,
+      terminationReason: message,
+      idempotencyKey: `preview:${input.jobId}:local`,
+      mark: "terminated",
+      diagnostics: {
+        sandbox: "local",
+        sandboxStatus: preview.status,
+        sandboxValidation: preview.validation,
+      },
+    }).catch(() => null)
     return {
       ok: false,
       files,
@@ -2858,6 +3091,36 @@ async function runValidationLifecycle(input: {
     sandboxStatus: preview.status,
     runtimeVerification: preview.runtimeVerification,
   })
+  await appendOrchestrationEvent({
+    jobId: input.jobId,
+    trace: input.trace,
+    type: "preview_ready",
+    stage: "building",
+    status: "running",
+    message: "Runtime sandbox preview reachable",
+    data: {
+      sandbox: "local",
+      sandboxStatus: preview.status,
+      previewUrl: preview.previewUrl,
+      buildCompleted: true,
+      devServerStartup: "completed",
+      runtimeVerification: preview.runtimeVerification,
+    },
+  })
+  await OrchestrationRuntimeService.upsertPreviewSession({
+    jobId: input.jobId,
+    projectId: input.projectId,
+    trace: input.trace,
+    status: "ready",
+    previewUrl: preview.previewUrl,
+    idempotencyKey: `preview:${input.jobId}:local`,
+    mark: "reachable",
+    diagnostics: {
+      sandbox: "local",
+      sandboxStatus: preview.status,
+      runtimeVerification: preview.runtimeVerification,
+    },
+  }).catch(() => null)
 
   return {
     ok: true,
@@ -2938,7 +3201,26 @@ async function attemptTargetedRepair(input: {
     promptLanguage: input.promptLanguage,
     signal: input.signal,
   })
-  const parsed = parseGeneratedArtifact(response.message)
+  let parsed: ReturnType<typeof parseGeneratedArtifact>
+  try {
+    parsed = parseGeneratedArtifact(response.message)
+  } catch (error) {
+    return {
+      files: currentFiles,
+      repaired: false,
+      parsedFileCount: 0,
+      acceptedFileCount: 0,
+      rejectedFiles: [],
+      deletedPaths: [],
+      installedDependencies: [],
+      normalizedPackages: [],
+      addedPackages: [],
+      repairPromptPreview: repairPrompt.slice(0, 6000),
+      repairedArtifactSummary: summarizeArtifactPayload({ files: [] }),
+      terminationReason: "malformed_repair_payload" as RepairTerminationReason,
+      failureMessage: error instanceof Error ? error.message : String(error),
+    }
+  }
   const scoped = parsed.taskGraph
     ? { acceptedFiles: parsed.files, rejectedFiles: [] as GeneratedFile[] }
     : filterFilesForPartialEdit(parsed.files, input.editPlan)
@@ -2962,6 +3244,8 @@ async function attemptTargetedRepair(input: {
       dependencies: parsed.dependencies,
       operations: parsed.taskGraph?.operations,
     }),
+    terminationReason: scoped.acceptedFiles.length > 0 ? null : "empty_repair_output" as RepairTerminationReason,
+    failureMessage: scoped.acceptedFiles.length > 0 ? null : "Repair output contained no accepted file changes",
   }
 }
 
@@ -3921,6 +4205,10 @@ export async function executeGenerationJob(
       files: workingFiles,
       plan,
       blueprint,
+      trace: {
+        traceId: correlation.traceId,
+        workerId: null,
+      },
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
@@ -4096,6 +4384,41 @@ export async function executeGenerationJob(
           steps: validation.steps,
         }
       )
+      await appendOrchestrationEvent({
+        jobId: input.jobId,
+        trace: {
+          traceId: correlation.traceId,
+          workerId: null,
+        },
+        type: "repair_started",
+        stage: "repairing",
+        status: "running",
+        message: `Repair attempt ${repairAttempt}/${MAX_REPAIR_ATTEMPTS} started`,
+        data: {
+          repairAttempt,
+          maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+          failure: validation.failure,
+          targetFiles: repairActions.map((action) => action.file),
+        },
+      })
+      await OrchestrationRuntimeService.startRepairAttempt({
+        jobId: input.jobId,
+        attempt: repairAttempt,
+        trace: {
+          traceId: correlation.traceId,
+          workerId: null,
+        },
+        reason: validation.failure?.message || "Validation lifecycle failed",
+        input: {
+          targetFiles: repairActions.map((action) => action.file),
+          failure: validation.failure,
+        },
+        idempotencyKey: `repair:${input.jobId}:${repairAttempt}`,
+        metadata: {
+          maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+          steps: validation.steps,
+        },
+      }).catch(() => null)
       developerDiagnostics.repairAttempts.push({
         attempt: repairAttempt,
         reason: validation.failure?.message || "Validation lifecycle failed",
@@ -4143,9 +4466,10 @@ export async function executeGenerationJob(
       recordDeveloperDiagnostic(developerDiagnostics, {
         stage: "REPAIRING",
         status: repaired.repaired ? "passed" : "failed",
-        reason: repaired.repaired ? "Repair artifact accepted" : "Repair artifact produced no accepted file changes",
+        reason: repaired.repaired ? "Repair artifact accepted" : repaired.failureMessage || "Repair artifact produced no accepted file changes",
         repairAttempt,
         data: {
+          terminationReason: repaired.terminationReason || null,
           parsedFileCount: repaired.parsedFileCount,
           acceptedFileCount: repaired.acceptedFileCount,
           rejectedFiles: repaired.rejectedFiles,
@@ -4181,9 +4505,11 @@ export async function executeGenerationJob(
 
       if (repaired.acceptedFileCount === 0 || !repaired.repaired || repairedFileHash === previousRepairFileHash) {
         repairStopReason =
-          repaired.acceptedFileCount === 0 || !repaired.repaired
-            ? "accepted_file_changes_zero"
-            : "patch_changed_no_files"
+          repaired.terminationReason ||
+          (repaired.acceptedFileCount === 0 || !repaired.repaired
+            ? "empty_repair_output"
+            : "repeated_identical_artifact")
+        const publicStopReason = publicRepairTerminationReason(repairStopReason)
         log("warn", "repair_stopped", {
           jobId: input.jobId,
           projectId: input.projectId,
@@ -4193,6 +4519,38 @@ export async function executeGenerationJob(
           acceptedFileCount: repaired.acceptedFileCount,
           fileHashChanged: repairedFileHash !== previousRepairFileHash,
         })
+        await appendOrchestrationEvent({
+          jobId: input.jobId,
+          trace: {
+            traceId: correlation.traceId,
+            workerId: null,
+          },
+          type: "repair_failed",
+          stage: "repairing",
+          status: "failed",
+          message: publicStopReason,
+          data: {
+            reason: repairStopReason,
+            repairAttempts: repairAttempt,
+            maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+            lastValidatorError: validation.failure?.step || null,
+            lastValidatorMessage: validation.failure?.message || null,
+            acceptedFileCount: repaired.acceptedFileCount,
+            fileHashChanged: repairedFileHash !== previousRepairFileHash,
+          },
+        })
+        await OrchestrationRuntimeService.finishRepairAttempt({
+          jobId: input.jobId,
+          attempt: repairAttempt,
+          status: "failed",
+          terminationReason: repairStopReason,
+          validatorError: validation.failure?.step || null,
+          output: repaired.repairedArtifactSummary,
+          metadata: {
+            acceptedFileCount: repaired.acceptedFileCount,
+            fileHashChanged: repairedFileHash !== previousRepairFileHash,
+          },
+        }).catch(() => null)
         workflowMemory.push({
           iteration,
           changedFiles: [],
@@ -4200,8 +4558,8 @@ export async function executeGenerationJob(
             step: validation.failure?.step,
             message: validation.failure?.message || "Validation failed before repair could change files",
           }],
-          fixes: [repairStopReason],
-        })
+        fixes: [repairStopReason],
+      })
         break
       }
       await transition(
@@ -4252,6 +4610,10 @@ export async function executeGenerationJob(
         files: workingFiles,
         plan,
         blueprint,
+        trace: {
+          traceId: correlation.traceId,
+          workerId: null,
+        },
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
@@ -4311,6 +4673,47 @@ export async function executeGenerationJob(
             repairAttempt,
           })
         }
+      }
+      if (validation.ok) {
+        await appendOrchestrationEvent({
+          jobId: input.jobId,
+          trace: {
+            traceId: correlation.traceId,
+            workerId: null,
+          },
+          type: "repair_succeeded",
+          stage: "repairing",
+          status: "running",
+          message: `Repair attempt ${repairAttempt}/${MAX_REPAIR_ATTEMPTS} passed validation`,
+          data: {
+            repairAttempt,
+            repairAttempts: repairAttempt,
+            lastValidatorError: null,
+          },
+        })
+        await OrchestrationRuntimeService.finishRepairAttempt({
+          jobId: input.jobId,
+          attempt: repairAttempt,
+          status: "succeeded",
+          terminationReason: null,
+          validatorError: null,
+          output: summarizeGeneratedFiles(workingFiles),
+          metadata: {
+            validationSteps: validation.steps,
+          },
+        }).catch(() => null)
+      } else {
+        await OrchestrationRuntimeService.finishRepairAttempt({
+          jobId: input.jobId,
+          attempt: repairAttempt,
+          status: "failed",
+          terminationReason: validation.failure?.message || "validation_failed_after_repair",
+          validatorError: validation.failure?.step || null,
+          output: summarizeGeneratedFiles(workingFiles),
+          metadata: {
+            validationSteps: validation.steps,
+          },
+        }).catch(() => null)
       }
       await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       traceExecution(traceContext, "build_finished", {
@@ -4489,6 +4892,10 @@ export async function executeGenerationJob(
         files: workingFiles,
         plan,
         blueprint,
+        trace: {
+          traceId: correlation.traceId,
+          workerId: null,
+        },
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
@@ -4585,12 +4992,40 @@ export async function executeGenerationJob(
     }
 
     if (!validation.ok) {
+      repairStopReason =
+        repairStopReason ||
+        classifyRepairTerminationReason({
+          repairAttempt,
+          maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+          validation,
+        }) ||
+        "validator_deadlock"
+      const finalRepairReason = publicRepairTerminationReason(repairStopReason)
+      await appendOrchestrationEvent({
+        jobId: input.jobId,
+        trace: {
+          traceId: correlation.traceId,
+          workerId: null,
+        },
+        type: "repair_failed",
+        stage: "repairing",
+        status: "failed",
+        message: finalRepairReason,
+        data: {
+          reason: repairStopReason,
+          repairAttempts: repairAttempt,
+          maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+          lastValidatorError: validation.failure?.step || null,
+          lastValidatorMessage: validation.failure?.message || null,
+        },
+      })
       recordDeveloperDiagnostic(developerDiagnostics, {
         stage: "FAILED",
         status: "failed",
-        reason: validation.failure?.message || "Validation lifecycle failed",
+        reason: finalRepairReason,
         data: {
           repairAttempts: repairAttempt,
+          repairTerminationReason: repairStopReason,
           failure: validation.failure || null,
         },
       })
@@ -4601,7 +5036,7 @@ export async function executeGenerationJob(
         repairAttempts: repairAttempt,
         failure: validation.failure,
       })
-      throw new Error(validation.failure?.message || "Validation lifecycle failed")
+      throw new Error(finalRepairReason)
     }
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: "READY",
@@ -4781,6 +5216,26 @@ export async function executeGenerationJob(
         },
       },
     })
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: {
+        traceId: correlation.traceId,
+        workerId: null,
+      },
+      type: "generation_completed",
+      stage: "completed",
+      status: "completed",
+      message: "Generation completed",
+      data: {
+        event: "generation_completed",
+        stage: "completed",
+        reason: "Generation validated, persisted, and preview artifacts are ready",
+        repairAttempts: repairAttempt,
+        lastSuccessfulStage: developerDiagnostics.lastSuccessfulStage || "READY",
+        previewUrl: validation.previewUrl,
+        lastValidatorError: null,
+      },
+    })
     await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, validation.previewUrl)
     traceExecution(traceContext, "task_completed", {
       projectId: input.projectId,
@@ -4826,12 +5281,24 @@ export async function executeGenerationJob(
 
     const serialized = serializeError(error)
     const publicErrorMessage = publicGenerationErrorMessage(error)
+    const repairTerminationReason =
+      repairStopReason ||
+      classifyRepairTerminationReason({
+        error,
+        repairAttempt,
+        maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+        validation,
+      })
+    const orchestrationFailureReason = repairTerminationReason
+      ? publicRepairTerminationReason(repairTerminationReason)
+      : serialized.message
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: "FAILED",
       status: "failed",
-      reason: serialized.message,
+      reason: orchestrationFailureReason,
       repairAttempt: repairAttempt > 0 ? repairAttempt : undefined,
       data: {
+        repairTerminationReason: repairTerminationReason || null,
         publicMessage: publicErrorMessage,
         validationFailure: validation?.failure || null,
       },
@@ -4840,6 +5307,16 @@ export async function executeGenerationJob(
       diagnostics: {
         ...serialized,
         publicMessage: publicErrorMessage,
+        orchestrationSummary: {
+          event: "generation_failed",
+          stage: developerDiagnostics.currentStage,
+          reason: orchestrationFailureReason,
+          repairAttempts: repairAttempt,
+          lastValidatorError: validation?.failure?.step || null,
+          lastValidatorMessage: validation?.failure?.message || null,
+          lastSuccessfulStage: developerDiagnostics.lastSuccessfulStage || null,
+          repairTerminationReason: repairTerminationReason || null,
+        },
         developer: developerDiagnostics,
         providerAttempts:
           error instanceof SwiftProviderFailureError
@@ -4886,6 +5363,27 @@ export async function executeGenerationJob(
           : null,
       },
     }).catch(() => null)
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: {
+        traceId: correlation.traceId,
+        workerId: null,
+      },
+      type: "generation_failed",
+      stage: "failed",
+      status: "failed",
+      message: publicErrorMessage,
+      data: {
+        event: "generation_failed",
+        stage: developerDiagnostics.currentStage,
+        reason: orchestrationFailureReason,
+        repairAttempts: repairAttempt,
+        lastValidatorError: validation?.failure?.step || null,
+        lastValidatorMessage: validation?.failure?.message || null,
+        lastSuccessfulStage: developerDiagnostics.lastSuccessfulStage || null,
+        repairTerminationReason: repairTerminationReason || null,
+      },
+    })
     await GenerationJobService.markFailed(input.jobId, publicErrorMessage)
     throw error
   }

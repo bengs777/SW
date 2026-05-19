@@ -5,6 +5,7 @@ import { captureException } from "@/lib/observability"
 import { log } from "@/lib/logging"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
+import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 
 const STALE_GENERATION_TIMEOUT_MS = Math.max(
   10_000,
@@ -35,6 +36,11 @@ function parseBillingContext(contextJson: string | null) {
 }
 
 export async function reconcileStaleGenerationJobs() {
+  await OrchestrationRuntimeService.recoverOrphanedJobs().catch((error) => {
+    log("warn", "orphaned_generation_recovery_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
   const cutoff = new Date(Date.now() - STALE_GENERATION_TIMEOUT_MS)
   const staleJobs = await prisma.generationJob.findMany({
     where: {

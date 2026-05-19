@@ -619,6 +619,7 @@ function startPreviewServer(state: SandboxState) {
     return
   }
 
+  appendLog(state, "preview_started: dev server startup")
   const invocation = commandInvocation("npm", ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(state.port)])
   const child = spawn(invocation.command, invocation.args, {
     cwd: state.rootDir,
@@ -632,6 +633,7 @@ function startPreviewServer(state: SandboxState) {
   state.previewUrl = `http://127.0.0.1:${state.port}`
   state.status = "running"
   appendLog(state, `$ npm run start -- --hostname 127.0.0.1 --port ${state.port}`)
+  appendLog(state, `preview_ready: ${state.previewUrl}`)
 
   child.stdout.on("data", (chunk) => appendLog(state, String(chunk)))
   child.stderr.on("data", (chunk) => appendLog(state, String(chunk)))
@@ -649,6 +651,25 @@ function startPreviewServer(state: SandboxState) {
 
 export async function startRuntimeSandbox(projectId: string, files: GeneratedFile[], options?: { signal?: AbortSignal }): Promise<StartSandboxResult> {
   return withSandboxLock(projectId, () => startRuntimeSandboxUnlocked(projectId, files, options))
+}
+
+export async function cleanupExpiredRuntimeSandboxes(ttlMs = Number(process.env.SWIFT_PREVIEW_TTL_MS || 30 * 60 * 1000)) {
+  const now = Date.now()
+  const cleaned: string[] = []
+  for (const [projectId, state] of states.entries()) {
+    const lastLog = state.logs[state.logs.length - 1] || ""
+    const timestampMatch = lastLog.match(/^\[([^\]]+)\]/)
+    const lastActivityAt = timestampMatch ? Date.parse(timestampMatch[1]) : now
+    if (state.process && now - lastActivityAt > ttlMs) {
+      appendLog(state, `preview_terminated: ttl cleanup after ${Math.round(ttlMs / 1000)}s`)
+      await stopProcess(state)
+      state.status = "idle"
+      state.previewUrl = null
+      state.lastError = "Preview terminated by TTL cleanup"
+      cleaned.push(projectId)
+    }
+  }
+  return cleaned
 }
 
 function commandSpec(command: RuntimeCommandName) {
@@ -755,6 +776,7 @@ export async function runRuntimeCommand(
 
 async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFile[], options?: { signal?: AbortSignal }): Promise<StartSandboxResult> {
   const state = getState(projectId)
+  appendLog(state, `sandbox_boot_start: project ${projectId}`)
   const nextFileHash = hashFiles(files)
   const validation: SandboxValidationStep[] = []
   let runtimeVerification: RuntimeSmokeResult | null = null
@@ -900,19 +922,23 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
     if (build.code !== 0) {
       throw new Error(commandFailureMessage(validation[validation.length - 1]))
     }
+    appendLog(state, `build_completion: production build passed in ${build.durationMs}ms`)
 
     await assertWorkspaceQuota(state)
     startPreviewServer(state)
     state.status = "verifying"
+    appendLog(state, "preview_reachability_check: started")
     runtimeVerification = await verifyRuntimeSmoke({
       previewUrl: state.previewUrl || `http://127.0.0.1:${state.port}`,
       files,
       signal: options?.signal,
     })
     if (!runtimeVerification.ok) {
+      appendLog(state, `preview_failed: ${runtimeVerification.failureCategory || "unknown"}${runtimeVerification.error ? ` - ${runtimeVerification.error}` : ""}`)
       await stopProcess(state)
       throw new Error(`runtime verification failed: ${runtimeVerification.failureCategory || "unknown"}${runtimeVerification.error ? ` - ${runtimeVerification.error}` : ""}`)
     }
+    appendLog(state, `preview_url_reachable: ${state.previewUrl || `http://127.0.0.1:${state.port}`}`)
     state.status = "running"
 
     return {

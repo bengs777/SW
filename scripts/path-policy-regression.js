@@ -23,9 +23,9 @@ function loadCanonicalModule(source) {
       target: ts.ScriptTarget.ES2022,
     },
   }).outputText
-  const module = { exports: {} }
-  vm.runInNewContext(compiled, { exports: module.exports, module, require })
-  return module.exports
+  const loadedModule = { exports: {} }
+  vm.runInNewContext(compiled, { exports: loadedModule.exports, module: loadedModule, require })
+  return loadedModule.exports
 }
 
 function main() {

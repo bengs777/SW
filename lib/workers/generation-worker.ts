@@ -13,6 +13,7 @@ import { executeGenerationJob } from "@/lib/services/generation-orchestrator.ser
 import { prisma } from "@/lib/db/client"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
+import { OrchestrationRuntimeService, classifyRetryReason } from "@/lib/services/orchestration-runtime.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
@@ -65,8 +66,24 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   }
   let timeoutTriggered = false
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+  let lastSuccessfulTransition = "worker_started"
 
   try {
+    const leaseAcquired = await OrchestrationRuntimeService.acquireLease({
+      jobId: payload.jobId,
+      workerId: String(traceContext.workerId || resolvedQueueJobId),
+      traceId: correlation.traceId,
+      queueJobId: resolvedQueueJobId,
+      leaseMs: GENERATION_JOB_TIMEOUT_MS,
+    })
+    if (!leaseAcquired) {
+      log("warn", "duplicate_job_execution_prevented", {
+        jobId: payload.jobId,
+        queueJobId: resolvedQueueJobId,
+        workerId: traceContext.workerId,
+      })
+      return
+    }
     startAiTask({
       taskId: payload.jobId,
       sessionId: payload.userId,
@@ -101,6 +118,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       traceId: correlation.traceId,
       executionChainId: correlation.executionChainId,
     })
+    lastSuccessfulTransition = "orchestrator_started"
 
     const execution = executeGenerationJob(
       {
@@ -133,6 +151,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         }, GENERATION_JOB_TIMEOUT_MS)
       }),
     ])
+    lastSuccessfulTransition = "orchestrator_completed"
     const durationMs = Date.now() - startedAt
     warnIfSlow("generation", durationMs, { jobId: payload.jobId, projectId: payload.projectId })
     finishAiTask(payload.jobId, "completed", durationMs)
@@ -179,6 +198,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       durationMs: Date.now() - startedAt,
       executionMode: String(resolvedQueueJobId).startsWith("serverless:") ? "serverless_fallback" : "queue",
     })
+    await OrchestrationRuntimeService.releaseLease(payload.jobId, String(traceContext.workerId || resolvedQueueJobId), "terminated")
   } catch (error) {
     const isTimeout = timeoutTriggered || error instanceof GenerationJobTimeoutError
     const timeoutMessage = `Generation timed out after ${Math.round(GENERATION_JOB_TIMEOUT_MS / 1000)}s`
@@ -210,10 +230,25 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     })
 
     if (isTimeout) {
+      await GenerationJobService.appendEvent({
+        jobId: payload.jobId,
+        type: "worker_timeout",
+        stage: "timeout",
+        status: "failed",
+        message: timeoutMessage,
+        data: {
+          event: "worker_timeout",
+          timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+          currentStage: lastSuccessfulTransition,
+          idleTimeout: true,
+          stalledGenerationDetected: true,
+        },
+      }).catch(() => null)
       await GenerationJobService.markFailed(payload.jobId, timeoutMessage, "timeout").catch(() => null)
     }
 
     if (!isCancelled) {
+      const retryClass = classifyRetryReason(error, { stage: lastSuccessfulTransition, reason: isTimeout ? "timeout" : null })
       const durationMs = Date.now() - startedAt
       finishAiTask(payload.jobId, "failed", durationMs)
       traceError(traceContext, error, {
@@ -247,6 +282,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         timeoutMs: GENERATION_JOB_TIMEOUT_MS,
         timeoutTriggered: isTimeout,
         errorCode: classifyRuntimeError(error),
+        retryClass,
         correlationId: correlation.correlationId,
         traceId: correlation.traceId,
         executionChainId: correlation.executionChainId,
@@ -258,9 +294,29 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
         userId: payload.userId,
         source: "generation_worker",
       })
+      await OrchestrationRuntimeService.persistFailure({
+        jobId: payload.jobId,
+        trace: { traceId: correlation.traceId, workerId: String(traceContext.workerId || resolvedQueueJobId) },
+        eventType: isTimeout ? "worker_timeout" : "worker_failed",
+        stage: lastSuccessfulTransition,
+        severity: isTimeout ? "critical" : "error",
+        reason: errorMessage,
+        retryCount: 0,
+        terminationReason: isTimeout ? "timeout" : retryClass === "terminal" ? "terminal_failure" : null,
+        metadata: {
+          queueJobId: resolvedQueueJobId,
+          retryClass,
+          durationMs,
+        },
+      }).catch(() => null)
     }
     throw error
   } finally {
+    await OrchestrationRuntimeService.releaseLease(
+      payload.jobId,
+      String(traceContext.workerId || resolvedQueueJobId),
+      timeoutTriggered ? "terminated" : "processing"
+    ).catch(() => null)
     if (timeoutHandle) {
       clearTimeout(timeoutHandle)
     }
@@ -276,6 +332,7 @@ export function startGenerationWorker() {
   const bootStartedAt = Date.now()
   const worker = createGenerationWorker(processGenerationQueueJob)
   const workerId = `generation:${process.env.VERCEL_REGION || "local"}:${process.pid}`
+  const activeJobs = new Map<string, { stage: string; lastSuccessfulTransition: string; startedAt: number }>()
 
   log("info", "generation_worker_booted", {
     workerId,
@@ -304,11 +361,30 @@ export function startGenerationWorker() {
   })
 
   const heartbeat = () => {
-    recordGenerationWorkerHeartbeat(workerId).catch((error) => {
+    const active = [...activeJobs.entries()]
+    const longestRunningMs = active.reduce((max, [, item]) => Math.max(max, Date.now() - item.startedAt), 0)
+    const stalledGenerationDetected = longestRunningMs > GENERATION_JOB_TIMEOUT_MS
+    recordGenerationWorkerHeartbeat(workerId, {
+      alive: true,
+      currentStage: active[0]?.[1].stage || "idle",
+      lastSuccessfulTransition: active[0]?.[1].lastSuccessfulTransition || "worker_ready",
+      activeJobIds: active.map(([jobId]) => jobId),
+      idleTimeoutMs: GENERATION_JOB_TIMEOUT_MS,
+      stalledGenerationDetected,
+    }).catch((error) => {
       log("warn", "Generation worker heartbeat failed", {
         workerId,
         error: error instanceof Error ? error.message : String(error),
       })
+    })
+    log("info", "worker_alive", {
+      event: "worker_alive",
+      workerId,
+      activeJobIds: active.map(([jobId]) => jobId),
+      currentStage: active[0]?.[1].stage || "idle",
+      lastSuccessfulTransition: active[0]?.[1].lastSuccessfulTransition || "worker_ready",
+      idleTimeoutMs: GENERATION_JOB_TIMEOUT_MS,
+      stalledGenerationDetected,
     })
   }
   heartbeat()
@@ -320,6 +396,11 @@ export function startGenerationWorker() {
     const endedAt = job.processedOn || Date.now()
     const startedAt = job.timestamp || endedAt
     await GenerationJobService.attachQueueJob(job.data.jobId, job.id || job.data.jobId)
+    activeJobs.set(job.data.jobId, {
+      stage: "active",
+      lastSuccessfulTransition: "worker_active",
+      startedAt: Date.now(),
+    })
     updateAiTask(job.data.jobId, {
       workerId,
       retryCount: job.attemptsMade,
@@ -359,6 +440,7 @@ export function startGenerationWorker() {
 
   worker.on("failed", async (job, error) => {
     if (!job) return
+    activeJobs.delete(job.data.jobId)
     if (error instanceof GenerationJobCancelledError || error.message === "GENERATION_JOB_CANCELLED") return
     const current = await GenerationJobService.findById(job.data.jobId)
     if (current && current.status !== "failed" && current.status !== "cancelled") {
@@ -397,10 +479,26 @@ export function startGenerationWorker() {
         error: deadLetterError instanceof Error ? deadLetterError.message : String(deadLetterError),
       })
     })
+    await OrchestrationRuntimeService.markDeadLettered({
+      jobId: job.data.jobId,
+      workerId,
+      reason: error.message || "Generation moved to dead-letter queue",
+      retryClass: classifyRetryReason(error, { stage: "worker_failed" }),
+      metadata: {
+        queueJobId: job.id,
+        attemptsMade: job.attemptsMade,
+      },
+    }).catch((persistError) => {
+      log("warn", "dead_letter_state_persist_failed", {
+        jobId: job.data.jobId,
+        error: persistError instanceof Error ? persistError.message : String(persistError),
+      })
+    })
   })
 
   worker.on("completed", async (job) => {
     if (!job) return
+    activeJobs.delete(job.data.jobId)
     log("info", "Generation worker completed", {
       workerId,
       jobId: job.data.jobId,
@@ -451,6 +549,27 @@ export function startGenerationWorker() {
       error: null,
       traceId: payload?.traceId,
     })
+    if (payload?.jobId) {
+      activeJobs.set(payload.jobId, {
+        stage: "stalled",
+        lastSuccessfulTransition: "worker_stalled",
+        startedAt: stalledJob?.processedOn || Date.now(),
+      })
+      await OrchestrationRuntimeService.persistFailure({
+        jobId: payload.jobId,
+        trace: { traceId: payload.traceId, workerId },
+        eventType: "worker_stalled",
+        stage: "stalled",
+        severity: "critical",
+        reason: "BullMQ reported a stalled generation job",
+        retryCount: stalledJob?.attemptsMade || 0,
+        terminationReason: null,
+        metadata: {
+          queueJobId: jobId,
+          processedOn: stalledJob?.processedOn || null,
+        },
+      }).catch(() => null)
+    }
   })
 
   worker.on("error", (error) => {

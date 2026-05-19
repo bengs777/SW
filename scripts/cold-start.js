@@ -198,7 +198,7 @@ async function main() {
   })
 
   try {
-    const result = await waitForHealth(child)
+    await waitForHealth(child)
     await stopServer(child)
     if (countPortOwners() > 0) {
       killListeningPortOwners()

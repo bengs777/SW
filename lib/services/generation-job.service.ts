@@ -22,6 +22,12 @@ export type GenerationJobStage =
 
 export type GenerationJobStatus =
   | "queued"
+  | "processing"
+  | "retrying"
+  | "stalled"
+  | "orphaned"
+  | "dead_lettered"
+  | "terminated"
   | "running"
   | "completed"
   | "failed"
@@ -45,6 +51,7 @@ type CreateGenerationJobInput = {
 
 type UpdateGenerationJobInput = {
   status?: GenerationJobStatus
+  orchestrationState?: string
   stage?: GenerationJobStage
   label?: string
   progress?: number
@@ -60,6 +67,16 @@ type UpdateGenerationJobInput = {
   error?: string | null
   resultHistoryId?: string | null
   queueJobId?: string | null
+  traceId?: string | null
+  workerId?: string | null
+  leaseOwner?: string | null
+  leaseExpiresAt?: Date | null
+  lastHeartbeatAt?: Date | null
+  retryReason?: string | null
+  retryClass?: string | null
+  recoveryCount?: number
+  deadLetteredAt?: Date | null
+  terminatedAt?: Date | null
   cancelRequested?: boolean
   cancelReason?: string | null
   startedAt?: Date | null
@@ -71,11 +88,21 @@ type UpdateGenerationJobInput = {
 
 type AppendGenerationEventInput = {
   jobId: string
+  traceId?: string | null
+  spanId?: string | null
+  parentSpanId?: string | null
+  workerId?: string | null
+  sandboxId?: string | null
+  previewId?: string | null
   type: string
+  eventType?: string | null
   stage: GenerationJobStage
   status: GenerationJobStatus
   message: string
   data?: Record<string, unknown> | null
+  metadata?: Record<string, unknown> | null
+  retryCount?: number
+  terminationReason?: string | null
 }
 
 export class GenerationJobCancelledError extends Error {
@@ -115,6 +142,7 @@ export class GenerationJobService {
           idempotencyKey: input.idempotencyKey || null,
           requestHash: input.requestHash || null,
           status: "queued",
+          orchestrationState: "queued",
           stage: "queued",
           label: "Prompt diterima",
           progress: 0,
@@ -129,6 +157,7 @@ export class GenerationJobService {
           jobId: job.id,
           sequence: 1,
           type: "job.created",
+          eventType: "job.created",
           stage: "queued",
           status: "queued",
           message: "Generation job queued",
@@ -193,7 +222,7 @@ export class GenerationJobService {
       where: {
         userId,
         status: {
-          in: ["queued", "running", "cancelling"],
+          in: ["queued", "running", "processing", "retrying", "stalled", "orphaned", "cancelling"],
         },
       },
     })
@@ -215,12 +244,22 @@ export class GenerationJobService {
       return tx.generationEvent.create({
         data: {
           jobId: input.jobId,
+          traceId: input.traceId || null,
+          spanId: input.spanId || null,
+          parentSpanId: input.parentSpanId || null,
+          workerId: input.workerId || null,
+          sandboxId: input.sandboxId || null,
+          previewId: input.previewId || null,
           sequence,
           type: input.type,
+          eventType: input.eventType || input.type,
           stage: input.stage,
           status: input.status,
           message: input.message,
           dataJson: safeStringify(input.data),
+          metadataJson: safeStringify(input.metadata),
+          retryCount: Math.max(0, input.retryCount || 0),
+          terminationReason: input.terminationReason || null,
         },
       })
     })
@@ -250,6 +289,7 @@ export class GenerationJobService {
       where: { id: jobId, version: existing.version },
       data: {
         ...(input.status ? { status: input.status } : {}),
+        ...(input.orchestrationState ? { orchestrationState: input.orchestrationState } : {}),
         ...(input.stage ? { stage: input.stage } : {}),
         ...(input.label ? { label: input.label } : {}),
         ...(typeof input.progress === "number"
@@ -267,6 +307,16 @@ export class GenerationJobService {
         ...(input.error !== undefined ? { error: input.error } : {}),
         ...(input.resultHistoryId !== undefined ? { resultHistoryId: input.resultHistoryId } : {}),
         ...(input.queueJobId !== undefined ? { queueJobId: input.queueJobId } : {}),
+        ...(input.traceId !== undefined ? { traceId: input.traceId } : {}),
+        ...(input.workerId !== undefined ? { workerId: input.workerId } : {}),
+        ...(input.leaseOwner !== undefined ? { leaseOwner: input.leaseOwner } : {}),
+        ...(input.leaseExpiresAt !== undefined ? { leaseExpiresAt: input.leaseExpiresAt } : {}),
+        ...(input.lastHeartbeatAt !== undefined ? { lastHeartbeatAt: input.lastHeartbeatAt } : {}),
+        ...(input.retryReason !== undefined ? { retryReason: input.retryReason } : {}),
+        ...(input.retryClass !== undefined ? { retryClass: input.retryClass } : {}),
+        ...(typeof input.recoveryCount === "number" ? { recoveryCount: Math.max(0, input.recoveryCount) } : {}),
+        ...(input.deadLetteredAt !== undefined ? { deadLetteredAt: input.deadLetteredAt } : {}),
+        ...(input.terminatedAt !== undefined ? { terminatedAt: input.terminatedAt } : {}),
         ...(typeof input.cancelRequested === "boolean" ? { cancelRequested: input.cancelRequested } : {}),
         ...(input.cancelReason !== undefined ? { cancelReason: input.cancelReason } : {}),
         ...(input.startedAt !== undefined ? { startedAt: input.startedAt } : {}),
@@ -285,6 +335,15 @@ export class GenerationJobService {
       type: string
       message: string
       data?: Record<string, unknown> | null
+      metadata?: Record<string, unknown> | null
+      eventType?: string | null
+      traceId?: string | null
+      spanId?: string | null
+      parentSpanId?: string | null
+      workerId?: string | null
+      sandboxId?: string | null
+      previewId?: string | null
+      terminationReason?: string | null
     }
   ) {
     const stage = input.stage || "queued"
@@ -317,10 +376,20 @@ export class GenerationJobService {
     await this.appendEvent({
       jobId,
       type: input.type,
+      eventType: input.eventType,
+      traceId: input.traceId,
+      spanId: input.spanId,
+      parentSpanId: input.parentSpanId,
+      workerId: input.workerId,
+      sandboxId: input.sandboxId,
+      previewId: input.previewId,
       stage,
       status,
       message: input.message,
       data: input.data,
+      metadata: input.metadata,
+      retryCount: input.retryCount,
+      terminationReason: input.terminationReason,
     })
     return this.findById(jobId)
   }
@@ -329,6 +398,7 @@ export class GenerationJobService {
     return this.transition(jobId, {
       type: "job.started",
       status: "running",
+      orchestrationState: "processing",
       stage: "generating",
       label,
       progress: 5,
@@ -341,12 +411,14 @@ export class GenerationJobService {
     return this.transition(jobId, {
       type: "job.completed",
       status: "completed",
+      orchestrationState: "terminated",
       stage: "completed",
       label: "Generation completed",
       progress: 100,
       resultHistoryId: resultHistoryId || null,
       previewUrl: previewUrl || null,
       completedAt: new Date(),
+      terminatedAt: new Date(),
       message: "Generation completed",
     })
   }
@@ -355,11 +427,13 @@ export class GenerationJobService {
     return this.transition(jobId, {
       type: "job.failed",
       status: "failed",
+      orchestrationState: "terminated",
       stage,
       label: "Generation failed",
       progress: 100,
       error,
       failedAt: new Date(),
+      terminatedAt: new Date(),
       message: error,
     })
   }
@@ -368,12 +442,14 @@ export class GenerationJobService {
     return this.transition(jobId, {
       type: "job.cancelled",
       status: "cancelled",
+      orchestrationState: "terminated",
       stage: "cancelled",
       label: reason,
       progress: 100,
       cancelRequested: true,
       cancelReason: reason,
       cancelledAt: new Date(),
+      terminatedAt: new Date(),
       message: reason,
     })
   }
@@ -382,6 +458,7 @@ export class GenerationJobService {
     return this.transition(jobId, {
       type: "job.cancellation_requested",
       status: "cancelling",
+      orchestrationState: "processing",
       stage: "cancelled",
       label: "Cancelling generation",
       cancelRequested: true,
@@ -467,6 +544,7 @@ export class GenerationJobService {
     intent?: string | null
     usedAutoRepair?: boolean
     status: string
+    orchestrationState?: string
     stage: string
     label: string
     progress: number
@@ -474,6 +552,16 @@ export class GenerationJobService {
     retryCount: number
     maxRetries: number
     attemptCount: number
+    traceId?: string | null
+    workerId?: string | null
+    leaseOwner?: string | null
+    leaseExpiresAt?: Date | null
+    lastHeartbeatAt?: Date | null
+    retryReason?: string | null
+    retryClass?: string | null
+    recoveryCount?: number
+    deadLetteredAt?: Date | null
+    terminatedAt?: Date | null
     planJson?: string | null
     previewUrl?: string | null
     error?: string | null
@@ -498,6 +586,7 @@ export class GenerationJobService {
       intent: job.intent || null,
       usedAutoRepair: Boolean(job.usedAutoRepair),
       status: job.status,
+      orchestrationState: job.orchestrationState || job.status,
       stage: job.stage,
       label: job.label,
       progress: job.progress,
@@ -505,6 +594,16 @@ export class GenerationJobService {
       retryCount: job.retryCount,
       maxRetries: job.maxRetries,
       attemptCount: job.attemptCount,
+      traceId: job.traceId || null,
+      workerId: job.workerId || null,
+      leaseOwner: job.leaseOwner || null,
+      leaseExpiresAt: job.leaseExpiresAt?.toISOString() || null,
+      lastHeartbeatAt: job.lastHeartbeatAt?.toISOString() || null,
+      retryReason: job.retryReason || null,
+      retryClass: job.retryClass || null,
+      recoveryCount: job.recoveryCount || 0,
+      deadLetteredAt: job.deadLetteredAt?.toISOString() || null,
+      terminatedAt: job.terminatedAt?.toISOString() || null,
       plan: parsePlan(job.planJson),
       previewUrl: job.previewUrl || null,
       error: job.error || null,
@@ -525,16 +624,38 @@ export class GenerationJobService {
     metricsJson?: string | null
     planJson?: string | null
     contextJson?: string | null
+    traceId?: string | null
+    workerId?: string | null
+    leaseOwner?: string | null
+    leaseExpiresAt?: Date | null
+    lastHeartbeatAt?: Date | null
+    retryReason?: string | null
+    retryClass?: string | null
+    recoveryCount?: number
     stage: string
     status: string
+    orchestrationState?: string
     retryCount: number
     attemptCount: number
   }) {
     return {
       stage: job.stage,
       status: job.status,
+      orchestrationState: job.orchestrationState || job.status,
       retryCount: job.retryCount,
       attemptCount: job.attemptCount,
+      trace: {
+        traceId: job.traceId || null,
+        workerId: job.workerId || null,
+        leaseOwner: job.leaseOwner || null,
+        leaseExpiresAt: job.leaseExpiresAt?.toISOString() || null,
+        lastHeartbeatAt: job.lastHeartbeatAt?.toISOString() || null,
+      },
+      recovery: {
+        retryReason: job.retryReason || null,
+        retryClass: job.retryClass || null,
+        recoveryCount: job.recoveryCount || 0,
+      },
       plan: safeJsonParse(job.planJson),
       context: safeJsonParse(job.contextJson),
       diagnostics: stripRawStacks(safeJsonParse(job.diagnosticsJson)),

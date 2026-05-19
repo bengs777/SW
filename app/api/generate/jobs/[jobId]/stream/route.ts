@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { GenerationJobService, GENERATION_TERMINAL_STATUSES } from "@/lib/services/generation-job.service"
+import { log } from "@/lib/logging"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -69,25 +70,79 @@ export async function GET(
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      log("info", "stream_connected", {
+        event: "stream_connected",
+        jobId,
+        userId: user.id,
+        lastEventSequence,
+        developerDiagnosticsAllowed,
+      })
       const send = (event: string, id: number | string, data: unknown) => {
         if (closed) return
         controller.enqueue(encoder.encode(eventFrame(event, id, data)))
         if (event !== "heartbeat") {
           console.log("frontend_notified")
+          log("info", "frontend_notified", {
+            event: "frontend_notified",
+            jobId,
+            userId: user.id,
+            streamEvent: event,
+            eventId: id,
+          })
         }
         lastSentAt = Date.now()
       }
 
-      const close = () => {
+      const close = async (reason = "stream_closed") => {
         if (closed) return
         closed = true
         console.log("sse_closed")
-        controller.close()
+        log("info", "stream_terminated", {
+          event: "stream_terminated",
+          jobId,
+          userId: user.id,
+          reason,
+          uptimeMs: Date.now() - startedAt,
+          lastEventSequence,
+        })
+        await GenerationJobService.appendEvent({
+          jobId,
+          type: "stream_terminated",
+          stage: "completed",
+          status: "running",
+          message: reason,
+          data: {
+            event: "stream_terminated",
+            reason,
+            uptimeMs: Date.now() - startedAt,
+            lastEventSequence,
+          },
+        }).catch(() => null)
+        try {
+          controller.close()
+        } catch {
+          // Stream may already be closed by the runtime.
+        }
       }
 
-      abortSignal.addEventListener("abort", close, { once: true })
+      abortSignal.addEventListener("abort", () => {
+        log("warn", "stream_aborted", {
+          event: "stream_aborted",
+          jobId,
+          userId: user.id,
+          uptimeMs: Date.now() - startedAt,
+          lastEventSequence,
+        })
+        void close("stream_aborted")
+      }, { once: true })
 
       send("job", lastEventSequence, GenerationJobService.toPublicJob(initialJob))
+      log("info", "frontend_listener_attached", {
+        event: "frontend_listener_attached",
+        jobId,
+        userId: user.id,
+        lastEventSequence,
+      })
       if (developerDiagnosticsAllowed) {
         send("developer.diagnostics", `${lastEventSequence}:diagnostics`, GenerationJobService.toDeveloperDiagnostics(initialJob))
       }
@@ -100,7 +155,7 @@ export async function GET(
           send("generation.stream_error", lastEventSequence, {
             message: error instanceof Error ? error.message : "Failed to read generation events",
           })
-          close()
+          await close("stream_event_read_failed")
           return
         }
 
@@ -120,7 +175,7 @@ export async function GET(
         const freshJob = await GenerationJobService.findForUser(jobId, user.id).catch(() => null)
         if (!freshJob) {
           send("generation.failed", lastEventSequence, { message: "Generation job not found" })
-          close()
+          await close("job_not_found")
           return
         }
 
@@ -130,12 +185,19 @@ export async function GET(
         }
 
         if (GENERATION_TERMINAL_STATUSES.has(freshJob.status)) {
-          close()
+          await close(`job_${freshJob.status}`)
           return
         }
 
         const now = Date.now()
         if (now - lastSentAt >= HEARTBEAT_MS) {
+          log("info", "sse_heartbeat", {
+            event: "sse_heartbeat",
+            jobId,
+            userId: user.id,
+            uptimeMs: now - startedAt,
+            lastEventSequence,
+          })
           send("heartbeat", lastEventSequence, {
             at: new Date(now).toISOString(),
             uptimeMs: now - startedAt,
@@ -146,7 +208,7 @@ export async function GET(
           send("timeout", lastEventSequence, {
             message: "SSE stream idle timeout reached. Reconnect with backoff.",
           })
-          close()
+          await close("stream_idle_timeout")
           return
         }
 
@@ -155,6 +217,13 @@ export async function GET(
     },
     cancel() {
       closed = true
+      log("info", "stream_disconnected", {
+        event: "stream_disconnected",
+        jobId,
+        userId: user.id,
+        uptimeMs: Date.now() - startedAt,
+        lastEventSequence,
+      })
     },
   })
 

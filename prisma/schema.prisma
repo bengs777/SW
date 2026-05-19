@@ -218,6 +218,7 @@ model GenerationJob {
   intent          String?
   usedAutoRepair  Boolean  @default(false) @map("used_auto_repair")
   status          String   @default("queued")
+  orchestrationState String @default("queued")
   stage           String   @default("queued")
   label           String   @default("Prompt diterima")
   progress        Int      @default(0)
@@ -233,6 +234,16 @@ model GenerationJob {
   error           String?
   resultHistoryId String?
   queueJobId      String?
+  traceId         String?
+  workerId        String?
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
+  lastHeartbeatAt DateTime?
+  retryReason     String?
+  retryClass      String?
+  recoveryCount   Int      @default(0)
+  deadLetteredAt  DateTime?
+  terminatedAt    DateTime?
   idempotencyKey  String?
   requestHash     String?
   cancelRequested Boolean  @default(false)
@@ -249,15 +260,24 @@ model GenerationJob {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events  GenerationEvent[]
   attempts GenerationAttempt[]
+  repairAttempts RepairAttempt[]
+  previewSessions PreviewSession[]
+  orchestrationFailures OrchestrationFailure[]
   qualityMetric GenerationQualityMetric?
   artifact Artifact?
 
   @@index([userId, createdAt])
   @@index([projectId, createdAt])
   @@index([status])
+  @@index([orchestrationState])
   @@index([stage])
   @@index([cancelRequested])
   @@index([queueJobId])
+  @@index([traceId])
+  @@index([workerId])
+  @@index([leaseOwner])
+  @@index([leaseExpiresAt])
+  @@index([lastHeartbeatAt])
   @@unique([userId, projectId, idempotencyKey])
   @@unique([userId, projectId, requestHash])
 }
@@ -341,12 +361,22 @@ model GenerationQualityMetric {
 model GenerationEvent {
   id        String   @id @default(cuid())
   jobId      String
+  traceId    String?
+  spanId     String?
+  parentSpanId String?
+  workerId   String?
+  sandboxId  String?
+  previewId  String?
   sequence   Int
   type       String
+  eventType  String?
   stage      String
   status     String
   message    String
   dataJson   String?
+  metadataJson String?
+  retryCount Int      @default(0)
+  terminationReason String?
   createdAt  DateTime @default(now())
 
   job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
@@ -355,6 +385,120 @@ model GenerationEvent {
   @@index([jobId, createdAt])
   @@index([jobId, sequence])
   @@index([type])
+  @@index([eventType])
+  @@index([traceId])
+  @@index([workerId])
+  @@index([previewId])
+}
+
+model RepairAttempt {
+  id                 String   @id @default(cuid())
+  jobId              String
+  traceId            String?
+  spanId             String?
+  workerId           String?
+  attempt            Int
+  status             String
+  reason             String?
+  terminationReason  String?
+  validatorError     String?
+  inputHash          String?
+  outputHash         String?
+  idempotencyKey     String?
+  metadataJson       String?
+  startedAt          DateTime @default(now())
+  completedAt        DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, attempt])
+  @@unique([jobId, idempotencyKey])
+  @@index([jobId, startedAt])
+  @@index([status])
+  @@index([terminationReason])
+  @@index([traceId])
+}
+
+model PreviewSession {
+  id                 String   @id @default(cuid())
+  jobId              String
+  projectId          String
+  traceId            String?
+  spanId             String?
+  workerId           String?
+  sandboxId          String?
+  previewUrl         String?
+  status             String   @default("starting")
+  bootStartedAt      DateTime?
+  buildStartedAt     DateTime?
+  buildCompletedAt   DateTime?
+  devServerStartedAt DateTime?
+  reachableAt        DateTime?
+  terminatedAt       DateTime?
+  terminationReason  String?
+  expiresAt          DateTime?
+  idempotencyKey     String?
+  diagnosticsJson    String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, idempotencyKey])
+  @@index([jobId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@index([traceId])
+  @@index([sandboxId])
+  @@index([expiresAt])
+}
+
+model WorkerHeartbeat {
+  id                       String   @id @default(cuid())
+  workerId                 String   @unique
+  traceId                  String?
+  currentJobId             String?
+  currentStage             String?
+  lastSuccessfulTransition String?
+  leaseOwner               String?
+  leaseExpiresAt           DateTime?
+  runtimeInfoJson          String?
+  metadataJson             String?
+  heartbeatAt              DateTime @default(now())
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([heartbeatAt])
+  @@index([currentJobId])
+  @@index([currentStage])
+  @@index([leaseExpiresAt])
+}
+
+model OrchestrationFailure {
+  id                 String   @id @default(cuid())
+  jobId              String
+  traceId            String?
+  workerId           String?
+  eventType          String
+  stage              String
+  severity           String   @default("error")
+  reason             String
+  retryCount         Int      @default(0)
+  terminationReason  String?
+  metadataJson       String?
+  createdAt          DateTime @default(now())
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, createdAt])
+  @@index([traceId])
+  @@index([workerId])
+  @@index([eventType])
+  @@index([severity])
+  @@index([terminationReason])
+  @@index([createdAt])
 }
 
 model GenerationAttempt {

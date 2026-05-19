@@ -190,7 +190,7 @@ async function runScenario(input: {
   let files: GeneratedFile[] = []
   let artifactValidationPassed = false
   let dependencyResolutionPassed = false
-  let artifactPath = path.join(scenarioDir, "artifact.json")
+  const artifactPath = path.join(scenarioDir, "artifact.json")
 
   const stage = async <T>(name: string, fn: () => Promise<T>, data?: Record<string, unknown>) => {
     const stageStartedAt = Date.now()

@@ -4,6 +4,7 @@ import { env } from "@/lib/env"
 import { log } from "@/lib/logging"
 import { warnIfSlow } from "@/lib/observability/performance-monitor"
 import { recordRedisLatency, recordWorkerUtilization } from "@/lib/observability/runtime-metrics"
+import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 
 export type GenerationQueueJobName = "generation.execute"
 
@@ -354,7 +355,17 @@ export async function replayGenerationDeadLetterJob(input: {
   }
 }
 
-export async function recordGenerationWorkerHeartbeat(workerId: string) {
+export async function recordGenerationWorkerHeartbeat(
+  workerId: string,
+  details?: {
+    alive?: boolean
+    currentStage?: string | null
+    lastSuccessfulTransition?: string | null
+    activeJobIds?: string[]
+    idleTimeoutMs?: number | null
+    stalledGenerationDetected?: boolean
+  }
+) {
   const connection = getRedisConnection()
   if (!connection) return null
   const startedAt = Date.now()
@@ -362,10 +373,37 @@ export async function recordGenerationWorkerHeartbeat(workerId: string) {
   const payload = JSON.stringify({
     workerId,
     pid: process.pid,
+    alive: details?.alive ?? true,
+    currentStage: details?.currentStage || "idle",
+    lastSuccessfulTransition: details?.lastSuccessfulTransition || null,
+    activeJobIds: details?.activeJobIds || [],
+    idleTimeoutMs: details?.idleTimeoutMs ?? null,
+    stalledGenerationDetected: Boolean(details?.stalledGenerationDetected),
     at: new Date().toISOString(),
   })
 
   await connection.set(GENERATION_WORKER_HEARTBEAT_KEY, payload, "PX", 120_000)
+  await OrchestrationRuntimeService.recordWorkerHeartbeat({
+    workerId,
+    currentJobId: details?.activeJobIds?.[0] || null,
+    currentStage: details?.currentStage || "idle",
+    lastSuccessfulTransition: details?.lastSuccessfulTransition || null,
+    leaseOwner: details?.activeJobIds?.[0] ? workerId : null,
+    runtimeInfo: {
+      pid: process.pid,
+      activeJobIds: details?.activeJobIds || [],
+      idleTimeoutMs: details?.idleTimeoutMs ?? null,
+      stalledGenerationDetected: Boolean(details?.stalledGenerationDetected),
+    },
+    metadata: {
+      source: "bullmq_worker_heartbeat",
+    },
+  }).catch((error) => {
+    log("warn", "worker_heartbeat_persist_failed", {
+      workerId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
   const latencyMs = Date.now() - startedAt
   recordRedisLatency(latencyMs, { operation: "workerHeartbeat", workerId })
   warnIfSlow("redis", latencyMs, { operation: "workerHeartbeat", workerId })
@@ -417,7 +455,17 @@ export async function getGenerationQueueHealth() {
   const workerHeartbeat = rawHeartbeat
     ? (() => {
         try {
-          return JSON.parse(rawHeartbeat) as { workerId: string; pid: number; at: string }
+          return JSON.parse(rawHeartbeat) as {
+            workerId: string
+            pid: number
+            at: string
+            alive?: boolean
+            currentStage?: string | null
+            lastSuccessfulTransition?: string | null
+            activeJobIds?: string[]
+            idleTimeoutMs?: number | null
+            stalledGenerationDetected?: boolean
+          }
         } catch {
           return null
         }

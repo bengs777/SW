@@ -30,8 +30,8 @@ function loadModule(file) {
     },
   }).outputText
 
-  const module = { exports: {} }
-  moduleCache.set(absolute, module)
+  const loadedModule = { exports: {} }
+  moduleCache.set(absolute, loadedModule)
 
   const localRequire = (request) => {
     if (request === "@/lib/ai/canonical-path") return loadModule("lib/ai/canonical-path.ts")
@@ -44,21 +44,13 @@ function loadModule(file) {
   vm.runInNewContext(compiled, {
     Buffer,
     console,
-    exports: module.exports,
-    module,
+    exports: loadedModule.exports,
+    module: loadedModule,
     process,
     require: localRequire,
   }, { filename: file })
 
-  return module.exports
-}
-
-function parseError(value) {
-  try {
-    return JSON.parse(value)
-  } catch {
-    return null
-  }
+  return loadedModule.exports
 }
 
 function main() {

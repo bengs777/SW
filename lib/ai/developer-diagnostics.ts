@@ -35,6 +35,8 @@ export type DeveloperRepairAttempt = {
 export type DeveloperGenerationDiagnostics = {
   mode: "developer-diagnostics-v1"
   currentStage: GenerationState
+  lastSuccessfulStage?: GenerationState | null
+  terminationReason?: string | null
   retryCount: number
   plannerOutput?: Record<string, unknown>
   generatedArtifactSummary?: Record<string, unknown>
@@ -60,6 +62,8 @@ export function createDeveloperGenerationDiagnostics(): DeveloperGenerationDiagn
   return {
     mode: "developer-diagnostics-v1",
     currentStage: "PLANNING",
+    lastSuccessfulStage: null,
+    terminationReason: null,
     retryCount: 0,
     validatorFailures: [],
     artifactParseFailures: [],
@@ -90,6 +94,12 @@ export function recordDeveloperDiagnostic(
     data: sanitizeDiagnosticData(entry.data),
   })
   diagnostics.executionTimeline = diagnostics.executionTimeline.slice(-80)
+  if (entry.status === "passed") {
+    diagnostics.lastSuccessfulStage = entry.stage
+  }
+  if (entry.stage === "FAILED" && entry.reason) {
+    diagnostics.terminationReason = entry.reason
+  }
   updateRetryMetrics(diagnostics)
 }
 

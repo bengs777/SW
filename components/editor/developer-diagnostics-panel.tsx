@@ -15,6 +15,8 @@ export type DeveloperDiagnosticsSnapshot = {
     developer?: {
       currentStage?: string
       retryCount?: number
+      lastSuccessfulStage?: string | null
+      terminationReason?: string | null
       plannerOutput?: unknown
       generatedArtifactSummary?: unknown
       validatorFailures?: unknown[]
@@ -37,6 +39,18 @@ export type DeveloperDiagnosticsSnapshot = {
   } | null
   metrics?: unknown
   plan?: unknown
+  trace?: {
+    traceId?: string | null
+    workerId?: string | null
+    leaseOwner?: string | null
+    leaseExpiresAt?: string | null
+    lastHeartbeatAt?: string | null
+  }
+  recovery?: {
+    retryReason?: string | null
+    retryClass?: string | null
+    recoveryCount?: number
+  }
 }
 
 type Props = {
@@ -51,6 +65,14 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
   const developer = diagnostics.diagnostics?.developer
   const currentStage = developer?.currentStage || diagnostics.stage || "UNKNOWN"
   const timeline = Array.isArray(developer?.executionTimeline) ? developer.executionTimeline : []
+  const lastSuccessfulStage =
+    developer?.lastSuccessfulStage ||
+    [...timeline].reverse().find((item) => item.status === "passed")?.stage ||
+    "UNKNOWN"
+  const terminationReason =
+    developer?.terminationReason ||
+    [...timeline].reverse().find((item) => item.status === "failed" || item.stage === "FAILED")?.reason ||
+    "Not terminated"
 
   return (
     <div className="border-t border-border bg-background">
@@ -72,6 +94,28 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
       {expanded && (
         <ScrollArea className="max-h-80 border-t border-border">
           <div className="space-y-3 p-3 text-xs">
+            <Section title="Orchestration Summary">
+              <div className="grid gap-2 rounded-md border border-border bg-muted/30 p-2">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Last successful stage</p>
+                  <p className="mt-1 font-medium">{lastSuccessfulStage}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Termination reason</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words font-medium">{terminationReason}</p>
+                </div>
+              </div>
+            </Section>
+            <Section title="Correlation">
+              <div className="grid gap-1 rounded-md border border-border bg-muted/30 p-2 font-mono text-[11px]">
+                <p>trace_id: {diagnostics.trace?.traceId || "unknown"}</p>
+                <p>worker_id: {diagnostics.trace?.workerId || "unassigned"}</p>
+                <p>lease_owner: {diagnostics.trace?.leaseOwner || "none"}</p>
+                <p>lease_expiry: {diagnostics.trace?.leaseExpiresAt || "none"}</p>
+                <p>retry_class: {diagnostics.recovery?.retryClass || "none"}</p>
+                <p>retry_reason: {diagnostics.recovery?.retryReason || "none"}</p>
+              </div>
+            </Section>
             <Section title="Execution Timeline">
               {timeline.length === 0 ? (
                 <p className="text-muted-foreground">No developer timeline events yet.</p>
@@ -103,6 +147,9 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
             <JsonSection title="Repair Attempts" value={developer?.repairAttempts} />
             <JsonSection title="Build Failures" value={developer?.buildFailures} />
             <JsonSection title="Preview Startup Failures" value={developer?.previewStartupFailures} />
+            <JsonSection title="Queue Lifecycle" value={diagnostics.recovery} />
+            <JsonSection title="Worker Ownership" value={diagnostics.trace} />
+            <JsonSection title="Terminal Failure Summary" value={(diagnostics.diagnostics as Record<string, unknown> | null)?.orchestrationSummary} />
             <JsonSection title="Retry Metrics" value={developer?.retryMetrics} />
             <JsonSection title="Reports" value={developer?.reports} />
           </div>

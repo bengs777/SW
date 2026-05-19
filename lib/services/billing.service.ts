@@ -64,6 +64,7 @@ type ReserveGenerationJobInput = {
   plan?: unknown
   context?: Record<string, unknown> | null
   maxRetries?: number
+  traceId?: string | null
 }
 
 function safeStringify(value: unknown) {
@@ -370,6 +371,8 @@ export class BillingService {
           idempotencyKey: input.idempotencyKey || null,
           requestHash: input.requestHash || null,
           status: "queued",
+          orchestrationState: "queued",
+          traceId: input.traceId || null,
           stage: "queued",
           label: "Prompt diterima",
           progress: 0,
@@ -464,6 +467,8 @@ export class BillingService {
           jobId: updatedJob.id,
           sequence: 1,
           type: "job.created",
+          eventType: "job.created",
+          traceId: input.traceId || null,
           stage: "queued",
           status: "queued",
           message: "Generation job queued",

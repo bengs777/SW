@@ -14,7 +14,11 @@ type CachedAuthUser = {
 }
 
 const userCache = new Map<string, CachedAuthUser>()
+const userLookupInflight = new Map<string, Promise<CachedAuthUser | null>>()
+const creditGrantCache = new Map<string, number>()
+const creditGrantInflight = new Map<string, Promise<void>>()
 const authDebugEnabled = process.env.SWIFT_AUTH_DEBUG === "true"
+const CREDIT_GRANT_SESSION_TTL_MS = 10 * 60 * 1000
 
 type AuthToken = JWT & {
   id?: string | null
@@ -41,7 +45,16 @@ async function resolveDatabaseUser(email?: string | null): Promise<CachedAuthUse
     return userCache.get(normalizedEmail) ?? null
   }
 
-  try {
+  const inflight = userLookupInflight.get(normalizedEmail)
+  if (inflight) {
+    try {
+      return await inflight
+    } catch {
+      return null
+    }
+  }
+
+  const lookup = (async () => {
     const dbUser = await prisma.user.findUnique({
       where: { email: normalizedEmail },
       select: { id: true, isDeveloperAccount: true },
@@ -53,6 +66,12 @@ async function resolveDatabaseUser(email?: string | null): Promise<CachedAuthUse
     }
     userCache.set(normalizedEmail, authUser)
     return authUser
+  })()
+
+  userLookupInflight.set(normalizedEmail, lookup)
+
+  try {
+    return await lookup
   } catch (error) {
     if (isMissingRequiredTableError(error)) {
       if (shouldSoftFailMissingTable()) {
@@ -66,7 +85,29 @@ async function resolveDatabaseUser(email?: string | null): Promise<CachedAuthUse
 
     log("error", "auth_user_id_resolve_failed", { error: error instanceof Error ? error.message : String(error) })
     return null
+  } finally {
+    userLookupInflight.delete(normalizedEmail)
   }
+}
+
+async function grantMonthlyFreeCreditsFromSession(email: string) {
+  const normalizedEmail = email.trim().toLowerCase()
+  const lastGrantedAt = creditGrantCache.get(normalizedEmail) || 0
+  if (Date.now() - lastGrantedAt < CREDIT_GRANT_SESSION_TTL_MS) return
+
+  const inflight = creditGrantInflight.get(normalizedEmail)
+  if (inflight) return inflight
+
+  const grant = UserService.grantMonthlyFreeCreditsIfNeeded(normalizedEmail)
+    .then(() => {
+      creditGrantCache.set(normalizedEmail, Date.now())
+    })
+    .finally(() => {
+      creditGrantInflight.delete(normalizedEmail)
+    })
+
+  creditGrantInflight.set(normalizedEmail, grant)
+  return grant
 }
 
 setInterval(() => {
@@ -139,7 +180,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         if (userEmail) {
           try {
-            await UserService.grantMonthlyFreeCreditsIfNeeded(userEmail)
+            await grantMonthlyFreeCreditsFromSession(userEmail)
           } catch (error) {
             if (isMissingRequiredTableError(error) && !shouldSoftFailMissingTable()) {
               throw error

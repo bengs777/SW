@@ -30,6 +30,11 @@ function main() {
   const generationPipeline = read("lib/ai/generation-pipeline.ts")
   const adminMonitoring = read("lib/services/admin-monitoring.service.ts")
   const systemPage = read("app/dashboard/system/page.tsx")
+  const schema = read("prisma/schema.prisma")
+  const runtimeService = read("lib/services/orchestration-runtime.service.ts")
+  const generationWorker = read("lib/workers/generation-worker.ts")
+  const sandboxRuntime = read("lib/sandbox/runtime.ts")
+  const metricsRoute = read("app/api/metrics/route.ts")
 
   assert(
     "script.registered",
@@ -171,6 +176,45 @@ function main() {
     /type:\s*"worker_heartbeat_stale"[\s\S]*severity:\s*"critical"/.test(adminMonitoring) &&
       /type:\s*"generation_failure_rate_high"[\s\S]*severity:\s*"warning"/.test(adminMonitoring),
     "worker heartbeat is critical and generation failure rate is warning"
+  )
+
+  assert(
+    "orchestration.durable-schema",
+    /model RepairAttempt/.test(schema) &&
+      /model PreviewSession/.test(schema) &&
+      /model WorkerHeartbeat/.test(schema) &&
+      /model OrchestrationFailure/.test(schema) &&
+      /orchestrationState/.test(schema) &&
+      /leaseOwner/.test(schema) &&
+      /terminationReason/.test(schema),
+    "durable orchestration state, repair history, preview sessions, worker leases, and failures are persisted"
+  )
+
+  assert(
+    "orchestration.lease-recovery",
+    /acquireLease/.test(runtimeService) &&
+      /renewLease/.test(runtimeService) &&
+      /releaseLease/.test(runtimeService) &&
+      /recoverOrphanedJobs/.test(runtimeService) &&
+      /duplicate_job_execution_prevented/.test(generationWorker),
+    "worker lease ownership prevents duplicate execution and supports orphan recovery"
+  )
+
+  assert(
+    "orchestration.replay-metrics-cleanup",
+    /static async replay/.test(runtimeService) &&
+      /prometheusMetrics/.test(runtimeService) &&
+      /cleanupExpiredLifecycle/.test(runtimeService) &&
+      /Content-Type"[\s\S]*text\/plain; version=0\.0\.4/.test(metricsRoute),
+    "orchestration replay, cleanup, and Prometheus metrics are implemented"
+  )
+
+  assert(
+    "sandbox.ttl-cleanup",
+    /cleanupExpiredRuntimeSandboxes/.test(sandboxRuntime) &&
+      /preview_terminated: ttl cleanup/.test(sandboxRuntime) &&
+      /SWIFT_PREVIEW_TTL_MS/.test(sandboxRuntime),
+    "runtime sandboxes have TTL cleanup and zombie process termination"
   )
 
   console.log("\n[hardening] pipeline hardening regression checks passed")
