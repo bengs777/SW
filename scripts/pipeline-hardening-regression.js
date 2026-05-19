@@ -26,6 +26,7 @@ function main() {
   const artifactParser = read("lib/ai/generated-artifact.ts")
   const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
   const filePolicy = read("lib/ai/file-policy.ts")
+  const canonicalPath = read("lib/ai/canonical-path.ts")
   const generationPipeline = read("lib/ai/generation-pipeline.ts")
   const adminMonitoring = read("lib/services/admin-monitoring.service.ts")
   const systemPage = read("app/dashboard/system/page.tsx")
@@ -78,11 +79,12 @@ function main() {
   assert(
     "path.allowed-roots",
     /ALLOWED_GENERATED_ROOTS\s*=\s*\["src",\s*"app",\s*"components",\s*"lib",\s*"prisma"\]/.test(filePolicy) &&
+      /canonicalizeGeneratedPath/.test(canonicalPath) &&
       /normalizeGeneratedPath/.test(filePolicy) &&
       /resolveGeneratedPath/.test(filePolicy) &&
       /validateGeneratedPath/.test(filesystemService) &&
       /validateGeneratedPath/.test(taskGraphExecutor) &&
-      /Generated file path is outside allowed project roots/.test(filePolicy),
+      /Path must start with an allowed generated root/.test(filePolicy),
     "filesystem and executor reject paths outside strict generated roots"
   )
 

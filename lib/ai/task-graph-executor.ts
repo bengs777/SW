@@ -210,9 +210,8 @@ function collapseOperations(operations: GeneratedTaskOperation[]) {
   const createdPaths = new Set<string>()
 
   for (const operation of operations) {
-    const path = normalizeGeneratedPath(operation.path)
+    const path = validateGeneratedPath(operation.path).path
     if (!path) continue
-    validateGeneratedPath(path)
     if (operation.action === "create") {
       createdPaths.add(path)
     }

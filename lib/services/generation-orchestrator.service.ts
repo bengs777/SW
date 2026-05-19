@@ -2005,7 +2005,7 @@ function buildSlicePrompt(input: {
       : "- Follow the controlled app blueprint exactly.",
     "- Keep each returned file under 4000 output tokens when possible.",
     "- Stop after the requested slice; do not create extra support files speculatively.",
-    "- PATH POLICY: every path must normalize and resolve inside the workspace, and must start with src/, app/, components/, lib/, or prisma/.",
+    "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, lib/, or prisma/. Use app/page.tsx, components/Button.tsx, or lib/utils.ts; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, or pnpm-lock.yaml.",
     "- Return ONLY a JSON object matching the schema; include changed files as taskGraph.operations.",
     '- Required schema: {"files":[],"dependencies":[],"commands":[],"summary":"...","taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]},"diagnostics":[],"metadata":{},"repairs":[]}',

@@ -142,7 +142,7 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "ATURAN KERAS SWIFT BUILDER: ikuti EXECUTION_RULES dari prompt user. Preview mode dibatasi kecil; PRODUCTION_FULLSTACK_MODE boleh multi-file dan wajib mencakup backend bila prompt meminta full-stack.",
   "PAKAI DATA DUMMY hanya untuk preview mode. Dalam PRODUCTION_FULLSTACK_MODE, buat Prisma schema, API routes, service layer, env placeholder, auth/payment/API boundaries sesuai permintaan prompt.",
   "MAX 4000 TOKEN PER FILE dan jangan bikin file lebih dari 150 baris bila bisa dibuat ringkas.",
-  "PATH POLICY: every generated path must normalize and resolve inside the workspace, and must start with src/, app/, components/, lib/, or prisma/.",
+  "PATH POLICY: every generated path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, lib/, or prisma/. Use app/page.tsx, components/Button.tsx, or lib/utils.ts; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
   "BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, or pnpm-lock.yaml.",
   "PATH HARUS BENAR: root Next.js adalah /app. Jangan buat /src/app kecuali user secara eksplisit meminta src/ layout.",
   "Jangan pernah generate next-auth.d.ts. Untuk jalur NextAuth gunakan file allowed di lib/ dan app/ saja.",

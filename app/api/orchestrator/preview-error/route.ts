@@ -182,7 +182,7 @@ export async function POST(req: NextRequest) {
         repairAttempt: attempt,
       })
 
-      const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nRespond ONLY with a valid JSON object: {"files":[{"path":"app/page.tsx","language":"tsx","content":"<full file content>"}],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}. No explanation, no markdown, no extra text.`
+      const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nUse canonical workspace-relative POSIX paths only, for example app/page.tsx. Never use leading slashes, ./ prefixes, traversal, or Windows separators.\nRespond ONLY with a valid JSON object: {"files":[{"path":"app/page.tsx","language":"tsx","content":"<full file content>"}],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}. No explanation, no markdown, no extra text.`
 
       const fullPrompt = `${systemPrompt}\n\nError:\n${message}\n\nStack:\n${stack}\n\nContext:\n${inspectContext}`
 

@@ -1,6 +1,6 @@
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
-import { normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
+import { formatGeneratedPathValidationError, normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 const MAX_GENERATED_FILES = 100
@@ -10,15 +10,20 @@ const PROTECTED_DELETE_FILES = new Set([
   "app/page.tsx",
 ])
 
+const generatedPathSchema = z.string().trim().min(1).transform((path, ctx) => {
+  try {
+    return validateGeneratedPath(path).path
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: JSON.stringify(formatGeneratedPathValidationError(error)),
+    })
+    return z.NEVER
+  }
+})
+
 const generatedFileSchema = z.object({
-  path: z.string().trim().min(1).refine((path) => {
-    try {
-      validateGeneratedPath(path)
-      return true
-    } catch {
-      return false
-    }
-  }, "unsafe generated file path"),
+  path: generatedPathSchema,
   content: z.string().refine(
     (content) => Buffer.byteLength(content, "utf8") <= MAX_SINGLE_FILE_BYTES,
     "generated file exceeds single-file size limit"
@@ -29,14 +34,7 @@ const generatedFileSchema = z.object({
 const taskGraphOperationSchema = z.object({
   id: z.string().trim().min(1).optional(),
   action: z.enum(["create", "modify", "delete"]),
-  path: z.string().trim().min(1).refine((path) => {
-    try {
-      validateGeneratedPath(path)
-      return true
-    } catch {
-      return false
-    }
-  }, "unsafe generated file path"),
+  path: generatedPathSchema,
   content: z.string().optional(),
   language: z.string().trim().optional(),
   reason: z.string().optional(),

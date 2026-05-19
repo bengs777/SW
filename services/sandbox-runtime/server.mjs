@@ -136,7 +136,12 @@ function safeSegment(value) {
 }
 
 function normalizePath(filePath) {
-  return String(filePath || "").replace(/\\/g, "/").replace(/^\.\//, "").trim()
+  let normalized = String(filePath || "").trim().replace(/\\/g, "/")
+  normalized = normalized.replace(/^\/+/, "")
+  while (normalized.startsWith("./")) {
+    normalized = normalized.slice(2)
+  }
+  return normalized.replace(/\/{2,}/g, "/")
 }
 
 function stateFor(projectId) {
@@ -191,7 +196,7 @@ function assertSafeFilePath(rootDir, filePath, options = {}) {
     throw new Error(`Invalid file path: ${filePath}`)
   }
 
-  if (rawPath.startsWith("/") || rawPath.startsWith("\\") || path.isAbsolute(rawPath) || /^[a-zA-Z]:/.test(rawPath)) {
+  if (/^[a-zA-Z]:[\\/]/.test(rawPath.trim())) {
     throw new Error(`Absolute sandbox file path rejected: ${filePath}`)
   }
 
