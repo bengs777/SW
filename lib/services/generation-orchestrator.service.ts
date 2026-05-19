@@ -46,6 +46,46 @@ type GenerationPlannerFile = {
   action: "create_or_update"
 }
 
+type AgentWorkflowAction = {
+  action: "create" | "modify" | "delete"
+  file: string
+  reason?: string
+}
+
+type AgentWorkflowMemoryEntry = {
+  iteration: number
+  changedFiles: string[]
+  errors: Array<{
+    step?: string
+    message: string
+  }>
+  fixes: string[]
+}
+
+type AgentWorkflowObservation = {
+  prompt: string
+  blueprint: {
+    label: string
+    requiredFiles: string[]
+    stack: string[]
+  }
+  selectedFiles: Array<{ path: string; reason: string }>
+  packageJson: {
+    exists: boolean
+    dependencies: Record<string, string>
+    devDependencies: Record<string, string>
+    parseError: string | null
+  }
+  dependencies: DependencyMap
+  prismaSchema: {
+    exists: boolean
+    path: string | null
+    bytes: number
+  }
+  buildLogs: string[]
+  previousAttempts: AgentWorkflowMemoryEntry[]
+}
+
 type GenerationPlan = {
   objective: string
   appType: ControlledAppType
@@ -62,6 +102,8 @@ type GenerationPlan = {
   architecturePlan: string[]
   dependencyPlan: string[]
   fileGraphPlan: string[]
+  agentTasks: string[]
+  actionPlan: AgentWorkflowAction[]
   contextBudget: {
     maxFiles: number
     maxCharsPerFile: number
@@ -88,7 +130,8 @@ type ExecuteGenerationJobDeps = {
   loadGenerationHistoryCount?: (projectId: string) => Promise<number>
 }
 
-const MAX_REPAIR_ATTEMPTS = 1
+const MAX_AGENT_ITERATIONS = 5
+const MAX_REPAIR_ATTEMPTS = MAX_AGENT_ITERATIONS - 1
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
 const PRODUCTION_FULLSTACK_FILE_LIMIT = 16
 const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
@@ -1308,6 +1351,19 @@ function buildGenerationPlan(input: {
       }
     }
   }
+  const agentTasks = buildAgentTaskPlan(input.prompt, filePlan, {
+    productionMode,
+    editMode: editPlan.mode,
+  })
+  const existingPathSet = new Set(input.existingFiles.map((file) => normalizePath(file.path)))
+  const actionPlan = filePlan.map((file): AgentWorkflowAction => {
+    const path = normalizePath(file.path)
+    return {
+      action: existingPathSet.has(path) ? "modify" : "create",
+      file: path,
+      reason: file.reason,
+    }
+  })
 
   return {
     objective: classification,
@@ -1329,12 +1385,59 @@ function buildGenerationPlan(input: {
       "Do not introduce alternate frameworks, databases, routers, or package managers.",
     ],
     fileGraphPlan: filePlan.map((file) => `${file.path}: ${file.reason}`),
+    agentTasks,
+    actionPlan,
     contextBudget: {
       ...trimmed.budget,
       usedFiles: trimmed.files.length,
       usedChars: trimmed.totalChars,
     },
   } satisfies GenerationPlan
+}
+
+function buildAgentTaskPlan(
+  prompt: string,
+  filePlan: GenerationPlannerFile[],
+  input: {
+    productionMode: GenerationPlan["productionMode"]
+    editMode: PartialEditPlan["mode"]
+  }
+) {
+  const text = prompt.toLowerCase()
+  const tasks: string[] = []
+  const addTask = (task: string) => {
+    if (!tasks.includes(task)) tasks.push(task)
+  }
+
+  addTask(input.editMode === "partial" ? "scope edit" : "setup project")
+
+  if (filePlan.some((file) => normalizePath(file.path) === "prisma/schema.prisma") || /\b(prisma|database|db|postgres|schema)\b/i.test(text)) {
+    addTask("setup prisma")
+  }
+
+  if (/\b(auth|login|register|role|rbac|admin|user|session)\b/i.test(text)) {
+    addTask("setup auth")
+    addTask("create role system")
+  }
+
+  if (filePlan.some((file) => normalizePath(file.path).startsWith("app/api/")) || /\b(api|route|crud|webhook|integration|integrasi)\b/i.test(text)) {
+    addTask("create APIs")
+  }
+
+  if (/\b(upload|file|asset|storage|lampiran|gambar)\b/i.test(text)) {
+    addTask("create uploads")
+  }
+
+  if (filePlan.some((file) => /^app\/(?:.+\/)?page\.(tsx|ts|jsx|js)$/i.test(normalizePath(file.path))) || /\b(dashboard|admin|panel|page|halaman|ui)\b/i.test(text)) {
+    addTask("create dashboard")
+  }
+
+  if (input.productionMode === "production_fullstack") {
+    addTask("wire full-stack boundaries")
+  }
+
+  addTask("verify project")
+  return tasks.slice(0, 12)
 }
 
 async function transition(jobId: string, stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) {
@@ -1382,6 +1485,205 @@ async function emitGeneratedFilesUpdate(input: {
       ...(input.data || {}),
     },
   })
+}
+
+function createAgentWorkflowTools(initialFiles: GeneratedFile[]) {
+  const byPath = new Map<string, GeneratedFile>()
+  for (const file of initialFiles) {
+    byPath.set(normalizePath(file.path), { ...file, path: normalizePath(file.path) })
+  }
+
+  const listFiles = (prefix = "") => {
+    const normalizedPrefix = normalizePath(prefix)
+    return Array.from(byPath.keys())
+      .filter((path) => !normalizedPrefix || path.startsWith(normalizedPrefix))
+      .sort()
+  }
+
+  const readFile = (path: string) => byPath.get(normalizePath(path))?.content ?? null
+
+  const writeFile = (path: string, content: string, language?: GeneratedFile["language"]) => {
+    const normalizedPath = normalizePath(path)
+    byPath.set(normalizedPath, {
+      path: normalizedPath,
+      content,
+      language: language || inferLanguageFromPath(normalizedPath),
+    })
+  }
+
+  const searchFiles = (query: string, limit = 12) => {
+    const normalizedQuery = query.trim().toLowerCase()
+    if (!normalizedQuery) return []
+
+    return Array.from(byPath.values())
+      .filter((file) => {
+        const path = normalizePath(file.path).toLowerCase()
+        return path.includes(normalizedQuery) || String(file.content || "").toLowerCase().includes(normalizedQuery)
+      })
+      .map((file) => normalizePath(file.path))
+      .slice(0, limit)
+  }
+
+  const runCommand = (
+    command: "lint" | "typecheck" | "build" | "preview validation",
+    validationResult: ValidationLifecycleResult | null
+  ) => summarizeVerificationCommand(command, validationResult)
+
+  const snapshot = () => Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path))
+
+  return {
+    listFiles,
+    readFile,
+    writeFile,
+    searchFiles,
+    runCommand,
+    snapshot,
+  }
+}
+
+function inferLanguageFromPath(path: string): GeneratedFile["language"] {
+  if (path.endsWith(".tsx")) return "tsx"
+  if (path.endsWith(".ts")) return "ts"
+  if (path.endsWith(".css")) return "css"
+  if (path.endsWith(".json")) return "json"
+  if (path.endsWith(".html")) return "html"
+  if (path.endsWith(".prisma")) return "prisma"
+  if (path.endsWith(".md")) return "md"
+  if (path.includes(".env")) return "env"
+  return "ts"
+}
+
+function summarizeVerificationCommand(
+  command: "lint" | "typecheck" | "build" | "preview validation",
+  validationResult: ValidationLifecycleResult | null
+) {
+  if (!validationResult) {
+    return {
+      command,
+      status: "not_run",
+      output: "",
+    }
+  }
+
+  const stepNames =
+    command === "lint"
+      ? ["lint"]
+      : command === "typecheck"
+        ? ["typecheck"]
+        : command === "build"
+          ? ["build"]
+          : ["preview-compile", "runtime-smoke"]
+  const matchedSteps = validationResult.steps.filter((step) => stepNames.includes(step.name))
+  const failed = matchedSteps.find((step) => step.status === "failed")
+  const passed = matchedSteps.some((step) => step.status === "passed")
+  const skipped = matchedSteps.length > 0 && matchedSteps.every((step) => step.status === "skipped")
+
+  return {
+    command,
+    status: failed ? "failed" : passed ? "passed" : skipped ? "skipped" : "not_run",
+    output:
+      failed?.message ||
+      matchedSteps
+        .map((step) => `${step.name}:${step.status}${step.message ? `:${step.message}` : ""}`)
+        .join("\n"),
+  }
+}
+
+function selectObservedFiles(input: {
+  prompt: string
+  files: GeneratedFile[]
+  plan: GenerationPlan
+  buildLogs: string[]
+}) {
+  const previewContext = trimContextForGeneration({
+    prompt: input.prompt,
+    files: input.files,
+    layer: input.plan.objective === "simple_ui" ? "fast" : "builder",
+  })
+  const selected = new Map<string, string>()
+  const add = (path: string, reason: string) => {
+    const normalizedPath = normalizePath(path)
+    if (normalizedPath) selected.set(normalizedPath, reason)
+  }
+
+  for (const file of previewContext.files) {
+    add(file.path, "ranked by prompt relevance and import graph")
+  }
+
+  for (const file of input.plan.filePlan) {
+    add(file.path, "planned target file")
+  }
+
+  for (const filePath of ["package.json", "prisma/schema.prisma", "app/layout.tsx", "app/page.tsx"]) {
+    if (input.files.some((file) => normalizePath(file.path) === filePath)) {
+      add(filePath, "core project context")
+    }
+  }
+
+  for (const logLine of input.buildLogs.slice(-20)) {
+    for (const filePath of extractFilePathsFromError(logLine)) {
+      add(filePath, "referenced by build or validation log")
+    }
+  }
+
+  return Array.from(selected.entries())
+    .slice(0, 18)
+    .map(([path, reason]) => ({ path, reason }))
+}
+
+function observeAgentContext(input: {
+  prompt: string
+  plan: GenerationPlan
+  files: GeneratedFile[]
+  buildLogs: string[]
+  previousAttempts: AgentWorkflowMemoryEntry[]
+}): AgentWorkflowObservation {
+  const selectedFiles = selectObservedFiles(input)
+  const packageJson = parsePackageJsonFile(input.files)
+  const dependencies = buildDependencyMap(
+    input.files.filter((file) => selectedFiles.some((selected) => selected.path === normalizePath(file.path)))
+  )
+  const prismaFile = input.files.find((file) => normalizePath(file.path) === "prisma/schema.prisma")
+
+  return {
+    prompt: input.prompt,
+    blueprint: input.plan.blueprint,
+    selectedFiles,
+    packageJson,
+    dependencies,
+    prismaSchema: {
+      exists: Boolean(prismaFile),
+      path: prismaFile ? normalizePath(prismaFile.path) : null,
+      bytes: prismaFile ? Buffer.byteLength(prismaFile.content || "", "utf8") : 0,
+    },
+    buildLogs: input.buildLogs.slice(-20),
+    previousAttempts: input.previousAttempts.slice(-MAX_AGENT_ITERATIONS),
+  }
+}
+
+function summarizeAgentObservation(observation: AgentWorkflowObservation) {
+  return {
+    selectedFiles: observation.selectedFiles,
+    packageJson: {
+      exists: observation.packageJson.exists,
+      dependencyCount: Object.keys(observation.packageJson.dependencies).length,
+      devDependencyCount: Object.keys(observation.packageJson.devDependencies).length,
+      parseError: observation.packageJson.parseError,
+    },
+    dependencyMap: {
+      localImports: observation.dependencies.localImports.length,
+      externalPackages: observation.dependencies.externalPackages,
+      missingLocalImports: observation.dependencies.missingLocalImports.slice(0, 8),
+      unsupportedPreviewImports: observation.dependencies.unsupportedPreviewImports.slice(0, 8),
+    },
+    prismaSchema: observation.prismaSchema,
+    previousAttempts: observation.previousAttempts.map((attempt) => ({
+      iteration: attempt.iteration,
+      changedFiles: attempt.changedFiles,
+      errors: attempt.errors,
+      fixes: attempt.fixes,
+    })),
+  }
 }
 
 async function runProviderAttempt(input: {
@@ -1525,6 +1827,7 @@ function buildSlicePrompt(input: {
   existingFiles: GeneratedFile[]
   target: GenerationPlannerFile
   targets?: GenerationPlannerFile[]
+  observation?: AgentWorkflowObservation
 }) {
   const context = buildContextForTask({
     prompt: input.prompt,
@@ -1595,6 +1898,17 @@ function buildSlicePrompt(input: {
     `- Allowed target files for this provider call: ${targetPaths.join(", ")}`,
     `- Planned objective: ${input.plan.objective}`,
     `- Controlled app type: ${input.plan.appType}`,
+    "",
+    "AGENT_WORKFLOW_CONTEXT:",
+    JSON.stringify(
+      {
+        tasks: input.plan.agentTasks,
+        actionPlan: input.plan.actionPlan,
+        observation: input.observation ? summarizeAgentObservation(input.observation) : null,
+      },
+      null,
+      2
+    ),
   ].join("\n")
 }
 
@@ -2333,6 +2647,7 @@ async function attemptTargetedRepair(input: {
   repairAttempt: number
   maxRepairAttempts: number
   promptLanguage: "id" | "en"
+  observation?: AgentWorkflowObservation
   signal?: AbortSignal
 }) {
   await GenerationJobService.assertNotCancelled(input.jobId)
@@ -2365,6 +2680,16 @@ async function attemptTargetedRepair(input: {
     "",
     "FAILING_FILES_CONTEXT:",
     failingFiles.map((file) => `FILE ${file.path}\n${file.content}`).join("\n\n"),
+    "",
+    "AGENT_WORKFLOW_CONTEXT:",
+    JSON.stringify(
+      {
+        observation: input.observation ? summarizeAgentObservation(input.observation) : null,
+        previousAttempts: input.observation?.previousAttempts || [],
+      },
+      null,
+      2
+    ),
   ].join("\n")
 
   const response = await runProviderAttempt({
@@ -2708,6 +3033,8 @@ export async function executeGenerationJob(
   let promptTokens = 0
   let completionTokens = 0
   let totalTokens = 0
+  const workflowMemory: AgentWorkflowMemoryEntry[] = []
+  let buildLogs: string[] = []
 
   try {
     assertNotAborted(input.signal)
@@ -2744,6 +3071,22 @@ export async function executeGenerationJob(
     })
     blueprint = getControlledAppBlueprint(plan.appType)
     const appPlan = buildAppPlan({ prompt: input.prompt, plan })
+    log("info", "intent", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      objective: plan.objective,
+      appType: plan.appType,
+      productionMode: plan.productionMode,
+      editMode: plan.editPlan.mode,
+      intent: intentStorageKey(plan.intent),
+    })
+    log("info", "plan", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      tasks: plan.agentTasks,
+      actions: plan.actionPlan,
+      filePlan: plan.filePlan,
+    })
     log("info", "app_plan", {
       jobId: input.jobId,
       projectId: input.projectId,
@@ -2785,11 +3128,34 @@ export async function executeGenerationJob(
           allowedNewPaths: plan.editPlan.allowedNewPaths,
         },
         filePlan: plan.filePlan,
+        agentTasks: plan.agentTasks,
+        actionPlan: plan.actionPlan,
         appPlan,
       },
     })
 
     let workingFiles = [...existingFiles]
+    let tools = createAgentWorkflowTools(workingFiles)
+    const initialObservation = observeAgentContext({
+      prompt: input.prompt,
+      plan,
+      files: workingFiles,
+      buildLogs,
+      previousAttempts: workflowMemory,
+    })
+    log("info", "agent_observe", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      iteration: 1,
+      ...summarizeAgentObservation(initialObservation),
+    })
+    log("info", "agent_plan", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      iteration: 1,
+      tasks: plan.agentTasks,
+      actions: plan.actionPlan,
+    })
     const fastScaffoldFiles = buildFastClinicFullStackScaffold({
       plan,
       prompt: input.prompt,
@@ -2798,9 +3164,29 @@ export async function executeGenerationJob(
     if (fastScaffoldFiles) {
       const previousWorkingFiles = workingFiles
       const scaffoldStartedAt = performance.now()
+      log("info", "agent_act", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        source: "fast_fullstack_scaffold",
+        actions: fastScaffoldFiles.map((file) => ({
+          action: previousWorkingFiles.some((existing) => normalizePath(existing.path) === normalizePath(file.path)) ? "modify" : "create",
+          file: normalizePath(file.path),
+        })),
+      })
       workingFiles = mergeFilesByPath(workingFiles, fastScaffoldFiles)
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
+      tools = createAgentWorkflowTools(workingFiles)
+      log("info", "agent_execute_tools", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        source: "fast_fullstack_scaffold",
+        tools: ["readFile", "writeFile", "listFiles", "searchFiles", "runCommand"],
+        changedFiles: fastScaffoldFiles.map((file) => normalizePath(file.path)),
+        fileCount: tools.listFiles().length,
+      })
       const scaffoldDurationMs = Math.round(performance.now() - scaffoldStartedAt)
       await transition(input.jobId, "parsing", "Generating compact full-stack clinic core", 55, {
         source: "fast_fullstack_scaffold",
@@ -2830,6 +3216,13 @@ export async function executeGenerationJob(
         source: "fast_fullstack_scaffold",
         fileCount: workingFiles.length,
         generatedFiles: summarizeGeneratedManifest(workingFiles),
+      })
+      log("info", "files_generated", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        source: "fast_fullstack_scaffold",
+        files: fastScaffoldFiles.map((file) => normalizePath(file.path)),
       })
     } else {
       if (plan.editPlan.mode === "partial") {
@@ -2868,6 +3261,21 @@ export async function executeGenerationJob(
       const sliceTotal = Math.ceil(plan.filePlan.length / sliceBatchSize)
       const previousWorkingFiles = workingFiles
       const providerStartedAt = performance.now()
+      const sliceObservation = observeAgentContext({
+        prompt: input.prompt,
+        plan,
+        files: workingFiles,
+        buildLogs,
+        previousAttempts: workflowMemory,
+      })
+      log("info", "agent_observe", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        sliceIndex,
+        sliceTotal,
+        ...summarizeAgentObservation(sliceObservation),
+      })
       const baseSlicePrompt = buildSlicePrompt({
           prompt: input.prompt,
           plan,
@@ -2875,6 +3283,19 @@ export async function executeGenerationJob(
           existingFiles: workingFiles,
           target,
           targets,
+          observation: sliceObservation,
+      })
+      log("info", "agent_act", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        sliceIndex,
+        sliceTotal,
+        actions: targets.map((item) => ({
+          action: workingFiles.some((file) => normalizePath(file.path) === normalizePath(item.path)) ? "modify" : "create",
+          file: normalizePath(item.path),
+          reason: item.reason,
+        })),
       })
       let response: Awaited<ReturnType<typeof runProviderAttempt>> | null = null
       let parsed: ReturnType<typeof parseGeneratedArtifact> | null = null
@@ -2943,6 +3364,22 @@ export async function executeGenerationJob(
         throw parseError instanceof Error ? parseError : new Error("MALFORMED_GENERATED_ARTIFACT")
       }
       assertNotAborted(input.signal)
+      log("info", "files_generated", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        sliceIndex,
+        sliceTotal,
+        operations: parsed.taskGraph?.operations.map((operation) => ({
+          action: operation.action,
+          file: normalizePath(operation.path),
+          reason: operation.reason || null,
+        })) || parsed.files.map((file) => ({
+          action: workingFiles.some((existing) => normalizePath(existing.path) === normalizePath(file.path)) ? "modify" : "create",
+          file: normalizePath(file.path),
+          reason: null,
+        })),
+      })
       const sliceDurationMs = Math.round(performance.now() - providerStartedAt)
       providerLatencyMs += sliceDurationMs
       promptTokens += Math.max(0, response.tokenUsage?.promptTokens || 0)
@@ -2967,6 +3404,17 @@ export async function executeGenerationJob(
       workingFiles = executed.files
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
+      tools = createAgentWorkflowTools(workingFiles)
+      log("info", "agent_execute_tools", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        sliceIndex,
+        tools: ["readFile", "writeFile", "listFiles", "searchFiles", "runCommand"],
+        changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)),
+        deletedPaths: executed.deletedPaths,
+        fileCount: tools.listFiles().length,
+      })
       const streamPaths = new Set([
         ...executed.changedFiles.map((file) => normalizePath(file.path)),
         ...(normalized.addedPackages.length > 0 || executed.installedDependencies.length > 0 ? ["package.json"] : []),
@@ -3041,14 +3489,94 @@ export async function executeGenerationJob(
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
+    const verificationCommands = (["lint", "typecheck", "build", "preview validation"] as const)
+      .map((command) => tools.runCommand(command, validation))
+    buildLogs = [
+      ...buildLogs,
+      ...verificationCommands.map((item) => `${item.command}:${item.status}${item.output ? `:${item.output}` : ""}`),
+    ].slice(-60)
+    log("info", "build_output", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      iteration: 1,
+      ok: validation.ok,
+      commands: verificationCommands,
+      failure: validation.failure || null,
+    })
+    log("info", "agent_verify", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      iteration: 1,
+      ok: validation.ok,
+      steps: validation.steps.map((step) => ({
+        name: step.name,
+        status: step.status,
+        policy: step.policy,
+      })),
+      failure: validation.failure || null,
+    })
+    if (!validation.ok) {
+      const contextMemoryEntry: AgentWorkflowMemoryEntry = {
+        iteration: 1,
+        changedFiles: plan.actionPlan.map((action) => action.file),
+        errors: [{
+          step: validation.failure?.step,
+          message: validation.failure?.message || "Validation failed",
+        }],
+        fixes: [],
+      }
+      workflowMemory.push(contextMemoryEntry)
+      log("info", "agent_context_updated", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration: 1,
+        memory: contextMemoryEntry,
+      })
+    }
 
     while (!validation.ok && repairAttempt < MAX_REPAIR_ATTEMPTS) {
       repairAttempt += 1
+      const iteration = repairAttempt + 1
       await GenerationJobService.update(input.jobId, {
         usedAutoRepair: true,
       })
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
+      const repairObservation = observeAgentContext({
+        prompt: input.prompt,
+        plan,
+        files: validation.files,
+        buildLogs,
+        previousAttempts: workflowMemory,
+      })
+      log("info", "agent_observe", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        ...summarizeAgentObservation(repairObservation),
+      })
+      const repairTargets = pickFailingFiles(validation.files, buildDependencyMap(validation.files), validation.failure?.message || "")
+      const repairActions = repairTargets.map((file): AgentWorkflowAction => ({
+        action: "modify",
+        file: normalizePath(file.path),
+        reason: validation?.failure?.message || "Validation failure repair target",
+      }))
+      log("info", "agent_plan", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        tasks: ["read error log", "repair failing files", "rerun verification"],
+        actions: repairActions,
+      })
+      log("info", "repair_iteration", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        repairAttempt,
+        maxIterations: MAX_AGENT_ITERATIONS,
+        failure: validation.failure,
+        targetFiles: repairActions.map((action) => action.file),
+      })
       await transition(
         input.jobId,
         "repairing",
@@ -3071,12 +3599,36 @@ export async function executeGenerationJob(
         repairAttempt,
         maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
         promptLanguage,
+        observation: repairObservation,
         signal: input.signal,
       })
 
       assertNotAborted(input.signal)
       workingFiles = repaired.files
+      tools = createAgentWorkflowTools(workingFiles)
       const previousRepairFiles = validation.files
+      log("info", "repair_result", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        repairAttempt,
+        repaired: repaired.repaired,
+        parsedFileCount: repaired.parsedFileCount,
+        acceptedFileCount: repaired.acceptedFileCount,
+        rejectedFiles: repaired.rejectedFiles,
+        deletedPaths: repaired.deletedPaths,
+        installedDependencies: repaired.installedDependencies,
+        addedPackages: repaired.addedPackages,
+      })
+      log("info", "agent_execute_tools", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        tools: ["readFile", "writeFile", "listFiles", "searchFiles", "runCommand"],
+        changedFiles: repaired.files.map((file) => normalizePath(file.path)),
+        deletedPaths: repaired.deletedPaths,
+        fileCount: tools.listFiles().length,
+      })
       await transition(
         input.jobId,
         "validating",
@@ -3122,6 +3674,54 @@ export async function executeGenerationJob(
         blueprint,
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
+      })
+      const repairVerificationCommands = (["lint", "typecheck", "build", "preview validation"] as const)
+        .map((command) => tools.runCommand(command, validation))
+      buildLogs = [
+        ...buildLogs,
+        ...repairVerificationCommands.map((item) => `${item.command}:${item.status}${item.output ? `:${item.output}` : ""}`),
+      ].slice(-60)
+      log("info", "build_output", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        ok: validation.ok,
+        commands: repairVerificationCommands,
+        failure: validation.failure || null,
+      })
+      log("info", "agent_verify", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        ok: validation.ok,
+        steps: validation.steps.map((step) => ({
+          name: step.name,
+          status: step.status,
+          policy: step.policy,
+        })),
+        failure: validation.failure || null,
+      })
+      const contextMemoryEntry: AgentWorkflowMemoryEntry = {
+        iteration,
+        changedFiles: repaired.files.map((file) => normalizePath(file.path)),
+        errors: validation.ok
+          ? []
+          : [{
+              step: validation.failure?.step,
+              message: validation.failure?.message || "Validation failed after repair",
+            }],
+        fixes: [
+          repaired.repaired ? "targeted repair applied" : "repair returned no accepted file changes",
+          ...repaired.addedPackages.map((packageName) => `added package ${packageName}`),
+          ...repaired.normalizedPackages.map((packageName) => `normalized package ${packageName}`),
+        ],
+      }
+      workflowMemory.push(contextMemoryEntry)
+      log("info", "agent_context_updated", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        iteration,
+        memory: contextMemoryEntry,
       })
       assertNotAborted(input.signal)
     }
@@ -3218,6 +3818,14 @@ export async function executeGenerationJob(
       steps: validation.steps,
       sandboxValidation: validation.sandboxValidation,
       failure: validation.failure || null,
+    }
+    metrics.agentWorkflow = {
+      maxIterations: MAX_AGENT_ITERATIONS,
+      completedIterations: Math.min(MAX_AGENT_ITERATIONS, repairAttempt + 1),
+      tasks: plan.agentTasks,
+      actionPlan: plan.actionPlan,
+      memory: workflowMemory,
+      buildLogs: buildLogs.slice(-20),
     }
     metrics.quality = {
       appType: plan.appType,
@@ -3389,6 +3997,13 @@ export async function executeGenerationJob(
           preservedFileCount: plan.editPlan.preservePaths.length,
         },
         fileCount: workingFiles.length,
+        agentWorkflow: {
+          maxIterations: MAX_AGENT_ITERATIONS,
+          completedIterations: Math.min(MAX_AGENT_ITERATIONS, repairAttempt + 1),
+          tasks: plan.agentTasks,
+          actionPlan: plan.actionPlan,
+          memory: workflowMemory,
+        },
       },
     })
     await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, validation.previewUrl)
@@ -3462,6 +4077,16 @@ export async function executeGenerationJob(
               intent: plan.editPlan.intent,
               targetPaths: plan.editPlan.targetPaths,
               allowedNewPaths: plan.editPlan.allowedNewPaths,
+            }
+          : null,
+        agentWorkflow: plan
+          ? {
+              maxIterations: MAX_AGENT_ITERATIONS,
+              completedIterations: Math.min(MAX_AGENT_ITERATIONS, repairAttempt + 1),
+              tasks: plan.agentTasks,
+              actionPlan: plan.actionPlan,
+              memory: workflowMemory,
+              buildLogs: buildLogs.slice(-20),
             }
           : null,
       },
