@@ -67,6 +67,11 @@ import {
   type GenerationMode,
   type IncrementalEditPlan,
 } from "@/lib/ai/incremental-edit"
+import {
+  autoRepairAdjacentJsxFragments,
+  validateRuntimeImports,
+  validateRuntimeSyntax,
+} from "@/lib/ai/runtime-tsx-validator"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
 import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
@@ -190,6 +195,8 @@ const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
 
 type ValidationLifecycleStep =
   | "normalize"
+  | "tsx-validation"
+  | "import-validation"
   | "static"
   | "preview-compile"
   | "dependency-install"
@@ -2666,6 +2673,62 @@ async function runValidationLifecycle(input: {
     conflictsPrevented: normalized.conflictsPrevented,
   })
 
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("validating", "Validating TSX and module syntax", 63)
+  let tsxValidation = validateRuntimeSyntax(files)
+  let tsxRepair = null as ReturnType<typeof autoRepairAdjacentJsxFragments> | null
+  if (!tsxValidation.ok) {
+    tsxRepair = autoRepairAdjacentJsxFragments(files, tsxValidation.diagnostics[0])
+    if (tsxRepair.repaired) {
+      files = tsxRepair.files
+      tsxValidation = validateRuntimeSyntax(files)
+    }
+  }
+  if (!tsxValidation.ok) {
+    const first = tsxValidation.diagnostics[0]
+    const message = first
+      ? `${first.file}${first.line ? ` Line ${first.line}, Column ${first.column ?? 0}` : ""}: ${first.message}`
+      : "TSX validation failed"
+    recordStep("tsx-validation", "failed", "required", stepStartedAt, message, {
+      diagnostics: tsxValidation.diagnostics,
+      repairPayload: first
+        ? {
+            mode: "syntax_repair",
+            targetFile: first.file,
+            error: first.message,
+            line: first.line,
+            column: first.column,
+          }
+        : null,
+      repairStrategy: first?.repairStrategy || "targeted_syntax_repair",
+      autoRepairAttempted: Boolean(tsxRepair),
+      autoRepairChangedFiles: tsxRepair?.changedFiles.map((file) => normalizePath(file.path)) || [],
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: "tsx_validation_failed",
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "tsx-validation",
+        message,
+        data: {
+          diagnostics: tsxValidation.diagnostics,
+          repairStrategy: first?.repairStrategy || "targeted_syntax_repair",
+          targetFile: first?.file || null,
+        },
+      },
+    }
+  }
+  recordStep("tsx-validation", "passed", "required", stepStartedAt, tsxRepair?.repaired ? "Auto fragment repair applied" : undefined, {
+    diagnostics: tsxValidation.diagnostics,
+    repairStrategy: tsxRepair?.strategy || null,
+    changedFiles: tsxRepair?.changedFiles.map((file) => normalizePath(file.path)) || [],
+  })
+
   if (input.plan.generationMode === "EDIT") {
     await GenerationJobService.assertNotCancelled(input.jobId)
     stepStartedAt = performance.now()
@@ -2717,9 +2780,47 @@ async function runValidationLifecycle(input: {
 
   await GenerationJobService.assertNotCancelled(input.jobId)
   stepStartedAt = performance.now()
-  await input.emit("validating", "Checking static project invariants", 66)
+  await input.emit("validating", "Validating runtime imports", 66)
   const fullstack = validateFullStackFiles(files)
   const dependencyMap = buildDependencyMap(files)
+  const importValidation = validateRuntimeImports(files)
+  if (!importValidation.ok) {
+    const first = importValidation.diagnostics[0]
+    const message = first
+      ? `${first.file}${first.line ? ` Line ${first.line}, Column ${first.column ?? 0}` : ""}: ${first.message}`
+      : "Import validation failed"
+    recordStep("import-validation", "failed", "required", stepStartedAt, message, {
+      diagnostics: importValidation.diagnostics,
+      missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
+      unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: "import_validation_failed",
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "import-validation",
+        message,
+        data: {
+          diagnostics: importValidation.diagnostics,
+          missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
+          unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
+        },
+      },
+    }
+  }
+  recordStep("import-validation", "passed", "required", stepStartedAt, undefined, {
+    diagnostics: [],
+    localImportCount: dependencyMap.localImports.length,
+    externalPackages: dependencyMap.externalPackages,
+  })
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("validating", "Checking static project invariants", 68)
   const plannedRequiredFiles = input.plan.filePlan.map((file) => normalizePath(file.path))
   const productionRequiredFilesForValidation =
     input.plan.productionMode === "production_fullstack"
@@ -2770,14 +2871,6 @@ async function runValidationLifecycle(input: {
     : { ok: true, diagnostics: [] as ReturnType<typeof validateArchitectureFiles>["diagnostics"] }
   const staticFailures: string[] = []
   const requiresFullStackCoverage = !isPreviewFoundationPass && shouldRequireFullStackCoverage(input.plan)
-
-  if (dependencyMap.missingLocalImports.length > 0) {
-    staticFailures.push(`Missing local imports: ${dependencyMap.missingLocalImports.length}`)
-  }
-
-  if (input.plan.productionMode !== "production_fullstack" && dependencyMap.unsupportedPreviewImports.length > 0) {
-    staticFailures.push(`Unsupported preview imports: ${dependencyMap.unsupportedPreviewImports.length}`)
-  }
 
   if (requiresFullStackCoverage && fullstack.missingCategories.length > 0) {
     staticFailures.push(`Missing required full-stack categories: ${fullstack.missingCategories.join(", ")}`)
@@ -3360,6 +3453,8 @@ async function attemptTargetedRepair(input: {
   const currentFiles = [...input.files]
   const dependencyMap = buildDependencyMap(currentFiles)
   const failingFiles = pickFailingFiles(currentFiles, dependencyMap, input.validationError)
+  const syntaxRepairOnly = /tsx[-_ ]validation|Adjacent JSX|Missing closing tag|Unexpected token|Invalid import syntax|Duplicate export/i.test(input.validationError)
+  const failingPathSet = new Set(failingFiles.map((file) => normalizePath(file.path)))
   const repairPrompt = [
     buildStaticValidationPrompt({
       prompt: input.prompt,
@@ -3379,6 +3474,9 @@ async function attemptTargetedRepair(input: {
     "",
     "TARGETED_REPAIR_ONLY:",
     "- Repair only the failing files or their direct imports.",
+    syntaxRepairOnly
+      ? `- SYNTAX_REPAIR_MODE: return changes only for these failing file paths: ${Array.from(failingPathSet).join(", ")}. Do not touch imports unless the syntax diagnostic explicitly names an import statement.`
+      : "- Business or architecture repair may add direct missing dependencies only when validation requires them.",
     "- Do not regenerate the entire project.",
     "- Return only changed files.",
     "- Never create or modify next-auth.d.ts, root auth.ts, or any .env file during repair; use app/ route handlers or lib/ helpers for NextAuth changes.",
@@ -3438,9 +3536,14 @@ async function attemptTargetedRepair(input: {
       failureMessage: error instanceof Error ? error.message : String(error),
     }
   }
-  const scoped = parsed.taskGraph
-    ? { acceptedFiles: parsed.files, rejectedFiles: [] as GeneratedFile[] }
-    : filterFilesForPartialEdit(parsed.files, input.editPlan)
+  const scoped = syntaxRepairOnly
+    ? {
+        acceptedFiles: parsed.files.filter((file) => failingPathSet.has(normalizePath(file.path))),
+        rejectedFiles: parsed.files.filter((file) => !failingPathSet.has(normalizePath(file.path))),
+      }
+    : parsed.taskGraph
+      ? { acceptedFiles: parsed.files, rejectedFiles: [] as GeneratedFile[] }
+      : filterFilesForPartialEdit(parsed.files, input.editPlan)
   const executed = executeGeneratedTaskGraph(currentFiles, parsed.taskGraph, scoped.acceptedFiles, parsed.dependencies)
   const mergedFiles = executed.files
   const normalized = normalizeGeneratedDependencies(mergedFiles)
@@ -3688,6 +3791,8 @@ body {
 function mapLifecycleFailureToQualityStage(step?: ValidationLifecycleStep | null): GenerationQualityStage {
   if (!step) return "unknown"
   if (step === "static") return "static-validation"
+  if (step === "tsx-validation") return "static-validation"
+  if (step === "import-validation") return "static-validation"
   if (step === "dependency-install") return "dependency-planning"
   if (step === "preview-compile") return "preview-compile"
   if (step === "typecheck") return "typecheck"
