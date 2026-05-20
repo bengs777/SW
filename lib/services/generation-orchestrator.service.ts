@@ -58,6 +58,13 @@ import {
   type SwiftProjectMemoryGraph,
 } from "@/lib/ai/project-memory-graph"
 import { validateArchitectureFiles } from "@/lib/ai/architecture-validator"
+import {
+  applyDeterministicIncrementalPatch,
+  buildIncrementalEditPlan,
+  validateIncrementalPatch,
+  type GenerationMode,
+  type IncrementalEditPlan,
+} from "@/lib/ai/incremental-edit"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
 import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
@@ -122,9 +129,11 @@ type AgentWorkflowObservation = {
 
 type GenerationPlan = {
   objective: string
+  generationMode: GenerationMode
   appType: ControlledAppType
   intent: IntentAnalysis
   structuredIntent: SwiftStructuredIntent
+  incrementalEdit: IncrementalEditPlan
   editPlan: PartialEditPlan
   productionMode: "preview" | "production_fullstack"
   maxFilesThisPass: number
@@ -1312,11 +1321,19 @@ function buildGenerationPlan(input: {
     collaborationMode: input.collaborationMode,
     previewContext,
   })
+  const incrementalEdit = buildIncrementalEditPlan({
+    prompt: input.prompt,
+    files: input.existingFiles,
+    collaborationMode: input.collaborationMode,
+    activeFilePath: previewContext?.activeFilePath || null,
+    previewErrorFile: previewContext?.previewError?.filename || null,
+  })
   const appType = intent.appType || classifyControlledAppType(input.prompt)
   const blueprint = getControlledAppBlueprint(appType)
-  const productionMode = shouldUseProductionFullStackMode(input.prompt, {
+  const generationMode = incrementalEdit.generationMode
+  const productionMode = generationMode === "BUILD" && (shouldUseProductionFullStackMode(input.prompt, {
     collaborationMode: input.collaborationMode,
-  }) || structuredIntent.type === "fullstack_app"
+  }) || structuredIntent.type === "fullstack_app")
     ? "production_fullstack"
     : "preview"
   const architecture = buildArchitecturePlan({
@@ -1447,9 +1464,11 @@ function buildGenerationPlan(input: {
 
   return {
     objective: classification,
+    generationMode,
     appType,
     intent,
     structuredIntent,
+    incrementalEdit,
     editPlan,
     productionMode,
     maxFilesThisPass,
@@ -2180,6 +2199,8 @@ function buildSlicePrompt(input: {
     `- Why this file matters: ${input.target.reason}`,
     `- Allowed target files for this provider call: ${targetPaths.join(", ")}`,
     `- Planned objective: ${input.plan.objective}`,
+    `- Generation mode: ${input.plan.generationMode}`,
+    `- Incremental edit intent: ${input.plan.incrementalEdit.editIntent || "none"}`,
     `- Controlled app type: ${input.plan.appType}`,
     "",
     "AGENT_WORKFLOW_CONTEXT:",
@@ -2187,6 +2208,7 @@ function buildSlicePrompt(input: {
       {
         tasks: input.plan.agentTasks,
         actionPlan: input.plan.actionPlan,
+        incrementalEdit: input.plan.incrementalEdit,
         projectMemory: input.plan.projectMemory,
         dependencyGraph: input.plan.dependencyGraph,
         observation: input.observation ? summarizeAgentObservation(input.observation) : null,
@@ -3290,6 +3312,7 @@ async function attemptTargetedRepair(input: {
     JSON.stringify(
       {
         observation: input.observation ? summarizeAgentObservation(input.observation) : null,
+        incrementalEdit: input.plan.incrementalEdit,
         architecturePlan: input.plan.architecture,
         projectMemory: input.plan.projectMemory,
         dependencyGraph: input.plan.dependencyGraph,
@@ -3737,10 +3760,12 @@ export async function executeGenerationJob(
     const appPlan = buildAppPlan({ prompt: input.prompt, plan })
     developerDiagnostics.plannerOutput = {
       objective: plan.objective,
+      generationMode: plan.generationMode,
       appType: plan.appType,
       productionMode: plan.productionMode,
       intent: plan.intent,
       structuredIntent: plan.structuredIntent,
+      incrementalEdit: plan.incrementalEdit,
       filePlan: plan.filePlan,
       agentTasks: plan.agentTasks,
       actionPlan: plan.actionPlan,
@@ -3808,11 +3833,13 @@ export async function executeGenerationJob(
       message: "Architecture plan ready",
       data: {
         objective: plan.objective,
+        generationMode: plan.generationMode,
         appType: plan.appType,
         productionMode: plan.productionMode,
         maxFilesThisPass: plan.maxFilesThisPass,
         intent: plan.intent,
         structuredIntent: plan.structuredIntent,
+        incrementalEdit: plan.incrementalEdit,
         blueprint: plan.blueprint,
         architecturePlan: plan.architecture,
         projectMemoryGraph: plan.projectMemory,
@@ -3852,6 +3879,142 @@ export async function executeGenerationJob(
       tasks: plan.agentTasks,
       actions: plan.actionPlan,
     })
+
+    if (plan.generationMode === "EDIT") {
+      await transition(input.jobId, "generating", "Applying scoped incremental edit", 35, {
+        generationMode: plan.generationMode,
+        editIntent: plan.incrementalEdit.editIntent,
+        affectedFiles: plan.incrementalEdit.affectedFiles,
+        relatedFiles: plan.incrementalEdit.relatedFiles,
+      })
+      const patch = applyDeterministicIncrementalPatch({
+        prompt: input.prompt,
+        files: workingFiles,
+        plan: plan.incrementalEdit,
+      })
+
+      if (patch.applied) {
+        const scopedValidation = validateIncrementalPatch({
+          files: patch.files,
+          changedFiles: patch.changedFiles,
+          plan: plan.incrementalEdit,
+        })
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: scopedValidation.ok ? "VALIDATING" : "REPAIRING",
+          status: scopedValidation.ok ? "passed" : "failed",
+          reason: scopedValidation.ok ? "Incremental edit passed scoped validation" : "Incremental edit failed scoped validation",
+          data: {
+            generationMode: plan.generationMode,
+            editIntent: plan.incrementalEdit.editIntent,
+            affectedFiles: plan.incrementalEdit.affectedFiles,
+            relatedFiles: plan.incrementalEdit.relatedFiles,
+            patchSummary: patch.patchSummary,
+            incrementalValidator: scopedValidation,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+
+        if (scopedValidation.ok) {
+          const previousWorkingFiles = workingFiles
+          workingFiles = patch.files
+          await emitGeneratedFilesUpdate({
+            jobId: input.jobId,
+            stage: "validating",
+            message: "Scoped edit ready in Explorer",
+            allFiles: workingFiles,
+            previousFiles: previousWorkingFiles,
+            changedFiles: patch.changedFiles,
+            deletedPaths: [],
+            source: "slice",
+            data: {
+              generationMode: plan.generationMode,
+              editIntent: plan.incrementalEdit.editIntent,
+              affectedFiles: plan.incrementalEdit.affectedFiles,
+              patchSummary: patch.patchSummary,
+              incrementalValidator: scopedValidation,
+            },
+          })
+
+          const finalProjectMemory = buildProjectMemoryGraph({
+            files: workingFiles,
+            intent: plan.structuredIntent,
+            architecturePlan: plan.architecture,
+          })
+          const finalDependencyGraph = buildArchitectureDependencyGraph({
+            intent: plan.structuredIntent,
+            architecturePlan: plan.architecture,
+            memory: finalProjectMemory,
+          })
+          const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
+            projectId: input.projectId,
+            prompt: input.prompt,
+            files: workingFiles,
+            projectMemoryJson: JSON.stringify({
+              ...finalProjectMemory,
+              dependencyGraph: finalDependencyGraph,
+              structureLock: {
+                lockedAt: new Date().toISOString(),
+                generationMode: plan.generationMode,
+                protectedPaths: plan.projectMemory.routes,
+              },
+            }),
+            idempotencyKey: input.persistenceKey,
+            generationJobId: input.jobId,
+            intent: intentStorageKey(plan.intent),
+            usedAutoRepair: false,
+          })
+
+          metrics.incrementalEdit = {
+            generationMode: plan.generationMode,
+            editIntent: plan.incrementalEdit.editIntent,
+            affectedFiles: plan.incrementalEdit.affectedFiles,
+            changedFiles: patch.changedFiles.map((file) => normalizePath(file.path)),
+            patchSummary: patch.patchSummary,
+            validator: scopedValidation,
+          }
+          await GenerationJobService.update(input.jobId, {
+            metrics,
+            intent: intentStorageKey(plan.intent),
+            usedAutoRepair: false,
+            previewUrl: null,
+          })
+          await appendOrchestrationEvent({
+            jobId: input.jobId,
+            trace: {
+              traceId: correlation.traceId,
+              workerId: null,
+            },
+            type: "incremental_edit_completed",
+            stage: "completed",
+            status: "completed",
+            message: "Incremental edit completed",
+            data: {
+              generationMode: plan.generationMode,
+              editIntent: plan.incrementalEdit.editIntent,
+              affectedFiles: plan.incrementalEdit.affectedFiles,
+              changedFiles: patch.changedFiles.map((file) => normalizePath(file.path)),
+              patchSummary: patch.patchSummary,
+              incrementalValidator: scopedValidation,
+            },
+          })
+          recordDeveloperDiagnostic(developerDiagnostics, {
+            stage: "READY",
+            status: "passed",
+            reason: "Scoped incremental edit persisted",
+            data: metrics.incrementalEdit as Record<string, unknown>,
+          })
+          await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+          await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, null)
+
+          return {
+            historyId: saveResult.historyId,
+            files: workingFiles,
+            previewUrl: null,
+          }
+        }
+      }
+    }
+
     const fastScaffoldFiles = buildFastClinicFullStackScaffold({
       plan,
       prompt: input.prompt,

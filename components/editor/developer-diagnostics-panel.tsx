@@ -144,6 +144,7 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
             <JsonSection title="Architecture Plan" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.architecturePlan} />
             <JsonSection title="Project Memory Graph" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.projectMemoryGraph} />
             <JsonSection title="Dependency Graph" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.dependencyGraph} />
+            <JsonSection title="Incremental Edit" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.incrementalEdit || (diagnostics.metrics as Record<string, unknown> | undefined)?.incrementalEdit} />
             <JsonSection title="Generated Artifact Summary" value={developer?.generatedArtifactSummary} />
             <JsonSection title="Validator Failures" value={developer?.validatorFailures} />
             <JsonSection title="Artifact Parse Failures" value={developer?.artifactParseFailures} />

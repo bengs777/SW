@@ -3,6 +3,13 @@ import { buildImportGraph, getTransitiveImpactPaths } from "@/lib/ai/import-grap
 
 export type EditIntent =
   | "full_generation"
+  | "text_update"
+  | "component_patch"
+  | "style_update"
+  | "route_update"
+  | "api_extension"
+  | "db_extension"
+  | "auth_extension"
   | "feature_addition"
   | "file_scoped_edit"
   | "component_scoped_edit"
@@ -65,7 +72,7 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
       mode === "fix" ||
       mode === "review" ||
       intent !== "full_generation" ||
-      /\b(add|tambahkan|ubah|change|update|edit|fix|perbaiki|connect|integrate|refine|polish)\b/i.test(prompt))
+      /\b(add|tambahkan|ganti|ubah|change|rename|update|edit|fix|perbaiki|connect|integrate|refine|polish)\b/i.test(prompt))
 
   if (!partial) {
     return {
@@ -224,16 +231,44 @@ function classifyEditIntent(prompt: string, mode: string): EditIntent {
     return "payment_integration"
   }
 
+  if (/\b(auth|login|register|session|admin login|nextauth|role|rbac)\b/.test(prompt)) {
+    return "auth_extension"
+  }
+
+  if (/\b(schema|prisma|model\s+\w+|database|migration|lead schema|ubah schema)\b/.test(prompt)) {
+    return "db_extension"
+  }
+
   if (/\b(schema|prisma|model\s+\w+|database|migration|lead schema|ubah schema)\b/.test(prompt)) {
     return "schema_change"
+  }
+
+  if (/\b(api|route handler|endpoint|webhook|connect|integrate|hubungkan)\b/.test(prompt)) {
+    return "api_extension"
   }
 
   if (/\b(api|route handler|endpoint|webhook|connect|integrate|hubungkan)\b/.test(prompt)) {
     return "api_change"
   }
 
+  if (/\b(route|page|halaman|navigation path)\b/.test(prompt)) {
+    return "route_update"
+  }
+
   if (/\b(component|section|card|modal|dialog|form|button|table|chart)\b/.test(prompt)) {
+    return "component_patch"
+  }
+
+  if (/\b(component|komponen|section|card|modal|dialog|form|button|tombol|navbar|nav|menu|table|chart|tambahkan|add)\b/.test(prompt)) {
     return "component_scoped_edit"
+  }
+
+  if (/\b(title|judul|headline|copy|text|teks|label|ganti|ubah|change|rename)\b/.test(prompt)) {
+    return "text_update"
+  }
+
+  if (/\b(copy|text|warna|color|style|spacing|polish|visual|responsive|mobile)\b/.test(prompt)) {
+    return "style_update"
   }
 
   if (/\b(copy|text|warna|color|style|spacing|polish|visual|responsive|mobile)\b/.test(prompt)) {
@@ -286,7 +321,7 @@ function addIntentPaths(input: {
     return
   }
 
-  if (input.intent === "schema_change") {
+  if (input.intent === "schema_change" || input.intent === "db_extension") {
     addExistingMatches([/^prisma\/schema\.prisma$/i, /lead/i, /crm/i, /^lib\/services\//i, /^app\/api\//i], 6)
     if (/lead|crm|pipeline/.test(input.prompt)) {
       input.allowedNewPaths.add("app/api/leads/route.ts")
@@ -295,7 +330,7 @@ function addIntentPaths(input: {
     return
   }
 
-  if (input.intent === "api_change") {
+  if (input.intent === "api_change" || input.intent === "api_extension") {
     addExistingMatches([/^app\/api\//i, /^lib\/services\//i, /^prisma\/schema\.prisma$/i], 6)
     return
   }
@@ -318,6 +353,22 @@ function addIntentPaths(input: {
     input.allowedNewPaths.add("app/crm/page.tsx")
     input.allowedNewPaths.add("app/api/leads/route.ts")
     input.allowedNewPaths.add("lib/services/lead.service.ts")
+    return
+  }
+
+  if (input.intent === "text_update") {
+    addExistingMatches([/^app\/page\.tsx$/i, /^app\/.+\/page\.tsx$/i, /^components\//i], 1)
+    return
+  }
+
+  if (input.intent === "component_patch" || input.intent === "style_update" || input.intent === "route_update") {
+    addExistingMatches([/^app\/page\.tsx$/i, /^components\//i, /^app\/.+\/page\.tsx$/i, /^app\/globals\.css$/i], 5)
+    return
+  }
+
+  if (input.intent === "auth_extension") {
+    addExistingMatches([/auth/i, /^app\/api\/auth\//i, /^app\/page\.tsx$/i, /^lib\//i], 5)
+    input.allowedNewPaths.add("app/api/auth/[...nextauth]/route.ts")
     return
   }
 
@@ -374,9 +425,10 @@ function isGeneratedSupportFile(path: string, plan: PartialEditPlan) {
 
 function maxSlicesForIntent(intent: EditIntent) {
   if (intent === "payment_integration") return 6
-  if (intent === "schema_change" || intent === "upload_integration") return 4
-  if (intent === "api_change" || intent === "pricing_page") return 4
+  if (intent === "schema_change" || intent === "db_extension" || intent === "upload_integration") return 4
+  if (intent === "api_change" || intent === "api_extension" || intent === "auth_extension" || intent === "pricing_page") return 4
   if (intent === "runtime_fix") return 4
+  if (intent === "text_update") return 1
   return 3
 }
 
