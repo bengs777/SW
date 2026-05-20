@@ -35,6 +35,11 @@ function main() {
   const generationWorker = read("lib/workers/generation-worker.ts")
   const sandboxRuntime = read("lib/sandbox/runtime.ts")
   const metricsRoute = read("app/api/metrics/route.ts")
+  const schemaHealth = read("lib/db/schema-health.ts")
+  const schemaHealthRoute = read("app/api/system/schema-health/route.ts")
+  const schemaHealthCheck = read("scripts/schema-health-check.js")
+  const instrumentation = read("instrumentation.ts")
+  const vercelBuild = read("scripts/vercel-build.js")
 
   assert(
     "script.registered",
@@ -215,6 +220,33 @@ function main() {
       /preview_terminated: ttl cleanup/.test(sandboxRuntime) &&
       /SWIFT_PREVIEW_TTL_MS/.test(sandboxRuntime),
     "runtime sandboxes have TTL cleanup and zombie process termination"
+  )
+
+  assert(
+    "schema.guard",
+    /REQUIRED_ORCHESTRATION_MIGRATION\s*=\s*"20260520120000_production_orchestration_hardening"/.test(schemaHealth) &&
+      /assertDatabaseSchemaCompatible/.test(schemaHealth) &&
+      /Database schema incompatible with runtime/.test(schemaHealth) &&
+      /runFailClosed\("database_schema"/.test(instrumentation),
+    "startup fails closed before worker startup when the production orchestration schema is missing"
+  )
+
+  assert(
+    "schema.health-endpoint",
+    /getDatabaseSchemaHealth/.test(schemaHealthRoute) &&
+      /probableRootCause:\s*"database schema mismatch"/.test(schemaHealthRoute) &&
+      /Cache-Control"[\s\S]*no-store/.test(schemaHealthRoute),
+    "schema health endpoint reports compatibility and database schema mismatch diagnostics"
+  )
+
+  assert(
+    "deploy.preflight-schema",
+    /"schema:health":\s*"node scripts\/schema-health-check\.js"/.test(JSON.stringify(packageJson)) &&
+      /"deploy:preflight":/.test(JSON.stringify(packageJson)) &&
+      /prisma migrate status/.test(vercelBuild) &&
+      /schema-health-check\.js/.test(vercelBuild) &&
+      /assertPrismaClientUnderstandsRuntimeSchema/.test(schemaHealthCheck),
+    "deployment checks migration status, generated Prisma client compatibility, and runtime schema health"
   )
 
   console.log("\n[hardening] pipeline hardening regression checks passed")

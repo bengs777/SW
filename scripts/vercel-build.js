@@ -93,8 +93,20 @@ async function runPrismaGenerateWithRetry() {
   }
 }
 
+function runDeploymentPreflight() {
+  console.log("[vercel-build] checking migration status...")
+  execSync("npx prisma migrate status", { stdio: "inherit", env })
+}
+
+function runSchemaCompatibilityCheck() {
+  console.log("[vercel-build] checking runtime database schema compatibility...")
+  execSync("node scripts/schema-health-check.js", { stdio: "inherit", env })
+}
+
 ;(async () => {
+  runDeploymentPreflight()
   await runPrismaGenerateWithRetry()
+  runSchemaCompatibilityCheck()
 
   execSync("npx next build --webpack", { stdio: "inherit", env })
 })().catch((error) => {

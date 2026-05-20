@@ -21,6 +21,23 @@ async function runFailOpen(stage: string, task: () => Promise<void> | void) {
   }
 }
 
+async function runFailClosed(stage: string, task: () => Promise<void> | void) {
+  console.info("[INSTRUMENTATION_INIT]", {
+    stage,
+    runtime: process.env.NEXT_RUNTIME || "nodejs",
+  })
+
+  try {
+    await task()
+  } catch (error) {
+    console.error("[INSTRUMENTATION_FATAL]", {
+      stage,
+      ...errorPayload(error),
+    })
+    throw error
+  }
+}
+
 async function warnMissingProductionEnv() {
   if (typeof window !== "undefined" || process.env.NODE_ENV !== "production") {
     return
@@ -52,8 +69,20 @@ function shouldStartOrchestrationCleanup() {
   return true
 }
 
+async function assertRuntimeDatabaseSchema() {
+  if (process.env.SWIFT_SKIP_SCHEMA_GUARD === "true") {
+    console.warn("[INSTRUMENTATION_WARNING]", "SWIFT_SKIP_SCHEMA_GUARD=true; database schema compatibility guard skipped")
+    return
+  }
+
+  const { assertDatabaseSchemaCompatible } = await import("@/lib/db/schema-health")
+  await assertDatabaseSchemaCompatible()
+}
+
 export async function register() {
   await runFailOpen("environment", warnMissingProductionEnv)
+
+  await runFailClosed("database_schema", assertRuntimeDatabaseSchema)
 
   await runFailOpen("generation_worker", async () => {
     if (shouldStartGenerationWorker()) {

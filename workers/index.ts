@@ -24,8 +24,19 @@ function parseArgs(): SwiftWorkerType | undefined {
 // Load environment
 require("dotenv").config()
 
+function assertRuntimeDatabaseSchema() {
+  if (process.env.SWIFT_SKIP_SCHEMA_GUARD === "true") {
+    console.warn("[Worker] SWIFT_SKIP_SCHEMA_GUARD=true; database schema compatibility guard skipped")
+    return
+  }
+
+  const { execFileSync } = require("node:child_process")
+  execFileSync(process.execPath, ["scripts/schema-health-check.js"], { stdio: "inherit" })
+}
+
 async function startWorker(workerType: SwiftWorkerType) {
   console.log(`[Worker] Starting ${workerType} worker...`)
+  assertRuntimeDatabaseSchema()
 
   // Setup shutdown handlers
   const { setupShutdownHandlers, registerWorker } = require("./graceful-shutdown")
