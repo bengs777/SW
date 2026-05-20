@@ -45,6 +45,19 @@ import {
   type PartialEditPlan,
 } from "@/lib/ai/edit-planner"
 import { analyzePromptIntent, buildIntentInstructionBlock, type IntentAnalysis } from "@/lib/ai/intent-analyzer"
+import { parseStructuredIntent, type SwiftStructuredIntent } from "@/lib/ai/architecture-intent"
+import {
+  buildArchitectureInstructionBlock,
+  buildArchitecturePlan,
+  type SwiftArchitecturePlan,
+} from "@/lib/ai/architecture-planner"
+import {
+  buildArchitectureDependencyGraph,
+  buildProjectMemoryGraph,
+  type SwiftDependencyGraph,
+  type SwiftProjectMemoryGraph,
+} from "@/lib/ai/project-memory-graph"
+import { validateArchitectureFiles } from "@/lib/ai/architecture-validator"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
 import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
@@ -111,6 +124,7 @@ type GenerationPlan = {
   objective: string
   appType: ControlledAppType
   intent: IntentAnalysis
+  structuredIntent: SwiftStructuredIntent
   editPlan: PartialEditPlan
   productionMode: "preview" | "production_fullstack"
   maxFilesThisPass: number
@@ -121,6 +135,9 @@ type GenerationPlan = {
   }
   filePlan: GenerationPlannerFile[]
   architecturePlan: string[]
+  architecture: SwiftArchitecturePlan
+  projectMemory: SwiftProjectMemoryGraph
+  dependencyGraph: SwiftDependencyGraph
   dependencyPlan: string[]
   fileGraphPlan: string[]
   agentTasks: string[]
@@ -1285,6 +1302,10 @@ function buildGenerationPlan(input: {
     previewError: previewContext?.previewError?.message || null,
   })
   const intent = detectIntent(input.prompt)
+  const structuredIntent = parseStructuredIntent({
+    prompt: input.prompt,
+    appType: intent.appType,
+  })
   const editPlan = buildPartialEditPlan({
     prompt: input.prompt,
     existingFiles: input.existingFiles,
@@ -1295,9 +1316,23 @@ function buildGenerationPlan(input: {
   const blueprint = getControlledAppBlueprint(appType)
   const productionMode = shouldUseProductionFullStackMode(input.prompt, {
     collaborationMode: input.collaborationMode,
-  })
+  }) || structuredIntent.type === "fullstack_app"
     ? "production_fullstack"
     : "preview"
+  const architecture = buildArchitecturePlan({
+    intent: structuredIntent,
+    existingFiles: input.existingFiles,
+  })
+  const projectMemory = buildProjectMemoryGraph({
+    files: input.existingFiles,
+    intent: structuredIntent,
+    architecturePlan: architecture,
+  })
+  const dependencyGraph = buildArchitectureDependencyGraph({
+    intent: structuredIntent,
+    architecturePlan: architecture,
+    memory: projectMemory,
+  })
   const requiredFilesForIntent = getRequiredFiles(intent, {
     prompt: input.prompt,
     productionMode,
@@ -1326,6 +1361,25 @@ function buildGenerationPlan(input: {
       })
     }
   } else {
+    for (const filePath of [
+      ...architecture.frontend.pages,
+      ...architecture.backend.apiRoutes,
+      ...architecture.backend.services,
+      architecture.database.schema,
+      ...architecture.storage.adapters,
+      ...architecture.payments.routes,
+      ...architecture.payments.services,
+      ".env.example",
+    ].filter((filePath) => filePath && filePath !== "none").slice(0, maxFilesThisPass)) {
+      if (plannedByPath.size >= maxFilesThisPass) break
+      const path = normalizePath(filePath)
+      plannedByPath.set(path, {
+        path,
+        reason: `Structured architecture plan requires ${path}`,
+        action: "create_or_update",
+      })
+    }
+
     for (const filePath of extractRequestedFilePaths(input.prompt).slice(0, maxFilesThisPass)) {
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
@@ -1395,6 +1449,7 @@ function buildGenerationPlan(input: {
     objective: classification,
     appType,
     intent,
+    structuredIntent,
     editPlan,
     productionMode,
     maxFilesThisPass,
@@ -1405,10 +1460,14 @@ function buildGenerationPlan(input: {
     },
     filePlan,
     architecturePlan: blueprint.architectureRules,
+    architecture,
+    projectMemory,
+    dependencyGraph,
     dependencyPlan: [
       "Use only the locked Swift stack.",
       `Allowed packages: ${blueprint.dependencyPolicy.allowedExternalPackages.join(", ")}`,
       "Do not introduce alternate frameworks, databases, routers, or package managers.",
+      `Required env vars: ${architecture.requiredEnvVars.join(", ") || "none"}`,
     ],
     fileGraphPlan: filePlan.map((file) => `${file.path}: ${file.reason}`),
     agentTasks,
@@ -2066,6 +2125,8 @@ function buildSlicePrompt(input: {
     "",
     buildBlueprintInstructionBlock(input.blueprint),
     "",
+    buildArchitectureInstructionBlock(input.plan.architecture),
+    "",
     buildPartialEditInstructionBlock(input.plan.editPlan),
     "",
     "EXECUTION_RULES:",
@@ -2126,6 +2187,8 @@ function buildSlicePrompt(input: {
       {
         tasks: input.plan.agentTasks,
         actionPlan: input.plan.actionPlan,
+        projectMemory: input.plan.projectMemory,
+        dependencyGraph: input.plan.dependencyGraph,
         observation: input.observation ? summarizeAgentObservation(input.observation) : null,
       },
       null,
@@ -2261,11 +2324,17 @@ function buildAppPlan(input: { prompt: string; plan: GenerationPlan }) {
     appType: input.plan.appType,
     objective: input.plan.objective,
     productionMode: input.plan.productionMode,
+    structuredIntent: input.plan.structuredIntent,
     database: input.plan.productionMode === "production_fullstack",
     authentication: /\b(auth|login|register|role|rbac|admin|user|pengelola|dokter|pasien|patient)\b/i.test(text),
     api: input.plan.productionMode === "production_fullstack",
     roles: Array.from(new Set(roles)),
-    integrations: Array.from(new Set(integrations)),
+    integrations: Array.from(new Set([
+      ...integrations,
+      ...input.plan.structuredIntent.integrations.map((integration) => `${integration.kind}:${integration.provider}`),
+    ])),
+    architecture: input.plan.architecture,
+    dependencyGraph: input.plan.dependencyGraph,
     fileCount: input.plan.filePlan.length,
     generatedFiles: input.plan.filePlan.map((file) => file.path),
   }
@@ -2601,6 +2670,23 @@ async function runValidationLifecycle(input: {
   const dependencyContract = input.plan.productionMode === "production_fullstack"
     ? assertDependenciesForBlueprint(files, input.blueprint)
     : { ok: true, missing: [] as string[], parseError: null as string | null, required: [] as string[] }
+  const currentMemory = buildProjectMemoryGraph({
+    files,
+    intent: input.plan.structuredIntent,
+    architecturePlan: input.plan.architecture,
+  })
+  const currentDependencyGraph = buildArchitectureDependencyGraph({
+    intent: input.plan.structuredIntent,
+    architecturePlan: input.plan.architecture,
+    memory: currentMemory,
+  })
+  const architectureValidation = input.plan.productionMode === "production_fullstack"
+    ? validateArchitectureFiles({
+        files,
+        architecturePlan: input.plan.architecture,
+        dependencyGraph: currentDependencyGraph,
+      })
+    : { ok: true, diagnostics: [] as ReturnType<typeof validateArchitectureFiles>["diagnostics"] }
   const staticFailures: string[] = []
   const requiresFullStackCoverage = !isPreviewFoundationPass && shouldRequireFullStackCoverage(input.plan)
 
@@ -2641,6 +2727,16 @@ async function runValidationLifecycle(input: {
     }
   }
 
+  if (!architectureValidation.ok) {
+    staticFailures.push(
+      `Architecture validation failed: ${architectureValidation.diagnostics
+        .filter((diagnostic) => diagnostic.severity === "error")
+        .map((diagnostic) => diagnostic.message)
+        .slice(0, 8)
+        .join("; ")}`
+    )
+  }
+
   if (staticFailures.length > 0) {
     const message = staticFailures.join("; ")
     const data = {
@@ -2653,6 +2749,9 @@ async function runValidationLifecycle(input: {
         forbiddenFiles: blueprintValidation.forbiddenFiles,
       },
       dependencies: dependencyContract,
+      architectureValidation,
+      projectMemory: currentMemory,
+      dependencyGraph: currentDependencyGraph,
       mockArtifacts,
       missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
       unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
@@ -2681,6 +2780,9 @@ async function runValidationLifecycle(input: {
     blueprintRequiredFiles: input.plan.blueprint.requiredFiles.length,
     requiredFilesMissing: blueprintValidation.missingRequiredFiles,
     dependencies: dependencyContract,
+    architectureValidation,
+    projectMemory: currentMemory,
+    dependencyGraph: currentDependencyGraph,
     mockArtifacts,
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
@@ -3137,6 +3239,7 @@ async function attemptTargetedRepair(input: {
   projectId: string
   prompt: string
   files: GeneratedFile[]
+  plan: GenerationPlan
   blueprint: ControlledAppBlueprint
   editPlan: PartialEditPlan
   validationError: string
@@ -3159,6 +3262,8 @@ async function attemptTargetedRepair(input: {
     }),
     "",
     buildBlueprintInstructionBlock(input.blueprint),
+    "",
+    buildArchitectureInstructionBlock(input.plan.architecture),
     "",
     buildPartialEditInstructionBlock(input.editPlan),
     "",
@@ -3185,6 +3290,10 @@ async function attemptTargetedRepair(input: {
     JSON.stringify(
       {
         observation: input.observation ? summarizeAgentObservation(input.observation) : null,
+        architecturePlan: input.plan.architecture,
+        projectMemory: input.plan.projectMemory,
+        dependencyGraph: input.plan.dependencyGraph,
+        missingBusinessDependencies: input.plan.dependencyGraph.missingBusinessDependencies,
         previousAttempts: input.observation?.previousAttempts || [],
       },
       null,
@@ -3631,10 +3740,14 @@ export async function executeGenerationJob(
       appType: plan.appType,
       productionMode: plan.productionMode,
       intent: plan.intent,
+      structuredIntent: plan.structuredIntent,
       filePlan: plan.filePlan,
       agentTasks: plan.agentTasks,
       actionPlan: plan.actionPlan,
       appPlan,
+      architecturePlan: plan.architecture,
+      projectMemoryGraph: plan.projectMemory,
+      dependencyGraph: plan.dependencyGraph,
     }
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: "PLANNING",
@@ -3699,7 +3812,11 @@ export async function executeGenerationJob(
         productionMode: plan.productionMode,
         maxFilesThisPass: plan.maxFilesThisPass,
         intent: plan.intent,
+        structuredIntent: plan.structuredIntent,
         blueprint: plan.blueprint,
+        architecturePlan: plan.architecture,
+        projectMemoryGraph: plan.projectMemory,
+        dependencyGraph: plan.dependencyGraph,
         editPlan: {
           mode: plan.editPlan.mode,
           intent: plan.editPlan.intent,
@@ -4442,6 +4559,7 @@ export async function executeGenerationJob(
         projectId: input.projectId,
         prompt: input.prompt,
         files: validation.files,
+        plan,
         blueprint,
         editPlan: plan.editPlan,
         validationError: validation.failure?.message || "Validation lifecycle failed",
@@ -5073,10 +5191,24 @@ export async function executeGenerationJob(
     })
 
     const persistenceStartedAt = Date.now()
+    const finalProjectMemory = buildProjectMemoryGraph({
+      files: workingFiles,
+      intent: plan.structuredIntent,
+      architecturePlan: plan.architecture,
+    })
+    const finalDependencyGraph = buildArchitectureDependencyGraph({
+      intent: plan.structuredIntent,
+      architecturePlan: plan.architecture,
+      memory: finalProjectMemory,
+    })
     const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
       projectId: input.projectId,
       prompt: input.prompt,
       files: workingFiles,
+      projectMemoryJson: JSON.stringify({
+        ...finalProjectMemory,
+        dependencyGraph: finalDependencyGraph,
+      }),
       idempotencyKey: input.persistenceKey,
       generationJobId: input.jobId,
       intent: intentStorageKey(plan.intent),

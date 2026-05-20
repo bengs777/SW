@@ -1,4 +1,7 @@
 import { enhancePromptForSwift } from "@/lib/ai/prompt-enhancer"
+import { parseStructuredIntent } from "@/lib/ai/architecture-intent"
+import { buildArchitecturePlan } from "@/lib/ai/architecture-planner"
+import { buildArchitectureDependencyGraph, buildProjectMemoryGraph } from "@/lib/ai/project-memory-graph"
 import type { GeneratedFile } from "@/lib/types"
 
 export type OrchestratorTask = {
@@ -23,6 +26,22 @@ export async function buildPlan(
   // Use local heuristic-based prompt enhancer to build a lightweight plan
   // This intentionally does not call external AI providers.
   const enhanced = await enhancePromptForSwift({ prompt, modelName: "local" })
+  const existingFiles = options?.files || []
+  const structuredIntent = parseStructuredIntent({ prompt })
+  const architecturePlan = buildArchitecturePlan({
+    intent: structuredIntent,
+    existingFiles,
+  })
+  const projectMemory = buildProjectMemoryGraph({
+    files: existingFiles,
+    intent: structuredIntent,
+    architecturePlan,
+  })
+  const dependencyGraph = buildArchitectureDependencyGraph({
+    intent: structuredIntent,
+    architecturePlan,
+    memory: projectMemory,
+  })
 
   const planId = `plan:${String(Date.now())}`
 
@@ -36,6 +55,9 @@ export async function buildPlan(
         summary: enhanced.summary,
         workPlan: enhanced.plan,
         projectMemory: enhanced.projectMemory,
+        structuredIntent,
+        architecturePlan,
+        dependencyGraph,
       },
     },
     {
@@ -63,6 +85,10 @@ export async function buildPlan(
       enhancedSummary: enhanced.summary,
       planSource: "local-heuristic",
       originalPrompt: prompt,
+      structuredIntent,
+      architecturePlan,
+      projectMemory,
+      dependencyGraph,
     },
   }
 }
