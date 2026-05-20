@@ -347,6 +347,14 @@ function publicGenerationErrorMessage(error: unknown) {
   return publicGenerationStructureErrorMessage(error)
 }
 
+function publicArtifactParseError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  return message
+    .replace(/^MALFORMED_GENERATED_ARTIFACT:/, "")
+    .replace(/^schema:/, "")
+    .trim() || "Invalid artifact JSON"
+}
+
 function assertNotAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw new Error("Generation aborted before completion")
@@ -2184,11 +2192,11 @@ function buildSlicePrompt(input: {
     "- Stop after the requested slice; do not create extra support files speculatively.",
     "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
-    "- Return ONLY a JSON object matching the schema; include changed files as taskGraph.operations.",
-    '- Required schema: {"kind":"generated_project_artifact","framework":"Next.js","files":[],"dependencies":[],"commands":[],"summary":"...","taskGraph":{"intent":"...","summary":"...","dependencies":["lucide-react"],"operations":[{"action":"create|modify|delete","path":"app/page.tsx","language":"tsx","content":"full file content","reason":"..."}]},"diagnostics":[],"metadata":{},"repairs":[]}',
+    "- STRICT_ARTIFACT_ENVELOPE: Return ONLY a JSON object parseable directly by JSON.parse. No markdown fences. No prose. No explanations. No comments outside JSON. No preamble like Here is your app.",
+    '- Required BUILD schema: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
+    "- The root object must contain files. files must be a non-empty array. Each file must have path and content. Do not use taskGraph, operations, repairs, commands, diagnostics, metadata, or summary for BUILD output.",
     "- Framework labels such as Next.js, React, and TypeScript belong in framework/metadata, never in files[].path or taskGraph.operations[].path.",
-    "- commands must always be an empty array. Never ask to run shell commands or mutate files outside taskGraph operations.",
-    "- For delete operations, omit content. For create/modify operations, content must be the full file content.",
+    "- Never ask to run shell commands or mutate files outside the files array.",
     "- TSX_PARSE_LOCK: every returned .tsx/.ts/.jsx/.js file must parse with @babel/parser using jsx + typescript plugins.",
     "- Do not use raw emoji or decorative non-ASCII symbols in TSX code. Use plain text labels or imported icons only.",
     "- Never split quoted strings across physical lines. Put long copy in JSX text nodes, arrays of short strings, or properly closed template literals.",
@@ -4347,10 +4355,10 @@ export async function executeGenerationJob(
                 "RETRY_DUE_TO_MALFORMED_ARTIFACT:",
                 "- Your previous response could not be parsed as a GeneratedArtifact.",
                 "- Return ONLY valid JSON. No Markdown fences, no prose, no comments.",
-                "- Include the strict keys files, dependencies, commands, summary, taskGraph, diagnostics, metadata, and repairs.",
-                "- commands must be []. Never request shell commands.",
+                '- Use exactly this BUILD envelope: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
+                "- Do not include taskGraph, operations, dependencies, commands, summary, diagnostics, metadata, repairs, or explanations.",
                 "- Paths must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
-                "- Include either {\"files\":[...]} or {\"taskGraph\":{\"operations\":[...]}}.",
+                "- files must be non-empty and every listed target file must be present.",
                 `- Cover exactly this slice target: ${target.path}.`,
               ].join("\n"),
           purpose: "generate",
@@ -4368,7 +4376,10 @@ export async function executeGenerationJob(
         })
         assertNotAborted(input.signal)
         try {
-          parsed = parseGeneratedArtifact(response.message)
+          parsed = parseGeneratedArtifact(response.message, {
+            strictFilesOnly: true,
+            requiredFiles: targets.map((item) => item.path),
+          })
           developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({
             files: parsed.files,
             dependencies: parsed.dependencies,
@@ -4396,7 +4407,7 @@ export async function executeGenerationJob(
             developerDiagnostics.artifactParseFailures.push({
               stage: "artifact_parsing",
               status: "failed",
-              reason: error instanceof Error ? error.message : String(error),
+              reason: publicArtifactParseError(error),
               parseAttempt,
               target: target.path,
               reportPath: invalidArtifactPath,
@@ -4405,17 +4416,18 @@ export async function executeGenerationJob(
             recordDeveloperDiagnostic(developerDiagnostics, {
               stage: "GENERATING",
               status: "failed",
-              reason: "Generated artifact failed strict parsing",
+              reason: publicArtifactParseError(error),
               data: {
                 parseAttempt,
                 target: target.path,
                 reportPath: invalidArtifactPath,
+                parserDiagnostic: publicArtifactParseError(error),
               },
             })
             await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
             throw error
           }
-          const publicMessage = publicGenerationStructureErrorMessage(error)
+          const publicMessage = publicArtifactParseError(error)
           const invalidArtifactPath = await persistInvalidArtifactReport({
             jobId: input.jobId,
             projectId: input.projectId,
@@ -4426,7 +4438,7 @@ export async function executeGenerationJob(
           developerDiagnostics.artifactParseFailures.push({
             stage: "artifact_parsing",
             status: "failed",
-            reason: error.message,
+            reason: publicArtifactParseError(error),
             parseAttempt,
             target: target.path,
             reportPath: invalidArtifactPath,
@@ -4435,11 +4447,12 @@ export async function executeGenerationJob(
           recordDeveloperDiagnostic(developerDiagnostics, {
             stage: "GENERATING",
             status: "failed",
-            reason: "Generated artifact failed strict parsing; retrying",
+            reason: `${publicArtifactParseError(error)}; retrying`,
             data: {
               parseAttempt,
               target: target.path,
               reportPath: invalidArtifactPath,
+              parserDiagnostic: publicArtifactParseError(error),
             },
           })
           await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)

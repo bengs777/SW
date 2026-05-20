@@ -90,6 +90,19 @@ const generatedArtifactSchema = z.object({
   repairs: z.array(generatedFileSchema).max(MAX_GENERATED_FILES).optional().default([]),
   taskGraph: taskGraphSchema.optional(),
 }).strict().superRefine((artifact, ctx) => {
+  const filePaths = new Set<string>()
+  for (const [index, file] of artifact.files.entries()) {
+    const path = normalizeGeneratedPath(file.path)
+    if (filePaths.has(path)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate file path: ${path}`,
+        path: ["files", index, "path"],
+      })
+    }
+    filePaths.add(path)
+  }
+
   if (artifact.commands.length > 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -134,7 +147,15 @@ export type GeneratedTaskOperation = {
   reason?: string
 }
 
-export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifact {
+export type GeneratedArtifactParseOptions = {
+  requiredFiles?: string[]
+  strictFilesOnly?: boolean
+}
+
+export function parseGeneratedArtifact(
+  providerMessage: string,
+  options: GeneratedArtifactParseOptions = {}
+): GeneratedArtifact {
   const parsedJson = tryParseJson(providerMessage)
   if (parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)) {
     const runtimeMessage = parseRuntimeMessage(parsedJson)
@@ -148,16 +169,28 @@ export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifa
 
     const strict = generatedArtifactSchema.safeParse(parsedJson)
     if (strict.success) {
-      return {
+      if (options.strictFilesOnly && strict.data.files.length === 0) {
+        throw new Error("MALFORMED_GENERATED_ARTIFACT:Empty files array")
+      }
+      if (options.strictFilesOnly && strict.data.taskGraph) {
+        throw new Error("MALFORMED_GENERATED_ARTIFACT:Unsupported artifact structure: BUILD output must use only {\"files\":[...]}")
+      }
+      assertRequiredFiles(strict.data.files.map((file) => file.path), options.requiredFiles)
+      const artifact = {
         files: strict.data.files.map(toGeneratedFile),
         dependencies: strict.data.dependencies,
-        commands: [],
+        commands: [] as [],
         summary: strict.data.summary,
         diagnostics: strict.data.diagnostics,
         metadata: normalizeArtifactMetadata(strict.data.metadata, strict.data.framework),
         repairs: strict.data.repairs.map(toGeneratedFile),
         taskGraph: strict.data.taskGraph ? toGeneratedTaskGraph(strict.data.taskGraph) : undefined,
       }
+      return artifact
+    }
+
+    if (options.strictFilesOnly) {
+      throw new Error(`MALFORMED_GENERATED_ARTIFACT:${formatArtifactIssues(strict.error.issues)}`)
     }
 
     const taskGraphOnly = z.object({
@@ -198,13 +231,10 @@ export function parseGeneratedArtifact(providerMessage: string): GeneratedArtifa
       }
     }
 
-    const detail = strict.error.issues
-      .map((issue) => `${issue.path.join(".") || "artifact"}: ${issue.message}`)
-      .join("; ")
-    throw new Error(`MALFORMED_GENERATED_ARTIFACT:schema:${detail}`)
+    throw new Error(`MALFORMED_GENERATED_ARTIFACT:${formatArtifactIssues(strict.error.issues)}`)
   }
 
-  throw new Error("MALFORMED_GENERATED_ARTIFACT:strict-json-schema-required")
+  throw new Error(`MALFORMED_GENERATED_ARTIFACT:${diagnoseJsonEnvelope(providerMessage)}`)
 }
 
 function normalizeArtifactMetadata(metadata: Record<string, unknown>, framework?: string): Record<string, unknown> {
@@ -238,12 +268,58 @@ function toGeneratedTaskGraph(graph: z.infer<typeof taskGraphSchema>): Generated
   }
 }
 
+function assertRequiredFiles(paths: string[], requiredFiles?: string[]) {
+  const required = Array.from(new Set((requiredFiles || []).map(normalizeGeneratedPath).filter(Boolean)))
+  if (required.length === 0) return
+
+  const present = new Set(paths.map(normalizeGeneratedPath))
+  const missing = required.filter((path) => !present.has(path))
+  if (missing.length > 0) {
+    throw new Error(`MALFORMED_GENERATED_ARTIFACT:${missing.map((path) => `Missing required file: ${path}`).join("; ")}`)
+  }
+}
+
+function formatArtifactIssues(issues: z.ZodIssue[]) {
+  if (issues.length === 0) return "Unsupported artifact structure"
+  return issues.map((issue) => {
+    const path = issue.path.join(".") || "artifact"
+    if (issue.message.includes("Duplicate file path")) return issue.message
+    if (path.match(/^files\.\d+\.content$/)) return "File content missing"
+    if (path === "files" && issue.message.includes("requires filesystem writes")) return "Empty files array"
+    if (issue.message.includes("Required")) return `${path}: missing required value`
+    if (issue.message.startsWith("{")) return `Invalid file path at ${path}`
+    return `${path}: ${issue.message}`
+  }).join("; ")
+}
+
+function diagnoseJsonEnvelope(value: string) {
+  const raw = String(value || "").trim()
+  if (!raw) return "Invalid artifact JSON: response is empty"
+  if (/^```/m.test(raw)) return "Markdown wrapper detected but no valid JSON object could be recovered"
+  if (!raw.startsWith("{")) return "Invalid artifact JSON: response must start with {"
+  return "Invalid artifact JSON"
+}
+
 function tryParseJson(value: string) {
   const raw = String(value || "").trim()
 
   try {
     return JSON.parse(raw)
   } catch {
+    const fenced = extractJsonFence(raw)
+    if (fenced) {
+      try {
+        return JSON.parse(fenced)
+      } catch {
+        return null
+      }
+    }
+
     return null
   }
+}
+
+function extractJsonFence(raw: string) {
+  const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  return match?.[1]?.trim() || null
 }
