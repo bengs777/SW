@@ -1,4 +1,5 @@
 import { parse } from "@babel/parser"
+import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
 import { buildDependencyMap } from "@/lib/ai/generation-pipeline"
 
@@ -32,6 +33,7 @@ export type IncrementalPatchResult = {
 
 export type IncrementalValidationResult = {
   ok: boolean
+  validationScope: "target_tsx" | "component_subtree" | "css_only" | "route_only" | "prisma_only"
   scope: string[]
   diagnostics: Array<{
     file?: string
@@ -40,6 +42,54 @@ export type IncrementalValidationResult = {
     reason: string
   }>
 }
+
+export const PatchOperationSchema = z.object({
+  action: z.enum(["create", "modify", "delete"]),
+  path: z.string().trim().min(1),
+  content: z.string().optional(),
+  reason: z.string().optional(),
+}).strict().superRefine((operation, ctx) => {
+  if ((operation.action === "create" || operation.action === "modify") && typeof operation.content !== "string") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["content"],
+      message: "create/modify patch operations require content",
+    })
+  }
+})
+
+export const RepairPayloadSchema = z.object({
+  mode: z.enum(["scoped", "architecture"]),
+  affectedFiles: z.array(z.string().trim().min(1)).default([]),
+  operations: z.array(PatchOperationSchema).default([]),
+}).strict()
+
+export const ScopedEditResultSchema = z.object({
+  generationMode: z.enum(["EDIT", "FIX"]),
+  editIntent: z.enum([
+    "text_update",
+    "component_patch",
+    "style_update",
+    "route_update",
+    "api_extension",
+    "db_extension",
+    "auth_extension",
+  ]),
+  affectedFiles: z.array(z.string().trim().min(1)),
+  patchSummary: z.array(z.string()).default([]),
+  validation: z.object({
+    ok: z.boolean(),
+    diagnostics: z.array(z.object({
+      file: z.string().optional(),
+      line: z.number().nullable().optional(),
+      column: z.number().nullable().optional(),
+      reason: z.string(),
+    })),
+  }),
+}).strict()
+
+export type RepairPayload = z.infer<typeof RepairPayloadSchema>
+export type ScopedEditResult = z.infer<typeof ScopedEditResultSchema>
 
 export function detectGenerationMode(input: {
   prompt: string
@@ -160,10 +210,21 @@ export function validateIncrementalPatch(input: {
   plan: IncrementalEditPlan
 }): IncrementalValidationResult {
   const scope = unique([...input.plan.affectedFiles, ...input.changedFiles.map((file) => normalizePath(file.path))])
+  const validationScope = validationScopeForIntent(input.plan.editIntent)
   const diagnostics: IncrementalValidationResult["diagnostics"] = []
 
   for (const file of input.changedFiles) {
     const path = normalizePath(file.path)
+    if (validationScope === "css_only") {
+      const cssDiagnostic = validateCssLikeContent(file)
+      if (cssDiagnostic) diagnostics.push(cssDiagnostic)
+      continue
+    }
+    if (validationScope === "prisma_only") {
+      const prismaDiagnostic = validatePrismaLikeContent(file)
+      if (prismaDiagnostic) diagnostics.push(prismaDiagnostic)
+      continue
+    }
     if (!/\.(tsx?|jsx?)$/i.test(path)) continue
     try {
       parse(String(file.content || ""), {
@@ -182,8 +243,9 @@ export function validateIncrementalPatch(input: {
     }
   }
 
-  const dependencyMap = buildDependencyMap(input.files.filter((file) => scope.includes(normalizePath(file.path))))
+  const dependencyMap = buildDependencyMap(input.files)
   for (const missing of dependencyMap.missingLocalImports) {
+    if (!scope.includes(normalizePath(missing.file))) continue
     diagnostics.push({
       file: missing.file,
       reason: `Missing local import after scoped edit: ${missing.specifier}`,
@@ -192,9 +254,38 @@ export function validateIncrementalPatch(input: {
 
   return {
     ok: diagnostics.length === 0,
+    validationScope,
     scope,
     diagnostics,
   }
+}
+
+export function parseRepairPayload(value: unknown): { ok: true; payload: RepairPayload } | { ok: false; reason: string } {
+  const parsed = RepairPayloadSchema.safeParse(value)
+  if (!parsed.success) {
+    return {
+      ok: false,
+      reason: parsed.error.issues.map((issue) => `${issue.path.join(".") || "payload"}: ${issue.message}`).join("; "),
+    }
+  }
+  return { ok: true, payload: parsed.data }
+}
+
+export function buildScopedEditResult(input: {
+  plan: IncrementalEditPlan
+  patch: IncrementalPatchResult
+  validation: IncrementalValidationResult
+}): ScopedEditResult {
+  return ScopedEditResultSchema.parse({
+    generationMode: input.plan.generationMode === "FIX" ? "FIX" : "EDIT",
+    editIntent: input.plan.editIntent || "component_patch",
+    affectedFiles: input.plan.affectedFiles,
+    patchSummary: input.patch.patchSummary,
+    validation: {
+      ok: input.validation.ok,
+      diagnostics: input.validation.diagnostics,
+    },
+  })
 }
 
 function applyTextUpdate(input: {
@@ -245,12 +336,54 @@ function insertNavbar(input: { files: GeneratedFile[]; plan: IncrementalEditPlan
 }
 
 function replaceLikelyTitle(content: string, replacement: string) {
+  ensureTsxAst(content)
   const escaped = escapeJsxText(replacement)
   const headingPattern = /(<h1\b[^>]*>)([\s\S]*?)(<\/h1>)/i
   if (headingPattern.test(content)) return content.replace(headingPattern, `$1${escaped}$3`)
   const titlePattern = /(<title\b[^>]*>)([\s\S]*?)(<\/title>)/i
   if (titlePattern.test(content)) return content.replace(titlePattern, `$1${escaped}$3`)
   return content
+}
+
+function ensureTsxAst(content: string) {
+  parse(String(content || ""), {
+    sourceType: "module",
+    errorRecovery: true,
+    plugins: ["jsx", "typescript", "dynamicImport", "importAttributes", "decorators-legacy"],
+  })
+}
+
+function validationScopeForIntent(intent: IncrementalEditIntent | null): IncrementalValidationResult["validationScope"] {
+  if (intent === "text_update") return "target_tsx"
+  if (intent === "component_patch") return "component_subtree"
+  if (intent === "style_update") return "css_only"
+  if (intent === "api_extension" || intent === "route_update" || intent === "auth_extension") return "route_only"
+  if (intent === "db_extension") return "prisma_only"
+  return "component_subtree"
+}
+
+function validateCssLikeContent(file: GeneratedFile) {
+  const content = String(file.content || "")
+  const open = (content.match(/\{/g) || []).length
+  const close = (content.match(/\}/g) || []).length
+  if (open !== close) {
+    return {
+      file: normalizePath(file.path),
+      reason: "CSS brace mismatch in scoped style edit",
+    }
+  }
+  return null
+}
+
+function validatePrismaLikeContent(file: GeneratedFile) {
+  const content = String(file.content || "")
+  if (normalizePath(file.path) === "prisma/schema.prisma" && !/\bmodel\s+[A-Z][A-Za-z0-9_]*\s*\{/.test(content)) {
+    return {
+      file: normalizePath(file.path),
+      reason: "Prisma scoped edit must preserve at least one model block",
+    }
+  }
+  return null
 }
 
 function extractReplacementText(prompt: string) {

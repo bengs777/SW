@@ -6,6 +6,8 @@ export type SwiftProjectMemoryGraph = {
   mode: "project-memory-graph-v1"
   framework: string | null
   routes: string[]
+  components: string[]
+  imports: Array<{ file: string; specifier: string }>
   databaseModels: string[]
   installedDependencies: string[]
   services: string[]
@@ -41,6 +43,8 @@ export function buildProjectMemoryGraph(input: {
     mode: "project-memory-graph-v1",
     framework: detectFramework(packageJson, files),
     routes: files.filter((file) => /^app\/.+\/(page|route)\.(tsx?|jsx?)$/i.test(file.path) || /^app\/page\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path).sort(),
+    components: files.filter((file) => /^components\/.+\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path).sort(),
+    imports: extractImports(files),
     databaseModels: extractPrismaModels(files),
     installedDependencies: Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies }).sort(),
     services: files.filter((file) => /^lib\/services\/.+\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path).sort(),
@@ -151,6 +155,17 @@ function extractEnvVars(files: Array<{ content: string }>) {
     }
   }
   return Array.from(vars)
+}
+
+function extractImports(files: Array<{ path: string; content: string }>) {
+  const imports: Array<{ file: string; specifier: string }> = []
+  for (const file of files) {
+    if (!/\.(tsx?|jsx?)$/i.test(file.path)) continue
+    for (const match of file.content.matchAll(/\bimport\s+(?:type\s+)?[\s\S]*?\s+from\s+["']([^"']+)["']/g)) {
+      imports.push({ file: file.path, specifier: match[1] })
+    }
+  }
+  return imports.slice(0, 300)
 }
 
 function detectProviderList(files: Array<{ content: string }>, explicit?: string | null) {

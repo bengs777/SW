@@ -60,7 +60,9 @@ import {
 import { validateArchitectureFiles } from "@/lib/ai/architecture-validator"
 import {
   applyDeterministicIncrementalPatch,
+  buildScopedEditResult,
   buildIncrementalEditPlan,
+  parseRepairPayload,
   validateIncrementalPatch,
   type GenerationMode,
   type IncrementalEditPlan,
@@ -2656,6 +2658,55 @@ async function runValidationLifecycle(input: {
     conflictsPrevented: normalized.conflictsPrevented,
   })
 
+  if (input.plan.generationMode === "EDIT") {
+    await GenerationJobService.assertNotCancelled(input.jobId)
+    stepStartedAt = performance.now()
+    await input.emit("validating", "Running scoped edit validation", 70, {
+      generationMode: input.plan.generationMode,
+      editIntent: input.plan.incrementalEdit.editIntent,
+      affectedFiles: input.plan.incrementalEdit.affectedFiles,
+    })
+    const changedFiles = files.filter((file) => input.plan.incrementalEdit.affectedFiles.includes(normalizePath(file.path)))
+    const scopedValidation = validateIncrementalPatch({
+      files,
+      changedFiles,
+      plan: input.plan.incrementalEdit,
+    })
+    recordStep(
+      "static",
+      scopedValidation.ok ? "passed" : "failed",
+      "required",
+      stepStartedAt,
+      scopedValidation.ok ? "Scoped edit validation passed" : "Scoped edit validation failed",
+      {
+        generationMode: input.plan.generationMode,
+        editIntent: input.plan.incrementalEdit.editIntent,
+        scopedValidation,
+        skippedGlobalValidation: true,
+        skippedBlueprintValidation: true,
+        skippedArchitectureValidation: true,
+      }
+    )
+    return {
+      ok: scopedValidation.ok,
+      files,
+      previewUrl: null,
+      previewStatus: scopedValidation.ok ? "preserved" : "scoped_validation_failed",
+      steps,
+      sandboxValidation: [],
+      failure: scopedValidation.ok
+        ? undefined
+        : {
+            step: "static",
+            message: scopedValidation.diagnostics.map((diagnostic) => diagnostic.reason).join("; ") || "Scoped edit validation failed",
+            data: {
+              scopedValidation,
+              skippedGlobalValidation: true,
+            },
+          },
+    }
+  }
+
   await GenerationJobService.assertNotCancelled(input.jobId)
   stepStartedAt = performance.now()
   await input.emit("validating", "Checking static project invariants", 66)
@@ -3272,6 +3323,32 @@ async function attemptTargetedRepair(input: {
   signal?: AbortSignal
 }) {
   await GenerationJobService.assertNotCancelled(input.jobId)
+  if (input.plan.generationMode === "EDIT") {
+    const scopedPayload = parseRepairPayload({
+      mode: "scoped",
+      affectedFiles: input.plan.incrementalEdit.affectedFiles,
+      operations: [],
+    })
+    return {
+      files: input.files,
+      repaired: false,
+      parsedFileCount: 0,
+      acceptedFileCount: 0,
+      rejectedFiles: [],
+      deletedPaths: [],
+      installedDependencies: [],
+      normalizedPackages: [],
+      addedPackages: [],
+      repairPromptPreview: "",
+      repairedArtifactSummary: {
+        mode: "scoped",
+        scopedPayload,
+        skippedArchitectureRepair: true,
+      },
+      terminationReason: "empty_repair_output" as RepairTerminationReason,
+      failureMessage: "EDIT mode only permits scoped repair; architecture repair was skipped.",
+    }
+  }
   const currentFiles = [...input.files]
   const dependencyMap = buildDependencyMap(currentFiles)
   const failingFiles = pickFailingFiles(currentFiles, dependencyMap, input.validationError)
@@ -3899,6 +3976,11 @@ export async function executeGenerationJob(
           changedFiles: patch.changedFiles,
           plan: plan.incrementalEdit,
         })
+        const scopedEditResult = buildScopedEditResult({
+          plan: plan.incrementalEdit,
+          patch,
+          validation: scopedValidation,
+        })
         recordDeveloperDiagnostic(developerDiagnostics, {
           stage: scopedValidation.ok ? "VALIDATING" : "REPAIRING",
           status: scopedValidation.ok ? "passed" : "failed",
@@ -3910,6 +3992,7 @@ export async function executeGenerationJob(
             relatedFiles: plan.incrementalEdit.relatedFiles,
             patchSummary: patch.patchSummary,
             incrementalValidator: scopedValidation,
+            scopedEditResult,
           },
         })
         await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
@@ -3932,6 +4015,7 @@ export async function executeGenerationJob(
               affectedFiles: plan.incrementalEdit.affectedFiles,
               patchSummary: patch.patchSummary,
               incrementalValidator: scopedValidation,
+              scopedEditResult,
             },
           })
 
@@ -3955,7 +4039,9 @@ export async function executeGenerationJob(
               structureLock: {
                 lockedAt: new Date().toISOString(),
                 generationMode: plan.generationMode,
-                protectedPaths: plan.projectMemory.routes,
+                protectedPaths: finalProjectMemory.routes,
+                components: finalProjectMemory.components,
+                imports: finalProjectMemory.imports,
               },
             }),
             idempotencyKey: input.persistenceKey,
@@ -3971,6 +4057,8 @@ export async function executeGenerationJob(
             changedFiles: patch.changedFiles.map((file) => normalizePath(file.path)),
             patchSummary: patch.patchSummary,
             validator: scopedValidation,
+            scopedEditResult,
+            previewPreserved: true,
           }
           await GenerationJobService.update(input.jobId, {
             metrics,
@@ -3995,6 +4083,8 @@ export async function executeGenerationJob(
               changedFiles: patch.changedFiles.map((file) => normalizePath(file.path)),
               patchSummary: patch.patchSummary,
               incrementalValidator: scopedValidation,
+              scopedEditResult,
+              previewPreserved: true,
             },
           })
           recordDeveloperDiagnostic(developerDiagnostics, {
@@ -4012,7 +4102,54 @@ export async function executeGenerationJob(
             previewUrl: null,
           }
         }
+
+        const scopedRepairPayload = parseRepairPayload({
+          mode: "scoped",
+          affectedFiles: plan.incrementalEdit.affectedFiles,
+          operations: [],
+        })
+        await appendOrchestrationEvent({
+          jobId: input.jobId,
+          trace: {
+            traceId: correlation.traceId,
+            workerId: null,
+          },
+          type: "scoped_edit_failed",
+          stage: "failed",
+          status: "failed",
+          message: "Scoped edit validation failed; architecture repair was not invoked",
+          data: {
+            generationMode: plan.generationMode,
+            editIntent: plan.incrementalEdit.editIntent,
+            affectedFiles: plan.incrementalEdit.affectedFiles,
+            incrementalValidator: scopedValidation,
+            scopedRepairPayload,
+            skippedArchitectureRepair: true,
+          },
+        })
+        throw new Error("Scoped edit validation failed; architecture repair was not invoked")
       }
+
+      await appendOrchestrationEvent({
+        jobId: input.jobId,
+        trace: {
+          traceId: correlation.traceId,
+          workerId: null,
+        },
+        type: "scoped_edit_not_applied",
+        stage: "failed",
+        status: "failed",
+        message: patch.reason,
+        data: {
+          generationMode: plan.generationMode,
+          editIntent: plan.incrementalEdit.editIntent,
+          affectedFiles: plan.incrementalEdit.affectedFiles,
+          relatedFiles: plan.incrementalEdit.relatedFiles,
+          skippedScaffoldRegeneration: true,
+          skippedArchitectureRepair: true,
+        },
+      })
+      throw new Error(`Scoped edit was not applied: ${patch.reason}`)
     }
 
     const fastScaffoldFiles = buildFastClinicFullStackScaffold({
