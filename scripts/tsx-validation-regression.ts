@@ -29,6 +29,73 @@ const repaired = autoRepairAdjacentJsxFragments(adjacent, adjacentResult.diagnos
 assert(repaired.repaired, "adjacent JSX should be auto repaired with a fragment")
 assert(validateRuntimeSyntax(repaired.files).ok, "auto fragment repair should pass syntax validation")
 
+const repairCases: Array<{ label: string; content: string }> = [
+  {
+    label: "conditional sibling JSX",
+    content: `export function Panel({ active }: { active: boolean }) {
+  return (
+    active ? (
+      <section>One</section>
+      <section>Two</section>
+    ) : <aside>None</aside>
+  )
+}
+`,
+  },
+  {
+    label: "mapped sibling JSX",
+    content: `export function List() {
+  return (
+    <main>
+      {[1, 2].map((item) => (
+        <span>{item}</span>
+        <strong>!</strong>
+      ))}
+    </main>
+  )
+}
+`,
+  },
+  {
+    label: "nested fragment wrapping",
+    content: `export function Nested() {
+  return (
+    <main>
+      {true && (
+        <section>One</section>
+        <section>Two</section>
+      )}
+    </main>
+  )
+}
+`,
+  },
+  {
+    label: "multiline return sibling JSX",
+    content: `export function Multi() {
+  return (
+    <header>
+      <h1>A</h1>
+    </header>
+    <main>
+      <p>B</p>
+    </main>
+  )
+}
+`,
+  },
+]
+
+for (const item of repairCases) {
+  const files: GeneratedFile[] = [{ path: "components/Case.tsx", language: "tsx", content: item.content }]
+  const before = validateRuntimeSyntax(files)
+  assert(!before.ok, `${item.label} should fail before repair`)
+  const fixed = autoRepairAdjacentJsxFragments(files, before.diagnostics[0])
+  assert(fixed.repaired, `${item.label} should be auto repaired`)
+  assert(fixed.repairedNodeType, `${item.label} should report repaired AST node type`)
+  assert(validateRuntimeSyntax(fixed.files).ok, `${item.label} should pass after repair`)
+}
+
 const malformedClosing: GeneratedFile[] = [
   {
     path: "app/page.tsx",

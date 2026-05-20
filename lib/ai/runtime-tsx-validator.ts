@@ -1,4 +1,5 @@
 import { parse } from "@babel/parser"
+import generate from "@babel/generator"
 import type { GeneratedFile } from "@/lib/types"
 import { buildDependencyMap } from "@/lib/ai/generation-pipeline"
 
@@ -48,7 +49,14 @@ export function validateRuntimeSyntax(files: GeneratedFile[]): RuntimeValidation
 export function autoRepairAdjacentJsxFragments(
   files: GeneratedFile[],
   diagnostic: RuntimeSyntaxDiagnostic | null | undefined
-): { repaired: boolean; files: GeneratedFile[]; changedFiles: GeneratedFile[]; strategy: "auto_fragment_wrap" | null } {
+): {
+  repaired: boolean
+  files: GeneratedFile[]
+  changedFiles: GeneratedFile[]
+  strategy: "auto_fragment_wrap" | null
+  repairedNodeType?: string | null
+  repairDiagnostic?: string | null
+} {
   if (!diagnostic || !/adjacent jsx elements/i.test(diagnostic.message)) {
     return { repaired: false, files, changedFiles: [], strategy: null }
   }
@@ -58,17 +66,24 @@ export function autoRepairAdjacentJsxFragments(
   if (!target) return { repaired: false, files, changedFiles: [], strategy: null }
 
   const content = String(target.content || "")
-  const repairedContent = wrapReturnBodyInFragment(content)
-  if (!repairedContent || repairedContent === content) {
-    return { repaired: false, files, changedFiles: [], strategy: null }
+  const repaired = repairAdjacentJsxWithAst(content, diagnostic)
+  if (!repaired.ok || repaired.content === content) {
+    return {
+      repaired: false,
+      files,
+      changedFiles: [],
+      strategy: null,
+      repairDiagnostic: repaired.ok ? "No AST repair changed the file" : repaired.reason,
+    }
   }
 
-  const changed = { ...target, path: targetPath, content: repairedContent }
+  const changed = { ...target, path: targetPath, content: repaired.content }
   return {
     repaired: true,
     files: files.map((file) => normalizePath(file.path) === targetPath ? changed : file),
     changedFiles: [changed],
     strategy: "auto_fragment_wrap",
+    repairedNodeType: repaired.nodeType,
   }
 }
 
@@ -164,20 +179,125 @@ function validateExportSafety(file: string, content: string): RuntimeSyntaxDiagn
   }
 }
 
-function wrapReturnBodyInFragment(content: string) {
-  const returnMatch = content.match(/return\s*\(/)
-  if (!returnMatch || typeof returnMatch.index !== "number") return null
-  const openParen = content.indexOf("(", returnMatch.index)
-  if (openParen < 0) return null
+function repairAdjacentJsxWithAst(
+  content: string,
+  diagnostic: RuntimeSyntaxDiagnostic
+): { ok: true; content: string; nodeType: string } | { ok: false; reason: string } {
+  const offset = locationToOffset(content, diagnostic.line, diagnostic.column)
+  const candidates = collectRepairRanges(content, offset)
+
+  for (const candidate of candidates) {
+    const inner = content.slice(candidate.start, candidate.end).trim()
+    if (!inner || /^<>\s*[\s\S]*<\/>$/.test(inner)) continue
+    if ((inner.match(/<([A-Za-z][\w.]*)\b/g) || []).length < 2) continue
+
+    const repairedContent = `${content.slice(0, candidate.start)}<>\n${indentBlock(inner, "  ")}\n</>${content.slice(candidate.end)}`
+    const ast = parseRuntimeFile(repairedContent)
+    if (!ast.ok) continue
+    const generated = generate(ast.ast as never, {
+      retainLines: true,
+      comments: true,
+      jsescOption: { minimal: true },
+    }).code
+    const validation = parseRuntimeFile(generated)
+    if (validation.ok) {
+      return {
+        ok: true,
+        content: generated.endsWith("\n") ? generated : `${generated}\n`,
+        nodeType: candidate.nodeType,
+      }
+    }
+  }
+
+  return { ok: false, reason: "Unable to find an AST-safe JSX sibling range to wrap in a fragment" }
+}
+
+function parseRuntimeFile(content: string) {
+  try {
+    return {
+      ok: true as const,
+      ast: parse(content, {
+        sourceType: "module",
+        errorRecovery: false,
+        plugins: ["jsx", "typescript", "dynamicImport", "importAttributes", "decorators-legacy"],
+      }),
+    }
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function collectRepairRanges(content: string, offset: number) {
+  const ranges: Array<{ start: number; end: number; nodeType: string }> = []
+  const paren = findEnclosingParens(content, offset)
+  if (paren) ranges.push({ start: paren.start + 1, end: paren.end, nodeType: "ParenthesizedExpression" })
+
+  const returnRange = findKeywordExpressionRange(content, offset, "return")
+  if (returnRange) ranges.push({ ...returnRange, nodeType: "ReturnStatement" })
+
+  const assignmentRange = findAssignmentExpressionRange(content, offset)
+  if (assignmentRange) ranges.push({ ...assignmentRange, nodeType: "VariableDeclarator" })
+
+  const arrowRange = findArrowExpressionRange(content, offset)
+  if (arrowRange) ranges.push({ ...arrowRange, nodeType: "ArrowFunctionExpression" })
+
+  const seen = new Set<string>()
+  return ranges.filter((range) => {
+    const key = `${range.start}:${range.end}`
+    if (range.start < 0 || range.end <= range.start || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function findEnclosingParens(content: string, offset: number) {
+  const stack: number[] = []
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index]
+    if (char === "(") stack.push(index)
+    if (char === ")") {
+      const start = stack.pop()
+      if (typeof start === "number" && start < offset && index >= offset) {
+        return { start, end: index }
+      }
+    }
+  }
+  return null
+}
+
+function findKeywordExpressionRange(content: string, offset: number, keyword: string) {
+  const before = content.slice(0, offset)
+  const keywordIndex = before.lastIndexOf(keyword)
+  if (keywordIndex < 0) return null
+  const openParen = content.indexOf("(", keywordIndex)
+  if (openParen < 0 || openParen > offset) return null
   const closeParen = findMatchingParen(content, openParen)
   if (closeParen < 0) return null
-  const body = content.slice(openParen + 1, closeParen)
-  if (/<>\s*[\s\S]*<\/>/m.test(body)) return null
-  if ((body.match(/<([A-Za-z][\w.]*)\b/g) || []).length < 2) return null
-  const leading = body.match(/^\s*/)?.[0] || "\n"
-  const trailing = body.match(/\s*$/)?.[0] || "\n"
-  const inner = body.trim()
-  return `${content.slice(0, openParen + 1)}${leading}<>\n${indentBlock(inner, "  ")}\n${leading}</>${trailing}${content.slice(closeParen)}`
+  return { start: openParen + 1, end: closeParen }
+}
+
+function findAssignmentExpressionRange(content: string, offset: number) {
+  const before = content.slice(0, offset)
+  const equalIndex = before.lastIndexOf("=")
+  if (equalIndex < 0) return null
+  const semicolonIndex = content.indexOf(";", offset)
+  const lineEndIndex = content.indexOf("\n", offset)
+  const endCandidates = [semicolonIndex, lineEndIndex].filter((value) => value > offset)
+  const end = endCandidates.length > 0 ? Math.min(...endCandidates) : content.length
+  return { start: equalIndex + 1, end }
+}
+
+function findArrowExpressionRange(content: string, offset: number) {
+  const before = content.slice(0, offset)
+  const arrowIndex = before.lastIndexOf("=>")
+  if (arrowIndex < 0) return null
+  const endCandidates = [content.indexOf(",", offset), content.indexOf(")", offset), content.indexOf("\n", offset)]
+    .filter((value) => value > offset)
+  const end = endCandidates.length > 0 ? Math.min(...endCandidates) : content.length
+  return { start: arrowIndex + 2, end }
 }
 
 function findMatchingParen(content: string, openIndex: number) {
@@ -191,6 +311,16 @@ function findMatchingParen(content: string, openIndex: number) {
     }
   }
   return -1
+}
+
+function locationToOffset(content: string, line: number | null, column: number | null) {
+  if (!line || line < 1) return 0
+  const lines = content.split(/\r?\n/)
+  let offset = 0
+  for (let index = 0; index < Math.min(line - 1, lines.length); index += 1) {
+    offset += lines[index].length + 1
+  }
+  return Math.min(content.length, offset + Math.max(0, column || 0))
 }
 
 function indentBlock(value: string, prefix: string) {

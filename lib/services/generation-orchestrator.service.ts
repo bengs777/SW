@@ -2663,19 +2663,7 @@ async function runValidationLifecycle(input: {
 
   await GenerationJobService.assertNotCancelled(input.jobId)
   let stepStartedAt = performance.now()
-  await input.emit("validating", "Normalizing generated artifacts", 60)
-  const normalized = normalizeGeneratedDependencies(files)
-  files = normalized.files
-  recordStep("normalize", "passed", "required", stepStartedAt, undefined, {
-    fileCount: files.length,
-    addedPackages: normalized.addedPackages,
-    normalizedPackages: normalized.normalizedPackages,
-    conflictsPrevented: normalized.conflictsPrevented,
-  })
-
-  await GenerationJobService.assertNotCancelled(input.jobId)
-  stepStartedAt = performance.now()
-  await input.emit("validating", "Validating TSX and module syntax", 63)
+  await input.emit("validating", "Validating TSX and module syntax", 60)
   let tsxValidation = validateRuntimeSyntax(files)
   let tsxRepair = null as ReturnType<typeof autoRepairAdjacentJsxFragments> | null
   if (!tsxValidation.ok) {
@@ -2704,6 +2692,8 @@ async function runValidationLifecycle(input: {
       repairStrategy: first?.repairStrategy || "targeted_syntax_repair",
       autoRepairAttempted: Boolean(tsxRepair),
       autoRepairChangedFiles: tsxRepair?.changedFiles.map((file) => normalizePath(file.path)) || [],
+      repairedNodeType: tsxRepair?.repairedNodeType || null,
+      repairSuccess: false,
     })
     return {
       ok: false,
@@ -2719,6 +2709,8 @@ async function runValidationLifecycle(input: {
           diagnostics: tsxValidation.diagnostics,
           repairStrategy: first?.repairStrategy || "targeted_syntax_repair",
           targetFile: first?.file || null,
+          repairedNodeType: tsxRepair?.repairedNodeType || null,
+          repairSuccess: false,
         },
       },
     }
@@ -2727,6 +2719,20 @@ async function runValidationLifecycle(input: {
     diagnostics: tsxValidation.diagnostics,
     repairStrategy: tsxRepair?.strategy || null,
     changedFiles: tsxRepair?.changedFiles.map((file) => normalizePath(file.path)) || [],
+    repairedNodeType: tsxRepair?.repairedNodeType || null,
+    repairSuccess: tsxRepair?.repaired || false,
+  })
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("validating", "Normalizing generated artifacts", 63)
+  const normalized = normalizeGeneratedDependencies(files)
+  files = normalized.files
+  recordStep("normalize", "passed", "required", stepStartedAt, undefined, {
+    fileCount: files.length,
+    addedPackages: normalized.addedPackages,
+    normalizedPackages: normalized.normalizedPackages,
+    conflictsPrevented: normalized.conflictsPrevented,
   })
 
   if (input.plan.generationMode === "EDIT") {
