@@ -28,7 +28,16 @@ export type IncrementalPatchResult = {
   files: GeneratedFile[]
   changedFiles: GeneratedFile[]
   patchSummary: string[]
+  patchPlan?: TextReplacementOperation
   reason: string
+}
+
+export type TextReplacementOperation = {
+  operation: "replace_text"
+  targetFile: string
+  find: string
+  replace: string
+  container: string | null
 }
 
 export type IncrementalValidationResult = {
@@ -64,6 +73,22 @@ export const RepairPayloadSchema = z.object({
   operations: z.array(PatchOperationSchema).default([]),
 }).strict()
 
+export const TextReplacementOperationSchema = z.object({
+  operation: z.literal("replace_text"),
+  targetFile: z.string().trim().min(1),
+  find: z.string(),
+  replace: z.string().trim().min(1),
+  container: z.string().nullable(),
+}).strict().superRefine((operation, ctx) => {
+  if (!operation.find.trim() && !operation.container) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["find"],
+      message: "Missing replace target",
+    })
+  }
+})
+
 export const ScopedEditResultSchema = z.object({
   generationMode: z.enum(["EDIT", "FIX"]),
   editIntent: z.enum([
@@ -77,6 +102,7 @@ export const ScopedEditResultSchema = z.object({
   ]),
   affectedFiles: z.array(z.string().trim().min(1)),
   patchSummary: z.array(z.string()).default([]),
+  patchPlan: TextReplacementOperationSchema.optional(),
   validation: z.object({
     ok: z.boolean(),
     diagnostics: z.array(z.object({
@@ -281,6 +307,7 @@ export function buildScopedEditResult(input: {
     editIntent: input.plan.editIntent || "component_patch",
     affectedFiles: input.plan.affectedFiles,
     patchSummary: input.patch.patchSummary,
+    patchPlan: input.patch.patchPlan,
     validation: {
       ok: input.validation.ok,
       diagnostics: input.validation.diagnostics,
@@ -293,15 +320,41 @@ function applyTextUpdate(input: {
   files: GeneratedFile[]
   plan: IncrementalEditPlan
 }): IncrementalPatchResult {
-  const targetText = extractReplacementText(input.prompt)
-  if (!targetText) return unchanged(input.files, "No replacement text found in edit prompt.")
-  const targetPath = input.plan.affectedFiles[0]
-  const file = input.files.find((item) => normalizePath(item.path) === targetPath)
-  if (!file) return unchanged(input.files, "No affected file found for text update.")
+  const grammar = parseReplacementGrammar(input.prompt)
+  if (!grammar.ok) return unchanged(input.files, grammar.reason)
+  const candidates = candidateFilesForTextUpdate(input.files, input.plan.affectedFiles)
 
-  const nextContent = replaceLikelyTitle(String(file.content || ""), targetText)
-  if (nextContent === file.content) return unchanged(input.files, "No title-like JSX text found to replace.")
-  return replaceFile(input.files, { ...file, content: nextContent }, [`updated title text in ${targetPath}`], "Applied deterministic text update.")
+  for (const file of candidates) {
+    const resolved = resolveJsxTextReplacement({
+      file,
+      find: grammar.find,
+      replace: grammar.replace,
+      targetKind: grammar.targetKind,
+    })
+    if (!resolved.ok) continue
+    const operation = TextReplacementOperationSchema.safeParse({
+      operation: "replace_text",
+      targetFile: normalizePath(file.path),
+      find: resolved.find,
+      replace: grammar.replace,
+      container: resolved.container,
+    })
+    if (!operation.success) {
+      return unchanged(input.files, humanizeZodIssues(operation.error.issues))
+    }
+    return replaceFile(
+      input.files,
+      { ...file, content: resolved.content },
+      [`replace_text ${normalizePath(file.path)}: "${resolved.find}" -> "${grammar.replace}"`],
+      "Applied deterministic JSX text replacement.",
+      operation.data
+    )
+  }
+
+  if (grammar.find) {
+    return unchanged(input.files, `No matching JSX text node found for "${grammar.find}".`)
+  }
+  return unchanged(input.files, `No ${grammar.targetKind || "heading"} JSX text node found for replacement.`)
 }
 
 function insertButton(input: { prompt: string; files: GeneratedFile[]; plan: IncrementalEditPlan }, label: string) {
@@ -335,22 +388,185 @@ function insertNavbar(input: { files: GeneratedFile[]; plan: IncrementalEditPlan
   return replaceFile(input.files, { ...file, content: nextContent }, [`inserted navbar in ${targetPath}`], "Applied deterministic navbar patch.")
 }
 
-function replaceLikelyTitle(content: string, replacement: string) {
-  ensureTsxAst(content)
-  const escaped = escapeJsxText(replacement)
-  const headingPattern = /(<h1\b[^>]*>)([\s\S]*?)(<\/h1>)/i
-  if (headingPattern.test(content)) return content.replace(headingPattern, `$1${escaped}$3`)
-  const titlePattern = /(<title\b[^>]*>)([\s\S]*?)(<\/title>)/i
-  if (titlePattern.test(content)) return content.replace(titlePattern, `$1${escaped}$3`)
-  return content
-}
-
-function ensureTsxAst(content: string) {
-  parse(String(content || ""), {
+function parseTsxAst(content: string) {
+  return parse(String(content || ""), {
     sourceType: "module",
     errorRecovery: true,
     plugins: ["jsx", "typescript", "dynamicImport", "importAttributes", "decorators-legacy"],
+  }) as unknown as AstNode
+}
+
+type ReplacementGrammar =
+  | { ok: true; find: string | null; replace: string; targetKind: "title" | "heading" | null; normalizedPrompt: string }
+  | { ok: false; reason: string }
+
+function parseReplacementGrammar(prompt: string): ReplacementGrammar {
+  const raw = String(prompt || "").trim()
+  if (!raw) return { ok: false, reason: "Unsupported edit grammar: prompt is empty." }
+  const normalized = normalizeReplacementPrompt(raw)
+  const quoted = [
+    /\b(?:ganti|ubah)\s+"([^"]+)"\s+(?:menjadi|jadi)\s+"([^"]+)"/i,
+    /\breplace\s+"([^"]+)"\s+with\s+"([^"]+)"/i,
+  ]
+  for (const pattern of quoted) {
+    const match = normalized.match(pattern)
+    if (match?.[1] && match?.[2]) {
+      return {
+        ok: true,
+        find: match[1].trim(),
+        replace: match[2].trim(),
+        targetKind: null,
+        normalizedPrompt: `replace text "${match[1].trim()}" with "${match[2].trim()}"`,
+      }
+    }
+  }
+
+  const heading = normalized.match(/\b(?:ganti|ubah)\s+(judul|heading|title|headline)\s+(?:menjadi|jadi)\s+"?([^"\n]+)"?/i)
+  if (heading?.[2]) {
+    return {
+      ok: true,
+      find: null,
+      replace: heading[2].trim(),
+      targetKind: heading[1].toLowerCase() === "judul" || heading[1].toLowerCase() === "title" ? "title" : "heading",
+      normalizedPrompt: `replace ${heading[1].toLowerCase()} with "${heading[2].trim()}"`,
+    }
+  }
+
+  const unquotedReplace = normalized.match(/\breplace\s+text\s+"([^"]+)"\s+with\s+"([^"]+)"/i)
+  if (unquotedReplace?.[1] && unquotedReplace?.[2]) {
+    return {
+      ok: true,
+      find: unquotedReplace[1].trim(),
+      replace: unquotedReplace[2].trim(),
+      targetKind: null,
+      normalizedPrompt: normalized,
+    }
+  }
+
+  if (/\b(?:ganti|ubah|replace)\b/i.test(normalized)) {
+    return { ok: false, reason: "Ambiguous replacement instruction: use ganti \"OLD_TEXT\" menjadi \"NEW_TEXT\" or ganti judul jadi \"NEW_TITLE\"." }
+  }
+
+  return { ok: false, reason: "Unsupported edit grammar for text_update." }
+}
+
+function normalizeReplacementPrompt(prompt: string) {
+  const lines = prompt
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length >= 3 && /^(ganti|ubah)\s+jadi$/i.test(lines[1])) {
+    return `replace text "${lines[0]}" with "${lines.slice(2).join(" ")}"`
+  }
+  if (lines.length >= 3 && /^replace\s+with$/i.test(lines[1])) {
+    return `replace text "${lines[0]}" with "${lines.slice(2).join(" ")}"`
+  }
+  return prompt.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim()
+}
+
+function candidateFilesForTextUpdate(files: GeneratedFile[], affectedFiles: string[]) {
+  const affected = new Set(affectedFiles.map(normalizePath))
+  const affectedMatches = files.filter((file) => affected.has(normalizePath(file.path)) && /\.(tsx?|jsx?)$/i.test(file.path))
+  if (affectedMatches.length > 0) return affectedMatches
+  return files
+    .filter((file) => (/^app\/(?:.+\/)?page\.tsx$/i.test(normalizePath(file.path)) || /^components\/.+\.tsx$/i.test(normalizePath(file.path))) && /\.(tsx?|jsx?)$/i.test(file.path))
+    .slice(0, 8)
+}
+
+function resolveJsxTextReplacement(input: {
+  file: GeneratedFile
+  find: string | null
+  replace: string
+  targetKind: "title" | "heading" | null
+}): { ok: true; content: string; find: string; container: string | null } | { ok: false; reason: string } {
+  const content = String(input.file.content || "")
+  const ast = parseTsxAst(content)
+  const anchors = collectJsxTextAnchors(ast, content)
+  const target = input.find
+    ? anchors.find((anchor) => normalizeJsxText(anchor.text) === normalizeJsxText(input.find || ""))
+    : anchors.find((anchor) => {
+        if (input.targetKind === "title") return anchor.container === "h1" || anchor.container === "title"
+        if (input.targetKind === "heading") return /^h[1-6]$/.test(anchor.container || "")
+        return false
+      })
+
+  if (!target) {
+    return { ok: false, reason: input.find ? "No matching JSX text node found" : "No target JSX heading found" }
+  }
+
+  const raw = content.slice(target.start, target.end)
+  const leading = raw.match(/^\s*/)?.[0] || ""
+  const trailing = raw.match(/\s*$/)?.[0] || ""
+  const replacement = `${leading}${escapeJsxText(input.replace)}${trailing}`
+  return {
+    ok: true,
+    content: `${content.slice(0, target.start)}${replacement}${content.slice(target.end)}`,
+    find: normalizeJsxText(target.text),
+    container: target.container,
+  }
+}
+
+type JsxTextAnchor = {
+  text: string
+  start: number
+  end: number
+  container: string | null
+}
+
+function collectJsxTextAnchors(ast: AstNode, content: string) {
+  const anchors: JsxTextAnchor[] = []
+  walkAst(ast, [], (node, parents) => {
+    if (node.type !== "JSXText") return
+    if (typeof node.start !== "number" || typeof node.end !== "number") return
+    const text = normalizeJsxText(content.slice(node.start, node.end))
+    if (!text) return
+    anchors.push({
+      text,
+      start: node.start,
+      end: node.end,
+      container: nearestJsxElementName(parents),
+    })
   })
+  return anchors
+}
+
+function nearestJsxElementName(parents: AstNode[]) {
+  for (let index = parents.length - 1; index >= 0; index -= 1) {
+    const parent = parents[index]
+    if (parent.type !== "JSXElement") continue
+    const opening = parent.openingElement as AstNode | undefined
+    const name = opening?.name as AstNode | undefined
+    if (name?.type === "JSXIdentifier" && typeof name.name === "string") return name.name
+  }
+  return null
+}
+
+type AstNode = Record<string, unknown> & {
+  type?: string
+  start?: number
+  end?: number
+  openingElement?: unknown
+  name?: unknown
+}
+
+function walkAst(node: unknown, parents: AstNode[], visit: (node: AstNode, parents: AstNode[]) => void) {
+  if (!node || typeof node !== "object") return
+  const current = node as AstNode
+  if (typeof current.type === "string") visit(current, parents)
+  const nextParents = typeof current.type === "string" ? [...parents, current] : parents
+
+  for (const [key, value] of Object.entries(current)) {
+    if (key === "loc" || key === "start" || key === "end" || key === "range") continue
+    if (Array.isArray(value)) {
+      for (const child of value) walkAst(child, nextParents, visit)
+      continue
+    }
+    if (value && typeof value === "object") walkAst(value, nextParents, visit)
+  }
+}
+
+function normalizeJsxText(value: string) {
+  return String(value || "").replace(/\s+/g, " ").trim()
 }
 
 function validationScopeForIntent(intent: IncrementalEditIntent | null): IncrementalValidationResult["validationScope"] {
@@ -386,18 +602,6 @@ function validatePrismaLikeContent(file: GeneratedFile) {
   return null
 }
 
-function extractReplacementText(prompt: string) {
-  const patterns = [
-    /\b(?:jadi|menjadi|to)\s+["']?([^"'\n.]+)["']?/i,
-    /\b(?:ganti|ubah|change|rename).*?\b(?:judul|title|headline).*?["']([^"']+)["']/i,
-  ]
-  for (const pattern of patterns) {
-    const match = prompt.match(pattern)
-    if (match?.[1]) return toTitleCase(match[1].trim())
-  }
-  return extractQuotedValue(prompt)
-}
-
 function extractQuotedValue(prompt: string) {
   const quoted = prompt.match(/["']([^"']+)["']/)
   return quoted?.[1]?.trim() || null
@@ -431,7 +635,13 @@ function addMatching(targets: Set<string>, paths: string[], patterns: RegExp[], 
   }
 }
 
-function replaceFile(files: GeneratedFile[], changed: GeneratedFile, patchSummary: string[], reason: string): IncrementalPatchResult {
+function replaceFile(
+  files: GeneratedFile[],
+  changed: GeneratedFile,
+  patchSummary: string[],
+  reason: string,
+  patchPlan?: TextReplacementOperation
+): IncrementalPatchResult {
   const path = normalizePath(changed.path)
   const next = files.map((file) => normalizePath(file.path) === path ? { ...changed, path } : file)
   return {
@@ -439,6 +649,7 @@ function replaceFile(files: GeneratedFile[], changed: GeneratedFile, patchSummar
     files: next,
     changedFiles: [{ ...changed, path }],
     patchSummary,
+    patchPlan,
     reason,
   }
 }
@@ -477,10 +688,7 @@ function escapeJsxText(value: string) {
   return value.replace(/[<>{}]/g, "")
 }
 
-function toTitleCase(value: string) {
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => word.slice(0, 1).toUpperCase() + word.slice(1))
-    .join(" ")
+function humanizeZodIssues(issues: z.ZodIssue[]) {
+  if (issues.some((issue) => issue.message === "Missing replace target")) return "Missing replace target."
+  return issues.map((issue) => `${issue.path.join(".") || "payload"}: ${issue.message}`).join("; ")
 }
