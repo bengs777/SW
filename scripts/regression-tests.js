@@ -194,4 +194,17 @@ assert(
   "generation must read back persisted files and block preview/completion when project state is empty"
 )
 
+assert(
+  "production backend blueprint scaffold covers commerce users products",
+  /buildMissingBackendBlueprintFiles/.test(generationOrchestrator) &&
+    /app\/api\/users\/route\.ts/.test(generationOrchestrator) &&
+    /app\/api\/products\/route\.ts/.test(generationOrchestrator) &&
+    /lib\/services\/user\.service\.ts/.test(generationOrchestrator) &&
+    /lib\/services\/product\.service\.ts/.test(generationOrchestrator) &&
+    /ProductSchema/.test(generationOrchestrator) &&
+    /UserSchema/.test(generationOrchestrator) &&
+    /extractUiMockDataToServices/.test(generationOrchestrator),
+  "production full-stack generation must add backend blueprint files and move obvious page product mock data into services"
+)
+
 console.log("[regression] all checks passed")

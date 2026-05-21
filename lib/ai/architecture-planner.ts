@@ -59,7 +59,7 @@ export function buildArchitecturePlan(input: {
   const modelRoutes = intent.database.models.map((model) => `app/api/${routeSegmentForModel(model)}/route.ts`)
   const serviceFiles = unique([
     ...intent.backend.services.map((service) => `lib/services/${service}.service.ts`),
-    ...intent.database.models.map((model) => `lib/services/${routeSegmentForModel(model)}.service.ts`),
+    ...intent.database.models.map((model) => `lib/services/${serviceSegmentForModel(model)}.service.ts`),
   ])
   const paymentRoutes = intent.payments.provider
     ? ["app/api/payments/checkout/route.ts", "app/api/payments/webhook/route.ts"]
@@ -167,6 +167,13 @@ function dependenciesForIntent(intent: SwiftStructuredIntent) {
 export function routeSegmentForModel(model: string) {
   const normalized = String(model || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
   return normalized || "items"
+}
+
+function serviceSegmentForModel(model: string) {
+  const routeSegment = routeSegmentForModel(model)
+  if (routeSegment.endsWith("ies")) return `${routeSegment.slice(0, -3)}y`
+  if (routeSegment.endsWith("s")) return routeSegment.slice(0, -1)
+  return routeSegment
 }
 
 function unique(values: string[]) {

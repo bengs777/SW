@@ -494,6 +494,14 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
     required.add("lib/services/integration.service.ts")
   }
 
+  if (blueprint.appType === "simple_marketplace" || /\b(product|produk|marketplace|e-?commerce|seller|buyer|user|auth|login|admin)\b/i.test(text)) {
+    required.add("app/api/products/route.ts")
+    required.add("app/api/users/route.ts")
+    required.add("lib/services/product.service.ts")
+    required.add("lib/services/user.service.ts")
+    required.add("prisma/schema.prisma")
+  }
+
   for (const filePath of genericSupportFiles) {
     required.add(filePath)
   }
@@ -1698,6 +1706,7 @@ function buildAgentTaskPlan(
   }
 
   if (input.productionMode === "production_fullstack") {
+    addTask("generate backend blueprint")
     addTask("wire full-stack boundaries")
   }
 
@@ -1839,7 +1848,7 @@ async function emitGeneratedFilesUpdate(input: {
   previousFiles?: GeneratedFile[]
   changedFiles?: GeneratedFile[]
   deletedPaths?: string[]
-  source: "seed" | "slice" | "repair" | "fast_fullstack_scaffold"
+  source: "seed" | "slice" | "repair" | "fast_fullstack_scaffold" | "backend_blueprint_scaffold"
   data?: Record<string, unknown>
 }) {
   const allFilesBytes = totalFileBytes(input.allFiles)
@@ -2998,6 +3007,243 @@ export default config
   }
 
   return files
+}
+
+function buildMissingBackendBlueprintFiles(input: {
+  plan: GenerationPlan
+  prompt: string
+  files: GeneratedFile[]
+}): GeneratedFile[] {
+  if (input.plan.productionMode !== "production_fullstack") return []
+
+  const text = input.prompt.toLowerCase()
+  const paths = new Set(input.files.map((file) => normalizePath(file.path)))
+  const planned = new Set([
+    ...input.plan.filePlan.map((file) => normalizePath(file.path)),
+    ...input.plan.blueprint.requiredFiles.map(normalizePath),
+    ...input.plan.architecture.backend.apiRoutes.map(normalizePath),
+    ...input.plan.architecture.backend.services.map(normalizePath),
+    input.plan.architecture.database.schema,
+  ].filter((filePath) => filePath && filePath !== "none"))
+  const shouldScaffoldCommerceBackend =
+    input.plan.appType === "simple_marketplace" ||
+    input.plan.orchestration.plannerOutput.appType === "ecommerce" ||
+    /\b(product|produk|marketplace|e-?commerce|seller|buyer|catalog|katalog|cart|checkout|user|auth|login|admin)\b/i.test(text) ||
+    planned.has("app/api/products/route.ts") ||
+    planned.has("lib/services/product.service.ts")
+
+  if (!shouldScaffoldCommerceBackend) return []
+
+  const filesByPath = new Map<string, GeneratedFile>()
+  const addIfMissing = (file: GeneratedFile) => {
+    const path = normalizePath(file.path)
+    if (!paths.has(path)) filesByPath.set(path, { ...file, path })
+  }
+
+  addIfMissing(buildCommercePrismaSchemaFile())
+  addIfMissing(buildProductServiceFile())
+  addIfMissing(buildUserServiceFile())
+  addIfMissing(buildProductsApiRouteFile())
+  addIfMissing(buildUsersApiRouteFile())
+
+  return Array.from(filesByPath.values()).sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function extractUiMockDataToServices(files: GeneratedFile[]) {
+  return files.map((file) => {
+    const path = normalizePath(file.path)
+    if (!/^app\/(?:.+\/)?page\.tsx$/i.test(path)) return file
+    if (/^\s*["']use client["']/m.test(file.content)) return file
+    if (!/\bconst\s+products\s*=\s*\[[\s\S]*?\]\s*(?:\n|$)/m.test(file.content)) return file
+    if (/from\s+["']@\/lib\/services\/product\.service["']/.test(file.content)) return file
+
+    let content = file.content.replace(/\bconst\s+products\s*=\s*\[[\s\S]*?\]\s*(?:\n|$)/m, "")
+    content = `import { listProducts } from "@/lib/services/product.service"\n${content.trimStart()}`
+    content = content.replace(
+      /export\s+default\s+function\s+([A-Za-z0-9_]+)\s*\(\s*\)\s*\{/,
+      "export default async function $1() {\n  const products = await listProducts()"
+    )
+    return { ...file, path, content }
+  })
+}
+
+function buildCommercePrismaSchemaFile(): GeneratedFile {
+  return {
+    path: "prisma/schema.prisma",
+    language: "prisma",
+    content: `generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  name      String
+  email     String    @unique
+  role      String    @default("buyer")
+  products  Product[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  area        String   @default("Online")
+  price       Int
+  status      String   @default("draft")
+  ownerId     String?
+  owner       User?    @relation(fields: [ownerId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+`,
+  }
+}
+
+function buildProductServiceFile(): GeneratedFile {
+  return {
+    path: "lib/services/product.service.ts",
+    language: "ts",
+    content: `import { z } from "zod"
+
+export const ProductSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  description: z.string().min(1),
+  area: z.string().min(1),
+  price: z.number().int().nonnegative(),
+  status: z.string().min(1),
+})
+
+export const CreateProductSchema = ProductSchema.omit({ id: true }).partial({
+  description: true,
+  area: true,
+  status: true,
+}).extend({
+  name: z.string().min(1),
+  price: z.number().int().nonnegative(),
+})
+
+export type Product = z.infer<typeof ProductSchema>
+export type CreateProductInput = z.infer<typeof CreateProductSchema>
+
+const productSeed: Product[] = [
+  { id: "prod_1", name: "Starter Product", description: "Production-safe seed product served from the service layer.", area: "Online", price: 85000, status: "ready" },
+  { id: "prod_2", name: "Featured Product", description: "Use Prisma-backed storage when DATABASE_URL is configured.", area: "Warehouse", price: 140000, status: "featured" },
+]
+
+export async function listProducts(): Promise<Product[]> {
+  return productSeed
+}
+
+export async function createProduct(input: CreateProductInput): Promise<Product> {
+  const parsed = CreateProductSchema.parse(input)
+  return {
+    id: \`prod_\${Date.now()}\`,
+    description: parsed.description || "New product",
+    area: parsed.area || "Online",
+    status: parsed.status || "draft",
+    ...parsed,
+  }
+}
+`,
+  }
+}
+
+function buildUserServiceFile(): GeneratedFile {
+  return {
+    path: "lib/services/user.service.ts",
+    language: "ts",
+    content: `import { z } from "zod"
+
+export const UserSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  email: z.string().email(),
+  role: z.enum(["admin", "seller", "buyer"]).default("buyer"),
+})
+
+export const CreateUserSchema = UserSchema.omit({ id: true })
+
+export type PublicUser = z.infer<typeof UserSchema>
+export type CreateUserInput = z.infer<typeof CreateUserSchema>
+
+const userSeed: PublicUser[] = [
+  { id: "user_admin", name: "Admin User", email: "admin@example.com", role: "admin" },
+  { id: "user_seller", name: "Seller User", email: "seller@example.com", role: "seller" },
+]
+
+export async function listUsers(): Promise<PublicUser[]> {
+  return userSeed
+}
+
+export async function createUser(input: CreateUserInput): Promise<PublicUser> {
+  const parsed = CreateUserSchema.parse(input)
+  return {
+    id: \`user_\${Date.now()}\`,
+    ...parsed,
+  }
+}
+`,
+  }
+}
+
+function buildProductsApiRouteFile(): GeneratedFile {
+  return {
+    path: "app/api/products/route.ts",
+    language: "ts",
+    content: `import { NextResponse } from "next/server"
+import { CreateProductSchema, createProduct, listProducts } from "@/lib/services/product.service"
+
+export async function GET() {
+  const products = await listProducts()
+  return NextResponse.json({ products, total: products.length })
+}
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null)
+  const parsed = CreateProductSchema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid product payload", issues: parsed.error.flatten() }, { status: 400 })
+  }
+
+  const product = await createProduct(parsed.data)
+  return NextResponse.json({ product }, { status: 201 })
+}
+`,
+  }
+}
+
+function buildUsersApiRouteFile(): GeneratedFile {
+  return {
+    path: "app/api/users/route.ts",
+    language: "ts",
+    content: `import { NextResponse } from "next/server"
+import { CreateUserSchema, createUser, listUsers } from "@/lib/services/user.service"
+
+export async function GET() {
+  const users = await listUsers()
+  return NextResponse.json({ users, total: users.length })
+}
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null)
+  const parsed = CreateUserSchema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid user payload", issues: parsed.error.flatten() }, { status: 400 })
+  }
+
+  const user = await createUser(parsed.data)
+  return NextResponse.json({ user }, { status: 201 })
+}
+`,
+  }
 }
 
 function extractPackageNames(files: GeneratedFile[]) {
@@ -5322,6 +5568,69 @@ export async function executeGenerationJob(
         },
       })
       throw new Error(`Scoped edit was not applied: ${patch.reason}`)
+    }
+
+    const backendBlueprintFiles = buildMissingBackendBlueprintFiles({
+      plan,
+      prompt: input.prompt,
+      files: workingFiles,
+    })
+    if (backendBlueprintFiles.length > 0) {
+      const previousWorkingFiles = workingFiles
+      const backendStartedAt = performance.now()
+      const withBackend = mergeFilesByPath(workingFiles, backendBlueprintFiles)
+      workingFiles = extractUiMockDataToServices(withBackend)
+      const normalized = normalizeGeneratedDependencies(workingFiles)
+      workingFiles = normalized.files
+      tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+      const changedPaths = new Set(backendBlueprintFiles.map((file) => normalizePath(file.path)))
+      for (const file of workingFiles) {
+        const previous = previousWorkingFiles.find((item) => normalizePath(item.path) === normalizePath(file.path))
+        if (previous && previous.content !== file.content) changedPaths.add(normalizePath(file.path))
+      }
+      const changedFiles = workingFiles.filter((file) => changedPaths.has(normalizePath(file.path)))
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "GENERATING",
+        status: "passed",
+        reason: "Backend blueprint scaffold generated for production full-stack validation",
+        data: {
+          acceptedFileCount: backendBlueprintFiles.length,
+          changedFiles: Array.from(changedPaths).sort(),
+          addedPackages: normalized.addedPackages,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+      const backendDurationMs = Math.round(performance.now() - backendStartedAt)
+      await transition(input.jobId, "parsing", "Generating backend blueprint scaffold", 52, {
+        source: "backend_blueprint_scaffold",
+        fileCount: workingFiles.length,
+        changedPaths: Array.from(changedPaths).sort(),
+        addedPackages: normalized.addedPackages,
+        durationMs: backendDurationMs,
+      })
+      await emitGeneratedFilesUpdate({
+        jobId: input.jobId,
+        stage: "parsing",
+        message: "Backend blueprint scaffold ready in Explorer",
+        allFiles: workingFiles,
+        previousFiles: previousWorkingFiles,
+        changedFiles,
+        deletedPaths: [],
+        source: "backend_blueprint_scaffold",
+        data: {
+          durationMs: backendDurationMs,
+          fileCount: workingFiles.length,
+          addedPackages: normalized.addedPackages,
+        },
+      })
+      log("info", "backend_blueprint_scaffold_completed", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        source: "backend_blueprint_scaffold",
+        fileCount: workingFiles.length,
+        generatedFiles: backendBlueprintFiles.map((file) => normalizePath(file.path)),
+        changedFiles: Array.from(changedPaths).sort(),
+      })
     }
 
     const fastScaffoldFiles = buildFastClinicFullStackScaffold({
