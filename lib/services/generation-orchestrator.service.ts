@@ -59,6 +59,14 @@ import {
 } from "@/lib/ai/project-memory-graph"
 import { validateArchitectureFiles } from "@/lib/ai/architecture-validator"
 import {
+  appendRepairPath,
+  assertSoftwareOrchestrationReady,
+  buildRoleInstructionBlock,
+  createSoftwareOrchestration,
+  type SoftwareOrchestrationDiagnostics,
+  type SoftwareOrchestrationRole,
+} from "@/lib/ai/software-orchestration"
+import {
   applyDeterministicIncrementalPatch,
   buildScopedEditResult,
   buildIncrementalEditPlan,
@@ -154,6 +162,7 @@ type GenerationPlan = {
   architecture: SwiftArchitecturePlan
   projectMemory: SwiftProjectMemoryGraph
   dependencyGraph: SwiftDependencyGraph
+  orchestration: SoftwareOrchestrationDiagnostics
   dependencyPlan: string[]
   fileGraphPlan: string[]
   agentTasks: string[]
@@ -1371,6 +1380,16 @@ function buildGenerationPlan(input: {
     prompt: input.prompt,
     productionMode,
   })
+  const orchestration = createSoftwareOrchestration({
+    prompt: input.prompt,
+    appType,
+    structuredIntent,
+    architecture,
+    projectMemory,
+    dependencyGraph,
+    blueprintRequiredFiles: requiredFilesForIntent,
+  })
+  assertSoftwareOrchestrationReady(orchestration)
   const maxFilesThisPass =
     productionMode === "production_fullstack" ? PRODUCTION_FULLSTACK_FILE_LIMIT : editPlan.maxSlices
   const trimmed = trimContextForGeneration({
@@ -1499,6 +1518,7 @@ function buildGenerationPlan(input: {
     architecture,
     projectMemory,
     dependencyGraph,
+    orchestration,
     dependencyPlan: [
       "Use only the locked Swift stack.",
       `Allowed packages: ${blueprint.dependencyPolicy.allowedExternalPackages.join(", ")}`,
@@ -1972,6 +1992,8 @@ async function runProviderAttempt(input: {
   projectId?: string | null
   prompt: string
   purpose: "generate" | "repair"
+  orchestrationRole?: SoftwareOrchestrationRole
+  logicalModel?: string
   selectedModel: string
   promptLanguage: "id" | "en"
   signal?: AbortSignal
@@ -2016,6 +2038,8 @@ async function runProviderAttempt(input: {
   log("info", "generation_provider_attempt_started", {
     jobId: input.jobId,
     purpose: input.purpose,
+    orchestrationRole: input.orchestrationRole || input.purpose,
+    logicalModel: input.logicalModel || route.modelName,
     selectedModel: input.selectedModel,
     routedModel: route.modelName,
     layer: route.layer,
@@ -2033,6 +2057,8 @@ async function runProviderAttempt(input: {
       complexity: route.complexity,
       reason: route.reason,
       selectedModel: input.selectedModel,
+      orchestrationRole: input.orchestrationRole || input.purpose,
+      logicalModel: input.logicalModel || route.modelName,
     },
   })
 
@@ -2162,6 +2188,11 @@ function buildSlicePrompt(input: {
     buildBlueprintInstructionBlock(input.blueprint),
     "",
     buildArchitectureInstructionBlock(input.plan.architecture),
+    "",
+    buildRoleInstructionBlock({
+      diagnostics: input.plan.orchestration,
+      role: "builder",
+    }),
     "",
     buildPartialEditInstructionBlock(input.plan.editPlan),
     "",
@@ -3473,6 +3504,11 @@ async function attemptTargetedRepair(input: {
     "",
     buildArchitectureInstructionBlock(input.plan.architecture),
     "",
+    buildRoleInstructionBlock({
+      diagnostics: input.plan.orchestration,
+      role: "repair",
+    }),
+    "",
     buildPartialEditInstructionBlock(input.editPlan),
     "",
     "DETERMINISTIC_VALIDATION_FAILURE:",
@@ -3518,6 +3554,8 @@ async function attemptTargetedRepair(input: {
     projectId: input.projectId,
     prompt: repairPrompt,
     purpose: "repair",
+    orchestrationRole: "repair",
+    logicalModel: input.plan.orchestration.repairModel,
     selectedModel: "repair",
     promptLanguage: input.promptLanguage,
     signal: input.signal,
@@ -3954,6 +3992,18 @@ export async function executeGenerationJob(
     })
     blueprint = getControlledAppBlueprint(plan.appType)
     const appPlan = buildAppPlan({ prompt: input.prompt, plan })
+    developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+    developerDiagnostics.plannerConfidence = plan.orchestration.plannerConfidence
+    developerDiagnostics.selectedArchetype = plan.orchestration.selectedArchetype
+    developerDiagnostics.orchestrationModels = {
+      plannerModel: plan.orchestration.plannerModel,
+      architectureModel: plan.orchestration.architectureModel,
+      builderModel: plan.orchestration.builderModel,
+      repairModel: plan.orchestration.repairModel,
+      validatorModel: plan.orchestration.validatorModel,
+      uiEnhancementModel: plan.orchestration.uiEnhancementModel,
+    }
+    developerDiagnostics.repairPath = plan.orchestration.repairPath
     developerDiagnostics.plannerOutput = {
       objective: plan.objective,
       generationMode: plan.generationMode,
@@ -3966,6 +4016,16 @@ export async function executeGenerationJob(
       agentTasks: plan.agentTasks,
       actionPlan: plan.actionPlan,
       appPlan,
+      orchestrationDiagnostics: plan.orchestration,
+      plannerModel: plan.orchestration.plannerModel,
+      architectureModel: plan.orchestration.architectureModel,
+      builderModel: plan.orchestration.builderModel,
+      repairModel: plan.orchestration.repairModel,
+      plannerConfidence: plan.orchestration.plannerConfidence,
+      selectedArchetype: plan.orchestration.selectedArchetype,
+      intentGraph: plan.orchestration.graphs.intentGraph,
+      routeGraph: plan.orchestration.graphs.routeGraph,
+      componentGraph: plan.orchestration.graphs.componentGraph,
       architecturePlan: plan.architecture,
       projectMemoryGraph: plan.projectMemory,
       dependencyGraph: plan.dependencyGraph,
@@ -4473,6 +4533,8 @@ export async function executeGenerationJob(
                 `- Cover exactly this slice target: ${target.path}.`,
               ].join("\n"),
           purpose: "generate",
+          orchestrationRole: "builder",
+          logicalModel: plan.orchestration.builderModel,
           selectedModel: input.selectedModel,
           promptLanguage,
           signal: input.signal,
@@ -4964,6 +5026,13 @@ export async function executeGenerationJob(
           steps: validation.steps,
         },
       }).catch(() => null)
+      appendRepairPath(plan.orchestration, {
+        attempt: repairAttempt,
+        reason: validation.failure?.message || "Validation lifecycle failed",
+        targetFiles: repairActions.map((action) => action.file),
+      })
+      developerDiagnostics.repairPath = plan.orchestration.repairPath
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
       developerDiagnostics.repairAttempts.push({
         attempt: repairAttempt,
         reason: validation.failure?.message || "Validation lifecycle failed",
@@ -5395,6 +5464,13 @@ export async function executeGenerationJob(
         addedPackages: fallback.addedPackages,
         normalizedPackages: fallback.normalizedPackages,
       })
+      appendRepairPath(plan.orchestration, {
+        attempt: repairAttempt + 1,
+        reason: validation.failure?.message || "Preview compile failed after AI repair",
+        targetFiles: workingFiles.map((file) => normalizePath(file.path)).slice(0, 40),
+      })
+      developerDiagnostics.repairPath = plan.orchestration.repairPath
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
       developerDiagnostics.repairAttempts.push({
         attempt: repairAttempt + 1,
         reason: validation.failure?.message || "Preview compile failed after AI repair",

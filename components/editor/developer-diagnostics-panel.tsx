@@ -17,6 +17,18 @@ export type DeveloperDiagnosticsSnapshot = {
       retryCount?: number
       lastSuccessfulStage?: string | null
       terminationReason?: string | null
+      plannerConfidence?: number | null
+      selectedArchetype?: string | null
+      orchestrationModels?: {
+        plannerModel?: string | null
+        architectureModel?: string | null
+        builderModel?: string | null
+        repairModel?: string | null
+        validatorModel?: string | null
+        uiEnhancementModel?: string | null
+      }
+      repairPath?: unknown[]
+      orchestrationDiagnostics?: unknown
       plannerOutput?: unknown
       generatedArtifactSummary?: unknown
       validatorFailures?: unknown[]
@@ -73,6 +85,19 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
     developer?.terminationReason ||
     [...timeline].reverse().find((item) => item.status === "failed" || item.stage === "FAILED")?.reason ||
     "Not terminated"
+  const plannerOutput = developer?.plannerOutput as Record<string, unknown> | undefined
+  const orchestrationModels =
+    developer?.orchestrationModels ||
+    (plannerOutput?.orchestrationDiagnostics as Record<string, unknown> | undefined)
+  const plannerConfidence =
+    typeof developer?.plannerConfidence === "number"
+      ? developer.plannerConfidence
+      : typeof plannerOutput?.plannerConfidence === "number"
+        ? plannerOutput.plannerConfidence
+        : null
+  const selectedArchetype =
+    developer?.selectedArchetype ||
+    (typeof plannerOutput?.selectedArchetype === "string" ? plannerOutput.selectedArchetype : null)
 
   return (
     <div className="border-t border-border bg-background">
@@ -116,6 +141,18 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
                 <p>retry_reason: {diagnostics.recovery?.retryReason || "none"}</p>
               </div>
             </Section>
+            <Section title="Role Orchestration">
+              <div className="grid gap-1 rounded-md border border-border bg-muted/30 p-2 font-mono text-[11px]">
+                <p>planner_model: {String(orchestrationModels?.plannerModel || "unknown")}</p>
+                <p>architecture_model: {String(orchestrationModels?.architectureModel || "unknown")}</p>
+                <p>builder_model: {String(orchestrationModels?.builderModel || "unknown")}</p>
+                <p>validator_model: {String(orchestrationModels?.validatorModel || "unknown")}</p>
+                <p>repair_model: {String(orchestrationModels?.repairModel || "unknown")}</p>
+                <p>ui_enhancement_model: {String(orchestrationModels?.uiEnhancementModel || "unknown")}</p>
+                <p>planner_confidence: {plannerConfidence === null ? "unknown" : plannerConfidence}</p>
+                <p>selected_archetype: {selectedArchetype || "unknown"}</p>
+              </div>
+            </Section>
             <Section title="Execution Timeline">
               {timeline.length === 0 ? (
                 <p className="text-muted-foreground">No developer timeline events yet.</p>
@@ -141,7 +178,11 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
             </Section>
 
             <JsonSection title="Planner Output" value={developer?.plannerOutput || diagnostics.plan} />
+            <JsonSection title="Orchestration Diagnostics" value={developer?.orchestrationDiagnostics || plannerOutput?.orchestrationDiagnostics} />
             <JsonSection title="Architecture Plan" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.architecturePlan} />
+            <JsonSection title="Intent Graph" value={plannerOutput?.intentGraph} />
+            <JsonSection title="Route Graph" value={plannerOutput?.routeGraph} />
+            <JsonSection title="Component Graph" value={plannerOutput?.componentGraph} />
             <JsonSection title="Project Memory Graph" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.projectMemoryGraph} />
             <JsonSection title="Dependency Graph" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.dependencyGraph} />
             <JsonSection title="Incremental Edit" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.incrementalEdit || (diagnostics.metrics as Record<string, unknown> | undefined)?.incrementalEdit} />
@@ -149,6 +190,7 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
             <JsonSection title="Validator Failures" value={developer?.validatorFailures} />
             <JsonSection title="Artifact Parse Failures" value={developer?.artifactParseFailures} />
             <JsonSection title="Repair Attempts" value={developer?.repairAttempts} />
+            <JsonSection title="Repair Path" value={developer?.repairPath || (developer?.orchestrationDiagnostics as Record<string, unknown> | undefined)?.repairPath} />
             <JsonSection title="Build Failures" value={developer?.buildFailures} />
             <JsonSection title="Preview Startup Failures" value={developer?.previewStartupFailures} />
             <JsonSection title="Queue Lifecycle" value={diagnostics.recovery} />

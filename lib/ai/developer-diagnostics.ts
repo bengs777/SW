@@ -39,6 +39,18 @@ export type DeveloperGenerationDiagnostics = {
   terminationReason?: string | null
   retryCount: number
   plannerOutput?: Record<string, unknown>
+  orchestrationDiagnostics?: Record<string, unknown>
+  plannerConfidence?: number | null
+  selectedArchetype?: string | null
+  orchestrationModels?: {
+    plannerModel?: string | null
+    architectureModel?: string | null
+    builderModel?: string | null
+    repairModel?: string | null
+    validatorModel?: string | null
+    uiEnhancementModel?: string | null
+  }
+  repairPath?: Array<Record<string, unknown>>
   generatedArtifactSummary?: Record<string, unknown>
   validatorFailures: Array<Record<string, unknown>>
   artifactParseFailures: Array<Record<string, unknown>>
@@ -65,6 +77,9 @@ export function createDeveloperGenerationDiagnostics(): DeveloperGenerationDiagn
     lastSuccessfulStage: null,
     terminationReason: null,
     retryCount: 0,
+    plannerConfidence: null,
+    selectedArchetype: null,
+    repairPath: [],
     validatorFailures: [],
     artifactParseFailures: [],
     repairAttempts: [],
