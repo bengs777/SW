@@ -63,7 +63,10 @@ import {
   assertSoftwareOrchestrationReady,
   buildRoleInstructionBlock,
   createSoftwareOrchestration,
+  markCommitStatus,
   markOrchestrationValidation,
+  markPreviewStatus,
+  markScopeRejections,
   validateProjectScaffold,
   type SoftwareOrchestrationDiagnostics,
   type SoftwareOrchestrationRole,
@@ -1568,6 +1571,11 @@ function buildGenerationPlan(input: {
     if (leftOrder !== rightOrder) return leftOrder - rightOrder
     return left.path.localeCompare(right.path)
   })
+  if (stagedEcommerceRequested) {
+    const allowed = new Set(orchestration.allowedScope.map(normalizePath))
+    const scopedPlan = filePlan.filter((item) => allowed.has(normalizePath(item.path)))
+    filePlan.splice(0, filePlan.length, ...scopedPlan)
+  }
   const agentTasks = buildAgentTaskPlan(input.prompt, filePlan, {
     productionMode,
     editMode: editPlan.mode,
@@ -2347,6 +2355,28 @@ function buildSlicePrompt(input: {
     `- Incremental edit intent: ${input.plan.incrementalEdit.editIntent || "none"}`,
     `- Controlled app type: ${input.plan.appType}`,
     "",
+    "SCOPED_GENERATION_REQUEST:",
+    JSON.stringify(
+      {
+        targetFiles: targetPaths,
+        exactPurpose: input.target.reason,
+        allowedFileScope: input.plan.orchestration.allowedScope,
+        allowedImports: [
+          "react",
+          "next/link",
+          "next/navigation",
+          "lucide-react",
+          "@/components/* only when the imported file is already in ALLOWED_FILE_SCOPE",
+          "@/lib/* only when the imported file is already in ALLOWED_FILE_SCOPE",
+        ],
+        allowedExports: ["default React component for route files", "named React component matching component filename"],
+        allowedDependencies: input.plan.architecture.dependencies,
+        forbiddenPatterns: input.plan.orchestration.architectureOutput.forbiddenPatterns,
+      },
+      null,
+      2
+    ),
+    "",
     "AGENT_WORKFLOW_CONTEXT:",
     JSON.stringify(
       {
@@ -2572,6 +2602,91 @@ function auditPostGeneration(input: {
     failures,
     fileCount: input.persistedFiles.length,
     requiredFiles: input.plan.orchestration.plannerOutput.appType === "ecommerce" ? ecommerceRequiredFiles() : [],
+  }
+}
+
+function validateGeneratedFilesAgainstAllowedScope(input: {
+  files: GeneratedFile[]
+  plan: GenerationPlan
+}) {
+  const allowed = new Set(input.plan.orchestration.allowedScope.map(normalizePath))
+  const forbiddenPatterns = input.plan.orchestration.architectureOutput.forbiddenPatterns
+  const rejected: Array<{ path: string; reason: string }> = []
+  const accepted: GeneratedFile[] = []
+
+  for (const file of input.files) {
+    const path = normalizePath(file.path)
+    const forbidden = forbiddenPatterns.find((pattern) => path.includes(pattern))
+    if (forbidden) {
+      rejected.push({ path, reason: `Forbidden pattern matched: ${forbidden}` })
+      continue
+    }
+    if (!allowed.has(path)) {
+      rejected.push({ path, reason: "File is outside ALLOWED_FILE_SCOPE" })
+      continue
+    }
+    accepted.push({ ...file, path })
+  }
+
+  const existingAcceptedPaths = new Set(accepted.map((file) => normalizePath(file.path)))
+  const missingRequired = input.plan.orchestration.architectureOutput.requiredFiles
+    .map(normalizePath)
+    .filter((path) => allowed.has(path) && !existingAcceptedPaths.has(path))
+
+  return {
+    ok: rejected.length === 0,
+    accepted,
+    rejected,
+    missingRequired,
+  }
+}
+
+function scopeArtifactToAllowedScope(
+  artifact: ReturnType<typeof parseGeneratedArtifact>,
+  plan: GenerationPlan
+): {
+  artifact: ReturnType<typeof parseGeneratedArtifact>
+  rejected: Array<{ path: string; reason: string }>
+} {
+  const fileValidation = validateGeneratedFilesAgainstAllowedScope({ files: artifact.files, plan })
+  const allowed = new Set(plan.orchestration.allowedScope.map(normalizePath))
+  const forbiddenPatterns = plan.orchestration.architectureOutput.forbiddenPatterns
+  const rejected = [...fileValidation.rejected]
+
+  if (!artifact.taskGraph) {
+    return {
+      artifact: {
+        ...artifact,
+        files: fileValidation.accepted,
+      },
+      rejected,
+    }
+  }
+
+  const operations = artifact.taskGraph.operations.filter((operation) => {
+    const path = normalizePath(operation.path)
+    const forbidden = forbiddenPatterns.find((pattern) => path.includes(pattern))
+    if (forbidden) {
+      rejected.push({ path, reason: `Forbidden taskGraph path pattern matched: ${forbidden}` })
+      return false
+    }
+    if (!allowed.has(path)) {
+      rejected.push({ path, reason: "taskGraph operation is outside ALLOWED_FILE_SCOPE" })
+      return false
+    }
+    return true
+  }).map((operation) => ({ ...operation, path: normalizePath(operation.path) }))
+
+  return {
+    artifact: {
+      ...artifact,
+      files: fileValidation.accepted,
+      taskGraph: {
+        ...artifact.taskGraph,
+        operations,
+      },
+    },
+    rejected,
   }
 }
 
@@ -4495,6 +4610,10 @@ export async function executeGenerationJob(
     developerDiagnostics.selectedArchetype = plan.orchestration.selectedArchetype
     developerDiagnostics.validationStatus = plan.orchestration.validationStatus
     developerDiagnostics.failedScope = plan.orchestration.failedScope
+    developerDiagnostics.allowedScope = plan.orchestration.allowedScope
+    developerDiagnostics.rejectedFiles = plan.orchestration.rejectedFiles
+    developerDiagnostics.previewStatus = plan.orchestration.previewStatus
+    developerDiagnostics.commitStatus = plan.orchestration.commitStatus
     developerDiagnostics.orchestrationModels = {
       plannerModel: plan.orchestration.plannerModel,
       architectureModel: plan.orchestration.architectureModel,
@@ -4546,6 +4665,10 @@ export async function executeGenerationJob(
       selectedArchetype: plan.orchestration.selectedArchetype,
       validationStatus: plan.orchestration.validationStatus,
       failedScope: plan.orchestration.failedScope,
+      allowedScope: plan.orchestration.allowedScope,
+      rejectedFiles: plan.orchestration.rejectedFiles,
+      previewStatus: plan.orchestration.previewStatus,
+      commitStatus: plan.orchestration.commitStatus,
       intentGraph: plan.orchestration.graphs.intentGraph,
       routeGraph: plan.orchestration.graphs.routeGraph,
       componentGraph: plan.orchestration.graphs.componentGraph,
@@ -4635,6 +4758,26 @@ export async function executeGenerationJob(
         appPlan,
       },
     })
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "allowed_scope.defined",
+      stage: "planning",
+      status: "running",
+      message: "ALLOWED_FILE_SCOPE defined before generation",
+      data: {
+        allowedScope: plan.orchestration.allowedScope,
+        forbiddenPatterns: plan.orchestration.architectureOutput.forbiddenPatterns,
+      },
+    })
+    recordDeveloperDiagnostic(developerDiagnostics, {
+      stage: "PLANNING",
+      status: "passed",
+      reason: "Allowed file scope frozen before generation",
+      data: {
+        allowedScope: plan.orchestration.allowedScope,
+      },
+    })
+    await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
 
     let workingFiles = [...existingFiles]
     let tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
@@ -5354,10 +5497,41 @@ export async function executeGenerationJob(
       completionTokens += Math.max(0, response.tokenUsage?.completionTokens || 0)
       totalTokens += Math.max(0, response.tokenUsage?.totalTokens || 0)
 
+      const allowedScopeResult = scopeArtifactToAllowedScope(parsed, plan)
+      if (allowedScopeResult.rejected.length > 0) {
+        const rejectedPaths = allowedScopeResult.rejected.map((item) => item.path)
+        markScopeRejections(plan.orchestration, rejectedPaths)
+        developerDiagnostics.rejectedFiles = plan.orchestration.rejectedFiles
+        developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+        developerDiagnostics.failedScope = plan.orchestration.failedScope
+        developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+        developerDiagnostics.validatorFailures.push({
+          stage: "scope-validation",
+          status: "failed",
+          reason: "Generated artifact contained files outside ALLOWED_FILE_SCOPE",
+          rejectedFiles: allowedScopeResult.rejected,
+        })
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "VALIDATING",
+          status: "failed",
+          reason: "Rejected files outside ALLOWED_FILE_SCOPE; keeping accepted files only",
+          data: {
+            target: target.path,
+            rejectedFiles: allowedScopeResult.rejected,
+            allowedScope: plan.orchestration.allowedScope,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+      }
+
+      if (allowedScopeResult.artifact.files.length === 0 && (!allowedScopeResult.artifact.taskGraph || allowedScopeResult.artifact.taskGraph.operations.length === 0)) {
+        throw new Error(`Scope validation rejected every generated file for ${target.path}`)
+      }
+
       const scopedArtifact =
         plan.productionMode === "production_fullstack"
-          ? scopeGeneratedArtifactToTargets(parsed, targets.map((item) => item.path))
-          : parsed
+          ? scopeGeneratedArtifactToTargets(allowedScopeResult.artifact, targets.map((item) => item.path))
+          : allowedScopeResult.artifact
       const scoped = scopedArtifact.taskGraph
         ? { acceptedFiles: scopedArtifact.files, rejectedFiles: [] as GeneratedFile[] }
         : plan.productionMode === "production_fullstack"
@@ -5570,8 +5744,10 @@ export async function executeGenerationJob(
       failedScope: validation.failure?.step || "",
       failures: validation.ok ? [] : [validation.failure?.message || "Validation lifecycle failed"],
     })
+    markPreviewStatus(plan.orchestration, validation.previewStatus)
     developerDiagnostics.validationStatus = plan.orchestration.validationStatus
     developerDiagnostics.failedScope = plan.orchestration.failedScope
+    developerDiagnostics.previewStatus = plan.orchestration.previewStatus
     developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
@@ -5991,8 +6167,10 @@ export async function executeGenerationJob(
         failedScope: validation.failure?.step || "",
         failures: validation.ok ? [] : [validation.failure?.message || "Validation lifecycle failed after repair"],
       })
+      markPreviewStatus(plan.orchestration, validation.previewStatus)
       developerDiagnostics.validationStatus = plan.orchestration.validationStatus
       developerDiagnostics.failedScope = plan.orchestration.failedScope
+      developerDiagnostics.previewStatus = plan.orchestration.previewStatus
       developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
       const repairValidationDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt)
       if (repairValidationDiagnostic) {
@@ -6412,6 +6590,8 @@ export async function executeGenerationJob(
     })
 
     const persistenceStartedAt = Date.now()
+    markCommitStatus(plan.orchestration, "pending")
+    developerDiagnostics.commitStatus = plan.orchestration.commitStatus
     const finalProjectMemory = buildProjectMemoryGraph({
       files: workingFiles,
       intent: plan.structuredIntent,
@@ -6445,6 +6625,7 @@ export async function executeGenerationJob(
     })
     metrics.postGenerationAudit = postGenerationAudit
     if (!postGenerationAudit.ok) {
+      markCommitStatus(plan.orchestration, "failed")
       markOrchestrationValidation(plan.orchestration, {
         status: "failed",
         failedScope: "post-generation-audit",
@@ -6463,6 +6644,7 @@ export async function executeGenerationJob(
       developerDiagnostics.validationStatus = plan.orchestration.validationStatus
       developerDiagnostics.failedScope = plan.orchestration.failedScope
       developerDiagnostics.repairPath = plan.orchestration.repairPath
+      developerDiagnostics.commitStatus = plan.orchestration.commitStatus
       developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
       developerDiagnostics.validatorFailures.push({
         stage: "post-generation-audit",
@@ -6493,6 +6675,10 @@ export async function executeGenerationJob(
       })
       throw new Error(`Post-generation audit failed: ${postGenerationAudit.failures.join("; ")}`)
     }
+    markCommitStatus(plan.orchestration, "persisted")
+    developerDiagnostics.commitStatus = plan.orchestration.commitStatus
+    developerDiagnostics.previewStatus = plan.orchestration.previewStatus
+    developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
     log("info", "database_persisted", {
       event: "database_persisted",
       jobId: input.jobId,
@@ -6569,6 +6755,7 @@ export async function executeGenerationJob(
       manifest: saveResult.manifest,
       verifiedFileCount: saveResult.files.length,
       postGenerationAudit,
+      commitStatus: plan.orchestration.commitStatus,
     }
     await GenerationJobService.update(input.jobId, {
       metrics,
@@ -6704,6 +6891,16 @@ export async function executeGenerationJob(
     const orchestrationFailureReason = repairTerminationReason
       ? publicRepairTerminationReason(repairTerminationReason)
       : serialized.message
+    if (plan) {
+      if (/persist|database|filesystem|save|commit/i.test(serialized.message)) {
+        markCommitStatus(plan.orchestration, "failed")
+      }
+      developerDiagnostics.allowedScope = plan.orchestration.allowedScope
+      developerDiagnostics.rejectedFiles = plan.orchestration.rejectedFiles
+      developerDiagnostics.previewStatus = plan.orchestration.previewStatus
+      developerDiagnostics.commitStatus = plan.orchestration.commitStatus
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+    }
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: "FAILED",
       status: "failed",

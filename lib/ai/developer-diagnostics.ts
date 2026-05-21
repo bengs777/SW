@@ -44,6 +44,10 @@ export type DeveloperGenerationDiagnostics = {
   selectedArchetype?: string | null
   validationStatus?: string | null
   failedScope?: string | null
+  allowedScope?: string[]
+  rejectedFiles?: string[]
+  previewStatus?: string | null
+  commitStatus?: string | null
   orchestrationModels?: {
     plannerModel?: string | null
     architectureModel?: string | null
@@ -83,6 +87,10 @@ export function createDeveloperGenerationDiagnostics(): DeveloperGenerationDiagn
     selectedArchetype: null,
     validationStatus: null,
     failedScope: null,
+    allowedScope: [],
+    rejectedFiles: [],
+    previewStatus: null,
+    commitStatus: null,
     repairPath: [],
     validatorFailures: [],
     artifactParseFailures: [],

@@ -48,10 +48,14 @@ export type IntentGraph = {
 
 export type ArchitectureOutput = {
   archetype: string
+  requiredRoutes: string[]
+  requiredComponents: string[]
   routes: string[]
   components: string[]
   dependencies: string[]
   requiredFiles: string[]
+  allowedFiles: string[]
+  forbiddenPatterns: string[]
   validationRules: string[]
 }
 
@@ -95,6 +99,10 @@ export type SoftwareOrchestrationDiagnostics = {
   validationStatus: "pending" | "passed" | "failed" | "blocked"
   failedScope: string
   repairCount: number
+  allowedScope: string[]
+  rejectedFiles: string[]
+  previewStatus: string
+  commitStatus: "pending" | "persisted" | "failed"
   validation: {
     ok: boolean
     failures: string[]
@@ -105,11 +113,14 @@ export const SOFTWARE_ORCHESTRATION_PIPELINE = [
   "Intent Planning",
   "Architecture Planning",
   "Graph Construction",
+  "Allowed Scope Definition",
   "Scaffold Validation",
   "Scoped File Generation",
+  "Scope Validation",
   "Runtime Validation",
   "Targeted Repair",
   "Preview Boot",
+  "Final Commit",
 ]
 
 const DEFAULT_ROLE_MODELS: Record<SoftwareOrchestrationRole, string> = {
@@ -175,6 +186,10 @@ export function createSoftwareOrchestration(input: {
     validationStatus: validationFailures.length === 0 ? "pending" : "failed",
     failedScope: validationFailures.length === 0 ? "" : "architecture",
     repairCount: 0,
+    allowedScope: architectureOutput.allowedFiles,
+    rejectedFiles: [],
+    previewStatus: "pending",
+    commitStatus: "pending",
     validation: {
       ok: validationFailures.length === 0,
       failures: validationFailures,
@@ -198,6 +213,8 @@ export function buildRoleInstructionBlock(input: {
         boundaries,
         plannerOutput: input.diagnostics.plannerOutput,
         architectureOutput: input.diagnostics.architectureOutput,
+        allowedFileScope: input.diagnostics.allowedScope,
+        rejectedFiles: input.diagnostics.rejectedFiles,
         graphs: input.diagnostics.graphs,
         validation: input.diagnostics.validation,
       },
@@ -294,6 +311,34 @@ export function markOrchestrationValidation(
   }
 }
 
+export function markScopeRejections(
+  diagnostics: SoftwareOrchestrationDiagnostics | undefined,
+  rejectedFiles: string[]
+) {
+  if (!diagnostics) return
+  diagnostics.rejectedFiles = Array.from(new Set(rejectedFiles.map(normalizePath).filter(Boolean)))
+  if (diagnostics.rejectedFiles.length > 0) {
+    diagnostics.validationStatus = "failed"
+    diagnostics.failedScope = "allowed-scope"
+  }
+}
+
+export function markPreviewStatus(
+  diagnostics: SoftwareOrchestrationDiagnostics | undefined,
+  previewStatus: string | null | undefined
+) {
+  if (!diagnostics) return
+  diagnostics.previewStatus = previewStatus || "unknown"
+}
+
+export function markCommitStatus(
+  diagnostics: SoftwareOrchestrationDiagnostics | undefined,
+  commitStatus: SoftwareOrchestrationDiagnostics["commitStatus"]
+) {
+  if (!diagnostics) return
+  diagnostics.commitStatus = commitStatus
+}
+
 function buildPlannerOutput(input: {
   prompt: string
   appType: string
@@ -350,10 +395,22 @@ function buildArchitectureOutput(input: {
 }): ArchitectureOutput {
   return {
     archetype: input.plannerOutput.appType,
+    requiredRoutes: input.plannerOutput.requiredRoutes,
+    requiredComponents: input.plannerOutput.requiredComponents,
     routes: unique([...input.architecture.frontend.pages, ...input.architecture.backend.apiRoutes]),
     components: input.componentGraph.components.map((component) => component.path),
     dependencies: unique([...input.architecture.dependencies, ...input.dependencyGraph.nodes.map((node) => node.id)]),
     requiredFiles: input.plannerOutput.requiredFiles,
+    allowedFiles: allowedFilesForPlanner(input.plannerOutput),
+    forbiddenPatterns: [
+      "../",
+      "node_modules/",
+      ".env",
+      ".git/",
+      "package-lock.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+    ],
     validationRules: validationRulesForAppType(input.plannerOutput.appType),
   }
 }
@@ -445,14 +502,15 @@ function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStruc
     components.set(path, { path, ownerRoute, reason })
   }
 
-  add("components/app-shell.tsx", "app/page.tsx", "shared layout shell")
   if (intent.archetype === "FULLSTACK_COMMERCE") {
     add("components/Navbar.tsx", "app/page.tsx", "ecommerce navigation")
     add("components/ProductCard.tsx", "app/products/page.tsx", "product listing item")
     add("components/ProductGrid.tsx", "app/products/page.tsx", "product grid")
     add("components/CartDrawer.tsx", "app/cart/page.tsx", "cart drawer")
     add("components/CheckoutForm.tsx", "app/checkout/page.tsx", "checkout form")
+    return Array.from(components.values())
   }
+  add("components/app-shell.tsx", "app/page.tsx", "shared layout shell")
   if (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL") {
     add("components/dashboard-sidebar.tsx", "app/dashboard/page.tsx", "dashboard sidebar")
     add("components/overview-panel.tsx", "app/dashboard/page.tsx", "dashboard overview")
@@ -503,6 +561,46 @@ function estimateConfidence(input: {
 
 function unique(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+}
+
+function allowedFilesForPlanner(planner: PlannerOutput) {
+  if (planner.appType === "ecommerce") {
+    return unique([
+      "app/layout.tsx",
+      "app/page.tsx",
+      "app/globals.css",
+      "package.json",
+      "tsconfig.json",
+      "tailwind.config.ts",
+      "app/products/page.tsx",
+      "app/products/[id]/page.tsx",
+      "app/cart/page.tsx",
+      "app/checkout/page.tsx",
+      "app/login/page.tsx",
+      "app/admin/page.tsx",
+      "components/Navbar.tsx",
+      "components/ProductCard.tsx",
+      "components/ProductGrid.tsx",
+      "components/CartDrawer.tsx",
+      "components/CheckoutForm.tsx",
+      "lib/supabase/client.ts",
+      "lib/supabase/server.ts",
+      "lib/turso/client.ts",
+      "app/api/transactions/route.ts",
+    ])
+  }
+
+  return unique([
+    ...planner.requiredFiles,
+    ...planner.requiredRoutes,
+    ...planner.requiredComponents,
+    "app/layout.tsx",
+    "app/page.tsx",
+    "app/globals.css",
+    "package.json",
+    "tsconfig.json",
+    "tailwind.config.ts",
+  ])
 }
 
 function normalizePath(value: string) {

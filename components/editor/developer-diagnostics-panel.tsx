@@ -21,6 +21,10 @@ export type DeveloperDiagnosticsSnapshot = {
       selectedArchetype?: string | null
       validationStatus?: string | null
       failedScope?: string | null
+      allowedScope?: string[]
+      rejectedFiles?: string[]
+      previewStatus?: string | null
+      commitStatus?: string | null
       orchestrationModels?: {
         plannerModel?: string | null
         architectureModel?: string | null
@@ -106,6 +110,15 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
   const failedScope =
     developer?.failedScope ||
     (typeof plannerOutput?.failedScope === "string" ? plannerOutput.failedScope : "none")
+  const orchestrationDiagnostics = developer?.orchestrationDiagnostics as Record<string, unknown> | undefined
+  const previewStatus =
+    developer?.previewStatus ||
+    (typeof plannerOutput?.previewStatus === "string" ? plannerOutput.previewStatus : null) ||
+    (typeof orchestrationDiagnostics?.previewStatus === "string" ? orchestrationDiagnostics.previewStatus : "unknown")
+  const commitStatus =
+    developer?.commitStatus ||
+    (typeof plannerOutput?.commitStatus === "string" ? plannerOutput.commitStatus : null) ||
+    (typeof orchestrationDiagnostics?.commitStatus === "string" ? orchestrationDiagnostics.commitStatus : "unknown")
 
   return (
     <div className="border-t border-border bg-background">
@@ -161,6 +174,8 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
                 <p>selected_archetype: {selectedArchetype || "unknown"}</p>
                 <p>validation_status: {validationStatus}</p>
                 <p>failed_scope: {failedScope}</p>
+                <p>preview_status: {previewStatus}</p>
+                <p>commit_status: {commitStatus}</p>
               </div>
             </Section>
             <Section title="Execution Timeline">
@@ -190,6 +205,8 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
             <JsonSection title="Planner Output" value={developer?.plannerOutput || diagnostics.plan} />
             <JsonSection title="Orchestration Diagnostics" value={developer?.orchestrationDiagnostics || plannerOutput?.orchestrationDiagnostics} />
             <JsonSection title="Architecture Output" value={plannerOutput?.architectureOutput || (developer?.orchestrationDiagnostics as Record<string, unknown> | undefined)?.architectureOutput} />
+            <JsonSection title="Allowed File Scope" value={developer?.allowedScope || plannerOutput?.allowedScope || orchestrationDiagnostics?.allowedScope} />
+            <JsonSection title="Rejected Files" value={developer?.rejectedFiles || orchestrationDiagnostics?.rejectedFiles} />
             <JsonSection title="Architecture Plan" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.architecturePlan} />
             <JsonSection title="Intent Graph" value={plannerOutput?.intentGraph} />
             <JsonSection title="Route Graph" value={plannerOutput?.routeGraph} />
