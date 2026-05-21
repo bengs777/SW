@@ -63,6 +63,8 @@ import {
   assertSoftwareOrchestrationReady,
   buildRoleInstructionBlock,
   createSoftwareOrchestration,
+  markOrchestrationValidation,
+  validateProjectScaffold,
   type SoftwareOrchestrationDiagnostics,
   type SoftwareOrchestrationRole,
 } from "@/lib/ai/software-orchestration"
@@ -1483,6 +1485,52 @@ function buildGenerationPlan(input: {
         filePlan.pop()
       }
     }
+  }
+  if (editPlan.mode === "full") {
+    const existingOrPlannedPaths = new Set([
+      ...input.existingFiles.map((file) => normalizePath(file.path)),
+      ...filePlan.map((file) => normalizePath(file.path)),
+    ])
+    const scaffoldTargets: GenerationPlannerFile[] = [
+      { path: "app/layout.tsx", reason: "Required baseline scaffold layout", action: "create_or_update" },
+      { path: "app/page.tsx", reason: "Required baseline scaffold home route", action: "create_or_update" },
+      { path: "package.json", reason: "Required baseline package manifest", action: "create_or_update" },
+      { path: "tsconfig.json", reason: "Required baseline TypeScript config", action: "create_or_update" },
+      { path: "next.config.js", reason: "Required baseline Next.js config", action: "create_or_update" },
+      { path: "postcss.config.mjs", reason: "Tailwind v4/PostCSS scaffold equivalent", action: "create_or_update" },
+    ]
+    for (const scaffoldTarget of scaffoldTargets.reverse()) {
+      if (!existingOrPlannedPaths.has(scaffoldTarget.path)) {
+        filePlan.unshift(scaffoldTarget)
+        existingOrPlannedPaths.add(scaffoldTarget.path)
+      }
+    }
+    while (filePlan.length > maxFilesThisPass) {
+      const removed = filePlan.pop()
+      if (removed && /^app\/(layout|page)\.tsx$|^(package|tsconfig)\.json$|^next\.config\.js$|^postcss\.config\.mjs$/i.test(removed.path)) {
+        filePlan.unshift(removed)
+        filePlan.pop()
+      }
+    }
+  }
+  const scaffoldValidation = validateProjectScaffold({
+    paths: [
+      ...input.existingFiles.map((file) => file.path),
+      ...filePlan.map((file) => file.path),
+      "next.config.js",
+      "tsconfig.json",
+      "package.json",
+      "postcss.config.mjs",
+    ],
+    tailwindUsed: true,
+  })
+  if (!scaffoldValidation.ok) {
+    markOrchestrationValidation(orchestration, {
+      status: "blocked",
+      failedScope: "scaffold",
+      failures: scaffoldValidation.missingFiles.map((file) => `Missing scaffold file: ${file}`),
+    })
+    throw new Error(`Scaffold validation failed: missing ${scaffoldValidation.missingFiles.join(", ")}`)
   }
   const agentTasks = buildAgentTaskPlan(input.prompt, filePlan, {
     productionMode,
@@ -3625,6 +3673,10 @@ function shouldApplySafePreviewFallback(plan: GenerationPlan, validation: Valida
   return validation.failure?.step === "preview-compile" || /unterminated|unexpected character|parse/i.test(failureMessage)
 }
 
+// Legacy broad fallback generation is intentionally unreachable under the
+// role-based repair policy. Keep the historical helper inert until it can be
+// removed in a dedicated cleanup without obscuring this policy change.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildSafePreviewFallbackFiles(input: {
   prompt: string
   appType: ControlledAppType
@@ -3995,6 +4047,8 @@ export async function executeGenerationJob(
     developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
     developerDiagnostics.plannerConfidence = plan.orchestration.plannerConfidence
     developerDiagnostics.selectedArchetype = plan.orchestration.selectedArchetype
+    developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+    developerDiagnostics.failedScope = plan.orchestration.failedScope
     developerDiagnostics.orchestrationModels = {
       plannerModel: plan.orchestration.plannerModel,
       architectureModel: plan.orchestration.architectureModel,
@@ -4017,12 +4071,15 @@ export async function executeGenerationJob(
       actionPlan: plan.actionPlan,
       appPlan,
       orchestrationDiagnostics: plan.orchestration,
+      architectureOutput: plan.orchestration.architectureOutput,
       plannerModel: plan.orchestration.plannerModel,
       architectureModel: plan.orchestration.architectureModel,
       builderModel: plan.orchestration.builderModel,
       repairModel: plan.orchestration.repairModel,
       plannerConfidence: plan.orchestration.plannerConfidence,
       selectedArchetype: plan.orchestration.selectedArchetype,
+      validationStatus: plan.orchestration.validationStatus,
+      failedScope: plan.orchestration.failedScope,
       intentGraph: plan.orchestration.graphs.intentGraph,
       routeGraph: plan.orchestration.graphs.routeGraph,
       componentGraph: plan.orchestration.graphs.componentGraph,
@@ -4819,6 +4876,14 @@ export async function executeGenerationJob(
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
     })
+    markOrchestrationValidation(plan.orchestration, {
+      status: validation.ok ? "passed" : "failed",
+      failedScope: validation.failure?.step || "",
+      failures: validation.ok ? [] : [validation.failure?.message || "Validation lifecycle failed"],
+    })
+    developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+    developerDiagnostics.failedScope = plan.orchestration.failedScope
+    developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
       status: validation.ok ? "passed" : "failed",
@@ -5232,6 +5297,14 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      markOrchestrationValidation(plan.orchestration, {
+        status: validation.ok ? "passed" : "failed",
+        failedScope: validation.failure?.step || "",
+        failures: validation.ok ? [] : [validation.failure?.message || "Validation lifecycle failed after repair"],
+      })
+      developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+      developerDiagnostics.failedScope = plan.orchestration.failedScope
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
       const repairValidationDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt)
       if (repairValidationDiagnostic) {
         repairValidationDiagnostic.validatorResult = {
@@ -5417,6 +5490,14 @@ export async function executeGenerationJob(
           if (repairStopDiagnostic) {
             repairStopDiagnostic.failedBecause = repairStopReason
           }
+          markOrchestrationValidation(plan.orchestration, {
+            status: "blocked",
+            failedScope: validation.failure?.step || "repair",
+            failures: [validation.failure?.message || repairStopReason],
+          })
+          developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+          developerDiagnostics.failedScope = plan.orchestration.failedScope
+          developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
           recordDeveloperDiagnostic(developerDiagnostics, {
             stage: "REPAIRING",
             status: "failed",
@@ -5449,103 +5530,50 @@ export async function executeGenerationJob(
     if (!validation.ok && shouldApplySafePreviewFallback(plan, validation)) {
       await GenerationJobService.assertNotCancelled(input.jobId)
       assertNotAborted(input.signal)
-      const previousFallbackFiles = validation.files
-      const fallback = normalizeGeneratedDependencies(
-        buildSafePreviewFallbackFiles({
-          prompt: input.prompt,
-          appType: plan.appType,
-        })
-      )
-      workingFiles = fallback.files
-
-      await transition(input.jobId, "repairing", "Applying safe preview fallback", 91, {
-        reason: validation.failure?.message || "Preview compile failed after AI repair",
-        fallbackFileCount: workingFiles.length,
-        addedPackages: fallback.addedPackages,
-        normalizedPackages: fallback.normalizedPackages,
+      repairStopReason = repairStopReason || "validator_deadlock"
+      markOrchestrationValidation(plan.orchestration, {
+        status: "blocked",
+        failedScope: validation.failure?.step || "preview-compile",
+        failures: [
+          validation.failure?.message ||
+            "Preview compile failed after targeted repair; broad fallback regeneration is disabled by orchestration policy.",
+        ],
       })
       appendRepairPath(plan.orchestration, {
         attempt: repairAttempt + 1,
-        reason: validation.failure?.message || "Preview compile failed after AI repair",
-        targetFiles: workingFiles.map((file) => normalizePath(file.path)).slice(0, 40),
+        reason:
+          validation.failure?.message ||
+          "Preview compile failed after targeted repair; broad fallback regeneration is disabled by orchestration policy.",
+        targetFiles: pickFailingFiles(validation.files, buildDependencyMap(validation.files), validation.failure?.message || "")
+          .map((file) => normalizePath(file.path))
+          .slice(0, 8),
+        failedScope: validation.failure?.step || "preview-compile",
+        issueType: "tsx_build",
+        fixPlan: "automatic broad fallback is blocked; human review or architecture correction is required",
       })
       developerDiagnostics.repairPath = plan.orchestration.repairPath
       developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+      developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+      developerDiagnostics.failedScope = plan.orchestration.failedScope
       developerDiagnostics.repairAttempts.push({
         attempt: repairAttempt + 1,
-        reason: validation.failure?.message || "Preview compile failed after AI repair",
-        targetFiles: workingFiles.map((file) => normalizePath(file.path)).slice(0, 40),
-        repairedArtifactSummary: summarizeGeneratedFiles(workingFiles),
+        reason:
+          validation.failure?.message ||
+          "Preview compile failed after targeted repair; broad fallback regeneration is disabled by orchestration policy.",
+        targetFiles: plan.orchestration.repairPath.at(-1)?.targetFiles || [],
+        failedBecause: "Broad fallback regeneration disabled by orchestration policy",
       })
       recordDeveloperDiagnostic(developerDiagnostics, {
         stage: "REPAIRING",
-        status: "started",
-        reason: "Applying safe preview fallback",
-        repairAttempt: repairAttempt + 1,
-        data: {
-          fallbackFileCount: workingFiles.length,
-          addedPackages: fallback.addedPackages,
-        },
-      })
-      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
-      await emitGeneratedFilesUpdate({
-        jobId: input.jobId,
-        stage: "repairing",
-        message: "Safe preview fallback ready in Explorer",
-        allFiles: workingFiles,
-        previousFiles: previousFallbackFiles,
-        changedFiles: workingFiles,
-        deletedPaths: previousFallbackFiles
-          .map((file) => normalizePath(file.path))
-          .filter((path) => !workingFiles.some((file) => normalizePath(file.path) === path)),
-        source: "repair",
-        data: {
-          fallbackApplied: true,
-          failure: validation.failure || null,
-          addedPackages: fallback.addedPackages,
-          normalizedPackages: fallback.normalizedPackages,
-        },
-      })
-
-      validation = await runValidationLifecycle({
-        jobId: input.jobId,
-        projectId: input.projectId,
-        prompt: input.prompt,
-        files: workingFiles,
-        plan,
-        blueprint,
-        trace: {
-          traceId: correlation.traceId,
-          workerId: null,
-        },
-        signal: input.signal,
-        emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
-      })
-      const fallbackRepairDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt + 1)
-      if (fallbackRepairDiagnostic) {
-        fallbackRepairDiagnostic.validatorResult = {
-          status: validation.ok ? "passed" : "failed",
-          failure: validation.failure || null,
-        }
-        fallbackRepairDiagnostic.failedBecause = validation.ok ? undefined : validation.failure?.message || "Fallback validation failed"
-      }
-      recordDeveloperDiagnostic(developerDiagnostics, {
-        stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
-        status: validation.ok ? "passed" : "failed",
-        reason: validation.ok ? "Safe preview fallback passed validation" : validation.failure?.message || "Safe preview fallback failed validation",
+        status: "failed",
+        reason: "Automatic broad fallback blocked by orchestration policy",
         repairAttempt: repairAttempt + 1,
         data: {
           failure: validation.failure || null,
+          repairStopReason,
         },
       })
       await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
-      recordValidationResult(validation.ok, {
-        jobId: input.jobId,
-        projectId: input.projectId,
-        fallbackApplied: true,
-        failureStep: validation.failure?.step || null,
-      })
-      assertNotAborted(input.signal)
     }
 
     workingFiles = validation.files

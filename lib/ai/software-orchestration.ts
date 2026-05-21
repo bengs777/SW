@@ -13,12 +13,13 @@ export type SoftwareOrchestrationRole =
 export type PlannerComplexity = "low" | "medium" | "high"
 
 export type PlannerOutput = {
-  appType: string
+  appType: "ecommerce" | "dashboard" | "landing" | "blog" | "portfolio" | "saas" | "other"
   confidence: number
   features: string[]
   complexity: PlannerComplexity
   requiredRoutes: string[]
-  requiredModules: string[]
+  requiredComponents: string[]
+  requiredFiles: string[]
 }
 
 export type RouteGraph = {
@@ -41,7 +42,23 @@ export type IntentGraph = {
   domain: string
   features: string[]
   requiredRoutes: string[]
-  requiredModules: string[]
+  requiredComponents: string[]
+  requiredFiles: string[]
+}
+
+export type ArchitectureOutput = {
+  archetype: string
+  routes: string[]
+  components: string[]
+  dependencies: string[]
+  requiredFiles: string[]
+  validationRules: string[]
+}
+
+export type ScaffoldValidationResult = {
+  ok: boolean
+  missingFiles: string[]
+  checkedFiles: string[]
 }
 
 export type SoftwareOrchestrationGraphs = {
@@ -65,11 +82,19 @@ export type SoftwareOrchestrationDiagnostics = {
   repairPath: Array<{
     attempt: number
     model: string
+    failedScope: string
+    issueType: string
+    fixPlan: string
+    filesToEdit: string[]
     targetFiles: string[]
     reason: string
   }>
   plannerOutput: PlannerOutput
+  architectureOutput: ArchitectureOutput
   graphs: SoftwareOrchestrationGraphs
+  validationStatus: "pending" | "passed" | "failed" | "blocked"
+  failedScope: string
+  repairCount: number
   validation: {
     ok: boolean
     failures: string[]
@@ -79,10 +104,8 @@ export type SoftwareOrchestrationDiagnostics = {
 export const SOFTWARE_ORCHESTRATION_PIPELINE = [
   "Intent Planning",
   "Architecture Planning",
-  "Intent Graph Generation",
-  "Route Graph Generation",
-  "Component Graph Generation",
-  "Scaffold Generation",
+  "Graph Construction",
+  "Scaffold Validation",
   "Scoped File Generation",
   "Runtime Validation",
   "Targeted Repair",
@@ -119,6 +142,12 @@ export function createSoftwareOrchestration(input: {
     dependencyGraph: input.dependencyGraph,
     plannerOutput,
   })
+  const architectureOutput = buildArchitectureOutput({
+    architecture: input.architecture,
+    dependencyGraph: input.dependencyGraph,
+    plannerOutput,
+    componentGraph: graphs.componentGraph,
+  })
   const validationFailures = validateGraphsAgainstPlanner(plannerOutput, graphs)
 
   return {
@@ -141,7 +170,11 @@ export function createSoftwareOrchestration(input: {
     },
     repairPath: [],
     plannerOutput,
+    architectureOutput,
     graphs,
+    validationStatus: validationFailures.length === 0 ? "pending" : "failed",
+    failedScope: validationFailures.length === 0 ? "" : "architecture",
+    repairCount: 0,
     validation: {
       ok: validationFailures.length === 0,
       failures: validationFailures,
@@ -164,6 +197,7 @@ export function buildRoleInstructionBlock(input: {
         model: modelForSoftwareRole(role),
         boundaries,
         plannerOutput: input.diagnostics.plannerOutput,
+        architectureOutput: input.diagnostics.architectureOutput,
         graphs: input.diagnostics.graphs,
         validation: input.diagnostics.validation,
       },
@@ -197,15 +231,78 @@ export function appendRepairPath(
     attempt: number
     targetFiles: string[]
     reason: string
+    failedScope?: string
+    issueType?: string
+    fixPlan?: string
   }
 ) {
   if (!diagnostics) return
+  const issueType = input.issueType || classifyIssueType(input.reason)
+  const model = modelForRepairIssue(issueType)
   diagnostics.repairPath.push({
     attempt: input.attempt,
-    model: modelForSoftwareRole("repair"),
+    model,
+    failedScope: input.failedScope || inferFailedScope(input.targetFiles, input.reason),
+    issueType,
+    fixPlan: input.fixPlan || fixPlanForIssue(issueType),
+    filesToEdit: input.targetFiles,
     targetFiles: input.targetFiles,
     reason: input.reason,
   })
+  diagnostics.repairCount = diagnostics.repairPath.length
+}
+
+export function validateProjectScaffold(input: {
+  paths: string[]
+  tailwindUsed?: boolean
+}): ScaffoldValidationResult {
+  const normalized = new Set(input.paths.map(normalizePath).filter(Boolean))
+  const missingFiles: string[] = []
+  const requireAny = (label: string, candidates: string[]) => {
+    if (!candidates.some((candidate) => normalized.has(candidate))) missingFiles.push(label)
+  }
+
+  requireAny("app/layout.tsx", ["app/layout.tsx", "src/app/layout.tsx"])
+  requireAny("app/page.tsx", ["app/page.tsx", "src/app/page.tsx"])
+  requireAny("package.json", ["package.json"])
+  requireAny("tsconfig.json", ["tsconfig.json"])
+  requireAny("next.config.js or equivalent", ["next.config.js", "next.config.mjs", "next.config.ts"])
+  if (input.tailwindUsed) {
+    requireAny("tailwind.config.ts or equivalent", [
+      "tailwind.config.ts",
+      "tailwind.config.js",
+      "tailwind.config.mjs",
+      "postcss.config.js",
+      "postcss.config.mjs",
+      "app/globals.css",
+      "src/app/globals.css",
+    ])
+  }
+
+  return {
+    ok: missingFiles.length === 0,
+    missingFiles,
+    checkedFiles: Array.from(normalized).sort(),
+  }
+}
+
+export function markOrchestrationValidation(
+  diagnostics: SoftwareOrchestrationDiagnostics | undefined,
+  input: {
+    status: SoftwareOrchestrationDiagnostics["validationStatus"]
+    failedScope?: string
+    failures?: string[]
+  }
+) {
+  if (!diagnostics) return
+  diagnostics.validationStatus = input.status
+  diagnostics.failedScope = input.failedScope || ""
+  if (input.failures) {
+    diagnostics.validation = {
+      ok: input.status === "passed",
+      failures: input.failures,
+    }
+  }
 }
 
 function buildPlannerOutput(input: {
@@ -235,15 +332,40 @@ function buildPlannerOutput(input: {
     ...input.architecture.payments.services,
     ...input.blueprintRequiredFiles.filter((file) => /^components\//i.test(file)),
   ])
+  const requiredComponents = unique(inferComponents(input.architecture, input.structuredIntent).map((component) => component.path))
+  const requiredFiles = unique([
+    ...requiredRoutes,
+    ...requiredModules,
+    ...input.blueprintRequiredFiles,
+    input.architecture.database.schema,
+    ".env.example",
+  ].filter((file) => file && file !== "none"))
   const complexity = scoreComplexity(input.prompt, requiredRoutes, requiredModules)
 
   return {
-    appType: input.structuredIntent.archetype || input.appType,
+    appType: toPlannerAppType(input.structuredIntent.archetype, input.appType),
     confidence: estimateConfidence(input),
     features,
     complexity,
     requiredRoutes,
-    requiredModules,
+    requiredComponents,
+    requiredFiles,
+  }
+}
+
+function buildArchitectureOutput(input: {
+  architecture: SwiftArchitecturePlan
+  dependencyGraph: SwiftDependencyGraph
+  plannerOutput: PlannerOutput
+  componentGraph: ComponentGraph
+}): ArchitectureOutput {
+  return {
+    archetype: input.plannerOutput.appType,
+    routes: unique([...input.architecture.frontend.pages, ...input.architecture.backend.apiRoutes]),
+    components: input.componentGraph.components.map((component) => component.path),
+    dependencies: unique([...input.architecture.dependencies, ...input.dependencyGraph.nodes.map((node) => node.id)]),
+    requiredFiles: input.plannerOutput.requiredFiles,
+    validationRules: validationRulesForAppType(input.plannerOutput.appType),
   }
 }
 
@@ -271,7 +393,8 @@ function buildGraphs(input: {
       domain: input.structuredIntent.domain,
       features: input.plannerOutput.features,
       requiredRoutes: input.plannerOutput.requiredRoutes,
-      requiredModules: input.plannerOutput.requiredModules,
+      requiredComponents: input.plannerOutput.requiredComponents,
+      requiredFiles: input.plannerOutput.requiredFiles,
     },
     routeGraph: {
       routes: [...pageRoutes, ...apiRoutes],
@@ -294,11 +417,30 @@ function validateGraphsAgainstPlanner(planner: PlannerOutput, graphs: SoftwareOr
     if (!graphRoutes.has(route)) failures.push(`Planner required route is absent from route graph: ${route}`)
   }
 
-  if (planner.appType === "FULLSTACK_COMMERCE") {
-    for (const route of ["app/products/page.tsx", "app/cart/page.tsx"]) {
+  if (planner.appType === "ecommerce") {
+    for (const route of ["app/products/page.tsx", "app/cart/page.tsx", "app/checkout/page.tsx"]) {
       if (planner.requiredRoutes.includes(route) && !graphRoutes.has(route)) {
         failures.push(`Commerce route graph missing ${route}`)
       }
+    }
+    if (!graphs.componentGraph.components.some((component) => /product/i.test(component.path))) {
+      failures.push("Commerce component graph missing product component")
+    }
+  }
+
+  if (planner.appType === "dashboard") {
+    for (const componentName of ["sidebar", "overview", "settings"]) {
+      const present =
+        planner.requiredRoutes.some((route) => route.toLowerCase().includes(componentName)) ||
+        graphs.componentGraph.components.some((component) => component.path.toLowerCase().includes(componentName))
+      if (!present) failures.push(`Dashboard architecture missing ${componentName}`)
+    }
+  }
+
+  if (planner.appType === "landing") {
+    for (const componentName of ["hero", "features", "cta", "footer"]) {
+      const present = graphs.componentGraph.components.some((component) => component.path.toLowerCase().includes(componentName))
+      if (!present) failures.push(`Landing architecture missing ${componentName}`)
     }
   }
 
@@ -315,6 +457,22 @@ function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStruc
   }
 
   add("components/app-shell.tsx", "app/page.tsx", "shared layout shell")
+  if (intent.archetype === "FULLSTACK_COMMERCE") {
+    add("components/product-card.tsx", "app/products/page.tsx", "product listing item")
+    add("components/cart-summary.tsx", "app/cart/page.tsx", "cart summary")
+    add("components/checkout-form.tsx", "app/checkout/page.tsx", "checkout form")
+  }
+  if (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL") {
+    add("components/dashboard-sidebar.tsx", "app/dashboard/page.tsx", "dashboard sidebar")
+    add("components/overview-panel.tsx", "app/dashboard/page.tsx", "dashboard overview")
+    add("components/settings-panel.tsx", "app/dashboard/settings/page.tsx", "dashboard settings")
+  }
+  if (intent.archetype === "PORTFOLIO_SITE") {
+    add("components/hero-section.tsx", "app/page.tsx", "landing hero")
+    add("components/features-section.tsx", "app/page.tsx", "landing features")
+    add("components/cta-section.tsx", "app/page.tsx", "landing CTA")
+    add("components/site-footer.tsx", "app/page.tsx", "landing footer")
+  }
   for (const page of architecture.frontend.pages) {
     const segment = page.replace(/^app\//, "").replace(/\/page\.tsx$/, "").replace(/^page\.tsx$/, "home")
     const safe = segment.replace(/\[[^\]]+\]/g, "detail").replace(/[^a-z0-9-]+/gi, "-").replace(/^-|-$/g, "") || "home"
@@ -354,4 +512,55 @@ function estimateConfidence(input: {
 
 function unique(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+}
+
+function normalizePath(value: string) {
+  return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function toPlannerAppType(archetype: string, appType: string): PlannerOutput["appType"] {
+  if (archetype === "FULLSTACK_COMMERCE" || appType === "simple_marketplace") return "ecommerce"
+  if (archetype === "DASHBOARD_SAAS" || archetype === "ADMIN_PANEL" || /dashboard|admin|saas/i.test(appType)) return "dashboard"
+  if (archetype === "CONTENT_PLATFORM") return "blog"
+  if (archetype === "PORTFOLIO_SITE") return /landing/i.test(appType) ? "landing" : "portfolio"
+  if (archetype === "BOOKING_APP") return "saas"
+  return "other"
+}
+
+function validationRulesForAppType(appType: PlannerOutput["appType"]) {
+  if (appType === "ecommerce") {
+    return ["product listing exists", "cart exists", "checkout exists", "navigation exists", "product component exists"]
+  }
+  if (appType === "dashboard") return ["sidebar exists", "overview exists", "settings exists"]
+  if (appType === "landing") return ["hero exists", "features exist", "CTA exists", "footer exists"]
+  return ["required routes exist", "required components exist", "code compiles", "preview boots"]
+}
+
+function classifyIssueType(reason: string) {
+  if (/json|schema|artifact|parse generated artifact|malformed/i.test(reason)) return "json_schema"
+  if (/architecture|route graph|component graph|intent|required route|blueprint|missing required/i.test(reason)) return "architecture_mismatch"
+  if (/layout|spacing|responsive|visual|ui/i.test(reason)) return "ui_layout"
+  return "tsx_build"
+}
+
+function modelForRepairIssue(issueType: string) {
+  if (issueType === "architecture_mismatch") return modelForSoftwareRole("architecture")
+  if (issueType === "json_schema") return modelForSoftwareRole("planner")
+  if (issueType === "ui_layout") return modelForSoftwareRole("ui_enhancement")
+  return modelForSoftwareRole("repair")
+}
+
+function fixPlanForIssue(issueType: string) {
+  if (issueType === "architecture_mismatch") return "repair only the missing route/component/schema scope without redesigning the app"
+  if (issueType === "json_schema") return "return valid JSON matching the required schema only"
+  if (issueType === "ui_layout") return "refine only the failing UI scope without business logic changes"
+  return "fix syntax, imports, exports, props, or one-file runtime/build failure only"
+}
+
+function inferFailedScope(targetFiles: string[], reason: string) {
+  if (targetFiles.length === 1) return targetFiles[0]
+  if (/scaffold/i.test(reason)) return "scaffold"
+  if (/architecture/i.test(reason)) return "architecture"
+  if (/preview|runtime/i.test(reason)) return "runtime"
+  return targetFiles.length > 0 ? "targeted-files" : "unknown"
 }

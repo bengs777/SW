@@ -138,6 +138,7 @@ function pagesForIntent(intent: SwiftStructuredIntent) {
   if (intent.archetype === "FULLSTACK_COMMERCE") {
     pages.add("app/products/page.tsx")
     pages.add("app/cart/page.tsx")
+    pages.add("app/checkout/page.tsx")
     pages.add("app/orders/page.tsx")
   }
   if (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL") pages.add("app/dashboard/page.tsx")

@@ -42,6 +42,8 @@ export type DeveloperGenerationDiagnostics = {
   orchestrationDiagnostics?: Record<string, unknown>
   plannerConfidence?: number | null
   selectedArchetype?: string | null
+  validationStatus?: string | null
+  failedScope?: string | null
   orchestrationModels?: {
     plannerModel?: string | null
     architectureModel?: string | null
@@ -79,6 +81,8 @@ export function createDeveloperGenerationDiagnostics(): DeveloperGenerationDiagn
     retryCount: 0,
     plannerConfidence: null,
     selectedArchetype: null,
+    validationStatus: null,
+    failedScope: null,
     repairPath: [],
     validatorFailures: [],
     artifactParseFailures: [],

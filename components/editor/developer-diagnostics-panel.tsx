@@ -19,6 +19,8 @@ export type DeveloperDiagnosticsSnapshot = {
       terminationReason?: string | null
       plannerConfidence?: number | null
       selectedArchetype?: string | null
+      validationStatus?: string | null
+      failedScope?: string | null
       orchestrationModels?: {
         plannerModel?: string | null
         architectureModel?: string | null
@@ -98,6 +100,12 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
   const selectedArchetype =
     developer?.selectedArchetype ||
     (typeof plannerOutput?.selectedArchetype === "string" ? plannerOutput.selectedArchetype : null)
+  const validationStatus =
+    developer?.validationStatus ||
+    (typeof plannerOutput?.validationStatus === "string" ? plannerOutput.validationStatus : "unknown")
+  const failedScope =
+    developer?.failedScope ||
+    (typeof plannerOutput?.failedScope === "string" ? plannerOutput.failedScope : "none")
 
   return (
     <div className="border-t border-border bg-background">
@@ -151,6 +159,8 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
                 <p>ui_enhancement_model: {String(orchestrationModels?.uiEnhancementModel || "unknown")}</p>
                 <p>planner_confidence: {plannerConfidence === null ? "unknown" : plannerConfidence}</p>
                 <p>selected_archetype: {selectedArchetype || "unknown"}</p>
+                <p>validation_status: {validationStatus}</p>
+                <p>failed_scope: {failedScope}</p>
               </div>
             </Section>
             <Section title="Execution Timeline">
@@ -179,6 +189,7 @@ export function DeveloperDiagnosticsPanel({ diagnostics, expanded, onToggle }: P
 
             <JsonSection title="Planner Output" value={developer?.plannerOutput || diagnostics.plan} />
             <JsonSection title="Orchestration Diagnostics" value={developer?.orchestrationDiagnostics || plannerOutput?.orchestrationDiagnostics} />
+            <JsonSection title="Architecture Output" value={plannerOutput?.architectureOutput || (developer?.orchestrationDiagnostics as Record<string, unknown> | undefined)?.architectureOutput} />
             <JsonSection title="Architecture Plan" value={(developer?.plannerOutput as Record<string, unknown> | undefined)?.architecturePlan} />
             <JsonSection title="Intent Graph" value={plannerOutput?.intentGraph} />
             <JsonSection title="Route Graph" value={plannerOutput?.routeGraph} />
