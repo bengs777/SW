@@ -187,14 +187,16 @@ assert(
 )
 
 assert(
-  "vercel build prisma preflight is graceful locally",
-  /runPrismaGenerateWithRetry\(\)[\s\S]*runDeploymentPreflight\(\)/.test(vercelBuild) &&
+  "vercel build deploys prisma migrations safely",
+  /runPrismaGenerateWithRetry\(\)[\s\S]*runMigrationDeployment\(\)/.test(vercelBuild) &&
+    /npx prisma migrate deploy/.test(vercelBuild) &&
+    !/npx prisma migrate status/.test(vercelBuild) &&
     /diagnoseDatabaseUrl/.test(vercelBuild) &&
     /isStrictPreflight/.test(vercelBuild) &&
     /engine_binary_failure/.test(vercelBuild) &&
     /schema_parsing_failure/.test(vercelBuild) &&
     /schema compatibility check skipped in local fallback mode/.test(vercelBuild),
-  "local builds must generate Prisma first, diagnose migrate failures, and skip unavailable DB checks without blocking compilation"
+  "builds must generate Prisma first, deploy pending migrations, diagnose deploy failures, and skip unavailable DB checks locally"
 )
 
 assert(

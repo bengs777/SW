@@ -36,17 +36,20 @@ function stringifyError(error) {
 
 function classifyPrismaFailure(errorText) {
   const text = String(errorText || "")
-  if (/schema engine error|query_engine|schema-engine|libquery_engine|engine binary|binary target/i.test(text)) {
-    return "engine_binary_failure"
-  }
-  if (/schema parsing|error validating|prisma schema|schema\.prisma|P10\d{2}|P20\d{2}/i.test(text)) {
-    return "schema_parsing_failure"
-  }
   if (/invalid.*database_url|must start with the protocol|connection string|postgres/i.test(text)) {
     return "invalid_database_url"
   }
   if (/environment variable.*DATABASE_URL|DATABASE_URL.*not found|missing.*DATABASE_URL/i.test(text)) {
     return "missing_env"
+  }
+  if (/P1000|P1001|P1002|P1003|can't reach database|cannot reach database|timed out|timeout|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|authentication failed/i.test(text)) {
+    return "database_unreachable"
+  }
+  if (/P1012|schema parsing|error validating|prisma schema validation|schema\.prisma/i.test(text)) {
+    return "schema_parsing_failure"
+  }
+  if (/schema engine error|query_engine|schema-engine|libquery_engine|engine binary|binary target/i.test(text)) {
+    return "engine_binary_failure"
   }
   return "unknown_prisma_failure"
 }
@@ -57,7 +60,7 @@ function diagnoseDatabaseUrl() {
     return {
       ok: false,
       code: "missing_env",
-      message: "DATABASE_URL is missing; Prisma migrate status cannot run.",
+      message: "DATABASE_URL is missing; Prisma migrate deploy cannot run.",
     }
   }
 
@@ -145,28 +148,34 @@ async function runPrismaGenerateWithRetry() {
   if (lastError) throw lastError
 }
 
-function runDeploymentPreflight() {
+function runMigrationDeployment() {
   const database = diagnoseDatabaseUrl()
   if (!database.ok) {
-    handlePreflightFailure("migrate-status", database)
+    handlePreflightFailure("migrate-deploy", database)
     return false
   }
 
   try {
-    console.log("[vercel-build] checking migration status...")
-    const output = execSync("npx prisma migrate status", { env, encoding: "utf8" })
+    console.log("[vercel-build] deploying pending Prisma migrations...")
+    const output = execSync("npx prisma migrate deploy", { env, encoding: "utf8" })
     if (output) process.stdout.write(output)
     return true
   } catch (error) {
     const code = classifyPrismaFailure(stringifyError(error))
-    handlePreflightFailure("migrate-status", {
+    handlePreflightFailure("migrate-deploy", {
       ok: false,
       code,
       message: code === "engine_binary_failure"
-        ? "Prisma schema engine failed while checking migration status."
+        ? "Prisma schema engine failed while deploying migrations."
         : code === "schema_parsing_failure"
-          ? "Prisma schema parsing/validation failed while checking migration status."
-          : "Prisma migrate status failed.",
+          ? "Prisma schema parsing/validation failed while deploying migrations."
+          : code === "database_unreachable"
+            ? "Database is unreachable; Prisma migrate deploy cannot run."
+            : code === "missing_env"
+              ? "DATABASE_URL is missing; Prisma migrate deploy cannot run."
+              : code === "invalid_database_url"
+                ? "DATABASE_URL is invalid; Prisma migrate deploy cannot run."
+                : "Prisma migrate deploy failed.",
     }, error)
     return false
   }
@@ -192,8 +201,8 @@ function runSchemaCompatibilityCheck(canReachDatabase) {
 
 ;(async () => {
   await runPrismaGenerateWithRetry()
-  const migrationPreflightOk = runDeploymentPreflight()
-  runSchemaCompatibilityCheck(migrationPreflightOk)
+  const migrationsDeployed = runMigrationDeployment()
+  runSchemaCompatibilityCheck(migrationsDeployed)
 
   execSync("npx next build --webpack", { stdio: "inherit", env })
 })().catch((error) => {

@@ -243,10 +243,11 @@ function main() {
     "deploy.preflight-schema",
     /"schema:health":\s*"node scripts\/schema-health-check\.js"/.test(JSON.stringify(packageJson)) &&
       /"deploy:preflight":/.test(JSON.stringify(packageJson)) &&
-      /prisma migrate status/.test(vercelBuild) &&
+      /prisma migrate deploy/.test(vercelBuild) &&
+      !/prisma migrate status/.test(vercelBuild) &&
       /schema-health-check\.js/.test(vercelBuild) &&
       /assertPrismaClientUnderstandsRuntimeSchema/.test(schemaHealthCheck),
-    "deployment checks migration status, generated Prisma client compatibility, and runtime schema health"
+    "deployment applies pending migrations, checks generated Prisma client compatibility, and verifies runtime schema health"
   )
 
   console.log("\n[hardening] pipeline hardening regression checks passed")
