@@ -22,6 +22,7 @@ const generationJobService = read("lib/services/generation-job.service.ts")
 const generationJobStream = read("app/api/generate/jobs/[jobId]/stream/route.ts")
 const projectPage = read("app/dashboard/project/[id]/page.tsx")
 const developerDiagnostics = read("lib/ai/developer-diagnostics.ts")
+const vercelBuild = read("scripts/vercel-build.js")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -167,6 +168,17 @@ assert(
     /isImplicitHelperFile/.test(generationOrchestrator) &&
     /scopeArtifactToAllowedScope\(parsed, input\.plan\)/.test(generationOrchestrator),
   "builder and repair must share an explicit allowed-file contract and block unapproved helper files"
+)
+
+assert(
+  "vercel build prisma preflight is graceful locally",
+  /runPrismaGenerateWithRetry\(\)[\s\S]*runDeploymentPreflight\(\)/.test(vercelBuild) &&
+    /diagnoseDatabaseUrl/.test(vercelBuild) &&
+    /isStrictPreflight/.test(vercelBuild) &&
+    /engine_binary_failure/.test(vercelBuild) &&
+    /schema_parsing_failure/.test(vercelBuild) &&
+    /schema compatibility check skipped in local fallback mode/.test(vercelBuild),
+  "local builds must generate Prisma first, diagnose migrate failures, and skip unavailable DB checks without blocking compilation"
 )
 
 console.log("[regression] all checks passed")
