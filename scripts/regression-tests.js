@@ -24,6 +24,9 @@ const projectPage = read("app/dashboard/project/[id]/page.tsx")
 const projectApi = read("app/api/projects/[id]/route.ts")
 const developerDiagnostics = read("lib/ai/developer-diagnostics.ts")
 const vercelBuild = read("scripts/vercel-build.js")
+const productService = read("lib/services/product.service.ts")
+const productApi = read("app/api/products/route.ts")
+const dbClient = read("lib/db/client.ts")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -205,6 +208,21 @@ assert(
     /UserSchema/.test(generationOrchestrator) &&
     /extractUiMockDataToServices/.test(generationOrchestrator),
   "production full-stack generation must add backend blueprint files and move obvious page product mock data into services"
+)
+
+assert(
+  "runtime db crud is hardened",
+  /getDatabaseRuntimeDiagnostic/.test(dbClient) &&
+    /DATABASE_URL is required/.test(dbClient) &&
+    /Prisma client is not generated/.test(dbClient) &&
+    /createProduct/.test(productService) &&
+    /updateProduct/.test(productService) &&
+    /deleteProduct/.test(productService) &&
+    /listProducts/.test(productService) &&
+    /CreateProductSchema/.test(productService) &&
+    /requireDeveloperActorResponse/.test(productApi) &&
+    /getDatabaseRuntimeDiagnostic/.test(productApi),
+  "product CRUD must use Prisma, zod, admin write guards, and clear DB runtime diagnostics"
 )
 
 console.log("[regression] all checks passed")

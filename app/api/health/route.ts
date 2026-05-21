@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { randomUUID } from "node:crypto"
-import { prisma } from "@/lib/db/client"
+import { getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
 import { env, getMissingProductionEnvVars, validateEnv } from "@/lib/env"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
@@ -46,6 +46,14 @@ async function withHealthTimeout<T>(name: string, timeoutMs: number, fn: () => P
 }
 
 async function checkDatabase(): Promise<HealthCheck> {
+  const runtime = getDatabaseRuntimeDiagnostic()
+  if (!runtime.ok) {
+    return {
+      status: "unhealthy",
+      detail: runtime,
+    }
+  }
+
   try {
     const { latencyMs } = await timed(() =>
       withHealthTimeout("database health check", 2_000, () => prisma.$queryRaw`SELECT 1`)

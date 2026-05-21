@@ -7,18 +7,71 @@ import { recordPrismaDuration } from '@/lib/observability/runtime-metrics'
 const globalForPrisma = global as unknown as { prisma?: PrismaClient }
 let prismaSingleton: PrismaClient | undefined
 
-function assertPostgresDatabaseUrl() {
+export type DatabaseRuntimeDiagnostic = {
+  ok: boolean
+  code: "ok" | "missing_env" | "invalid_database_url" | "prisma_client_missing"
+  message: string
+}
+
+export function getDatabaseRuntimeDiagnostic(): DatabaseRuntimeDiagnostic {
   if (!env.databaseUrl) {
-    throw new Error('DATABASE_URL is required to initialize Prisma client')
+    return {
+      ok: false,
+      code: "missing_env",
+      message: "DATABASE_URL is required to initialize Prisma client",
+    }
   }
 
   if (!/^postgres(?:ql)?:\/\//i.test(env.databaseUrl)) {
-    throw new Error('DATABASE_URL must be a PostgreSQL connection string')
+    return {
+      ok: false,
+      code: "invalid_database_url",
+      message: "DATABASE_URL must be a PostgreSQL connection string",
+    }
+  }
+
+  if (typeof PrismaClient !== 'function') {
+    return {
+      ok: false,
+      code: "prisma_client_missing",
+      message: "Prisma client is not generated. Run npm run db:generate.",
+    }
+  }
+
+  return {
+    ok: true,
+    code: "ok",
+    message: "Database runtime configuration is valid.",
+  }
+}
+
+function assertPostgresDatabaseUrl() {
+  const diagnostic = getDatabaseRuntimeDiagnostic()
+  if (!diagnostic.ok && diagnostic.code !== "prisma_client_missing") {
+    log('error', 'database_runtime_config_invalid', {
+      code: diagnostic.code,
+      message: diagnostic.message,
+      nodeEnv: env.nodeEnv,
+    })
+    throw new Error(diagnostic.message)
+  }
+}
+
+function assertPrismaClientGenerated() {
+  const diagnostic = getDatabaseRuntimeDiagnostic()
+  if (diagnostic.code === "prisma_client_missing") {
+    log('error', 'database_runtime_config_invalid', {
+      code: diagnostic.code,
+      message: diagnostic.message,
+      nodeEnv: env.nodeEnv,
+    })
+    throw new Error(diagnostic.message)
   }
 }
 
 function createPrismaClient(): PrismaClient {
   assertPostgresDatabaseUrl()
+  assertPrismaClientGenerated()
 
   const client = new PrismaClient({
     log: [
