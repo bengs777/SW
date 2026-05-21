@@ -2466,7 +2466,7 @@ function stagedPhaseForPath(path: string, appType?: string): StagedGenerationPha
   if (appType === "ecommerce" && /^app\/(?:products(?:\/\[id\])?|cart|checkout|login|admin)\/page\.(tsx|ts|jsx|js)$/i.test(normalized)) {
     return "routes"
   }
-  if (appType === "ecommerce" && /^components\/(?:navbar|product-card|product-grid|cart-drawer|checkout-form)\.(tsx|ts|jsx|js)$/i.test(normalized)) {
+  if (appType === "ecommerce" && /^components\/(?:navbar|productcard|productgrid|cartdrawer|checkoutform|product-card|product-grid|cart-drawer|checkout-form)\.(tsx|ts|jsx|js)$/i.test(normalized)) {
     return "components"
   }
   if (/supabase/i.test(normalized)) return "supabase"
@@ -2523,11 +2523,11 @@ function validateStagedCheckpoint(input: {
 
   if (input.phase === "components") {
     for (const component of [
-      "components/navbar.tsx",
-      "components/product-card.tsx",
-      "components/product-grid.tsx",
-      "components/cart-drawer.tsx",
-      "components/checkout-form.tsx",
+      "components/Navbar.tsx",
+      "components/ProductCard.tsx",
+      "components/ProductGrid.tsx",
+      "components/CartDrawer.tsx",
+      "components/CheckoutForm.tsx",
     ]) {
       if (!paths.has(component)) failures.push(`Missing ecommerce component: ${component}`)
     }
@@ -2537,6 +2537,60 @@ function validateStagedCheckpoint(input: {
     ok: failures.length === 0,
     failures,
   }
+}
+
+function auditPostGeneration(input: {
+  plan: GenerationPlan
+  generatedFiles: GeneratedFile[]
+  persistedFiles: GeneratedFile[]
+  previewUrl: string | null
+  previewStatus: string | null
+}) {
+  const failures: string[] = []
+  const persistedPaths = new Set(input.persistedFiles.map((file) => normalizePath(file.path)))
+  const generatedPaths = new Set(input.generatedFiles.map((file) => normalizePath(file.path)))
+
+  if (input.generatedFiles.length === 0) failures.push("generatedFiles.length is 0")
+  if (input.persistedFiles.length === 0) failures.push("persisted file count is 0")
+
+  for (const path of generatedPaths) {
+    if (!persistedPaths.has(path)) failures.push(`Generated file was not persisted: ${path}`)
+  }
+
+  if (input.plan.orchestration.plannerOutput.appType === "ecommerce") {
+    for (const requiredFile of ecommerceRequiredFiles()) {
+      if (!persistedPaths.has(requiredFile)) failures.push(`Missing ecommerce required file after persistence: ${requiredFile}`)
+    }
+  }
+
+  if (!input.previewUrl && !/ready|running|success|passed|browser-preview-only/i.test(String(input.previewStatus || ""))) {
+    failures.push("Preview did not boot successfully")
+  }
+
+  return {
+    ok: failures.length === 0,
+    failures,
+    fileCount: input.persistedFiles.length,
+    requiredFiles: input.plan.orchestration.plannerOutput.appType === "ecommerce" ? ecommerceRequiredFiles() : [],
+  }
+}
+
+function ecommerceRequiredFiles() {
+  return [
+    "app/layout.tsx",
+    "app/page.tsx",
+    "app/products/page.tsx",
+    "app/products/[id]/page.tsx",
+    "app/cart/page.tsx",
+    "app/checkout/page.tsx",
+    "app/login/page.tsx",
+    "app/admin/page.tsx",
+    "components/Navbar.tsx",
+    "components/ProductCard.tsx",
+    "components/ProductGrid.tsx",
+    "components/CartDrawer.tsx",
+    "components/CheckoutForm.tsx",
+  ]
 }
 
 function buildMissingScaffoldFiles(missingFiles: string[]): GeneratedFile[] {
@@ -6382,6 +6436,63 @@ export async function executeGenerationJob(
       usedAutoRepair: repairAttempt > 0,
     })
     const persistenceEndedAt = Date.now()
+    const postGenerationAudit = auditPostGeneration({
+      plan,
+      generatedFiles: workingFiles,
+      persistedFiles: saveResult.files,
+      previewUrl: validation.previewUrl,
+      previewStatus: validation.previewStatus,
+    })
+    metrics.postGenerationAudit = postGenerationAudit
+    if (!postGenerationAudit.ok) {
+      markOrchestrationValidation(plan.orchestration, {
+        status: "failed",
+        failedScope: "post-generation-audit",
+        failures: postGenerationAudit.failures,
+      })
+      appendRepairPath(plan.orchestration, {
+        attempt: plan.orchestration.repairCount + 1,
+        reason: `Post-generation audit failed: ${postGenerationAudit.failures.join("; ")}`,
+        targetFiles: postGenerationAudit.requiredFiles.filter(
+          (file) => !saveResult.files.some((savedFile) => normalizePath(savedFile.path) === file)
+        ),
+        failedScope: "post-generation-audit",
+        issueType: "architecture_mismatch",
+        fixPlan: "repair only missing persisted route/component scope; do not full-regenerate",
+      })
+      developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+      developerDiagnostics.failedScope = plan.orchestration.failedScope
+      developerDiagnostics.repairPath = plan.orchestration.repairPath
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+      developerDiagnostics.validatorFailures.push({
+        stage: "post-generation-audit",
+        status: "failed",
+        reason: "Post-generation audit failed before success",
+        failures: postGenerationAudit.failures,
+      })
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "FAILED",
+        status: "failed",
+        reason: "Post-generation audit failed before success",
+        data: {
+          audit: postGenerationAudit,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+      await GenerationJobService.update(input.jobId, {
+        diagnostics: {
+          developer: developerDiagnostics,
+          orchestrationSummary: {
+            event: "post_generation_audit_failed",
+            stage: "post-generation-audit",
+            reason: postGenerationAudit.failures.join("; "),
+            repairAttempts: repairAttempt,
+          },
+        },
+        metrics,
+      })
+      throw new Error(`Post-generation audit failed: ${postGenerationAudit.failures.join("; ")}`)
+    }
     log("info", "database_persisted", {
       event: "database_persisted",
       jobId: input.jobId,
@@ -6456,6 +6567,8 @@ export async function executeGenerationJob(
       historyId: saveResult.historyId,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
+      verifiedFileCount: saveResult.files.length,
+      postGenerationAudit,
     }
     await GenerationJobService.update(input.jobId, {
       metrics,

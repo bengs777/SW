@@ -447,12 +447,11 @@ function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStruc
 
   add("components/app-shell.tsx", "app/page.tsx", "shared layout shell")
   if (intent.archetype === "FULLSTACK_COMMERCE") {
-    add("components/navbar.tsx", "app/page.tsx", "ecommerce navigation")
-    add("components/product-card.tsx", "app/products/page.tsx", "product listing item")
-    add("components/product-grid.tsx", "app/products/page.tsx", "product grid")
-    add("components/cart-summary.tsx", "app/cart/page.tsx", "cart summary")
-    add("components/cart-drawer.tsx", "app/cart/page.tsx", "cart drawer")
-    add("components/checkout-form.tsx", "app/checkout/page.tsx", "checkout form")
+    add("components/Navbar.tsx", "app/page.tsx", "ecommerce navigation")
+    add("components/ProductCard.tsx", "app/products/page.tsx", "product listing item")
+    add("components/ProductGrid.tsx", "app/products/page.tsx", "product grid")
+    add("components/CartDrawer.tsx", "app/cart/page.tsx", "cart drawer")
+    add("components/CheckoutForm.tsx", "app/checkout/page.tsx", "checkout form")
   }
   if (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL") {
     add("components/dashboard-sidebar.tsx", "app/dashboard/page.tsx", "dashboard sidebar")
