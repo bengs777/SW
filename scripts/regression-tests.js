@@ -21,6 +21,7 @@ const sandboxRuntime = read("lib/sandbox/runtime.ts")
 const generationJobService = read("lib/services/generation-job.service.ts")
 const generationJobStream = read("app/api/generate/jobs/[jobId]/stream/route.ts")
 const projectPage = read("app/dashboard/project/[id]/page.tsx")
+const projectApi = read("app/api/projects/[id]/route.ts")
 const developerDiagnostics = read("lib/ai/developer-diagnostics.ts")
 const vercelBuild = read("scripts/vercel-build.js")
 
@@ -179,6 +180,18 @@ assert(
     /schema_parsing_failure/.test(vercelBuild) &&
     /schema compatibility check skipped in local fallback mode/.test(vercelBuild),
   "local builds must generate Prisma first, diagnose migrate failures, and skip unavailable DB checks without blocking compilation"
+)
+
+assert(
+  "generation commit verifies project reload before success",
+  /verifyProjectStateCommit/.test(generationOrchestrator) &&
+    /ProjectFilesystemService\.readFiles\(input\.projectId\)/.test(generationOrchestrator) &&
+    /project_state_committed/.test(generationOrchestrator) &&
+    /Project state commit failed: persisted project state is empty/.test(generationOrchestrator) &&
+    /failedWritePaths/.test(generationOrchestrator) &&
+    generationOrchestrator.indexOf("verifyProjectStateCommit") < generationOrchestrator.indexOf("preview_ready") &&
+    /project_state_empty_after_generation/.test(projectApi),
+  "generation must read back persisted files and block preview/completion when project state is empty"
 )
 
 console.log("[regression] all checks passed")

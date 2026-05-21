@@ -76,10 +76,22 @@ export async function GET(
       projectId: id,
       userId: session.user.id,
       fileCount: visibleFiles.length,
+      manifest,
       latestHistoryId,
       reason: refreshReason,
       durationMs: Date.now() - startedAt,
     })
+    if ((refreshReason === "generation-completed" || refreshReason === "explorer-refresh") && visibleFiles.length === 0) {
+      log("error", "project_state_empty_after_generation", {
+        requestId,
+        projectId: id,
+        userId: session.user.id,
+        latestHistoryId,
+        manifest,
+        reason: refreshReason,
+        durationMs: Date.now() - startedAt,
+      })
+    }
     if (refreshReason === "generation-completed" || refreshReason === "explorer-refresh") {
       const endedAt = Date.now()
       log("info", "explorer_refreshed", {

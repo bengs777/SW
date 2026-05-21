@@ -26,6 +26,7 @@ import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
 import { runRuntimeCommand, startRuntimeSandbox, type RuntimeCommandName, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
+import { ProjectFilesystemService, type ProjectFileManifest } from "@/lib/services/project-filesystem.service"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
 import { OrchestrationRuntimeService, type TraceIds } from "@/lib/services/orchestration-runtime.service"
 import { GenerationQualityService, type GenerationQualityStage } from "@/lib/services/generation-quality.service"
@@ -256,6 +257,15 @@ type ValidationLifecycleResult = {
   steps: ValidationLifecycleStepResult[]
   sandboxValidation: SandboxValidationStep[]
   failure?: ValidationLifecycleFailure
+}
+
+type ProjectStateCommitDiagnostics = {
+  generatedFileCount: number
+  committedFileCount: number
+  persistedSnapshotId: string
+  failedWritePaths: string[]
+  requiredFilesMissing: string[]
+  manifest: ProjectFileManifest
 }
 
 type RepairTerminationReason =
@@ -2671,6 +2681,59 @@ function auditPostGeneration(input: {
     fileCount: input.persistedFiles.length,
     requiredFiles: input.plan.orchestration.plannerOutput.appType === "ecommerce" ? ecommerceRequiredFiles() : [],
   }
+}
+
+async function verifyProjectStateCommit(input: {
+  projectId: string
+  historyId: string
+  generatedFiles: GeneratedFile[]
+  plan: GenerationPlan
+}): Promise<ProjectStateCommitDiagnostics> {
+  const generatedFiles = ProjectFilesystemService.normalizeFiles(input.generatedFiles)
+  const committedFiles = await ProjectFilesystemService.readFiles(input.projectId)
+  const generatedManifest = ProjectFilesystemService.buildManifest(generatedFiles)
+  const committedManifest = ProjectFilesystemService.buildManifest(committedFiles)
+  const committedHashes = committedManifest.fileHashes
+  const failedWritePaths = generatedManifest.paths.filter(
+    (filePath) => committedHashes[filePath] !== generatedManifest.fileHashes[filePath]
+  )
+  const requiredFiles = requiredFilesForCommittedProject(input.plan)
+  const committedPaths = new Set(committedFiles.map((file) => normalizePath(file.path)))
+  const requiredFilesMissing = requiredFiles.filter((filePath) => !committedPaths.has(filePath))
+
+  const diagnostics: ProjectStateCommitDiagnostics = {
+    generatedFileCount: generatedFiles.length,
+    committedFileCount: committedFiles.length,
+    persistedSnapshotId: input.historyId,
+    failedWritePaths,
+    requiredFilesMissing,
+    manifest: committedManifest,
+  }
+
+  if (generatedFiles.length === 0) {
+    throw new Error(`Project state commit failed: generated file count is 0 for snapshot ${input.historyId}`)
+  }
+
+  if (committedFiles.length === 0) {
+    throw new Error(`Project state commit failed: persisted project state is empty for snapshot ${input.historyId}`)
+  }
+
+  if (failedWritePaths.length > 0) {
+    throw new Error(`Project state commit failed: write verification mismatch for ${failedWritePaths.join(", ")}`)
+  }
+
+  if (requiredFilesMissing.length > 0) {
+    throw new Error(`Project state commit failed: required files missing after reload: ${requiredFilesMissing.join(", ")}`)
+  }
+
+  return diagnostics
+}
+
+function requiredFilesForCommittedProject(plan: GenerationPlan) {
+  const required = plan.editPlan.mode === "partial"
+    ? plan.editPlan.targetPaths
+    : plan.filePlan.map((file) => file.path)
+  return uniquePaths(required)
 }
 
 function validateGeneratedFilesAgainstAllowedScope(input: {
@@ -5126,6 +5189,24 @@ export async function executeGenerationJob(
             intent: intentStorageKey(plan.intent),
             usedAutoRepair: false,
           })
+          await transition(input.jobId, "persisting", "Committing verified project state", 96, {
+            historyId: saveResult.historyId,
+            generatedFileCount: workingFiles.length,
+          })
+          const commitDiagnostics = await verifyProjectStateCommit({
+            projectId: input.projectId,
+            historyId: saveResult.historyId,
+            generatedFiles: workingFiles,
+            plan,
+          })
+          await GenerationJobService.appendEvent({
+            jobId: input.jobId,
+            type: "project_state_committed",
+            stage: "persisting",
+            status: "running",
+            message: "Project state committed and verified",
+            data: commitDiagnostics,
+          })
 
           metrics.incrementalEdit = {
             generationMode: plan.generationMode,
@@ -5137,6 +5218,14 @@ export async function executeGenerationJob(
             validator: scopedValidation,
             scopedEditResult,
             previewPreserved: true,
+          }
+          metrics.persistence = {
+            historyId: saveResult.historyId,
+            fileDiff: saveResult.fileDiff,
+            manifest: saveResult.manifest,
+            verifiedFileCount: commitDiagnostics.committedFileCount,
+            commitDiagnostics,
+            commitStatus: "persisted",
           }
           await GenerationJobService.update(input.jobId, {
             metrics,
@@ -5163,6 +5252,7 @@ export async function executeGenerationJob(
               patchSummary: patch.patchSummary,
               incrementalValidator: scopedValidation,
               scopedEditResult,
+              persistence: commitDiagnostics,
               previewPreserved: true,
             },
           })
@@ -5170,7 +5260,10 @@ export async function executeGenerationJob(
             stage: "READY",
             status: "passed",
             reason: "Scoped incremental edit persisted",
-            data: metrics.incrementalEdit as Record<string, unknown>,
+            data: {
+              incrementalEdit: metrics.incrementalEdit,
+              persistence: commitDiagnostics,
+            },
           })
           await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
           await GenerationJobService.markCompleted(input.jobId, saveResult.historyId, null)
@@ -6714,10 +6807,29 @@ export async function executeGenerationJob(
       usedAutoRepair: repairAttempt > 0,
     })
     const persistenceEndedAt = Date.now()
+    await transition(input.jobId, "persisting", "Committing verified project state", 96, {
+      historyId: saveResult.historyId,
+      generatedFileCount: workingFiles.length,
+      committedFileCount: saveResult.files.length,
+    })
+    const commitDiagnostics = await verifyProjectStateCommit({
+      projectId: input.projectId,
+      historyId: saveResult.historyId,
+      generatedFiles: workingFiles,
+      plan,
+    })
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "project_state_committed",
+      stage: "persisting",
+      status: "running",
+      message: "Project state committed and verified",
+      data: commitDiagnostics,
+    })
     const postGenerationAudit = auditPostGeneration({
       plan,
       generatedFiles: workingFiles,
-      persistedFiles: saveResult.files,
+      persistedFiles: await ProjectFilesystemService.readFiles(input.projectId),
       previewUrl: validation.previewUrl,
       previewStatus: validation.previewStatus,
     })
@@ -6786,16 +6898,22 @@ export async function executeGenerationJob(
       durationMs: persistenceEndedAt - persistenceStartedAt,
       historyId: saveResult.historyId,
       fileCount: saveResult.files.length,
+      committedFileCount: commitDiagnostics.committedFileCount,
+      failedWritePaths: commitDiagnostics.failedWritePaths,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
+      persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
     })
     log("info", "generation_files_persisted", {
       jobId: input.jobId,
       projectId: input.projectId,
       historyId: saveResult.historyId,
       fileCount: saveResult.files.length,
+      committedFileCount: commitDiagnostics.committedFileCount,
+      failedWritePaths: commitDiagnostics.failedWritePaths,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
+      persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
     })
     log("info", "files_written", {
       event: "files_written",
@@ -6806,8 +6924,11 @@ export async function executeGenerationJob(
       durationMs: persistenceEndedAt - persistenceStartedAt,
       historyId: saveResult.historyId,
       fileCount: saveResult.files.length,
+      committedFileCount: commitDiagnostics.committedFileCount,
+      failedWritePaths: commitDiagnostics.failedWritePaths,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
+      persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
     })
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
@@ -6823,8 +6944,11 @@ export async function executeGenerationJob(
         endedAt: new Date(persistenceEndedAt).toISOString(),
         durationMs: persistenceEndedAt - persistenceStartedAt,
         fileCount: saveResult.files.length,
+        committedFileCount: commitDiagnostics.committedFileCount,
+        failedWritePaths: commitDiagnostics.failedWritePaths,
         fileDiff: saveResult.fileDiff,
         manifest: saveResult.manifest,
+        persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
       },
     })
     await GenerationJobService.appendEvent({
@@ -6841,8 +6965,11 @@ export async function executeGenerationJob(
         endedAt: new Date(persistenceEndedAt).toISOString(),
         durationMs: persistenceEndedAt - persistenceStartedAt,
         fileCount: saveResult.files.length,
+        committedFileCount: commitDiagnostics.committedFileCount,
+        failedWritePaths: commitDiagnostics.failedWritePaths,
         fileDiff: saveResult.fileDiff,
         manifest: saveResult.manifest,
+        persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
       },
     })
 
@@ -6851,7 +6978,8 @@ export async function executeGenerationJob(
       historyId: saveResult.historyId,
       fileDiff: saveResult.fileDiff,
       manifest: saveResult.manifest,
-      verifiedFileCount: saveResult.files.length,
+      verifiedFileCount: commitDiagnostics.committedFileCount,
+      commitDiagnostics,
       postGenerationAudit,
       commitStatus: plan.orchestration.commitStatus,
     }
@@ -6867,7 +6995,9 @@ export async function executeGenerationJob(
       historyId: saveResult.historyId,
       previewUrl: validation.previewUrl,
       previewStatus: validation.previewStatus,
-      fileCount: workingFiles.length,
+      fileCount: commitDiagnostics.committedFileCount,
+      generatedFileCount: commitDiagnostics.generatedFileCount,
+      persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
     })
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
@@ -6878,7 +7008,9 @@ export async function executeGenerationJob(
       data: {
         previewUrl: validation.previewUrl,
         historyId: saveResult.historyId,
-        fileCount: workingFiles.length,
+        fileCount: commitDiagnostics.committedFileCount,
+        generatedFileCount: commitDiagnostics.generatedFileCount,
+        persistedSnapshotId: commitDiagnostics.persistedSnapshotId,
         previewStatus: validation.previewStatus,
       },
     })
@@ -6930,6 +7062,7 @@ export async function executeGenerationJob(
         repairAttempts: repairAttempt,
         lastSuccessfulStage: developerDiagnostics.lastSuccessfulStage || "READY",
         previewUrl: validation.previewUrl,
+        persistence: commitDiagnostics,
         lastValidatorError: null,
       },
     })

@@ -44,8 +44,9 @@ export class ProjectFilePersistenceService {
     const normalizedFiles = ProjectFilesystemService.normalizeFiles(files)
     const startedAt = Date.now()
 
-    return withDatabaseWriteRetry(() =>
-      prisma.$transaction(async (tx) => {
+    try {
+      return await withDatabaseWriteRetry(() =>
+        prisma.$transaction(async (tx) => {
         if (opts?.generationJobId) {
           await assertLatestProjectGeneration(tx, projectId, opts.generationJobId)
         }
@@ -116,8 +117,21 @@ export class ProjectFilePersistenceService {
           integrity: filesystemWrite.manifest,
           manifest: filesystemWrite.manifest,
         }
-      }, PERSISTENCE_TRANSACTION_OPTIONS)
-    )
+        }, PERSISTENCE_TRANSACTION_OPTIONS)
+      )
+    } catch (error) {
+      log("error", "project_files_persistence_failed", {
+        event: "project_files_persistence_failed",
+        jobId: opts?.generationJobId || null,
+        projectId,
+        generatedFileCount: normalizedFiles.length,
+        committedFileCount: 0,
+        persistedSnapshotId: null,
+        failedWritePaths: normalizedFiles.map((file) => file.path),
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
   }
 
   static async saveBufferedArtifacts(input: {
