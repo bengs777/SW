@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { requireDeveloperActorResponse } from "@/lib/admin"
+import { requireAdminActorResponse } from "@/lib/admin"
 import { getDatabaseRuntimeDiagnostic } from "@/lib/db/client"
 import { ProductService, CreateProductSchema, UpdateProductSchema } from "@/lib/services/product.service"
 
@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const actorResult = await requireDeveloperActorResponse()
+  const actorResult = await requireAdminActorResponse()
   if ("error" in actorResult) return actorResult.error
 
   try {
@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
-  const actorResult = await requireDeveloperActorResponse()
+  const actorResult = await requireAdminActorResponse()
   if ("error" in actorResult) return actorResult.error
 
   try {
@@ -76,7 +76,7 @@ export async function PATCH(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const actorResult = await requireDeveloperActorResponse()
+  const actorResult = await requireAdminActorResponse()
   if ("error" in actorResult) return actorResult.error
 
   try {

@@ -1,6 +1,7 @@
 const { loadEnvConfig } = require("@next/env")
 const fs = require("fs")
 const path = require("path")
+const { execSync } = require("child_process")
 
 loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production")
 
@@ -70,22 +71,69 @@ function isNativeRedisUrl(input) {
   return /^rediss?:\/\//i.test(String(input || ""))
 }
 
+function isStrongSecret(input, minLength = 32) {
+  const current = String(input || "")
+  return current.length >= minLength && !/(change-me|changeme|secret|password|example|placeholder|development-auth-secret)/i.test(current)
+}
+
+function commandDiagnostic(command, options = {}) {
+  try {
+    const output = execSync(command, {
+      cwd: process.cwd(),
+      env: process.env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: options.timeoutMs || 20_000,
+    })
+    return { ok: true, output: output.trim().slice(-2000) }
+  } catch (error) {
+    const output = [
+      error.message,
+      error.stdout,
+      error.stderr,
+      Array.isArray(error.output) ? error.output.join("\n") : "",
+    ].filter(Boolean).join("\n")
+    return { ok: false, output: output.trim().slice(-4000) }
+  }
+}
+
+async function databaseConnectivityDiagnostic() {
+  if (!isPostgresUrl(databaseUrl)) {
+    return { ok: false, detail: "DATABASE_URL is missing or invalid." }
+  }
+
+  try {
+    const { PrismaClient } = require("@prisma/client")
+    const prisma = new PrismaClient()
+    const startedAt = Date.now()
+    await prisma.$queryRaw`SELECT 1`
+    await prisma.$disconnect()
+    return { ok: true, detail: `Connected in ${Date.now() - startedAt}ms.` }
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 const nextAuthUrl = value("NEXTAUTH_URL")
 const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
 const databaseUrl = value("DATABASE_URL")
 const directDatabaseUrl = value("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
 const generationExecutionMode = value("SWIFT_GENERATION_EXECUTION_MODE").toLowerCase()
+const authProviderConfigured = Boolean(value("GOOGLE_CLIENT_ID") && value("GOOGLE_CLIENT_SECRET") && isStrongSecret(value("NEXTAUTH_SECRET")))
+const migrationStatus = commandDiagnostic("npx prisma migrate status", { timeoutMs: 30_000 })
+const schemaHealth = commandDiagnostic("node scripts/schema-health-check.js", { timeoutMs: 30_000 })
 
 const checks = [
   required("DATABASE_URL", "Neon pooled PostgreSQL app URL", isPostgresUrl(databaseUrl), databaseUrl ? "Must be a PostgreSQL URL." : "Set the Neon pooled connection string."),
   recommended("DATABASE_URL_POOLING", "Serverless pooled Neon host", isNeonPooledUrl(databaseUrl), "Use the Neon pooler host for app runtime traffic."),
   recommended("DIRECT_DATABASE_URL", "Direct Neon URL for migrations/admin scripts", isPostgresUrl(directDatabaseUrl), "Set DIRECT_DATABASE_URL, DIRECT_URL, or POSTGRES_URL_NON_POOLING."),
-  required("NEXTAUTH_SECRET", "Auth session secret", value("NEXTAUTH_SECRET")),
+  required("NEXTAUTH_SECRET", "Auth session secret", isStrongSecret(value("NEXTAUTH_SECRET")), "Must be at least 32 chars and not a placeholder."),
   required("NEXTAUTH_URL", "Canonical auth URL", isProductionUrl(nextAuthUrl), "Must be an https production URL, not localhost."),
   required("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(appUrl), "Must be an https production URL, not localhost."),
   required("GOOGLE_CLIENT_ID", "Google OAuth client ID", value("GOOGLE_CLIENT_ID")),
-  required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", value("GOOGLE_CLIENT_SECRET")),
-  required("OPENROUTER_API_KEY", "AI provider API key", value("OPENROUTER_API_KEY")),
+  required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", isStrongSecret(value("GOOGLE_CLIENT_SECRET"), 24), "Must be present and non-placeholder."),
+  required("AUTH_PROVIDER_HEALTH", "Auth provider health", authProviderConfigured, authProviderConfigured ? "Google OAuth and session secret configured." : "Missing or invalid Google OAuth/session env."),
+  required("OPENROUTER_API_KEY", "AI provider API key", isStrongSecret(value("OPENROUTER_API_KEY"), 20), "Must be present and non-placeholder."),
   required(
     "REDIS_BULLMQ_CONFIG",
     "Native Redis config for BullMQ jobs and workers",
@@ -122,27 +170,41 @@ const checks = [
   recommended("PAKASIR_API_KEY", "Payment API key", value("PAKASIR_API_KEY")),
   recommended("CRYPTO_PAYMENT_PRIVATE_KEY", "Crypto payment private key", value("CRYPTO_PAYMENT_PRIVATE_KEY")),
   recommended("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS", "Crypto payment receiving address", value("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS")),
+  required("MIGRATION_STATUS", "Prisma migration status", migrationStatus.ok, migrationStatus.ok ? "No pending migration mismatch detected." : migrationStatus.output),
+  required("SCHEMA_HEALTH", "Runtime schema compatibility", schemaHealth.ok, schemaHealth.ok ? "Runtime schema compatible." : schemaHealth.output),
 ]
 
-const requiredMissing = checks.filter((check) => check.severity === "required" && !check.ok)
-const recommendedMissing = checks.filter((check) => check.severity === "recommended" && !check.ok)
+async function main() {
+  const dbConnectivity = await databaseConnectivityDiagnostic()
+  checks.push(required("DB_CONNECTIVITY", "Database connectivity", dbConnectivity.ok, dbConnectivity.detail))
 
-console.log("\nDeploy Readiness")
-console.log("----------------")
-for (const check of checks) {
-  const state = check.ok ? "PASS" : check.severity === "required" ? "FAIL" : "WARN"
-  console.log(`${state} ${check.key} - ${check.label}${check.detail ? ` (${check.detail})` : ""}`)
-}
+  const requiredMissing = checks.filter((check) => check.severity === "required" && !check.ok)
+  const recommendedMissing = checks.filter((check) => check.severity === "recommended" && !check.ok)
 
-console.log("\nSummary")
-console.log(`Required: ${checks.filter((check) => check.severity === "required" && check.ok).length}/${checks.filter((check) => check.severity === "required").length} passed`)
-console.log(`Recommended missing: ${recommendedMissing.length}`)
+  console.log("\nDeploy Readiness")
+  console.log("----------------")
+  for (const check of checks) {
+    const state = check.ok ? "PASS" : check.severity === "required" ? "FAIL" : "WARN"
+    console.log(`${state} ${check.key} - ${check.label}${check.detail ? ` (${check.detail})` : ""}`)
+  }
 
-if (requiredMissing.length > 0) {
-  console.log(`NOT_READY_FOR_DEPLOY: ${requiredMissing.map((check) => check.key).join(", ")}`)
-  process.exitCode = 1
-} else {
-  console.log("READY_FOR_DEPLOY")
+  console.log("\nDeployment diagnostics")
+  console.log(`missing env vars: ${checks.filter((check) => !check.ok && /URL|SECRET|KEY|TOKEN|TEAM|CONFIG/.test(check.key)).map((check) => check.key).join(", ") || "none"}`)
+  console.log(`invalid secrets: ${checks.filter((check) => !check.ok && /SECRET|KEY|TOKEN/.test(check.key)).map((check) => check.key).join(", ") || "none"}`)
+  console.log(`migration mismatch: ${migrationStatus.ok && schemaHealth.ok ? "none" : "detected"}`)
+  console.log(`db connectivity: ${dbConnectivity.ok ? "ok" : "failed"}`)
+  console.log(`auth provider health: ${authProviderConfigured ? "ok" : "failed"}`)
+
+  console.log("\nSummary")
+  console.log(`Required: ${checks.filter((check) => check.severity === "required" && check.ok).length}/${checks.filter((check) => check.severity === "required").length} passed`)
+  console.log(`Recommended missing: ${recommendedMissing.length}`)
+
+  if (requiredMissing.length > 0) {
+    console.log(`NOT_READY_FOR_DEPLOY: ${requiredMissing.map((check) => check.key).join(", ")}`)
+    process.exitCode = 1
+  } else {
+    console.log("READY_FOR_DEPLOY")
+  }
 }
 
 function required(key, label, current, detail) {
@@ -162,3 +224,8 @@ function check(key, label, current, severity, detail) {
     detail,
   }
 }
+
+main().catch((error) => {
+  console.error("NOT_READY_FOR_DEPLOY:", error instanceof Error ? error.message : String(error))
+  process.exitCode = 1
+})

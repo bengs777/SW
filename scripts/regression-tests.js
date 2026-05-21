@@ -27,6 +27,18 @@ const vercelBuild = read("scripts/vercel-build.js")
 const productService = read("lib/services/product.service.ts")
 const productApi = read("app/api/products/route.ts")
 const dbClient = read("lib/db/client.ts")
+const authRuntime = read("lib/auth/runtime.ts")
+const authConfig = read("auth.ts")
+const adminGuard = read("lib/admin.ts")
+const healthApi = read("app/api/health/route.ts")
+const proxy = read("proxy.ts")
+const semanticEdit = read("lib/ai/semantic-edit.ts")
+const incrementalEdit = read("lib/ai/incremental-edit.ts")
+const projectMemoryGraph = read("lib/ai/project-memory-graph.ts")
+const generationWorker = read("lib/workers/generation-worker.ts")
+const productionReadiness = read("lib/production/readiness.ts")
+const deployReadiness = read("scripts/deploy-readiness.js")
+const instrumentation = read("instrumentation.ts")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -220,9 +232,105 @@ assert(
     /deleteProduct/.test(productService) &&
     /listProducts/.test(productService) &&
     /CreateProductSchema/.test(productService) &&
-    /requireDeveloperActorResponse/.test(productApi) &&
+    /requireAdminActorResponse/.test(productApi) &&
     /getDatabaseRuntimeDiagnostic/.test(productApi),
   "product CRUD must use Prisma, zod, admin write guards, and clear DB runtime diagnostics"
+)
+
+assert(
+  "auth runtime has diagnostics and graceful provider fallback",
+  /getAuthRuntimeDiagnostic/.test(authRuntime) &&
+    /NEXTAUTH_SECRET/.test(authRuntime) &&
+    /GOOGLE_CLIENT_ID/.test(authRuntime) &&
+    /GOOGLE_CLIENT_SECRET/.test(authRuntime) &&
+    /provider_unavailable/.test(authRuntime) &&
+    /createNormalizedAuthError/.test(authRuntime) &&
+    /providers:\s*authProviders/.test(authConfig) &&
+    /session:\s*\{[\s\S]*strategy:\s*"jwt"/.test(authConfig),
+  "Auth.js must expose explicit diagnostics, skip unavailable providers gracefully, and use persistent JWT sessions"
+)
+
+assert(
+  "server rbac protects privileged operations",
+  /getCurrentAuthActor/.test(adminGuard) &&
+    /requireRoleResponse/.test(adminGuard) &&
+    /requireAdminActorResponse/.test(adminGuard) &&
+    /requireDeveloperActorResponse/.test(adminGuard) &&
+    /canAccessRole/.test(adminGuard) &&
+    /memberships:\s*\{\s*select:\s*\{\s*role:\s*true/.test(adminGuard) &&
+    /normalizeAdminEmail\(user\.email\) === normalizeAdminEmail\(env\.devOwnerEmail\)/.test(adminGuard),
+  "privileged routes must derive roles from the server database and keep developer access owner-scoped"
+)
+
+assert(
+  "auth diagnostics are included in health and route protection",
+  /checkAuth/.test(healthApi) &&
+    /auth:\s*okLabel\(authCheck\)/.test(healthApi) &&
+    /authCheck\.status !== "unhealthy"/.test(healthApi) &&
+    /"\/api\/products"/.test(proxy) &&
+    /AUTH_REQUIRED/.test(proxy),
+  "health must report auth runtime state and proxy must protect product API routes"
+)
+
+assert(
+  "architecture memory persists semantic graph snapshots",
+  /routeGraph/.test(projectMemoryGraph) &&
+    /componentGraph/.test(projectMemoryGraph) &&
+    /serviceGraph/.test(projectMemoryGraph) &&
+    /apiGraph/.test(projectMemoryGraph) &&
+    /dependencies/.test(projectMemoryGraph) &&
+    /snapshotId/.test(projectMemoryGraph) &&
+    /buildPersistentArchitectureSnapshot/.test(projectMemoryGraph) &&
+    /parseProjectMemoryGraph/.test(projectMemoryGraph) &&
+    /previousMemoryJson/.test(generationOrchestrator) &&
+    /architecture_snapshot_persisted/.test(generationOrchestrator) &&
+    /loadProjectMemoryJson/.test(generationWorker),
+  "generation must load prior project memory, persist a graph snapshot, and retain route/component/service/API/dependency diagnostics"
+)
+
+assert(
+  "semantic scoped edits use ast operations",
+  /SemanticEditOperation/.test(semanticEdit) &&
+    /rename_component/.test(semanticEdit) &&
+    /update_prop/.test(semanticEdit) &&
+    /move_hook/.test(semanticEdit) &&
+    /modify_metadata/.test(semanticEdit) &&
+    /update_route/.test(semanticEdit) &&
+    /applyRangeEdits/.test(semanticEdit) &&
+    /parseTsxAst/.test(semanticEdit) &&
+    /dependencyImpact/.test(semanticEdit) &&
+    /routeImpact/.test(semanticEdit) &&
+    /componentGraphImpact/.test(semanticEdit) &&
+    /applySemanticScopedEdit/.test(incrementalEdit) &&
+    /findFirstJsxChildrenInsertionPoint/.test(incrementalEdit),
+  "scoped edits must be component/route/import aware and expose impact diagnostics instead of blind text replacement"
+)
+
+assert(
+  "deployment readiness blocks critical invalid runtime env",
+  /getDeploymentRuntimeReadiness/.test(productionReadiness) &&
+    /assertDeploymentEnvironmentReady/.test(productionReadiness) &&
+    /blockingFailures/.test(productionReadiness) &&
+    /degradedServices/.test(productionReadiness) &&
+    /missingEnvVars/.test(productionReadiness) &&
+    /invalidSecrets/.test(productionReadiness) &&
+    /dbConnectivity/.test(productionReadiness) &&
+    /migrationMismatch/.test(productionReadiness) &&
+    /AUTH_PROVIDER_HEALTH/.test(productionReadiness) &&
+    /deployment_readiness/.test(instrumentation),
+  "runtime startup and health must fail closed on critical envs while keeping optional services degraded"
+)
+
+assert(
+  "deploy readiness cli validates migrations db and auth",
+  /MIGRATION_STATUS/.test(deployReadiness) &&
+    /SCHEMA_HEALTH/.test(deployReadiness) &&
+    /DB_CONNECTIVITY/.test(deployReadiness) &&
+    /AUTH_PROVIDER_HEALTH/.test(deployReadiness) &&
+    /missing env vars/.test(deployReadiness) &&
+    /invalid secrets/.test(deployReadiness) &&
+    /migration mismatch/.test(deployReadiness),
+  "deployment readiness script must expose missing env, invalid secret, migration, DB, and auth diagnostics"
 )
 
 console.log("[regression] all checks passed")

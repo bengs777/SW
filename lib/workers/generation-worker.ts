@@ -44,6 +44,14 @@ async function loadGenerationHistoryCount(projectId: string) {
   })
 }
 
+async function loadProjectMemoryJson(projectId: string) {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { memoryJson: true },
+  })
+  return project?.memoryJson || null
+}
+
 export async function processGenerationPayload(payload: GenerationQueuePayload, queueJobId?: string | number) {
   const abortController = new AbortController()
   const unregisterAbort = registerGenerationAbortController(payload.jobId, abortController)
@@ -138,6 +146,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       {
         loadProjectFiles,
         loadGenerationHistoryCount,
+        loadProjectMemoryJson,
       }
     )
 

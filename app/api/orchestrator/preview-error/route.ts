@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { createHash } from "node:crypto"
 import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
@@ -11,6 +12,16 @@ import { enforceUserRateLimit } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 import * as Executor from "@/lib/orchestrator/executor"
 import { MAX_AUTOMATIC_REPAIR_ATTEMPTS, routeModelForRequest } from "@/lib/ai/generation-pipeline"
+import {
+  captureRuntimeError,
+  createRuntimeSnapshot,
+  diagnoseRuntimeError,
+  filterRepairOutputToScope,
+  isolateRepairScope,
+  recordRuntimeRecoveryEvent,
+  rollbackToSnapshot,
+  shouldStopRepeatedRepairLoop,
+} from "@/lib/observability/runtime-recovery"
 
 export const runtime = "nodejs"
 
@@ -21,8 +32,10 @@ type RepairAttempt = {
   reason?: string
   parseMode?: string
   applied?: string[]
+  rejected?: string[]
   model?: string
   layer?: string
+  outputHash?: string
 }
 
 const MAX_MESSAGE_LENGTH = 4000
@@ -35,6 +48,23 @@ function getErrorMessage(error: unknown) {
 
 function cleanString(value: unknown, maxLength: number) {
   return typeof value === "string" ? value.slice(0, maxLength) : ""
+}
+
+function hashFiles(files: Array<{ path: string; content: string }>) {
+  return createHash("sha256")
+    .update(JSON.stringify(files.map((file) => ({ path: file.path, content: file.content }))))
+    .digest("hex")
+}
+
+function inferGeneratedLanguage(path: string) {
+  if (/\.tsx$/i.test(path)) return "tsx" as const
+  if (/\.css$/i.test(path)) return "css" as const
+  if (/\.json$/i.test(path)) return "json" as const
+  if (/\.html$/i.test(path)) return "html" as const
+  if (/\.prisma$/i.test(path)) return "prisma" as const
+  if (/\.md$/i.test(path)) return "md" as const
+  if (/\.env(?:\.example)?$/i.test(path)) return "env" as const
+  return "ts" as const
 }
 
 async function resolveSessionUserId() {
@@ -159,15 +189,111 @@ export async function POST(req: NextRequest) {
     // Build inspect prompt
     const contextFiles = visibleProjectFiles.slice(0, 8).map((projectFile) => ({
       ...projectFile,
-      language: projectFile.path.endsWith(".tsx") ? "tsx" as const : "ts" as const,
+      language: inferGeneratedLanguage(projectFile.path),
     }))
+    const allProjectFiles = visibleProjectFiles.map((projectFile) => ({
+      ...projectFile,
+      language: inferGeneratedLanguage(projectFile.path),
+    }))
+    const capture = await captureRuntimeError({
+      projectId,
+      message: message || "Preview runtime error",
+      stack,
+      file,
+      lineno: typeof lineno === "number" ? lineno : null,
+      colno: typeof colno === "number" ? colno : null,
+      source: "preview",
+      severity: "error",
+      metadata: {
+        userId,
+        role: access.role,
+      },
+    })
+    const diagnosis = diagnoseRuntimeError({
+      error: `${message}\n${stack}`,
+      files: allProjectFiles,
+      fallbackTargets: file ? [file] : [],
+    })
+    const isolatedScope = isolateRepairScope({
+      files: allProjectFiles,
+      diagnosis,
+    })
+    await recordRuntimeRecoveryEvent({
+      capture,
+      phase: "diagnose",
+      diagnosis,
+      message: "Runtime error diagnosed and routed",
+      metadata: {
+        route: diagnosis.route,
+        targetPaths: isolatedScope.targetPaths,
+        preservePathCount: isolatedScope.preservePaths.length,
+      },
+    })
+
+    if (diagnosis.route !== "targeted_repair" || isolatedScope.targetPaths.length === 0) {
+      await recordRuntimeRecoveryEvent({
+        capture,
+        phase: "isolate",
+        diagnosis,
+        status: "failed",
+        message: "Runtime error could not be safely isolated for automatic repair",
+        metadata: {
+          targetPaths: isolatedScope.targetPaths,
+          fullRegenerationAllowed: false,
+        },
+      })
+      return NextResponse.json({
+        success: false,
+        correlationId: capture.correlationId,
+        error: "Runtime error captured, but automatic repair was blocked because the failed scope could not be isolated.",
+        diagnosis,
+        attempts: [],
+      }, { status: 422 })
+    }
+
     const activeFile = contextFiles.find((f) => f.path === file) || null
     const inspectContext = buildContextForTask({ prompt: message + "\n\nStack:\n" + stack, files: contextFiles, activeFile })
+    const snapshot = await createRuntimeSnapshot({
+      projectId,
+      prompt: `runtime-snapshot:${capture.correlationId}`,
+      files: allProjectFiles,
+      idempotencyKey: `runtime-snapshot:${capture.correlationId}`,
+      intent: "runtime-repair",
+    })
+    await recordRuntimeRecoveryEvent({
+      capture,
+      phase: "isolate",
+      diagnosis,
+      message: "Last known project state snapshotted before targeted repair",
+      metadata: {
+        historyId: snapshot.historyId,
+        targetPaths: isolatedScope.targetPaths,
+        fileHash: snapshot.fileHash,
+      },
+    })
 
     // Agent loop: two automatic attempts max. Premium repair is returned as
     // an escalation option so expensive models are never used by default.
     const attempts: RepairAttempt[] = []
     for (let attempt = 0; attempt < MAX_AUTOMATIC_REPAIR_ATTEMPTS; attempt += 1) {
+      const loopStop = shouldStopRepeatedRepairLoop({
+        attempts,
+        maxAttempts: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
+      })
+      if (loopStop.stop) {
+        await recordRuntimeRecoveryEvent({
+          capture,
+          phase: "targeted_repair",
+          diagnosis,
+          status: "failed",
+          message: "Repeated repair loop stopped before another provider call",
+          metadata: {
+            reason: loopStop.reason,
+            attempts: attempts.length,
+          },
+        })
+        break
+      }
       const routeDecision = routeModelForRequest({
         prompt: `${message}\n${stack}`,
         purpose: "repair",
@@ -182,9 +308,9 @@ export async function POST(req: NextRequest) {
         repairAttempt: attempt,
       })
 
-      const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nUse canonical workspace-relative POSIX paths only, for example app/page.tsx. Never use leading slashes, ./ prefixes, traversal, or Windows separators.\nRespond ONLY with a valid JSON object: {"files":[{"path":"app/page.tsx","language":"tsx","content":"<full file content>"}],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}. No explanation, no markdown, no extra text.`
+      const systemPrompt = `You are a senior fullstack debugger for a Next.js preview.\nUse canonical workspace-relative POSIX paths only, for example app/page.tsx. Never use leading slashes, ./ prefixes, traversal, or Windows separators.\nTARGETED_REPAIR_ONLY: change only these paths: ${isolatedScope.targetPaths.join(", ")}.\nNever regenerate the app, never rewrite unrelated files, and preserve every successful file outside that target list.\nRespond ONLY with a valid JSON object: {"files":[{"path":"app/page.tsx","language":"tsx","content":"<full file content>"}],"dependencies":[],"diagnostics":[],"metadata":{},"repairs":[]}. No explanation, no markdown, no extra text.`
 
-      const fullPrompt = `${systemPrompt}\n\nError:\n${message}\n\nStack:\n${stack}\n\nContext:\n${inspectContext}`
+      const fullPrompt = `${systemPrompt}\n\nError correlation ID: ${capture.correlationId}\n\nDiagnosis:\n${JSON.stringify(diagnosis, null, 2)}\n\nError:\n${message}\n\nStack:\n${stack}\n\nContext:\n${inspectContext}`
 
       let providerResp
       try {
@@ -220,21 +346,119 @@ export async function POST(req: NextRequest) {
         continue
       }
 
-      try {
-        await Executor.applyFiles(projectId, `preview-inspect:${attempt}`, parsed.files)
+      const scopedRepair = filterRepairOutputToScope({
+        files: parsed.files,
+        targetPaths: isolatedScope.targetPaths,
+      })
+      const outputHash = hashFiles(scopedRepair.accepted)
+      const repeatedStop = shouldStopRepeatedRepairLoop({
+        attempts,
+        nextOutputHash: outputHash,
+        maxAttempts: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
+      })
+      if (repeatedStop.stop) {
         attempts.push({
           attempt,
-          ok: true,
-          applied: parsed.files.map((f) => f.path),
+          ok: false,
+          reason: repeatedStop.reason || "repair_loop_stopped",
+          rejected: scopedRepair.rejected,
+          outputHash,
           model: routeDecision.modelName,
           layer: routeDecision.layer,
         })
+        await recordRuntimeRecoveryEvent({
+          capture,
+          phase: "targeted_repair",
+          diagnosis,
+          status: "failed",
+          message: "Repeated repair loop stopped after identical repair output",
+          metadata: {
+            reason: repeatedStop.reason,
+            rejectedFiles: scopedRepair.rejected,
+          },
+        })
+        break
+      }
+
+      if (scopedRepair.accepted.length === 0) {
+        attempts.push({
+          attempt,
+          ok: false,
+          reason: "empty_targeted_repair_output",
+          rejected: scopedRepair.rejected,
+          outputHash,
+          model: routeDecision.modelName,
+          layer: routeDecision.layer,
+        })
+        continue
+      }
+
+      try {
+        const saved = await Executor.applyFiles(projectId, `preview-repair:${capture.correlationId}:${attempt}`, scopedRepair.accepted)
+        const validation = await Executor.validateFiles(saved.files)
+        if (!validation.valid) {
+          await rollbackToSnapshot({
+            projectId,
+            historyId: snapshot.historyId,
+            reason: `validation_failed_after_runtime_repair:${capture.correlationId}`,
+          })
+          attempts.push({
+            attempt,
+            ok: false,
+            reason: "validation_failed_after_targeted_repair",
+            error: JSON.stringify(validation.result.missingCategories || validation.result).slice(0, 1000),
+            applied: scopedRepair.accepted.map((f) => f.path),
+            rejected: scopedRepair.rejected,
+            outputHash,
+            model: routeDecision.modelName,
+            layer: routeDecision.layer,
+          })
+          await recordRuntimeRecoveryEvent({
+            capture,
+            phase: "rollback",
+            diagnosis,
+            status: "failed",
+            message: "Targeted repair failed validation and was rolled back",
+            metadata: {
+              snapshotHistoryId: snapshot.historyId,
+              validation: validation.result,
+            },
+          })
+          continue
+        }
+        attempts.push({
+          attempt,
+          ok: true,
+          applied: scopedRepair.accepted.map((f) => f.path),
+          rejected: scopedRepair.rejected,
+          outputHash,
+          model: routeDecision.modelName,
+          layer: routeDecision.layer,
+        })
+        await recordRuntimeRecoveryEvent({
+          capture,
+          phase: "validation",
+          diagnosis,
+          message: "Targeted repair passed validation",
+          metadata: {
+            historyId: saved.historyId,
+            appliedFiles: scopedRepair.accepted.map((f) => f.path),
+            rejectedFiles: scopedRepair.rejected,
+          },
+        })
         break
       } catch (err: unknown) {
+        await rollbackToSnapshot({
+          projectId,
+          historyId: snapshot.historyId,
+          reason: `targeted_repair_apply_failed:${capture.correlationId}`,
+        }).catch(() => null)
         attempts.push({
           attempt,
           ok: false,
           error: getErrorMessage(err),
+          rejected: scopedRepair.rejected,
+          outputHash,
           model: routeDecision.modelName,
           layer: routeDecision.layer,
         })
@@ -253,9 +477,11 @@ export async function POST(req: NextRequest) {
         })
 
     log("info", "preview-error repair completed", {
+      correlationId: capture.correlationId,
       userId,
       projectId,
       role: access.role,
+      diagnosis,
       attempts: attempts.length,
       maxAutomaticRepairAttempts: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
       premiumEscalationSuggested: Boolean(premiumEscalation),
@@ -265,6 +491,11 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      correlationId: capture.correlationId,
+      diagnosis,
+      snapshot: {
+        historyId: snapshot.historyId,
+      },
       attempts,
       maxAutomaticRepairAttempts: MAX_AUTOMATIC_REPAIR_ATTEMPTS,
       premiumEscalation: premiumEscalation

@@ -7,6 +7,9 @@ import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { log } from "@/lib/logging"
 import { timeoutConfig } from "@/lib/timeouts"
+import { getAuthRuntimeDiagnostic } from "@/lib/auth/runtime"
+import { getDeploymentRuntimeReadiness, getProductionReadiness } from "@/lib/production/readiness"
+import { getRuntimeHealthDashboard } from "@/lib/observability/runtime-recovery"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -122,6 +125,33 @@ async function checkProviders(refresh: boolean): Promise<HealthCheck> {
   }
 }
 
+async function checkAuth(): Promise<HealthCheck> {
+  const diagnostic = getAuthRuntimeDiagnostic()
+  return {
+    status: diagnostic.status,
+    detail: diagnostic,
+  }
+}
+
+async function checkDeploymentReadiness(): Promise<HealthCheck> {
+  try {
+    const readiness = await getDeploymentRuntimeReadiness()
+    return {
+      status: readiness.status === "blocked" ? "unhealthy" : readiness.status === "degraded" ? "degraded" : "healthy",
+      detail: readiness,
+    }
+  } catch (error) {
+    const fallback = getProductionReadiness()
+    return {
+      status: "unhealthy",
+      detail: {
+        ...fallback,
+        runtimeError: error instanceof Error ? error.message : String(error),
+      },
+    }
+  }
+}
+
 function okLabel(check: HealthCheck) {
   return check.status === "healthy" || check.status === "degraded" ? "ok" : check.status
 }
@@ -169,6 +199,11 @@ export async function GET(request: NextRequest) {
             })),
           },
         },
+        auth: await checkAuth(),
+        deployment: {
+          status: getProductionReadiness().ok ? "healthy" : "unhealthy",
+          detail: getProductionReadiness(),
+        },
       },
     }, {
       headers: {
@@ -178,14 +213,24 @@ export async function GET(request: NextRequest) {
     })
   }
 
-  const [database, queue, providers] = await Promise.all([
+  const [database, queue, providers, authCheck, deployment] = await Promise.all([
     checkDatabase(),
     checkQueue(),
     checkProviders(refreshProvider),
+    checkAuth(),
+    checkDeploymentReadiness(),
   ])
+  const runtimeHealth = await getRuntimeHealthDashboard(1).catch((error) => ({
+    status: "unhealthy",
+    error: error instanceof Error ? error.message : String(error),
+  }))
   const missingProductionEnv = env.nodeEnv === "production" ? getMissingProductionEnvVars() : []
   const envReport = validateEnv()
-  const requiredHealthy = database.status !== "unhealthy" && missingProductionEnv.length === 0
+  const requiredHealthy =
+    database.status !== "unhealthy" &&
+    authCheck.status !== "unhealthy" &&
+    deployment.status !== "unhealthy" &&
+    missingProductionEnv.length === 0
   const operational =
     requiredHealthy &&
     queue.status !== "unhealthy" &&
@@ -198,8 +243,11 @@ export async function GET(request: NextRequest) {
     status,
     durationMs,
     database: database.status,
+    auth: authCheck.status,
+    deployment: deployment.status,
     queue: queue.status,
     providers: providers.status,
+    runtimeHealth: runtimeHealth.status,
     missingProductionEnvCount: missingProductionEnv.length,
     envIssueCount: envReport.issues.length,
   })
@@ -207,6 +255,8 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     status,
     database: okLabel(database),
+    auth: okLabel(authCheck),
+    deployment: okLabel(deployment),
     worker: workerLabel(queue),
     queue: okLabel(queue),
     checkedAt: new Date().toISOString(),
@@ -216,8 +266,11 @@ export async function GET(request: NextRequest) {
     environment: env.nodeEnv,
     checks: {
       database,
+      auth: authCheck,
+      deployment,
       queue,
       providers,
+      runtimeHealth,
       environment: {
         status: missingProductionEnv.length === 0 && envReport.issues.every((issue) => issue.severity !== "error")
           ? "healthy"

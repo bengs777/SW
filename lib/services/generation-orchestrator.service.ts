@@ -54,6 +54,7 @@ import {
 } from "@/lib/ai/architecture-planner"
 import {
   buildArchitectureDependencyGraph,
+  buildPersistentArchitectureSnapshot,
   buildProjectMemoryGraph,
   type SwiftDependencyGraph,
   type SwiftProjectMemoryGraph,
@@ -97,6 +98,13 @@ import {
   recordValidationResult,
   updateAiTask,
 } from "@/lib/observability/runtime-metrics"
+import {
+  captureRuntimeError,
+  diagnoseRuntimeError,
+  recordGenerationStageTelemetry,
+  recordRepairStageTelemetry,
+  recordRuntimeRecoveryEvent,
+} from "@/lib/observability/runtime-recovery"
 import { timeoutConfig } from "@/lib/timeouts"
 
 type GenerationPlannerFile = {
@@ -214,6 +222,7 @@ type ExecuteGenerationJobInput = {
 type ExecuteGenerationJobDeps = {
   loadProjectFiles: (projectId: string) => Promise<GeneratedFile[]>
   loadGenerationHistoryCount?: (projectId: string) => Promise<number>
+  loadProjectMemoryJson?: (projectId: string) => Promise<string | null>
 }
 
 const MAX_AGENT_ITERATIONS = 5
@@ -1366,6 +1375,7 @@ function buildGenerationPlan(input: {
   existingFiles: GeneratedFile[]
   collaborationMode?: string | null
   previewContext?: unknown
+  previousMemoryJson?: string | null
 }) {
   const previewContext = normalizePreviewContext(input.previewContext)
   const classification = classifyPrompt(input.prompt, {
@@ -1407,6 +1417,7 @@ function buildGenerationPlan(input: {
     files: input.existingFiles,
     intent: structuredIntent,
     architecturePlan: architecture,
+    previousMemoryJson: input.previousMemoryJson,
   })
   const dependencyGraph = buildArchitectureDependencyGraph({
     intent: structuredIntent,
@@ -1805,6 +1816,51 @@ async function appendOrchestrationEvent(input: {
       metadata: input.data,
     }).catch(() => null)
   }
+}
+
+async function captureValidationRuntimeFailure(input: {
+  jobId: string
+  projectId: string
+  trace?: TraceIds
+  files: GeneratedFile[]
+  message: string
+  source: "sandbox" | "orchestrator"
+  metadata?: Record<string, unknown>
+}) {
+  const capture = await captureRuntimeError({
+    projectId: input.projectId,
+    jobId: input.jobId,
+    trace: input.trace,
+    message: input.message,
+    source: input.source,
+    severity: "error",
+    metadata: input.metadata,
+  }).catch(() => null)
+
+  if (!capture) return null
+
+  const diagnosis = diagnoseRuntimeError({
+    error: input.message,
+    files: input.files,
+  })
+  await recordRuntimeRecoveryEvent({
+    capture,
+    phase: "diagnose",
+    diagnosis,
+    jobId: input.jobId,
+    trace: input.trace,
+    stage: "building",
+    status: diagnosis.route === "targeted_repair" ? "running" : "failed",
+    message: diagnosis.route === "targeted_repair"
+      ? "Runtime failure isolated for targeted repair"
+      : "Runtime failure captured but automatic repair requires manual review",
+    metadata: {
+      ...input.metadata,
+      fullRegenerationAllowed: false,
+      preserveSuccessfulState: true,
+    },
+  }).catch(() => null)
+  return { capture, diagnosis }
 }
 
 function classifyRepairTerminationReason(input: {
@@ -4015,6 +4071,20 @@ async function runValidationLifecycle(input: {
           logs: logs.slice(-20),
         },
       }).catch(() => null)
+      await captureValidationRuntimeFailure({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        trace: input.trace,
+        files,
+        message,
+        source: "sandbox",
+        metadata: {
+          sandbox: "remote",
+          sandboxStatus: preview.status || null,
+          previewUrl: preview.previewUrl || null,
+          logs: logs.slice(-20),
+        },
+      })
       return {
         ok: false,
         files,
@@ -4219,6 +4289,21 @@ async function runValidationLifecycle(input: {
         logs: preview.logs.slice(-20),
       },
     }).catch(() => null)
+    await captureValidationRuntimeFailure({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      trace: input.trace,
+      files,
+      message: preview.error,
+      source: "sandbox",
+      metadata: {
+        sandbox: "local",
+        sandboxStatus: preview.status,
+        previewUrl: preview.previewUrl,
+        runtimeVerification: runtimeFailed,
+        logs: preview.logs.slice(-20),
+      },
+    })
     return {
       ok: false,
       files,
@@ -4273,6 +4358,20 @@ async function runValidationLifecycle(input: {
         sandboxValidation: preview.validation,
       },
     }).catch(() => null)
+    await captureValidationRuntimeFailure({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      trace: input.trace,
+      files,
+      message,
+      source: "sandbox",
+      metadata: {
+        sandbox: "local",
+        sandboxStatus: preview.status,
+        previewUrl: preview.previewUrl,
+        sandboxValidation: preview.validation,
+      },
+    })
     return {
       ok: false,
       files,
@@ -4865,6 +4964,15 @@ export async function executeGenerationJob(
       projectId: input.projectId,
       selectedModel: input.selectedModel,
     })
+    recordGenerationStageTelemetry({
+      context: traceContext,
+      stage: "planning",
+      status: "started",
+      meta: {
+        projectId: input.projectId,
+        selectedModel: input.selectedModel,
+      },
+    })
     await GenerationJobService.transition(input.jobId, {
       type: "job.stage.planning",
       status: "running",
@@ -4876,7 +4984,7 @@ export async function executeGenerationJob(
     })
     await GenerationJobService.assertNotCancelled(input.jobId)
 
-    const [loadedExistingFiles, previousPromptCount] = await Promise.all([
+    const [loadedExistingFiles, previousPromptCount, previousMemoryJson] = await Promise.all([
       deps.loadProjectFiles(input.projectId),
       deps.loadGenerationHistoryCount
         ? deps.loadGenerationHistoryCount(input.projectId).catch((error) => {
@@ -4888,6 +4996,16 @@ export async function executeGenerationJob(
             return 0
           })
         : Promise.resolve(0),
+      deps.loadProjectMemoryJson
+        ? deps.loadProjectMemoryJson(input.projectId).catch((error) => {
+            log("warn", "architecture_memory_load_failed", {
+              jobId: input.jobId,
+              projectId: input.projectId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return null
+          })
+        : Promise.resolve(null),
     ])
     let existingFiles = loadedExistingFiles
     assertNotAborted(input.signal)
@@ -4990,8 +5108,21 @@ export async function executeGenerationJob(
       existingFiles,
       collaborationMode: input.collaborationMode,
       previewContext: input.previewContext,
+      previousMemoryJson,
     })
     blueprint = getControlledAppBlueprint(plan.appType)
+    recordGenerationStageTelemetry({
+      context: traceContext,
+      stage: "planning",
+      status: "passed",
+      meta: {
+        projectId: input.projectId,
+        appType: plan.appType,
+        generationMode: plan.generationMode,
+        productionMode: plan.productionMode,
+        targetPaths: plan.allowedFileScope.targetPaths,
+      },
+    })
     const appPlan = buildAppPlan({ prompt: input.prompt, plan })
     developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
     developerDiagnostics.plannerConfidence = plan.orchestration.plannerConfidence
@@ -5405,10 +5536,11 @@ export async function executeGenerationJob(
             },
           })
 
-          const finalProjectMemory = buildProjectMemoryGraph({
+          const finalProjectMemory = buildPersistentArchitectureSnapshot({
             files: workingFiles,
             intent: plan.structuredIntent,
             architecturePlan: plan.architecture,
+            previousMemoryJson,
           })
           const finalDependencyGraph = buildArchitectureDependencyGraph({
             intent: plan.structuredIntent,
@@ -5422,6 +5554,7 @@ export async function executeGenerationJob(
             projectMemoryJson: JSON.stringify({
               ...finalProjectMemory,
               dependencyGraph: finalDependencyGraph,
+              architectureSnapshot: finalProjectMemory,
               structureLock: {
                 lockedAt: new Date().toISOString(),
                 generationMode: plan.generationMode,
@@ -5434,6 +5567,23 @@ export async function executeGenerationJob(
             generationJobId: input.jobId,
             intent: intentStorageKey(plan.intent),
             usedAutoRepair: false,
+          })
+          await GenerationJobService.appendEvent({
+            jobId: input.jobId,
+            type: "architecture_snapshot_persisted",
+            stage: "persisting",
+            status: "running",
+            message: "Architecture graph snapshot persisted after scoped edit",
+            data: {
+              snapshotId: finalProjectMemory.snapshotId,
+              routeCount: finalProjectMemory.routeGraph.length,
+              componentCount: finalProjectMemory.componentGraph.length,
+              serviceCount: finalProjectMemory.serviceGraph.length,
+              apiCount: finalProjectMemory.apiGraph.length,
+              dependencyImpact: patch.semanticDiagnostics?.dependencyImpact || [],
+              routeImpact: patch.semanticDiagnostics?.routeImpact || [],
+              componentGraphImpact: patch.semanticDiagnostics?.componentGraphImpact || [],
+            },
           })
           await transition(input.jobId, "persisting", "Committing verified project state", 96, {
             historyId: saveResult.historyId,
@@ -5460,6 +5610,8 @@ export async function executeGenerationJob(
             affectedFiles: plan.incrementalEdit.affectedFiles,
             changedFiles: patch.changedFiles.map((file) => normalizePath(file.path)),
             patchPlan: patch.patchPlan || null,
+            semanticOperation: patch.semanticOperation || null,
+            semanticDiagnostics: patch.semanticDiagnostics || null,
             patchSummary: patch.patchSummary,
             validator: scopedValidation,
             scopedEditResult,
@@ -5495,6 +5647,8 @@ export async function executeGenerationJob(
               affectedFiles: plan.incrementalEdit.affectedFiles,
               changedFiles: patch.changedFiles.map((file) => normalizePath(file.path)),
               patchPlan: patch.patchPlan || null,
+              semanticOperation: patch.semanticOperation || null,
+              semanticDiagnostics: patch.semanticDiagnostics || null,
               patchSummary: patch.patchSummary,
               incrementalValidator: scopedValidation,
               scopedEditResult,
@@ -6221,6 +6375,15 @@ export async function executeGenerationJob(
       projectId: input.projectId,
       fileCount: workingFiles.length,
     })
+    recordGenerationStageTelemetry({
+      context: traceContext,
+      stage: "validation",
+      status: "started",
+      meta: {
+        projectId: input.projectId,
+        fileCount: workingFiles.length,
+      },
+    })
     traceExecution(traceContext, "build_started", {
       projectId: input.projectId,
       fileCount: workingFiles.length,
@@ -6238,6 +6401,21 @@ export async function executeGenerationJob(
       },
       signal: input.signal,
       emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
+    })
+    recordGenerationStageTelemetry({
+      context: traceContext,
+      stage: "validation",
+      status: validation.ok ? "passed" : "failed",
+      meta: {
+        projectId: input.projectId,
+        failure: validation.failure || null,
+        previewStatus: validation.previewStatus,
+        steps: validation.steps.map((step) => ({
+          name: step.name,
+          status: step.status,
+          durationMs: step.durationMs,
+        })),
+      },
     })
     markOrchestrationValidation(plan.orchestration, {
       status: validation.ok ? "passed" : "failed",
@@ -6368,6 +6546,16 @@ export async function executeGenerationJob(
         projectId: input.projectId,
         repairAttempt,
         failure: validation.failure,
+      })
+      recordRepairStageTelemetry({
+        context: traceContext,
+        stage: validation.failure?.step || "validation",
+        attempt: repairAttempt,
+        status: "started",
+        meta: {
+          projectId: input.projectId,
+          failure: validation.failure,
+        },
       })
       const iteration = repairAttempt + 1
       await GenerationJobService.update(input.jobId, {
@@ -6596,6 +6784,18 @@ export async function executeGenerationJob(
             fileHashChanged: repairedFileHash !== previousRepairFileHash,
           },
         }).catch(() => null)
+        recordRepairStageTelemetry({
+          context: traceContext,
+          stage: validation.failure?.step || "repair",
+          attempt: repairAttempt,
+          status: "stopped",
+          meta: {
+            projectId: input.projectId,
+            reason: repairStopReason,
+            acceptedFileCount: repaired.acceptedFileCount,
+            fileHashChanged: repairedFileHash !== previousRepairFileHash,
+          },
+        })
         workflowMemory.push({
           iteration,
           changedFiles: [],
@@ -6730,6 +6930,15 @@ export async function executeGenerationJob(
         }
       }
       if (validation.ok) {
+        recordRepairStageTelemetry({
+          context: traceContext,
+          stage: "validation",
+          attempt: repairAttempt,
+          status: "passed",
+          meta: {
+            projectId: input.projectId,
+          },
+        })
         await appendOrchestrationEvent({
           jobId: input.jobId,
           trace: {
@@ -6758,6 +6967,16 @@ export async function executeGenerationJob(
           },
         }).catch(() => null)
       } else {
+        recordRepairStageTelemetry({
+          context: traceContext,
+          stage: validation.failure?.step || "validation",
+          attempt: repairAttempt,
+          status: "failed",
+          meta: {
+            projectId: input.projectId,
+            failure: validation.failure,
+          },
+        })
         await OrchestrationRuntimeService.finishRepairAttempt({
           jobId: input.jobId,
           attempt: repairAttempt,
@@ -7092,10 +7311,11 @@ export async function executeGenerationJob(
     const persistenceStartedAt = Date.now()
     markCommitStatus(plan.orchestration, "pending")
     developerDiagnostics.commitStatus = plan.orchestration.commitStatus
-    const finalProjectMemory = buildProjectMemoryGraph({
+    const finalProjectMemory = buildPersistentArchitectureSnapshot({
       files: workingFiles,
       intent: plan.structuredIntent,
       architecturePlan: plan.architecture,
+      previousMemoryJson,
     })
     const finalDependencyGraph = buildArchitectureDependencyGraph({
       intent: plan.structuredIntent,
@@ -7109,6 +7329,7 @@ export async function executeGenerationJob(
       projectMemoryJson: JSON.stringify({
         ...finalProjectMemory,
         dependencyGraph: finalDependencyGraph,
+        architectureSnapshot: finalProjectMemory,
       }),
       idempotencyKey: input.persistenceKey,
       generationJobId: input.jobId,
@@ -7116,6 +7337,21 @@ export async function executeGenerationJob(
       usedAutoRepair: repairAttempt > 0,
     })
     const persistenceEndedAt = Date.now()
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "architecture_snapshot_persisted",
+      stage: "persisting",
+      status: "running",
+      message: "Architecture graph snapshot persisted after generation",
+      data: {
+        snapshotId: finalProjectMemory.snapshotId,
+        routeCount: finalProjectMemory.routeGraph.length,
+        componentCount: finalProjectMemory.componentGraph.length,
+        serviceCount: finalProjectMemory.serviceGraph.length,
+        apiCount: finalProjectMemory.apiGraph.length,
+        dependencyCount: finalProjectMemory.dependencies.reduce((sum, item) => sum + item.imports.length, 0),
+      },
+    })
     await transition(input.jobId, "persisting", "Committing verified project state", 96, {
       historyId: saveResult.historyId,
       generatedFileCount: workingFiles.length,

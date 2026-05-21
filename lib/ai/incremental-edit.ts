@@ -2,6 +2,12 @@ import { parse } from "@babel/parser"
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
 import { buildDependencyMap } from "@/lib/ai/generation-pipeline"
+import {
+  applySemanticScopedEdit,
+  buildSemanticEditDiagnostics,
+  type SemanticEditDiagnostics,
+  type SemanticEditOperation,
+} from "@/lib/ai/semantic-edit"
 
 export type GenerationMode = "BUILD" | "EDIT" | "FIX"
 
@@ -29,6 +35,8 @@ export type IncrementalPatchResult = {
   changedFiles: GeneratedFile[]
   patchSummary: string[]
   patchPlan?: TextReplacementOperation
+  semanticOperation?: SemanticEditOperation | null
+  semanticDiagnostics?: SemanticEditDiagnostics
   reason: string
 }
 
@@ -103,6 +111,8 @@ export const ScopedEditResultSchema = z.object({
   affectedFiles: z.array(z.string().trim().min(1)),
   patchSummary: z.array(z.string()).default([]),
   patchPlan: TextReplacementOperationSchema.optional(),
+  semanticOperation: z.unknown().optional(),
+  semanticDiagnostics: z.unknown().optional(),
   validation: z.object({
     ok: z.boolean(),
     diagnostics: z.array(z.object({
@@ -211,6 +221,23 @@ export function applyDeterministicIncrementalPatch(input: {
     return unchanged(input.files, "Deterministic patch is only used for EDIT mode.")
   }
 
+  const semanticPatch = applySemanticScopedEdit({
+    prompt: input.prompt,
+    files: input.files,
+    affectedFiles: input.plan.affectedFiles,
+  })
+  if (semanticPatch.applied) {
+    return {
+      applied: true,
+      files: semanticPatch.files,
+      changedFiles: semanticPatch.changedFiles,
+      patchSummary: semanticPatch.patchSummary,
+      semanticOperation: semanticPatch.operation,
+      semanticDiagnostics: semanticPatch.diagnostics,
+      reason: semanticPatch.reason,
+    }
+  }
+
   if (input.plan.editIntent === "text_update") {
     return applyTextUpdate(input)
   }
@@ -308,6 +335,13 @@ export function buildScopedEditResult(input: {
     affectedFiles: input.plan.affectedFiles,
     patchSummary: input.patch.patchSummary,
     patchPlan: input.patch.patchPlan,
+    semanticOperation: input.patch.semanticOperation || null,
+    semanticDiagnostics: input.patch.semanticDiagnostics || buildSemanticEditDiagnostics({
+      files: input.patch.files,
+      changedFiles: input.patch.changedFiles,
+      operation: input.patch.semanticOperation || null,
+      reason: input.patch.reason,
+    }),
     validation: {
       ok: input.validation.ok,
       diagnostics: input.validation.diagnostics,
@@ -364,7 +398,8 @@ function insertButton(input: { prompt: string; files: GeneratedFile[]; plan: Inc
   const content = String(file.content || "")
   if (new RegExp(`>${escapeRegExp(label)}<`, "i").test(content)) return unchanged(input.files, "Button already appears to exist.")
   const button = `\n        <button type="button" className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800">${label}</button>`
-  const nextContent = content.replace(/(<\/(?:section|main|div)>)/, `${button}\n      $1`)
+  const insertionPoint = findFirstJsxChildrenInsertionPoint(content)
+  const nextContent = insertionPoint === null ? content : `${content.slice(0, insertionPoint)}${button}${content.slice(insertionPoint)}`
   if (nextContent === content) return unchanged(input.files, "No safe JSX insertion point found.")
   return replaceFile(input.files, { ...file, content: nextContent }, [`inserted ${label} button in ${targetPath}`], "Applied deterministic component patch.")
 }
@@ -383,9 +418,23 @@ function insertNavbar(input: { files: GeneratedFile[]; plan: IncrementalEditPlan
           <a href="#">Contact</a>
         </div>
       </nav>\n      `
-  const nextContent = content.replace(/(<(?:main|section|div)\b[^>]*>)/, `$1\n      ${nav}`)
+  const insertionPoint = findFirstJsxChildrenInsertionPoint(content)
+  const nextContent = insertionPoint === null ? content : `${content.slice(0, insertionPoint)}\n      ${nav}${content.slice(insertionPoint)}`
   if (nextContent === content) return unchanged(input.files, "No safe JSX insertion point found.")
   return replaceFile(input.files, { ...file, content: nextContent }, [`inserted navbar in ${targetPath}`], "Applied deterministic navbar patch.")
+}
+
+function findFirstJsxChildrenInsertionPoint(content: string) {
+  const ast = parseTsxAst(content)
+  let insertionPoint: number | null = null
+  walkAst(ast, [], (node) => {
+    if (insertionPoint !== null || node.type !== "JSXElement") return
+    const opening = node.openingElement as AstNode | undefined
+    if (typeof opening?.end === "number") {
+      insertionPoint = opening.end
+    }
+  })
+  return insertionPoint
 }
 
 function parseTsxAst(content: string) {
@@ -660,6 +709,12 @@ function unchanged(files: GeneratedFile[], reason: string): IncrementalPatchResu
     files,
     changedFiles: [],
     patchSummary: [],
+    semanticDiagnostics: buildSemanticEditDiagnostics({
+      files,
+      changedFiles: [],
+      operation: null,
+      reason,
+    }),
     reason,
   }
 }

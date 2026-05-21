@@ -50,6 +50,18 @@ async function warnMissingProductionEnv() {
   }
 }
 
+async function assertDeploymentEnvironment() {
+  const { assertDeploymentEnvironmentReady } = await import("@/lib/production/readiness")
+  const readiness = assertDeploymentEnvironmentReady()
+  console.info("[DEPLOYMENT_READINESS]", {
+    status: readiness.status,
+    blockingFailures: readiness.blockingFailures,
+    degradedServices: readiness.degradedServices,
+    missingEnvVars: readiness.missingEnvVars,
+    invalidSecrets: readiness.invalidSecrets,
+  })
+}
+
 function shouldStartGenerationWorker() {
   if (process.env.SWIFT_ENABLE_GENERATION_WORKER !== "true") {
     return false
@@ -81,6 +93,8 @@ async function assertRuntimeDatabaseSchema() {
 
 export async function register() {
   await runFailOpen("environment", warnMissingProductionEnv)
+
+  await runFailClosed("deployment_readiness", assertDeploymentEnvironment)
 
   await runFailClosed("database_schema", assertRuntimeDatabaseSchema)
 

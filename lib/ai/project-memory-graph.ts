@@ -6,17 +6,25 @@ export type SwiftProjectMemoryGraph = {
   mode: "project-memory-graph-v1"
   framework: string | null
   routes: string[]
+  routeGraph: Array<{ path: string; kind: "page" | "api"; route: string; imports: string[] }>
   components: string[]
+  componentGraph: Array<{ path: string; exports: string[]; imports: string[]; hooks: string[]; props: string[] }>
   imports: Array<{ file: string; specifier: string }>
   databaseModels: string[]
   installedDependencies: string[]
   services: string[]
+  serviceGraph: Array<{ path: string; exports: string[]; imports: string[]; models: string[] }>
+  apiGraph: Array<{ path: string; methods: string[]; services: string[]; models: string[] }>
+  dependencies: Array<{ file: string; imports: string[]; importedBy: string[] }>
+  snapshotId: string
   authProviders: string[]
   paymentProviders: string[]
   storageAdapters: string[]
   envVars: string[]
   lastIntent?: SwiftStructuredIntent
   lastArchitecturePlan?: SwiftArchitecturePlan
+  previousSnapshotId?: string | null
+  previousUpdatedAt?: string | null
   updatedAt: string
 }
 
@@ -31,6 +39,7 @@ export function buildProjectMemoryGraph(input: {
   files: GeneratedFile[]
   intent?: SwiftStructuredIntent
   architecturePlan?: SwiftArchitecturePlan
+  previousMemoryJson?: string | null
 }): SwiftProjectMemoryGraph {
   const files = input.files.map((file) => ({
     ...file,
@@ -38,23 +47,69 @@ export function buildProjectMemoryGraph(input: {
     content: String(file.content || ""),
   }))
   const packageJson = parsePackageJson(files)
+  const imports = extractImports(files)
+  const componentGraph = buildComponentGraph(files)
+  const serviceGraph = buildServiceGraph(files)
+  const apiGraph = buildApiGraph(files)
+  const routeGraph = buildRouteGraph(files, imports)
+  const dependencyGraph = buildFileDependencyGraph(files, imports)
+  const snapshotId = createArchitectureSnapshotId(files)
+  const previousMemory = parseProjectMemoryGraph(input.previousMemoryJson)
 
   return {
     mode: "project-memory-graph-v1",
     framework: detectFramework(packageJson, files),
-    routes: files.filter((file) => /^app\/.+\/(page|route)\.(tsx?|jsx?)$/i.test(file.path) || /^app\/page\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path).sort(),
+    routes: routeGraph.map((route) => route.path).sort(),
+    routeGraph,
     components: files.filter((file) => /^components\/.+\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path).sort(),
-    imports: extractImports(files),
+    componentGraph,
+    imports,
     databaseModels: extractPrismaModels(files),
     installedDependencies: Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies }).sort(),
     services: files.filter((file) => /^lib\/services\/.+\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path).sort(),
+    serviceGraph,
+    apiGraph,
+    dependencies: dependencyGraph,
+    snapshotId,
     authProviders: detectProviderList(files, input.intent?.auth.provider),
     paymentProviders: detectProviderList(files, input.intent?.payments.provider),
     storageAdapters: files.filter((file) => /^lib\/(storage|supabase)\//i.test(file.path)).map((file) => file.path).sort(),
     envVars: unique([...extractEnvVars(files), ...(input.architecturePlan?.requiredEnvVars || [])]).sort(),
     lastIntent: input.intent,
     lastArchitecturePlan: input.architecturePlan,
+    previousSnapshotId: previousMemory?.snapshotId || null,
+    previousUpdatedAt: previousMemory?.updatedAt || null,
     updatedAt: new Date().toISOString(),
+  }
+}
+
+export function buildPersistentArchitectureSnapshot(input: {
+  files: GeneratedFile[]
+  intent?: SwiftStructuredIntent
+  architecturePlan?: SwiftArchitecturePlan
+  previousMemoryJson?: string | null
+}) {
+  const memory = buildProjectMemoryGraph(input)
+  return {
+    ...memory,
+    persistedAt: new Date().toISOString(),
+    diagnostics: {
+      routeCount: memory.routeGraph.length,
+      componentCount: memory.componentGraph.length,
+      serviceCount: memory.serviceGraph.length,
+      apiCount: memory.apiGraph.length,
+      dependencyCount: memory.dependencies.reduce((sum, item) => sum + item.imports.length, 0),
+    },
+  }
+}
+
+export function parseProjectMemoryGraph(value?: string | null): SwiftProjectMemoryGraph | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(value) as Partial<SwiftProjectMemoryGraph>
+    return parsed?.mode === "project-memory-graph-v1" ? parsed as SwiftProjectMemoryGraph : null
+  } catch {
+    return null
   }
 }
 
@@ -166,6 +221,119 @@ function extractImports(files: Array<{ path: string; content: string }>) {
     }
   }
   return imports.slice(0, 300)
+}
+
+function buildRouteGraph(files: Array<{ path: string; content: string }>, imports: Array<{ file: string; specifier: string }>) {
+  return files
+    .filter((file) => /^app\/.+\/(page|route)\.(tsx?|jsx?)$/i.test(file.path) || /^app\/page\.(tsx?|jsx?)$/i.test(file.path))
+    .map((file) => ({
+      path: file.path,
+      kind: /\/route\.(tsx?|jsx?)$/i.test(file.path) ? "api" as const : "page" as const,
+      route: routePathForAppFile(file.path),
+      imports: imports.filter((item) => item.file === file.path).map((item) => item.specifier).sort(),
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function buildComponentGraph(files: Array<{ path: string; content: string }>) {
+  return files
+    .filter((file) => /^components\/.+\.(tsx?|jsx?)$/i.test(file.path) || /^app\/.+\/page\.(tsx?|jsx?)$/i.test(file.path) || /^app\/page\.(tsx?|jsx?)$/i.test(file.path))
+    .map((file) => ({
+      path: file.path,
+      exports: extractExportedSymbols(file.content),
+      imports: extractImports([file]).map((item) => item.specifier).sort(),
+      hooks: unique(Array.from(file.content.matchAll(/\b(use[A-Z][A-Za-z0-9_]*)\s*\(/g)).map((match) => match[1])).sort(),
+      props: unique(Array.from(file.content.matchAll(/\b([A-Za-z_$][\w$]*)\s*:/g)).map((match) => match[1])).slice(0, 40).sort(),
+    }))
+}
+
+function buildServiceGraph(files: Array<{ path: string; content: string }>) {
+  const models = extractPrismaModels(files)
+  return files
+    .filter((file) => /^lib\/services\/.+\.(tsx?|jsx?)$/i.test(file.path))
+    .map((file) => ({
+      path: file.path,
+      exports: extractExportedSymbols(file.content),
+      imports: extractImports([file]).map((item) => item.specifier).sort(),
+      models: models.filter((model) => new RegExp(`\\b${model}\\b`, "i").test(file.content)).sort(),
+    }))
+}
+
+function buildApiGraph(files: Array<{ path: string; content: string }>) {
+  const serviceFiles = files.filter((file) => /^lib\/services\/.+\.(tsx?|jsx?)$/i.test(file.path)).map((file) => file.path)
+  const models = extractPrismaModels(files)
+  return files
+    .filter((file) => /^app\/api\/.+\/route\.(tsx?|jsx?)$/i.test(file.path))
+    .map((file) => ({
+      path: file.path,
+      methods: unique(Array.from(file.content.matchAll(/\bexport\s+async\s+function\s+(GET|POST|PUT|PATCH|DELETE)\b/g)).map((match) => match[1])).sort(),
+      services: serviceFiles.filter((service) => file.content.includes(service.replace(/\.(tsx?|jsx?)$/i, "")) || file.content.includes(service.split("/").pop()?.replace(/\.(tsx?|jsx?)$/i, "") || "")).sort(),
+      models: models.filter((model) => new RegExp(`\\b${model}\\b`, "i").test(file.content)).sort(),
+    }))
+}
+
+function buildFileDependencyGraph(files: Array<{ path: string; content: string }>, imports: Array<{ file: string; specifier: string }>) {
+  const paths = new Set(files.map((file) => file.path))
+  const resolved = imports
+    .map((item) => ({ file: item.file, target: resolveLocalImport(item.file, item.specifier, paths) }))
+    .filter((item): item is { file: string; target: string } => Boolean(item.target))
+  return files.map((file) => ({
+    file: file.path,
+    imports: unique(resolved.filter((item) => item.file === file.path).map((item) => item.target)).sort(),
+    importedBy: unique(resolved.filter((item) => item.target === file.path).map((item) => item.file)).sort(),
+  })).sort((a, b) => a.file.localeCompare(b.file))
+}
+
+function extractExportedSymbols(content: string) {
+  return unique([
+    ...Array.from(content.matchAll(/\bexport\s+(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)).map((match) => match[1]),
+    ...Array.from(content.matchAll(/\bexport\s+const\s+([A-Za-z_$][\w$]*)/g)).map((match) => match[1]),
+    ...Array.from(content.matchAll(/\bexport\s+\{\s*([^}]+)\s*\}/g)).flatMap((match) => match[1].split(",").map((item) => item.trim().split(/\s+as\s+/i).pop() || "")),
+  ]).sort()
+}
+
+function resolveLocalImport(fromFile: string, specifier: string, paths: Set<string>) {
+  if (!specifier.startsWith(".") && !specifier.startsWith("@/")) return null
+  const base = specifier.startsWith("@/")
+    ? specifier.slice(2)
+    : `${fromFile.split("/").slice(0, -1).join("/")}/${specifier}`
+  const normalized = normalizePath(base)
+  const candidates = [
+    normalized,
+    `${normalized}.ts`,
+    `${normalized}.tsx`,
+    `${normalized}.js`,
+    `${normalized}.jsx`,
+    `${normalized}/index.ts`,
+    `${normalized}/index.tsx`,
+  ]
+  return candidates.find((candidate) => paths.has(candidate)) || null
+}
+
+function routePathForAppFile(path: string) {
+  const normalized = normalizePath(path)
+    .replace(/^app/, "")
+    .replace(/\/(?:page|route)\.(tsx?|jsx?)$/i, "")
+    .replace(/\(([^)]+)\)\//g, "")
+    .replace(/\/index$/i, "")
+  return normalized || "/"
+}
+
+function createArchitectureSnapshotId(files: Array<{ path: string; content: string }>) {
+  const seed = files
+    .map((file) => `${file.path}:${file.content.length}:${simpleHash(file.content)}`)
+    .sort()
+    .join("|")
+  return `arch_${simpleHash(seed)}`
+}
+
+function simpleHash(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16)
 }
 
 function detectProviderList(files: Array<{ content: string }>, explicit?: string | null) {

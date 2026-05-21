@@ -2,6 +2,7 @@ import { subHours } from "date-fns"
 import { prisma } from "@/lib/db/client"
 import { getProductionReadiness } from "@/lib/production/readiness"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
+import { getRuntimeHealthDashboard } from "@/lib/observability/runtime-recovery"
 
 const DEFAULT_WINDOW_HOURS = 24
 export const ALERT_THRESHOLDS = {
@@ -303,6 +304,7 @@ export class AdminMonitoringService {
       queueHealth,
       databaseLatencyMs,
       operationalFailures,
+      runtimeHealth,
     ] = await Promise.all([
       prisma.user.count(),
       prisma.project.count(),
@@ -461,6 +463,10 @@ export class AdminMonitoringService {
         where: { createdAt: { gte: since } },
         _count: { _all: true },
       }),
+      getRuntimeHealthDashboard(hours).catch((error) => ({
+        status: "unhealthy",
+        error: error instanceof Error ? error.message : String(error),
+      })),
     ])
 
     const usage = statusCountMap(usageStatus)
@@ -571,6 +577,7 @@ export class AdminMonitoringService {
         apiLatencyMs,
         queueLatencyMs,
         failures: operationalFailures,
+        runtimeHealth,
       },
       alerts,
       recentUsage,

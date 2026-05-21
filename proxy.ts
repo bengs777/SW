@@ -90,7 +90,7 @@ export const proxy = auth((req) => {
     const contentLength = req.headers.get("content-length")
     if (contentLength && Number(contentLength) > 10 * 1024 * 1024) {
       return NextResponse.json(
-        { error: "Request payload too large" },
+        { error: "Request payload too large", code: "PAYLOAD_TOO_LARGE", status: 413 },
         { status: 413 }
       )
     }
@@ -119,6 +119,7 @@ export const proxy = auth((req) => {
     "/api/billing",
     "/api/debug",
     "/api/models",
+    "/api/products",
     "/api/templates",
     "/api/crypto",
   ]
@@ -130,7 +131,7 @@ export const proxy = auth((req) => {
   if (isProtectedRoute && !req.auth) {
     if (isApiRoute(pathname)) {
       const response = NextResponse.json(
-        { error: "Authentication required" },
+        { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
         { status: 401 }
       )
       applySecurityHeaders(response)

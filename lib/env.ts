@@ -238,6 +238,47 @@ function validateOptionalPostgresUrl(
       message: `${key} should use Neon's pooled host for serverless runtime connections.`,
     })
   }
+
+  if (isProduction && !/[?&]sslmode=require\b/i.test(value) && !/\.neon\.tech/i.test(value)) {
+    issues.push({
+      key,
+      severity: "warning",
+      message: `${key} should require TLS for production PostgreSQL connections.`,
+    })
+  }
+}
+
+function validateSecret(
+  issues: EnvValidationIssue[],
+  key: string,
+  value: string,
+  options: { minLength: number; isProduction: boolean }
+) {
+  if (!value) return
+
+  const placeholderPattern = /(change-me|changeme|secret|password|example|placeholder|development-auth-secret)/i
+  if (value.length < options.minLength || placeholderPattern.test(value)) {
+    issues.push({
+      key,
+      severity: options.isProduction ? "error" : "warning",
+      message: `${key} must be a non-placeholder secret with at least ${options.minLength} characters.`,
+    })
+  }
+}
+
+function validateLikelyGoogleClientId(
+  issues: EnvValidationIssue[],
+  value: string,
+  isProduction: boolean
+) {
+  if (!value) return
+  if (!/\.apps\.googleusercontent\.com$/i.test(value)) {
+    issues.push({
+      key: "GOOGLE_CLIENT_ID",
+      severity: isProduction ? "error" : "warning",
+      message: "GOOGLE_CLIENT_ID should be a Google OAuth client id ending in .apps.googleusercontent.com.",
+    })
+  }
 }
 
 function validateOptionalNumber(
@@ -318,6 +359,19 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
 
   validateOptionalPostgresUrl(issues, "DATABASE_URL", env.databaseUrl, isProduction, { requirePooled: true })
   validateOptionalPostgresUrl(issues, "DIRECT_DATABASE_URL / DIRECT_URL / POSTGRES_URL_NON_POOLING", env.directDatabaseUrl, isProduction)
+  validateSecret(issues, "NEXTAUTH_SECRET", env.nextAuthSecret, { minLength: 32, isProduction })
+  validateSecret(issues, "GOOGLE_CLIENT_SECRET", env.googleClientSecret, { minLength: 24, isProduction })
+  validateSecret(issues, "SUPABASE_SERVICE_ROLE_KEY", env.supabaseServiceRoleKey, { minLength: 32, isProduction })
+  validateSecret(issues, "OPENROUTER_API_KEY", env.openRouterApiKey, { minLength: 20, isProduction })
+  validateLikelyGoogleClientId(issues, env.googleClientId, isProduction)
+
+  if (env.supabaseServiceRoleKey && env.supabasePublicAnonKey && env.supabaseServiceRoleKey === env.supabasePublicAnonKey) {
+    issues.push({
+      key: "SUPABASE_SERVICE_ROLE_KEY",
+      severity: isProduction ? "error" : "warning",
+      message: "SUPABASE_SERVICE_ROLE_KEY must not equal the public Supabase key.",
+    })
+  }
 
   validateOptionalUrl(issues, "NEXTAUTH_URL", env.nextAuthUrl, isProduction)
   validateOptionalUrl(issues, "NEXT_PUBLIC_APP_URL / APP_URL / NEXTAUTH_URL / VERCEL_URL", env.appUrl, isProduction)
