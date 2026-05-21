@@ -99,7 +99,10 @@ type GenerationPlannerFile = {
   path: string
   reason: string
   action: "create_or_update"
+  stage?: StagedGenerationPhase
 }
+
+type StagedGenerationPhase = "scaffold" | "routes" | "components" | "supabase" | "turso" | "support"
 
 type AgentWorkflowAction = {
   action: "create" | "modify" | "delete"
@@ -1392,8 +1395,13 @@ function buildGenerationPlan(input: {
     blueprintRequiredFiles: requiredFilesForIntent,
   })
   assertSoftwareOrchestrationReady(orchestration)
+  const stagedEcommerceRequested = orchestration.plannerOutput.appType === "ecommerce" && editPlan.mode === "full"
   const maxFilesThisPass =
-    productionMode === "production_fullstack" ? PRODUCTION_FULLSTACK_FILE_LIMIT : editPlan.maxSlices
+    productionMode === "production_fullstack"
+      ? stagedEcommerceRequested
+        ? Math.max(PRODUCTION_FULLSTACK_FILE_LIMIT, 24)
+        : PRODUCTION_FULLSTACK_FILE_LIMIT
+      : editPlan.maxSlices
   const trimmed = trimContextForGeneration({
     prompt: input.prompt,
     files: input.existingFiles,
@@ -1473,6 +1481,36 @@ function buildGenerationPlan(input: {
 
   const filePlan = Array.from(plannedByPath.values()).slice(0, maxFilesThisPass)
 
+  for (const componentPath of orchestration.plannerOutput.requiredComponents) {
+    const path = normalizePath(componentPath)
+    if (!plannedByPath.has(path) && filePlan.length < maxFilesThisPass) {
+      filePlan.push({
+        path,
+        reason: `Staged component graph requires ${path}`,
+        action: "create_or_update",
+      })
+    }
+  }
+  if (stagedEcommerceRequested) {
+    for (const stagedPath of [
+      "lib/supabase/client.ts",
+      "lib/supabase/server.ts",
+      "lib/turso/client.ts",
+      "app/api/transactions/route.ts",
+    ]) {
+      const path = normalizePath(stagedPath)
+      if (!filePlan.some((item) => normalizePath(item.path) === path) && filePlan.length < maxFilesThisPass) {
+        filePlan.push({
+          path,
+          reason: stagedPath.includes("supabase")
+            ? "Tahap 4 requires Supabase auth/database boundary"
+            : "Tahap 5 requires Turso lightweight transaction boundary",
+          action: "create_or_update",
+        })
+      }
+    }
+  }
+
   if (!filePlan.some((item) => /^app\/page\.(tsx|ts|jsx|js)$/i.test(item.path))) {
     const shouldAddHomePage = editPlan.mode === "full" || input.existingFiles.length === 0
     if (shouldAddHomePage) {
@@ -1497,6 +1535,7 @@ function buildGenerationPlan(input: {
       { path: "app/globals.css", reason: "Required baseline global stylesheet", action: "create_or_update" },
       { path: "package.json", reason: "Required baseline package manifest", action: "create_or_update" },
       { path: "tsconfig.json", reason: "Required baseline TypeScript config", action: "create_or_update" },
+      { path: "tailwind.config.ts", reason: "Required baseline Tailwind config", action: "create_or_update" },
     ]
     for (const scaffoldTarget of scaffoldTargets.reverse()) {
       if (!existingOrPlannedPaths.has(scaffoldTarget.path)) {
@@ -1506,12 +1545,29 @@ function buildGenerationPlan(input: {
     }
     while (filePlan.length > maxFilesThisPass) {
       const removed = filePlan.pop()
-      if (removed && /^app\/(layout|page)\.tsx$|^app\/globals\.css$|^(package|tsconfig)\.json$/i.test(removed.path)) {
+      if (removed && /^app\/(layout|page)\.tsx$|^app\/globals\.css$|^(package|tsconfig)\.json$|^tailwind\.config\.ts$/i.test(removed.path)) {
         filePlan.unshift(removed)
         filePlan.pop()
       }
     }
   }
+  for (const item of filePlan) {
+    item.stage = stagedPhaseForPath(item.path, orchestration.plannerOutput.appType)
+  }
+  filePlan.sort((left, right) => {
+    const phaseOrder: Record<StagedGenerationPhase, number> = {
+      scaffold: 0,
+      routes: 1,
+      components: 2,
+      supabase: 3,
+      turso: 4,
+      support: 5,
+    }
+    const leftOrder = phaseOrder[left.stage || "support"]
+    const rightOrder = phaseOrder[right.stage || "support"]
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder
+    return left.path.localeCompare(right.path)
+  })
   const agentTasks = buildAgentTaskPlan(input.prompt, filePlan, {
     productionMode,
     editMode: editPlan.mode,
@@ -2228,6 +2284,18 @@ function buildSlicePrompt(input: {
     productionFullStack
       ? "- PRODUCTION_FULLSTACK_MODE: generate a deployable full-stack slice with visible UI, route handlers, Prisma/data layer, env example, and package config as requested. Do not downgrade to dummy-only preview."
       : "- PREVIEW_MODE: generate a small preview-first foundation that can render quickly.",
+    `- STAGED_GENERATION_PHASE: ${input.target.stage || "support"}.`,
+    input.target.stage === "scaffold"
+      ? "- TAHAP_1_SCAFFOLD_ONLY: generate only valid Next.js App Router scaffold/config files. Do not create ecommerce routes, components, Supabase, or Turso files in this stage."
+      : input.target.stage === "routes"
+        ? "- TAHAP_2_ROUTES_ONLY: generate only ecommerce route page files for products, product detail, cart, checkout, login, or admin. Do not create components yet; use small in-file placeholders and keep imports local to existing scaffold only."
+        : input.target.stage === "components"
+          ? "- TAHAP_3_COMPONENTS_ONLY: generate only Navbar, ProductCard, ProductGrid, CartDrawer, or CheckoutForm with dummy data-friendly props. Do not add Supabase or Turso integration yet."
+          : input.target.stage === "supabase"
+            ? "- TAHAP_4_SUPABASE_ONLY: add Supabase auth/database integration boundaries only after scaffold, routes, and components are valid."
+            : input.target.stage === "turso"
+              ? "- TAHAP_5_TURSO_ONLY: add Turso lightweight transaction boundaries only after Supabase stage."
+              : "- SUPPORT_STAGE: keep changes scoped to the requested support file.",
     batchedFoundation
       ? `- BATCHED_SLICE: create or modify ONLY these ${targets.length} files in this provider call: ${targetPaths.join(", ")}.`
       : "- Work only on the requested file slice and directly related imports.",
@@ -2383,6 +2451,94 @@ function normalizePath(value: string) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
 }
 
+function stagedPhaseForPath(path: string, appType?: string): StagedGenerationPhase {
+  const normalized = normalizePath(path).toLowerCase()
+  if (
+    normalized === "app/layout.tsx" ||
+    normalized === "app/page.tsx" ||
+    normalized === "app/globals.css" ||
+    normalized === "package.json" ||
+    normalized === "tsconfig.json" ||
+    normalized === "tailwind.config.ts"
+  ) {
+    return "scaffold"
+  }
+  if (appType === "ecommerce" && /^app\/(?:products(?:\/\[id\])?|cart|checkout|login|admin)\/page\.(tsx|ts|jsx|js)$/i.test(normalized)) {
+    return "routes"
+  }
+  if (appType === "ecommerce" && /^components\/(?:navbar|product-card|product-grid|cart-drawer|checkout-form)\.(tsx|ts|jsx|js)$/i.test(normalized)) {
+    return "components"
+  }
+  if (/supabase/i.test(normalized)) return "supabase"
+  if (/turso|libsql/i.test(normalized)) return "turso"
+  return "support"
+}
+
+function isEcommerceStagedPlan(plan: GenerationPlan) {
+  return plan.orchestration.plannerOutput.appType === "ecommerce" && plan.editPlan.mode === "full"
+}
+
+function stagedPhaseLabel(phase: StagedGenerationPhase) {
+  const labels: Record<StagedGenerationPhase, string> = {
+    scaffold: "Tahap 1: scaffold",
+    routes: "Tahap 2: ecommerce routes",
+    components: "Tahap 3: ecommerce components",
+    supabase: "Tahap 4: Supabase integration",
+    turso: "Tahap 5: Turso lightweight transactions",
+    support: "Support files",
+  }
+  return labels[phase]
+}
+
+function validateStagedCheckpoint(input: {
+  phase: StagedGenerationPhase
+  files: GeneratedFile[]
+  plan: GenerationPlan
+}) {
+  const paths = new Set(input.files.map((file) => normalizePath(file.path)))
+  const failures: string[] = []
+
+  if (input.phase === "scaffold") {
+    const scaffold = validateProjectScaffold({ paths: Array.from(paths) })
+    failures.push(...scaffold.missingFiles.map((file) => `Missing scaffold file: ${file}`))
+    try {
+      compileProject(input.files)
+    } catch (error) {
+      failures.push(`Scaffold preview failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  if (input.phase === "routes") {
+    for (const route of [
+      "app/products/page.tsx",
+      "app/products/[id]/page.tsx",
+      "app/cart/page.tsx",
+      "app/checkout/page.tsx",
+      "app/login/page.tsx",
+      "app/admin/page.tsx",
+    ]) {
+      if (!paths.has(route)) failures.push(`Missing ecommerce route: ${route}`)
+    }
+  }
+
+  if (input.phase === "components") {
+    for (const component of [
+      "components/navbar.tsx",
+      "components/product-card.tsx",
+      "components/product-grid.tsx",
+      "components/cart-drawer.tsx",
+      "components/checkout-form.tsx",
+    ]) {
+      if (!paths.has(component)) failures.push(`Missing ecommerce component: ${component}`)
+    }
+  }
+
+  return {
+    ok: failures.length === 0,
+    failures,
+  }
+}
+
 function buildMissingScaffoldFiles(missingFiles: string[]): GeneratedFile[] {
   const files: GeneratedFile[] = []
   const missing = new Set(missingFiles.map((file) => file.toLowerCase()))
@@ -2519,6 +2675,25 @@ body {
         null,
         2
       )}\n`,
+    })
+  }
+
+  if (missing.has("tailwind.config.ts")) {
+    files.push({
+      path: "tailwind.config.ts",
+      language: "ts",
+      content: `import type { Config } from "tailwindcss"
+
+const config: Config = {
+  content: ["./app/**/*.{js,ts,jsx,tsx,mdx}", "./components/**/*.{js,ts,jsx,tsx,mdx}"],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}
+
+export default config
+`,
     })
   }
 
@@ -4873,7 +5048,10 @@ export async function executeGenerationJob(
         plan.editPlan.mode === "full" &&
         plan.filePlan.length > 1 &&
         plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
-      const sliceBatchSize = plan.productionMode === "production_fullstack"
+      const stagedEcommerce = isEcommerceStagedPlan(plan)
+      const sliceBatchSize = stagedEcommerce
+        ? 1
+        : plan.productionMode === "production_fullstack"
         ? PRODUCTION_FULLSTACK_BATCH_SIZE
         : usePreviewFoundationBatch
           ? plan.filePlan.length
@@ -4899,6 +5077,7 @@ export async function executeGenerationJob(
         : plan.filePlan[index]
       const sliceIndex = Math.floor(index / sliceBatchSize) + 1
       const sliceTotal = Math.ceil(plan.filePlan.length / sliceBatchSize)
+      const currentPhase = targets[0]?.stage || "support"
       traceExecution(traceContext, "generation_started", {
         sliceIndex,
         sliceTotal,
@@ -5151,8 +5330,9 @@ export async function executeGenerationJob(
       recordDeveloperDiagnostic(developerDiagnostics, {
         stage: "VALIDATING",
         status: scoped.rejectedFiles.length > 0 ? "failed" : "passed",
-        reason: scoped.rejectedFiles.length > 0 ? "Some generated files were rejected by scope validation" : "Generated artifact accepted by validator",
+        reason: scoped.rejectedFiles.length > 0 ? "Some generated files were rejected by scope validation" : `${stagedPhaseLabel(currentPhase)} artifact accepted by validator`,
         data: {
+          stagedPhase: currentPhase,
           acceptedFileCount: scoped.acceptedFiles.length,
           rejectedFileCount: scoped.rejectedFiles.length,
           changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)).slice(0, 40),
@@ -5224,8 +5404,77 @@ export async function executeGenerationJob(
         sliceIndex,
         sliceTotal,
         target: target.path,
+        stagedPhase: currentPhase,
         durationMs: sliceDurationMs,
       })
+      if (stagedEcommerce) {
+        const nextPhase = plan.filePlan[index + sliceBatchSize]?.stage || null
+        if (nextPhase !== currentPhase) {
+          const checkpoint = validateStagedCheckpoint({
+            phase: currentPhase,
+            files: workingFiles,
+            plan,
+          })
+          if (!checkpoint.ok) {
+            markOrchestrationValidation(plan.orchestration, {
+              status: "failed",
+              failedScope: currentPhase,
+              failures: checkpoint.failures,
+            })
+            appendRepairPath(plan.orchestration, {
+              attempt: plan.orchestration.repairCount + 1,
+              reason: `${stagedPhaseLabel(currentPhase)} checkpoint failed: ${checkpoint.failures.join("; ")}`,
+              targetFiles: targets.map((item) => normalizePath(item.path)),
+              failedScope: currentPhase,
+              issueType: currentPhase === "scaffold" ? "architecture_mismatch" : "tsx_build",
+              fixPlan: "repair only the failed staged scope before continuing",
+            })
+            developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+            developerDiagnostics.failedScope = plan.orchestration.failedScope
+            developerDiagnostics.repairPath = plan.orchestration.repairPath
+            developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+            recordDeveloperDiagnostic(developerDiagnostics, {
+              stage: "VALIDATING",
+              status: "failed",
+              reason: `${stagedPhaseLabel(currentPhase)} checkpoint failed`,
+              data: {
+                stagedPhase: currentPhase,
+                failures: checkpoint.failures,
+              },
+            })
+            await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+            throw new Error(`${stagedPhaseLabel(currentPhase)} checkpoint failed: ${checkpoint.failures.join("; ")}`)
+          }
+          markOrchestrationValidation(plan.orchestration, {
+            status: "passed",
+            failedScope: "",
+            failures: [],
+          })
+          developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+          developerDiagnostics.failedScope = plan.orchestration.failedScope
+          developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+          recordDeveloperDiagnostic(developerDiagnostics, {
+            stage: currentPhase === "scaffold" ? "STARTING_PREVIEW" : "VALIDATING",
+            status: "passed",
+            reason: `${stagedPhaseLabel(currentPhase)} checkpoint passed`,
+            data: {
+              stagedPhase: currentPhase,
+              nextPhase,
+            },
+          })
+          await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+          await transition(
+            input.jobId,
+            currentPhase === "scaffold" ? "compiling" : "validating",
+            `${stagedPhaseLabel(currentPhase)} validated`,
+            Math.min(70, 20 + Math.round((sliceIndex / Math.max(1, sliceTotal)) * 45)),
+            {
+              stagedPhase: currentPhase,
+              nextPhase,
+            }
+          )
+        }
+      }
       }
     }
     if (plan.editPlan.mode === "partial") {

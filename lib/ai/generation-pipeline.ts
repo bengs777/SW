@@ -76,6 +76,7 @@ export const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
   "react-hook-form": "^7.54.1",
   "@hookform/resolvers": "^3.9.1",
   "@supabase/supabase-js": "^2.104.0",
+  "@libsql/client": "^0.15.15",
   axios: "^1.7.9",
   bcryptjs: "^3.0.3",
   recharts: "2.15.0",

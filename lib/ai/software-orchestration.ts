@@ -266,6 +266,7 @@ export function validateProjectScaffold(input: {
   requireAny("app/globals.css", ["app/globals.css", "src/app/globals.css"])
   requireAny("package.json", ["package.json"])
   requireAny("tsconfig.json", ["tsconfig.json"])
+  requireAny("tailwind.config.ts", ["tailwind.config.ts", "tailwind.config.js", "tailwind.config.mjs"])
 
   return {
     ok: missingFiles.length === 0,
@@ -446,8 +447,11 @@ function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStruc
 
   add("components/app-shell.tsx", "app/page.tsx", "shared layout shell")
   if (intent.archetype === "FULLSTACK_COMMERCE") {
+    add("components/navbar.tsx", "app/page.tsx", "ecommerce navigation")
     add("components/product-card.tsx", "app/products/page.tsx", "product listing item")
+    add("components/product-grid.tsx", "app/products/page.tsx", "product grid")
     add("components/cart-summary.tsx", "app/cart/page.tsx", "cart summary")
+    add("components/cart-drawer.tsx", "app/cart/page.tsx", "cart drawer")
     add("components/checkout-form.tsx", "app/checkout/page.tsx", "checkout form")
   }
   if (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL") {
