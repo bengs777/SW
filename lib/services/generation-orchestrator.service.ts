@@ -1494,10 +1494,9 @@ function buildGenerationPlan(input: {
     const scaffoldTargets: GenerationPlannerFile[] = [
       { path: "app/layout.tsx", reason: "Required baseline scaffold layout", action: "create_or_update" },
       { path: "app/page.tsx", reason: "Required baseline scaffold home route", action: "create_or_update" },
+      { path: "app/globals.css", reason: "Required baseline global stylesheet", action: "create_or_update" },
       { path: "package.json", reason: "Required baseline package manifest", action: "create_or_update" },
       { path: "tsconfig.json", reason: "Required baseline TypeScript config", action: "create_or_update" },
-      { path: "next.config.js", reason: "Required baseline Next.js config", action: "create_or_update" },
-      { path: "postcss.config.mjs", reason: "Tailwind v4/PostCSS scaffold equivalent", action: "create_or_update" },
     ]
     for (const scaffoldTarget of scaffoldTargets.reverse()) {
       if (!existingOrPlannedPaths.has(scaffoldTarget.path)) {
@@ -1507,30 +1506,11 @@ function buildGenerationPlan(input: {
     }
     while (filePlan.length > maxFilesThisPass) {
       const removed = filePlan.pop()
-      if (removed && /^app\/(layout|page)\.tsx$|^(package|tsconfig)\.json$|^next\.config\.js$|^postcss\.config\.mjs$/i.test(removed.path)) {
+      if (removed && /^app\/(layout|page)\.tsx$|^app\/globals\.css$|^(package|tsconfig)\.json$/i.test(removed.path)) {
         filePlan.unshift(removed)
         filePlan.pop()
       }
     }
-  }
-  const scaffoldValidation = validateProjectScaffold({
-    paths: [
-      ...input.existingFiles.map((file) => file.path),
-      ...filePlan.map((file) => file.path),
-      "next.config.js",
-      "tsconfig.json",
-      "package.json",
-      "postcss.config.mjs",
-    ],
-    tailwindUsed: true,
-  })
-  if (!scaffoldValidation.ok) {
-    markOrchestrationValidation(orchestration, {
-      status: "blocked",
-      failedScope: "scaffold",
-      failures: scaffoldValidation.missingFiles.map((file) => `Missing scaffold file: ${file}`),
-    })
-    throw new Error(`Scaffold validation failed: missing ${scaffoldValidation.missingFiles.join(", ")}`)
   }
   const agentTasks = buildAgentTaskPlan(input.prompt, filePlan, {
     productionMode,
@@ -2401,6 +2381,148 @@ function extractFilePathsFromError(message: string) {
 
 function normalizePath(value: string) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function buildMissingScaffoldFiles(missingFiles: string[]): GeneratedFile[] {
+  const files: GeneratedFile[] = []
+  const missing = new Set(missingFiles.map((file) => file.toLowerCase()))
+
+  if (missing.has("app/layout.tsx")) {
+    files.push({
+      path: "app/layout.tsx",
+      language: "tsx",
+      content: `import type { Metadata } from "next"
+import type { ReactNode } from "react"
+import "./globals.css"
+
+export const metadata: Metadata = {
+  title: "Swift App",
+  description: "Generated with Swift orchestration.",
+}
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
+`,
+    })
+  }
+
+  if (missing.has("app/page.tsx")) {
+    files.push({
+      path: "app/page.tsx",
+      language: "tsx",
+      content: `export default function HomePage() {
+  return (
+    <main className="min-h-screen bg-background px-6 py-10 text-foreground">
+      <section className="mx-auto grid max-w-5xl gap-4">
+        <p className="text-sm font-medium text-muted-foreground">Swift scaffold ready</p>
+        <h1 className="text-3xl font-semibold tracking-normal">Your app is ready for scoped generation.</h1>
+      </section>
+    </main>
+  )
+}
+`,
+    })
+  }
+
+  if (missing.has("app/globals.css")) {
+    files.push({
+      path: "app/globals.css",
+      language: "css",
+      content: `@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #111827;
+  --muted-foreground: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+`,
+    })
+  }
+
+  if (missing.has("package.json")) {
+    files.push({
+      path: "package.json",
+      language: "json",
+      content: `${JSON.stringify(
+        {
+          name: "swift-generated-app",
+          version: "0.1.0",
+          private: true,
+          scripts: {
+            dev: "next dev",
+            build: "next build",
+            start: "next start",
+          },
+          dependencies: {
+            next: "16.2.6",
+            react: "19.2.5",
+            "react-dom": "19.2.5",
+          },
+          devDependencies: {
+            typescript: "5.7.3",
+            "@types/node": "^22",
+            "@types/react": "19.2.14",
+            "@types/react-dom": "19.2.3",
+            tailwindcss: "^4.2.0",
+            "@tailwindcss/postcss": "^4.2.0",
+          },
+        },
+        null,
+        2
+      )}\n`,
+    })
+  }
+
+  if (missing.has("tsconfig.json")) {
+    files.push({
+      path: "tsconfig.json",
+      language: "json",
+      content: `${JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2017",
+            lib: ["dom", "dom.iterable", "esnext"],
+            allowJs: true,
+            skipLibCheck: true,
+            strict: true,
+            noEmit: true,
+            esModuleInterop: true,
+            module: "esnext",
+            moduleResolution: "bundler",
+            resolveJsonModule: true,
+            isolatedModules: true,
+            jsx: "react-jsx",
+            incremental: true,
+            paths: {
+              "@/*": ["./*"],
+            },
+          },
+          include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+          exclude: ["node_modules"],
+        },
+        null,
+        2
+      )}\n`,
+    })
+  }
+
+  return files
 }
 
 function extractPackageNames(files: GeneratedFile[]) {
@@ -4022,7 +4144,7 @@ export async function executeGenerationJob(
     })
     await GenerationJobService.assertNotCancelled(input.jobId)
 
-    const [existingFiles, previousPromptCount] = await Promise.all([
+    const [loadedExistingFiles, previousPromptCount] = await Promise.all([
       deps.loadProjectFiles(input.projectId),
       deps.loadGenerationHistoryCount
         ? deps.loadGenerationHistoryCount(input.projectId).catch((error) => {
@@ -4035,7 +4157,102 @@ export async function executeGenerationJob(
           })
         : Promise.resolve(0),
     ])
+    let existingFiles = loadedExistingFiles
     assertNotAborted(input.signal)
+    const prePlanScaffoldValidation = validateProjectScaffold({
+      paths: existingFiles.map((file) => file.path),
+    })
+    let prePlanScaffoldRepairFiles: GeneratedFile[] = []
+    if (!prePlanScaffoldValidation.ok) {
+      await transition(input.jobId, "scaffolding", "Repairing missing baseline scaffold", 8, {
+        missingFiles: prePlanScaffoldValidation.missingFiles,
+      })
+      prePlanScaffoldRepairFiles = buildMissingScaffoldFiles(prePlanScaffoldValidation.missingFiles)
+      if (prePlanScaffoldRepairFiles.length !== prePlanScaffoldValidation.missingFiles.length) {
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "FAILED",
+          status: "failed",
+          reason: `Scaffold repair failed: unsupported missing baseline ${prePlanScaffoldValidation.missingFiles.join(", ")}`,
+          data: {
+            missingFiles: prePlanScaffoldValidation.missingFiles,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        throw new Error(`Scaffold repair failed: unsupported missing baseline ${prePlanScaffoldValidation.missingFiles.join(", ")}`)
+      }
+
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "REPAIRING",
+        status: "started",
+        reason: "Scaffold repair isolated to missing baseline files before architecture planning",
+        repairAttempt: 1,
+        data: {
+          missingFiles: prePlanScaffoldValidation.missingFiles,
+          filesToEdit: prePlanScaffoldRepairFiles.map((file) => normalizePath(file.path)),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+
+      const previousPrePlanFiles = existingFiles
+      const normalizedPrePlanScaffold = normalizeGeneratedDependencies(mergeFilesByPath(existingFiles, prePlanScaffoldRepairFiles))
+      existingFiles = normalizedPrePlanScaffold.files
+      await emitGeneratedFilesUpdate({
+        jobId: input.jobId,
+        stage: "scaffolding",
+        message: "Baseline scaffold repaired",
+        allFiles: existingFiles,
+        previousFiles: previousPrePlanFiles,
+        changedFiles: prePlanScaffoldRepairFiles,
+        deletedPaths: [],
+        source: "repair",
+        data: {
+          scaffoldRepairOnly: true,
+          beforeArchitecturePlanning: true,
+          missingFiles: prePlanScaffoldValidation.missingFiles,
+          addedPackages: normalizedPrePlanScaffold.addedPackages,
+          normalizedPackages: normalizedPrePlanScaffold.normalizedPackages,
+        },
+      })
+
+      const repairedPrePlanScaffold = validateProjectScaffold({
+        paths: existingFiles.map((file) => file.path),
+      })
+      if (!repairedPrePlanScaffold.ok) {
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "FAILED",
+          status: "failed",
+          reason: `Scaffold validation failed after repair: ${repairedPrePlanScaffold.missingFiles.join(", ")}`,
+          repairAttempt: 1,
+          data: {
+            missingFiles: repairedPrePlanScaffold.missingFiles,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        throw new Error(`Scaffold validation failed after repair: missing ${repairedPrePlanScaffold.missingFiles.join(", ")}`)
+      }
+
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "VALIDATING",
+        status: "passed",
+        reason: "Scaffold validation passed before architecture planning",
+        repairAttempt: 1,
+        data: {
+          checkedFiles: repairedPrePlanScaffold.checkedFiles.slice(0, 40),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+    } else {
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "VALIDATING",
+        status: "passed",
+        reason: "Baseline scaffold validation passed before architecture planning",
+        data: {
+          checkedFiles: prePlanScaffoldValidation.checkedFiles.slice(0, 40),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+    }
+
     plan = buildGenerationPlan({
       prompt: input.prompt,
       existingFiles,
@@ -4056,6 +4273,26 @@ export async function executeGenerationJob(
       repairModel: plan.orchestration.repairModel,
       validatorModel: plan.orchestration.validatorModel,
       uiEnhancementModel: plan.orchestration.uiEnhancementModel,
+    }
+    if (prePlanScaffoldRepairFiles.length > 0) {
+      appendRepairPath(plan.orchestration, {
+        attempt: 1,
+        reason: `Missing baseline scaffold files: ${prePlanScaffoldRepairFiles.map((file) => normalizePath(file.path)).join(", ")}`,
+        targetFiles: prePlanScaffoldRepairFiles.map((file) => normalizePath(file.path)),
+        failedScope: "scaffold",
+        issueType: "architecture_mismatch",
+        fixPlan: "create only the missing baseline scaffold files before architecture planning",
+      })
+      developerDiagnostics.repairAttempts.push({
+        attempt: 1,
+        reason: "Missing baseline scaffold files repaired before architecture planning",
+        targetFiles: prePlanScaffoldRepairFiles.map((file) => normalizePath(file.path)),
+        repairedArtifactSummary: summarizeGeneratedFiles(prePlanScaffoldRepairFiles),
+        validatorResult: {
+          status: "passed",
+          missingFiles: [],
+        },
+      })
     }
     developerDiagnostics.repairPath = plan.orchestration.repairPath
     developerDiagnostics.plannerOutput = {
@@ -4172,6 +4409,155 @@ export async function executeGenerationJob(
 
     let workingFiles = [...existingFiles]
     let tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+    const initialScaffoldValidation = validateProjectScaffold({
+      paths: workingFiles.map((file) => file.path),
+    })
+    if (!initialScaffoldValidation.ok) {
+      await transition(input.jobId, "scaffolding", "Repairing missing baseline scaffold", 14, {
+        missingFiles: initialScaffoldValidation.missingFiles,
+      })
+      const scaffoldRepairFiles = buildMissingScaffoldFiles(initialScaffoldValidation.missingFiles)
+      if (scaffoldRepairFiles.length !== initialScaffoldValidation.missingFiles.length) {
+        markOrchestrationValidation(plan.orchestration, {
+          status: "blocked",
+          failedScope: "scaffold",
+          failures: initialScaffoldValidation.missingFiles.map((file) => `Missing scaffold file: ${file}`),
+        })
+        developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+        developerDiagnostics.failedScope = plan.orchestration.failedScope
+        developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        throw new Error(`Scaffold repair failed: unsupported missing baseline ${initialScaffoldValidation.missingFiles.join(", ")}`)
+      }
+
+      appendRepairPath(plan.orchestration, {
+        attempt: 1,
+        reason: `Missing baseline scaffold files: ${initialScaffoldValidation.missingFiles.join(", ")}`,
+        targetFiles: scaffoldRepairFiles.map((file) => normalizePath(file.path)),
+        failedScope: "scaffold",
+        issueType: "architecture_mismatch",
+        fixPlan: "create only the missing baseline scaffold files and rerun scaffold validation",
+      })
+      developerDiagnostics.repairPath = plan.orchestration.repairPath
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+      developerDiagnostics.validationStatus = "failed"
+      developerDiagnostics.failedScope = "scaffold"
+      developerDiagnostics.repairAttempts.push({
+        attempt: 1,
+        reason: `Missing baseline scaffold files: ${initialScaffoldValidation.missingFiles.join(", ")}`,
+        targetFiles: scaffoldRepairFiles.map((file) => normalizePath(file.path)),
+      })
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "REPAIRING",
+        status: "started",
+        reason: "Scaffold repair isolated to missing baseline files",
+        repairAttempt: 1,
+        data: {
+          missingFiles: initialScaffoldValidation.missingFiles,
+          filesToEdit: scaffoldRepairFiles.map((file) => normalizePath(file.path)),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+
+      const previousScaffoldFiles = workingFiles
+      const normalizedScaffold = normalizeGeneratedDependencies(mergeFilesByPath(workingFiles, scaffoldRepairFiles))
+      workingFiles = normalizedScaffold.files
+      tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+      await emitGeneratedFilesUpdate({
+        jobId: input.jobId,
+        stage: "scaffolding",
+        message: "Baseline scaffold repaired",
+        allFiles: workingFiles,
+        previousFiles: previousScaffoldFiles,
+        changedFiles: scaffoldRepairFiles,
+        deletedPaths: [],
+        source: "repair",
+        data: {
+          scaffoldRepairOnly: true,
+          missingFiles: initialScaffoldValidation.missingFiles,
+          addedPackages: normalizedScaffold.addedPackages,
+          normalizedPackages: normalizedScaffold.normalizedPackages,
+        },
+      })
+
+      const repairedScaffoldValidation = validateProjectScaffold({
+        paths: workingFiles.map((file) => file.path),
+      })
+      if (!repairedScaffoldValidation.ok) {
+        markOrchestrationValidation(plan.orchestration, {
+          status: "blocked",
+          failedScope: "scaffold",
+          failures: repairedScaffoldValidation.missingFiles.map((file) => `Missing scaffold file after repair: ${file}`),
+        })
+        developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+        developerDiagnostics.failedScope = plan.orchestration.failedScope
+        developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+        const scaffoldRepairDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === 1)
+        if (scaffoldRepairDiagnostic) {
+          scaffoldRepairDiagnostic.validatorResult = {
+            status: "failed",
+            missingFiles: repairedScaffoldValidation.missingFiles,
+          }
+          scaffoldRepairDiagnostic.failedBecause = `Scaffold validation still missing ${repairedScaffoldValidation.missingFiles.join(", ")}`
+        }
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "REPAIRING",
+          status: "failed",
+          reason: "Scaffold validation failed after isolated repair",
+          repairAttempt: 1,
+          data: {
+            missingFiles: repairedScaffoldValidation.missingFiles,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        throw new Error(`Scaffold validation failed after repair: missing ${repairedScaffoldValidation.missingFiles.join(", ")}`)
+      }
+
+      markOrchestrationValidation(plan.orchestration, {
+        status: "passed",
+        failedScope: "",
+        failures: [],
+      })
+      developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+      developerDiagnostics.failedScope = plan.orchestration.failedScope
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+      const scaffoldRepairDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === 1)
+      if (scaffoldRepairDiagnostic) {
+        scaffoldRepairDiagnostic.validatorResult = {
+          status: "passed",
+          missingFiles: [],
+        }
+      }
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "VALIDATING",
+        status: "passed",
+        reason: "Scaffold validation passed after isolated repair",
+        repairAttempt: 1,
+        data: {
+          checkedFiles: repairedScaffoldValidation.checkedFiles.slice(0, 40),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+    } else {
+      markOrchestrationValidation(plan.orchestration, {
+        status: "passed",
+        failedScope: "",
+        failures: [],
+      })
+      developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+      developerDiagnostics.failedScope = plan.orchestration.failedScope
+      developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "VALIDATING",
+        status: "passed",
+        reason: "Baseline scaffold validation passed",
+        data: {
+          checkedFiles: initialScaffoldValidation.checkedFiles.slice(0, 40),
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+    }
+
     const initialObservation = observeAgentContext({
       prompt: input.prompt,
       plan,

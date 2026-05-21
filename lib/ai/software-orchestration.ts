@@ -254,7 +254,6 @@ export function appendRepairPath(
 
 export function validateProjectScaffold(input: {
   paths: string[]
-  tailwindUsed?: boolean
 }): ScaffoldValidationResult {
   const normalized = new Set(input.paths.map(normalizePath).filter(Boolean))
   const missingFiles: string[] = []
@@ -264,20 +263,9 @@ export function validateProjectScaffold(input: {
 
   requireAny("app/layout.tsx", ["app/layout.tsx", "src/app/layout.tsx"])
   requireAny("app/page.tsx", ["app/page.tsx", "src/app/page.tsx"])
+  requireAny("app/globals.css", ["app/globals.css", "src/app/globals.css"])
   requireAny("package.json", ["package.json"])
   requireAny("tsconfig.json", ["tsconfig.json"])
-  requireAny("next.config.js or equivalent", ["next.config.js", "next.config.mjs", "next.config.ts"])
-  if (input.tailwindUsed) {
-    requireAny("tailwind.config.ts or equivalent", [
-      "tailwind.config.ts",
-      "tailwind.config.js",
-      "tailwind.config.mjs",
-      "postcss.config.js",
-      "postcss.config.mjs",
-      "app/globals.css",
-      "src/app/globals.css",
-    ])
-  }
 
   return {
     ok: missingFiles.length === 0,
