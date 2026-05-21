@@ -159,4 +159,14 @@ assert(
   "orchestrator must capture invalid artifacts and repair-chain details"
 )
 
+assert(
+  "builder scope contract blocks implicit helpers",
+  /AllowedFileScopeContract/.test(generationOrchestrator) &&
+    /APPROVED_FILE_SCOPE_CONTRACT/.test(generationOrchestrator) &&
+    /components\/app-shell\.tsx/.test(generationOrchestrator) &&
+    /isImplicitHelperFile/.test(generationOrchestrator) &&
+    /scopeArtifactToAllowedScope\(parsed, input\.plan\)/.test(generationOrchestrator),
+  "builder and repair must share an explicit allowed-file contract and block unapproved helper files"
+)
+
 console.log("[regression] all checks passed")

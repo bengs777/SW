@@ -166,6 +166,7 @@ type GenerationPlan = {
     stack: string[]
   }
   filePlan: GenerationPlannerFile[]
+  allowedFileScope: AllowedFileScopeContract
   architecturePlan: string[]
   architecture: SwiftArchitecturePlan
   projectMemory: SwiftProjectMemoryGraph
@@ -182,6 +183,16 @@ type GenerationPlan = {
     usedFiles: number
     usedChars: number
   }
+}
+
+type AllowedFileScopeContract = {
+  kind: "swift_allowed_file_scope"
+  allowedPaths: string[]
+  targetPaths: string[]
+  existingPaths: string[]
+  helperPolicy: "explicit_only"
+  blockedHelperPatterns: string[]
+  reason: string
 }
 
 type ExecuteGenerationJobInput = {
@@ -1414,6 +1425,7 @@ function buildGenerationPlan(input: {
   })
 
   const plannedByPath = new Map<string, GenerationPlannerFile>()
+  const explicitlyRequestedPaths = extractRequestedFilePaths(input.prompt).map(normalizePath)
 
   if (editPlan.mode === "partial") {
     for (const filePath of [...editPlan.targetPaths, ...editPlan.allowedNewPaths]) {
@@ -1446,7 +1458,7 @@ function buildGenerationPlan(input: {
       })
     }
 
-    for (const filePath of extractRequestedFilePaths(input.prompt).slice(0, maxFilesThisPass)) {
+    for (const filePath of explicitlyRequestedPaths.slice(0, maxFilesThisPass)) {
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
         reason:
@@ -1486,6 +1498,9 @@ function buildGenerationPlan(input: {
 
   for (const componentPath of orchestration.plannerOutput.requiredComponents) {
     const path = normalizePath(componentPath)
+    if (isImplicitHelperFile(path, explicitlyRequestedPaths)) {
+      continue
+    }
     if (!plannedByPath.has(path) && filePlan.length < maxFilesThisPass) {
       filePlan.push({
         path,
@@ -1576,6 +1591,12 @@ function buildGenerationPlan(input: {
     const scopedPlan = filePlan.filter((item) => allowed.has(normalizePath(item.path)))
     filePlan.splice(0, filePlan.length, ...scopedPlan)
   }
+  const allowedFileScope = buildAllowedFileScopeContract({
+    filePlan,
+    existingFiles: input.existingFiles,
+    editPlan,
+  })
+  orchestration.allowedScope = allowedFileScope.allowedPaths
   const agentTasks = buildAgentTaskPlan(input.prompt, filePlan, {
     productionMode,
     editMode: editPlan.mode,
@@ -1606,6 +1627,7 @@ function buildGenerationPlan(input: {
       stack: blueprint.dependencyPolicy.stack,
     },
     filePlan,
+    allowedFileScope,
     architecturePlan: blueprint.architectureRules,
     architecture,
     projectMemory,
@@ -1671,6 +1693,47 @@ function buildAgentTaskPlan(
 
   addTask("verify project")
   return tasks.slice(0, 12)
+}
+
+function buildAllowedFileScopeContract(input: {
+  filePlan: GenerationPlannerFile[]
+  existingFiles: GeneratedFile[]
+  editPlan: PartialEditPlan
+}): AllowedFileScopeContract {
+  const targetPaths = uniquePaths(input.filePlan.map((file) => file.path))
+  const existingPaths = uniquePaths(input.existingFiles.map((file) => file.path))
+  const allowedPaths =
+    input.editPlan.mode === "partial"
+      ? uniquePaths([
+          ...input.editPlan.targetPaths,
+          ...input.editPlan.allowedNewPaths,
+          ...targetPaths,
+        ])
+      : targetPaths
+
+  return {
+    kind: "swift_allowed_file_scope",
+    allowedPaths,
+    targetPaths,
+    existingPaths,
+    helperPolicy: "explicit_only",
+    blockedHelperPatterns: ["components/app-shell.tsx", "components/*-shell.tsx", "components/*helper*.tsx"],
+    reason: "Scope is frozen from the approved generation file plan before Builder AI runs.",
+  }
+}
+
+function isImplicitHelperFile(path: string, explicitlyRequestedPaths: string[]) {
+  const normalized = normalizePath(path).toLowerCase()
+  if (explicitlyRequestedPaths.map((item) => item.toLowerCase()).includes(normalized)) return false
+  return (
+    normalized === "components/app-shell.tsx" ||
+    /^components\/[^/]*-shell\.(tsx|ts|jsx|js)$/i.test(normalized) ||
+    /^components\/[^/]*helper[^/]*\.(tsx|ts|jsx|js)$/i.test(normalized)
+  )
+}
+
+function uniquePaths(paths: string[]) {
+  return Array.from(new Set(paths.map(normalizePath).filter(Boolean))).sort()
 }
 
 async function transition(jobId: string, stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) {
@@ -2332,6 +2395,8 @@ function buildSlicePrompt(input: {
       : "- Follow the controlled app blueprint exactly.",
     "- Keep each returned file under 4000 output tokens when possible.",
     "- Stop after the requested slice; do not create extra support files speculatively.",
+    "- APPROVED_SCOPE_ONLY: create or modify files only when their exact canonical path appears in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
+    "- HELPER_FILE_POLICY: helper/shell files are explicit-only. Do not create components/app-shell.tsx, components/*-shell.tsx, or components/*helper*.tsx unless that exact path appears in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
     "- STRICT_ARTIFACT_ENVELOPE: Return ONLY a JSON object parseable directly by JSON.parse. No markdown fences. No prose. No explanations. No comments outside JSON. No preamble like Here is your app.",
@@ -2355,12 +2420,15 @@ function buildSlicePrompt(input: {
     `- Incremental edit intent: ${input.plan.incrementalEdit.editIntent || "none"}`,
     `- Controlled app type: ${input.plan.appType}`,
     "",
+    "APPROVED_FILE_SCOPE_CONTRACT:",
+    JSON.stringify(input.plan.allowedFileScope, null, 2),
+    "",
     "SCOPED_GENERATION_REQUEST:",
     JSON.stringify(
       {
         targetFiles: targetPaths,
         exactPurpose: input.target.reason,
-        allowedFileScope: input.plan.orchestration.allowedScope,
+        allowedFileScope: input.plan.allowedFileScope.allowedPaths,
         allowedImports: [
           "react",
           "next/link",
@@ -3017,10 +3085,6 @@ function scopeGeneratedArtifactToTargets(
   const operations = artifact.taskGraph.operations
     .filter((operation) => allowed.has(normalizePath(operation.path)))
     .map((operation) => ({ ...operation, path: normalizePath(operation.path) }))
-
-  if (operations.length === 0) {
-    throw new Error("MALFORMED_GENERATED_ARTIFACT:taskGraph:no operations matched requested slice")
-  }
 
   return {
     ...artifact,
@@ -4030,6 +4094,8 @@ async function attemptTargetedRepair(input: {
     "",
     "TARGETED_REPAIR_ONLY:",
     "- Repair only the failing files or their direct imports.",
+    "- APPROVED_SCOPE_ONLY: repair output may include only exact paths listed in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
+    "- HELPER_FILE_POLICY: do not create components/app-shell.tsx, components/*-shell.tsx, or components/*helper*.tsx unless that exact path is explicitly listed in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     syntaxRepairOnly
       ? `- SYNTAX_REPAIR_MODE: return changes only for these failing file paths: ${Array.from(failingPathSet).join(", ")}. Do not touch imports unless the syntax diagnostic explicitly names an import statement.`
       : "- Business or architecture repair may add direct missing dependencies only when validation requires them.",
@@ -4043,6 +4109,9 @@ async function attemptTargetedRepair(input: {
     "- If a fancy design is causing syntax risk, replace it with a minimal compile-safe version of the failing file.",
     "- The result will be revalidated through normalize -> static validation -> preview compile -> typecheck -> lint -> build before persistence.",
     `- Repair attempt: ${input.repairAttempt} / ${input.maxRepairAttempts}`,
+    "",
+    "APPROVED_FILE_SCOPE_CONTRACT:",
+    JSON.stringify(input.plan.allowedFileScope, null, 2),
     "",
     "FAILING_FILES_CONTEXT:",
     failingFiles.map((file) => `FILE ${file.path}\n${file.content}`).join("\n\n"),
@@ -4094,6 +4163,9 @@ async function attemptTargetedRepair(input: {
       failureMessage: error instanceof Error ? error.message : String(error),
     }
   }
+  const parsedFileCount = parsed.files.length
+  const allowedScopeResult = scopeArtifactToAllowedScope(parsed, input.plan)
+  parsed = allowedScopeResult.artifact
   const scoped = syntaxRepairOnly
     ? {
         acceptedFiles: parsed.files.filter((file) => failingPathSet.has(normalizePath(file.path))),
@@ -4109,9 +4181,12 @@ async function attemptTargetedRepair(input: {
   return {
     files: normalized.files,
     repaired: scoped.acceptedFiles.length > 0,
-    parsedFileCount: parsed.files.length,
+    parsedFileCount,
     acceptedFileCount: scoped.acceptedFiles.length,
-    rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 8),
+    rejectedFiles: [
+      ...allowedScopeResult.rejected.map((item) => `${item.path}: ${item.reason}`),
+      ...scoped.rejectedFiles.map((file) => `${file.path}: outside repair target scope`),
+    ].slice(0, 8),
     deletedPaths: executed.deletedPaths,
     installedDependencies: executed.installedDependencies,
     normalizedPackages: normalized.normalizedPackages,
@@ -4123,7 +4198,11 @@ async function attemptTargetedRepair(input: {
       operations: parsed.taskGraph?.operations,
     }),
     terminationReason: scoped.acceptedFiles.length > 0 ? null : "empty_repair_output" as RepairTerminationReason,
-    failureMessage: scoped.acceptedFiles.length > 0 ? null : "Repair output contained no accepted file changes",
+    failureMessage: scoped.acceptedFiles.length > 0
+      ? null
+      : allowedScopeResult.rejected.length > 0
+        ? `Repair output contained only files outside allowed scope: ${allowedScopeResult.rejected.map((item) => `${item.path} (${item.reason})`).join("; ")}`
+        : "Repair output contained no accepted file changes",
   }
 }
 
@@ -4765,7 +4844,8 @@ export async function executeGenerationJob(
       status: "running",
       message: "ALLOWED_FILE_SCOPE defined before generation",
       data: {
-        allowedScope: plan.orchestration.allowedScope,
+        contract: plan.allowedFileScope,
+        allowedScope: plan.allowedFileScope.allowedPaths,
         forbiddenPatterns: plan.orchestration.architectureOutput.forbiddenPatterns,
       },
     })
@@ -4774,7 +4854,8 @@ export async function executeGenerationJob(
       status: "passed",
       reason: "Allowed file scope frozen before generation",
       data: {
-        allowedScope: plan.orchestration.allowedScope,
+        contract: plan.allowedFileScope,
+        allowedScope: plan.allowedFileScope.allowedPaths,
       },
     })
     await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
@@ -5025,7 +5106,7 @@ export async function executeGenerationJob(
             architecturePlan: plan.architecture,
             memory: finalProjectMemory,
           })
-          const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
+          const saveResult = await ProjectFilePersistenceService["saveBufferedArtifacts"]({
             projectId: input.projectId,
             prompt: input.prompt,
             files: workingFiles,
@@ -5347,6 +5428,8 @@ export async function executeGenerationJob(
                 "- Return ONLY valid JSON. No Markdown fences, no prose, no comments.",
                 '- Use exactly this BUILD envelope: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
                 "- Do not include taskGraph, operations, dependencies, commands, summary, diagnostics, metadata, repairs, or explanations.",
+                `- Create or modify only exact paths in APPROVED_FILE_SCOPE: ${plan.allowedFileScope.allowedPaths.join(", ")}.`,
+                "- Do not create helper/shell files such as components/app-shell.tsx unless that exact path is in APPROVED_FILE_SCOPE.",
                 "- Paths must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
                 "- files must be non-empty and every listed target file must be present.",
                 `- Cover exactly this slice target: ${target.path}.`,
@@ -5524,10 +5607,6 @@ export async function executeGenerationJob(
         await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       }
 
-      if (allowedScopeResult.artifact.files.length === 0 && (!allowedScopeResult.artifact.taskGraph || allowedScopeResult.artifact.taskGraph.operations.length === 0)) {
-        throw new Error(`Scope validation rejected every generated file for ${target.path}`)
-      }
-
       const scopedArtifact =
         plan.productionMode === "production_fullstack"
           ? scopeGeneratedArtifactToTargets(allowedScopeResult.artifact, targets.map((item) => item.path))
@@ -5537,12 +5616,22 @@ export async function executeGenerationJob(
         : plan.productionMode === "production_fullstack"
           ? filterGeneratedFilesToTargets(scopedArtifact.files, targets.map((item) => item.path))
           : filterFilesForPartialEdit(scopedArtifact.files, plan.editPlan)
-      const executed = executeGeneratedTaskGraph(
-        workingFiles,
-        scopedArtifact.taskGraph,
-        scoped.acceptedFiles,
-        scopedArtifact.dependencies
-      )
+      const hasAcceptedScopedArtifact =
+        scoped.acceptedFiles.length > 0 ||
+        Boolean(scopedArtifact.taskGraph?.operations.length)
+      const executed = hasAcceptedScopedArtifact
+        ? executeGeneratedTaskGraph(
+            workingFiles,
+            scopedArtifact.taskGraph,
+            scoped.acceptedFiles,
+            scopedArtifact.dependencies
+          )
+        : {
+            files: workingFiles,
+            changedFiles: [] as GeneratedFile[],
+            deletedPaths: [] as string[],
+            installedDependencies: [] as string[],
+          }
       workingFiles = executed.files
       const normalized = normalizeGeneratedDependencies(workingFiles)
       workingFiles = normalized.files
@@ -5557,12 +5646,18 @@ export async function executeGenerationJob(
       }
       recordDeveloperDiagnostic(developerDiagnostics, {
         stage: "VALIDATING",
-        status: scoped.rejectedFiles.length > 0 ? "failed" : "passed",
-        reason: scoped.rejectedFiles.length > 0 ? "Some generated files were rejected by scope validation" : `${stagedPhaseLabel(currentPhase)} artifact accepted by validator`,
+        status: scoped.rejectedFiles.length > 0 || allowedScopeResult.rejected.length > 0 ? "failed" : "passed",
+        reason: scoped.rejectedFiles.length > 0 || allowedScopeResult.rejected.length > 0
+          ? "Some generated files were rejected by scope validation"
+          : `${stagedPhaseLabel(currentPhase)} artifact accepted by validator`,
         data: {
           stagedPhase: currentPhase,
           acceptedFileCount: scoped.acceptedFiles.length,
-          rejectedFileCount: scoped.rejectedFiles.length,
+          rejectedFileCount: scoped.rejectedFiles.length + allowedScopeResult.rejected.length,
+          rejectedFiles: [
+            ...allowedScopeResult.rejected,
+            ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
+          ].slice(0, 20),
           changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)).slice(0, 40),
           addedPackages: normalized.addedPackages,
         },
@@ -5594,8 +5689,11 @@ export async function executeGenerationJob(
           sliceDurationMs,
           parseFileCount: scopedArtifact.files.length,
           acceptedFileCount: scoped.acceptedFiles.length,
-          rejectedFileCount: scoped.rejectedFiles.length,
-          rejectedFiles: scoped.rejectedFiles.map((file) => file.path).slice(0, 8),
+          rejectedFileCount: scoped.rejectedFiles.length + allowedScopeResult.rejected.length,
+          rejectedFiles: [
+            ...allowedScopeResult.rejected,
+            ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
+          ].slice(0, 8),
           taskOperationCount: scopedArtifact.taskGraph?.operations.length || 0,
           deletedPaths: executed.deletedPaths,
           installedDependencies: executed.installedDependencies,
@@ -6553,7 +6651,7 @@ export async function executeGenerationJob(
         repairAttempts: repairAttempt,
         failure: validation.failure,
       })
-      throw new Error(finalRepairReason)
+      throw new Error(validation.failure?.message || finalRepairReason)
     }
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: "READY",
