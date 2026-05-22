@@ -207,6 +207,13 @@ function main() {
     "FIX repair is constrained to failing files"
   )
   assert(
+    "scoped-edit-provider-fallback",
+    /type: "scoped_edit_provider_fallback"/.test(orchestrator) &&
+      /providerScopedEditAllowed: true/.test(orchestrator) &&
+      !/throw new Error\(`Scoped edit was not applied:/.test(orchestrator),
+    "unmatched deterministic scoped edits must continue to provider scoped edit instead of failing the job"
+  )
+  assert(
     "collaboration-mode.enum",
     collaborationMode.isCollaborationMode("build") &&
       collaborationMode.isCollaborationMode("review") &&

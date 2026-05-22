@@ -5719,20 +5719,36 @@ export async function executeGenerationJob(
           traceId: correlation.traceId,
           workerId: null,
         },
-        type: "scoped_edit_not_applied",
-        stage: "failed",
-        status: "failed",
-        message: patch.reason,
+        type: "scoped_edit_provider_fallback",
+        stage: "generating",
+        status: "running",
+        message: "Deterministic scoped edit did not match; continuing with provider scoped edit inside the frozen allowed scope",
         data: {
           generationMode: plan.generationMode,
           editIntent: plan.incrementalEdit.editIntent,
           affectedFiles: plan.incrementalEdit.affectedFiles,
           relatedFiles: plan.incrementalEdit.relatedFiles,
+          deterministicPatchReason: patch.reason,
+          allowedScope: plan.allowedFileScope,
           skippedScaffoldRegeneration: true,
           skippedArchitectureRepair: true,
+          providerScopedEditAllowed: true,
         },
       })
-      throw new Error(`Scoped edit was not applied: ${patch.reason}`)
+      recordDeveloperDiagnostic(developerDiagnostics, {
+        stage: "GENERATING",
+        status: "passed",
+        reason: "Deterministic scoped edit did not match; provider scoped edit fallback allowed",
+        data: {
+          generationMode: plan.generationMode,
+          editIntent: plan.incrementalEdit.editIntent,
+          affectedFiles: plan.incrementalEdit.affectedFiles,
+          relatedFiles: plan.incrementalEdit.relatedFiles,
+          deterministicPatchReason: patch.reason,
+          allowedScope: plan.allowedFileScope,
+        },
+      })
+      await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
     }
 
     const backendBlueprintFiles = buildMissingBackendBlueprintFiles({
