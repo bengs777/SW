@@ -1,6 +1,12 @@
 import type { SwiftArchitecturePlan } from "@/lib/ai/architecture-planner"
 import type { SwiftStructuredIntent } from "@/lib/ai/architecture-intent"
 import type { SwiftDependencyGraph, SwiftProjectMemoryGraph } from "@/lib/ai/project-memory-graph"
+import {
+  buildUXPlanInstructionBlock,
+  buildUXProductPlan,
+  validateUXProductPlan,
+  type UXProductPlan,
+} from "@/lib/ai/product-ux-planner"
 
 export type SoftwareOrchestrationRole =
   | "planner"
@@ -20,6 +26,7 @@ export type PlannerOutput = {
   requiredRoutes: string[]
   requiredComponents: string[]
   requiredFiles: string[]
+  uxProductPlan: UXProductPlan
 }
 
 export type RouteGraph = {
@@ -44,6 +51,7 @@ export type IntentGraph = {
   requiredRoutes: string[]
   requiredComponents: string[]
   requiredFiles: string[]
+  uxProductPlan: UXProductPlan
 }
 
 export type ArchitectureOutput = {
@@ -111,6 +119,7 @@ export type SoftwareOrchestrationDiagnostics = {
 
 export const SOFTWARE_ORCHESTRATION_PIPELINE = [
   "Intent Planning",
+  "Product UX Planning",
   "Architecture Planning",
   "Graph Construction",
   "Allowed Scope Definition",
@@ -172,10 +181,10 @@ export function createSoftwareOrchestration(input: {
     selectedArchetype: plannerOutput.appType,
     pipeline: SOFTWARE_ORCHESTRATION_PIPELINE,
     roleBoundaries: {
-      planner: ["detect intent", "classify app archetype", "extract features", "estimate complexity"],
+      planner: ["detect intent", "classify app archetype", "extract features", "define UX product contract", "estimate complexity"],
       architecture: ["generate route graph", "generate component graph", "generate dependency graph", "define scaffold"],
-      builder: ["generate scoped files", "generate isolated React modules", "follow explicit props and targets"],
-      validator: ["compare user intent against architecture", "validate routes, imports, schema, and runtime gates"],
+      builder: ["generate scoped files", "generate isolated React modules", "follow explicit props, UX contract, and targets"],
+      validator: ["compare user intent against architecture and UX contract", "validate routes, imports, schema, and runtime gates"],
       repair: ["fix isolated syntax, import, runtime, hydration, and build failures"],
       ui_enhancement: ["improve spacing", "improve responsive layout", "improve hierarchy", "improve visual consistency"],
     },
@@ -212,6 +221,7 @@ export function buildRoleInstructionBlock(input: {
         model: modelForSoftwareRole(role),
         boundaries,
         plannerOutput: input.diagnostics.plannerOutput,
+        uxProductPlan: input.diagnostics.plannerOutput.uxProductPlan,
         architectureOutput: input.diagnostics.architectureOutput,
         allowedFileScope: input.diagnostics.allowedScope,
         rejectedFiles: input.diagnostics.rejectedFiles,
@@ -222,10 +232,11 @@ export function buildRoleInstructionBlock(input: {
       2
     ),
     "Role isolation rules:",
-    "- Planner output, route graph, component graph, and dependency graph are already validated before code generation.",
+    buildUXPlanInstructionBlock(input.diagnostics.plannerOutput.uxProductPlan),
+    "- Planner output, UX product plan, route graph, component graph, and dependency graph are already validated before code generation.",
     "- Builder must only generate the requested scoped file/module and direct imports required by that scope.",
-    "- Builder must never redesign architecture, reinterpret user intent, or modify route graph.",
-    "- UI Enhancement may refine layout polish only inside the scoped target and must not alter business logic.",
+    "- Builder must never redesign architecture, reinterpret user intent, ignore UX_PRODUCT_PLAN, or modify route graph.",
+    "- UI Enhancement may refine layout polish only inside the scoped target and must not alter business logic or UX intent.",
     "- Repair must be targeted to failing files only and must not regenerate the full app.",
   ].join("\n")
 }
@@ -376,14 +387,23 @@ function buildPlannerOutput(input: {
   ].filter((file) => file && file !== "none"))
   const complexity = scoreComplexity(input.prompt, requiredRoutes, requiredModules)
 
+  const appType = toPlannerAppType(input.structuredIntent.archetype, input.appType)
+  const uxProductPlan = buildUXProductPlan({
+    prompt: input.prompt,
+    appType,
+    structuredIntent: input.structuredIntent,
+    architecture: input.architecture,
+  })
+
   return {
-    appType: toPlannerAppType(input.structuredIntent.archetype, input.appType),
+    appType,
     confidence: estimateConfidence(input),
     features,
     complexity,
     requiredRoutes,
     requiredComponents,
     requiredFiles,
+    uxProductPlan,
   }
 }
 
@@ -441,6 +461,7 @@ function buildGraphs(input: {
       requiredRoutes: input.plannerOutput.requiredRoutes,
       requiredComponents: input.plannerOutput.requiredComponents,
       requiredFiles: input.plannerOutput.requiredFiles,
+      uxProductPlan: input.plannerOutput.uxProductPlan,
     },
     routeGraph: {
       routes: [...pageRoutes, ...apiRoutes],
@@ -501,6 +522,7 @@ function validateGraphsAgainstPlanner(planner: PlannerOutput, graphs: SoftwareOr
 
   if (planner.requiredRoutes.length === 0) failures.push("Planner produced no required routes")
   if (graphs.componentGraph.components.length === 0) failures.push("Architecture produced no component graph")
+  failures.push(...validateUXProductPlan(planner.uxProductPlan))
 
   return failures
 }
@@ -650,9 +672,10 @@ function validationRulesForAppType(appType: PlannerOutput["appType"]) {
   if (appType === "ecommerce") {
     return ["product listing exists", "cart exists", "checkout exists", "navigation exists", "product component exists"]
   }
-  if (appType === "dashboard") return ["sidebar exists", "overview exists", "settings exists"]
+  if (appType === "dashboard") return ["sidebar exists", "overview exists", "settings exists", "KPI summary exists", "chart exists", "table exists", "filter exists", "loading/empty/error states exist"]
   if (appType === "landing") return ["hero exists", "features exist", "CTA exists", "footer exists"]
-  return ["required routes exist", "required components exist", "code compiles", "preview boots"]
+  if (appType === "portfolio") return ["hero exists", "about exists", "projects exist", "contact CTA exists", "generic project placeholders are absent"]
+  return ["required routes exist", "required components exist", "UX product plan is implemented", "code compiles", "preview boots"]
 }
 
 function classifyIssueType(reason: string) {

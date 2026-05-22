@@ -60,6 +60,7 @@ import {
   type SwiftProjectMemoryGraph,
 } from "@/lib/ai/project-memory-graph"
 import { validateArchitectureFiles } from "@/lib/ai/architecture-validator"
+import { validateGeneratedUXQuality } from "@/lib/ai/product-ux-planner"
 import {
   appendRepairPath,
   assertSoftwareOrchestrationReady,
@@ -2743,6 +2744,13 @@ function auditPostGeneration(input: {
       if (!persistedPaths.has(requiredFile)) failures.push(`Missing ecommerce required file after persistence: ${requiredFile}`)
     }
   }
+
+  failures.push(
+    ...validateGeneratedUXQuality({
+      plan: input.plan.orchestration.plannerOutput.uxProductPlan,
+      files: input.persistedFiles,
+    })
+  )
 
   const previewStatus = String(input.previewStatus || "")
   const acceptsBrowserPreviewOnly =

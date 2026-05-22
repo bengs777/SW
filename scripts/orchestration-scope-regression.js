@@ -70,6 +70,7 @@ function main() {
   const editPlanner = loadTsModule("lib/ai/edit-planner.ts")
   const architecturePlanner = loadTsModule("lib/ai/architecture-planner.ts")
   const softwareOrchestration = loadTsModule("lib/ai/software-orchestration.ts")
+  const productUxPlanner = loadTsModule("lib/ai/product-ux-planner.ts")
   const filePolicy = loadTsModule("lib/ai/file-policy.ts")
   const collaborationMode = loadTsModule("lib/ai/collaboration-mode.ts")
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
@@ -132,6 +133,66 @@ function main() {
     warungOrchestration.validation.ok,
     `dashboard commerce prompt should not fail storefront product/cart validation: ${warungOrchestration.validation.failures.join("; ")}`
   )
+  const warungUxPlan = warungOrchestration.plannerOutput.uxProductPlan
+  assert(
+    "warung-dashboard.ux-plan",
+    warungUxPlan &&
+      warungUxPlan.appType === "dashboard" &&
+      warungUxPlan.domain === "commerce_operations" &&
+      warungUxPlan.screens.some((screen) => screen.sections.join(" ").toLowerCase().includes("kpi")) &&
+      warungUxPlan.screens.some((screen) => screen.sections.join(" ").toLowerCase().includes("chart")) &&
+      warungUxPlan.screens.some((screen) => screen.sections.join(" ").toLowerCase().includes("table")) &&
+      warungUxPlan.screens.some((screen) => screen.sections.join(" ").toLowerCase().includes("filter")) &&
+      warungUxPlan.screens.some((screen) => screen.states.includes("loading")) &&
+      warungUxPlan.screens.some((screen) => screen.states.includes("empty")) &&
+      warungUxPlan.screens.some((screen) => screen.states.includes("error")),
+    `dashboard UX plan must define product-grade hierarchy and states: ${JSON.stringify(warungUxPlan)}`
+  )
+  assert(
+    "warung-dashboard.no-generic-placeholders",
+    warungUxPlan.dataSemantics.forbiddenPlaceholders.includes("Product 1") &&
+      warungUxPlan.dataSemantics.forbiddenPlaceholders.includes("Project 1") &&
+      warungUxPlan.dataSemantics.mockDataRules.some((rule) => /IDR|Indonesian|Penjualan|Stok/i.test(rule)),
+    "dashboard UX plan must reject generic placeholders and require semantic commerce data"
+  )
+  const genericUxFailures = productUxPlanner.validateGeneratedUXQuality({
+    plan: warungUxPlan,
+    files: [
+      {
+        path: "app/page.tsx",
+        content: "export default function Page(){ return <main><h1>Ecommerce Dashboard</h1><p>Product 1 $100</p></main> }",
+      },
+    ],
+  })
+  assert(
+    "warung-dashboard.generic-output-rejected",
+    genericUxFailures.some((failure) => /Product 1/.test(failure)),
+    `generic dashboard output must be rejected: ${genericUxFailures.join("; ")}`
+  )
+  const semanticUxFailures = productUxPlanner.validateGeneratedUXQuality({
+    plan: warungUxPlan,
+    files: [
+      {
+        path: "app/page.tsx",
+        content: [
+          "export default function Page(){",
+          "const rows = [{ nama: 'Beras Ramos', stok: 12, penjualan: 1850000 }]",
+          "return <main>",
+          "<section>KPI ringkasan penjualan dan stok</section>",
+          "<section>Grafik chart tren penjualan</section>",
+          "<input aria-label='Cari produk' placeholder='Cari produk atau filter periode tanggal' />",
+          "<table><tbody>{rows.map((row)=><tr><td>{row.nama}</td></tr>)}</tbody></table>",
+          "<p>Memuat data...</p><p>Belum ada data</p><p>Gagal memuat data, retry</p>",
+          "</main>}",
+        ].join(""),
+      },
+    ],
+  })
+  assert(
+    "warung-dashboard.semantic-output-accepted",
+    semanticUxFailures.length === 0,
+    `semantic dashboard output should pass UX quality: ${semanticUxFailures.join("; ")}`
+  )
 
   const commerceStorefront = architectureIntent.parseStructuredIntent({
     prompt: "Buat marketplace produk dengan cart checkout seller buyer dan admin",
@@ -151,6 +212,12 @@ function main() {
     "storefront-commerce.stays-ecommerce",
     commerceOrchestration.plannerOutput.appType === "ecommerce",
     `expected ecommerce planner, got ${commerceOrchestration.plannerOutput.appType}`
+  )
+  assert(
+    "storefront-commerce.ux-flow",
+    commerceOrchestration.plannerOutput.uxProductPlan.flows.some((flow) => flow.steps.join(" ").toLowerCase().includes("checkout")) &&
+      commerceOrchestration.plannerOutput.uxProductPlan.screens.some((screen) => screen.sections.join(" ").toLowerCase().includes("product grid")),
+    "ecommerce UX plan must include product discovery and checkout flow"
   )
 
   const admin = architectureIntent.parseStructuredIntent({
@@ -264,6 +331,19 @@ function main() {
     /acceptsBrowserPreviewOnly[\s\S]*isProductionVercel\(\)[\s\S]*input\.persistedFiles\.length > 0[\s\S]*SWIFT_REQUIRE_SANDBOX_FOR_PRODUCTION_FULLSTACK/.test(orchestrator) &&
       /previewMode:[\s\S]*browser-preview-only/.test(orchestrator),
     "Vercel production post-generation audit must not fail persisted files only because no local preview URL exists"
+  )
+  assert(
+    "post-generation-ux-quality-gate",
+    /validateGeneratedUXQuality/.test(orchestrator) &&
+      /plannerOutput\.uxProductPlan/.test(orchestrator),
+    "post-generation audit must enforce UX quality against the planner contract"
+  )
+  assert(
+    "orchestration.ux-contract-instructions",
+    /UX_PRODUCT_PLAN/.test(softwareOrchestration.buildRoleInstructionBlock({ diagnostics: warungOrchestration, role: "builder" })) &&
+      /Do not generate UI from the raw prompt alone/.test(softwareOrchestration.buildRoleInstructionBlock({ diagnostics: warungOrchestration, role: "builder" })) &&
+      /Product UX Planning/.test(read("lib/ai/software-orchestration.ts")),
+    "builder instructions must include the UX product plan contract"
   )
   assert(
     "collaboration-mode.enum",
