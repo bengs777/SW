@@ -16,6 +16,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Spinner } from "@/components/ui/spinner"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { ArrowRight, Sparkles } from "lucide-react"
 import {
   Select,
   SelectContent,
@@ -48,12 +49,22 @@ export function NewProjectDialog({
   const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId ?? workspaces[0]?.id ?? "")
   const [error, setError] = useState("")
 
+  const suggestedName = prompt.trim()
+    ? prompt
+        .trim()
+        .replace(/\s+/g, " ")
+        .split(" ")
+        .slice(0, 6)
+        .join(" ")
+    : ""
+  const projectName = name.trim() || suggestedName || "Untitled Swift project"
+
   useEffect(() => {
     setWorkspaceId(defaultWorkspaceId ?? workspaces[0]?.id ?? "")
   }, [defaultWorkspaceId, workspaces])
 
   const handleCreate = async () => {
-    if (!name.trim() || !workspaceId || !prompt.trim()) return
+    if (!workspaceId || !prompt.trim()) return
 
     setIsCreating(true)
     setError("")
@@ -65,7 +76,7 @@ export function NewProjectDialog({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          name: name.trim(),
+          name: projectName,
           prompt: prompt.trim(),
           description: description.trim() || undefined,
           workspaceId,
@@ -114,14 +125,27 @@ export function NewProjectDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Create new project</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5" />
+            What are we building?
+          </DialogTitle>
           <DialogDescription>
-            Start a new AI-powered web application project.
+            Describe the app. Swift will create the project, open the workspace, and start the first generation automatically.
           </DialogDescription>
         </DialogHeader>
         <FieldGroup className="py-4">
+          <Field>
+            <FieldLabel>Prompt</FieldLabel>
+            <Textarea
+              placeholder="Build a modern SaaS dashboard with a sidebar, KPI cards, project table, auth-ready empty states, and a responsive preview."
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={7}
+              className="resize-none text-sm leading-6"
+            />
+          </Field>
           {workspaces.length > 1 && (
             <Field>
               <FieldLabel>Workspace</FieldLabel>
@@ -140,20 +164,11 @@ export function NewProjectDialog({
             </Field>
           )}
           <Field>
-            <FieldLabel>Project name</FieldLabel>
+            <FieldLabel>Project name (optional)</FieldLabel>
             <Input
-              placeholder="My awesome project"
+              placeholder={suggestedName || "Swift will name this from your prompt"}
               value={name}
               onChange={(e) => setName(e.target.value)}
-            />
-          </Field>
-          <Field>
-            <FieldLabel>Prompt</FieldLabel>
-            <Textarea
-              placeholder="Build a modern dashboard with a sidebar, KPI cards, and a project list."
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={4}
             />
           </Field>
           <Field>
@@ -184,15 +199,19 @@ export function NewProjectDialog({
           </Button>
           <Button
             onClick={handleCreate}
-            disabled={!name.trim() || !workspaceId || !prompt.trim() || isCreating}
+            disabled={!workspaceId || !prompt.trim() || isCreating}
+            className="gap-2"
           >
             {isCreating ? (
               <>
                 <Spinner className="mr-2" />
-                Creating...
+                Opening workspace...
               </>
             ) : (
-              "Create Project"
+              <>
+                Start building
+                <ArrowRight className="h-4 w-4" />
+              </>
             )}
           </Button>
         </DialogFooter>

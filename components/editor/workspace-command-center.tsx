@@ -5,10 +5,12 @@ import { Button } from "@/components/ui/button"
 import {
   CheckCircle2,
   Clock3,
+  Eye,
   GitBranch,
   Github,
   History,
   Loader2,
+  MessageSquareText,
   PlayCircle,
   Rocket,
   RotateCcw,
@@ -87,18 +89,47 @@ export function WorkspaceCommandCenter({
   const latestHistory = history[0] || null
   const validationPassed = previewValidation.status === "passed"
   const validationFailed = previewValidation.status === "failed"
+  const hasFiles = fileCount > 0
+  const githubReady = deployFlow.githubStatus === "ready"
+  const vercelReady = deployFlow.vercelStatus === "ready"
+  const flowSteps = [
+    {
+      label: "Prompt",
+      detail: latestHistory ? "Generation saved" : "Ready for first prompt",
+      icon: MessageSquareText,
+      state: latestHistory ? "done" : "active",
+    },
+    {
+      label: "Preview",
+      detail: validationPassed ? "Validated" : hasFiles ? "Review running app" : "Waiting for files",
+      icon: Eye,
+      state: validationPassed ? "done" : hasFiles ? "active" : "pending",
+    },
+    {
+      label: "GitHub",
+      detail: githubReady ? "Repository ready" : deployFlow.githubStatus === "running" ? "Publishing" : "Optional handoff",
+      icon: Github,
+      state: githubReady ? "done" : deployFlow.githubStatus === "running" ? "active" : "pending",
+    },
+    {
+      label: "Deploy",
+      detail: vercelReady ? "Live on Vercel" : deployFlow.vercelStatus === "running" ? "Building" : "Ship when ready",
+      icon: Rocket,
+      state: vercelReady ? "done" : deployFlow.vercelStatus === "running" ? "active" : "pending",
+    },
+  ] as const
 
   return (
     <section
       aria-label="Workspace builder controls"
       className="border-b border-border bg-background px-3 py-3"
     >
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)_minmax(300px,0.8fr)]">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(460px,1.25fr)]">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="secondary" className="gap-1">
               <GitBranch className="h-3.5 w-3.5" />
-              Workspace Builder
+              Swift Workspace
             </Badge>
             <Badge variant={isDirty ? "outline" : "secondary"}>
               {isDirty ? "Unsaved edits" : "Saved"}
@@ -110,10 +141,43 @@ export function WorkspaceCommandCenter({
             {projectName || "Swift project"}
           </h1>
           <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
-            Build with a patch-first loop: validate preview, keep rollback points, then ship through GitHub and Vercel.
+            Prompt, preview, patch, publish, and deploy from the same workspace.
           </p>
         </div>
 
+        <div className="grid gap-2 sm:grid-cols-4">
+          {flowSteps.map((step) => {
+            const Icon = step.icon
+            const isDone = step.state === "done"
+            const isActive = step.state === "active"
+
+            return (
+              <div
+                key={step.label}
+                className={cn(
+                  "rounded-md border px-3 py-3",
+                  isDone
+                    ? "border-emerald-500/30 bg-emerald-500/10"
+                    : isActive
+                      ? "border-primary/40 bg-primary/10"
+                      : "border-border bg-muted/30"
+                )}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <Icon className={cn("h-4 w-4", isDone && "text-emerald-600", isActive && "text-primary")} />
+                  <Badge variant={isDone ? "secondary" : isActive ? "default" : "outline"} className="text-[10px]">
+                    {isDone ? "Done" : isActive ? "Now" : "Next"}
+                  </Badge>
+                </div>
+                <div className="mt-3 text-sm font-medium text-foreground">{step.label}</div>
+                <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{step.detail}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(320px,0.9fr)_minmax(300px,0.8fr)]">
         <div className="rounded-md border border-border bg-muted/30 p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-medium">
