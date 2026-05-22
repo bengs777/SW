@@ -371,8 +371,8 @@ function buildPlannerOutput(input: {
     ...requiredRoutes,
     ...requiredModules,
     ...input.blueprintRequiredFiles,
-    input.architecture.database.schema,
-    ".env.example",
+    input.structuredIntent.type === "frontend_only" ? "" : input.architecture.database.schema,
+    input.structuredIntent.type === "frontend_only" ? "" : ".env.example",
   ].filter((file) => file && file !== "none"))
   const complexity = scoreComplexity(input.prompt, requiredRoutes, requiredModules)
 
@@ -502,6 +502,11 @@ function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStruc
     components.set(path, { path, ownerRoute, reason })
   }
 
+  if (intent.type === "frontend_only") {
+    add("app/page.tsx", "app/page.tsx", "frontend-only page scope")
+    return Array.from(components.values())
+  }
+
   if (intent.archetype === "FULLSTACK_COMMERCE") {
     add("components/Navbar.tsx", "app/page.tsx", "ecommerce navigation")
     add("components/ProductCard.tsx", "app/products/page.tsx", "product listing item")
@@ -608,6 +613,7 @@ function normalizePath(value: string) {
 }
 
 function toPlannerAppType(archetype: string, appType: string): PlannerOutput["appType"] {
+  if (appType === "frontend_landing") return "other"
   if (archetype === "FULLSTACK_COMMERCE" || appType === "simple_marketplace") return "ecommerce"
   if (archetype === "DASHBOARD_SAAS" || archetype === "ADMIN_PANEL" || /dashboard|admin|saas/i.test(appType)) return "dashboard"
   if (archetype === "CONTENT_PLATFORM") return "blog"

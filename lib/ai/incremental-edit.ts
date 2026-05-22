@@ -136,6 +136,7 @@ export function detectGenerationMode(input: {
   const mode = String(input.collaborationMode || "").toLowerCase()
   if (mode === "fix" || /\b(fix|repair|perbaiki|error|bug|crash|module not found|cannot find module|import error)\b/i.test(text)) return "FIX"
   if (mode === "edit") return "EDIT"
+  if (input.existingFiles.length > 0) return "EDIT"
   if (input.existingFiles.length > 0 && isEditLikePrompt(text)) return "EDIT"
   return "BUILD"
 }

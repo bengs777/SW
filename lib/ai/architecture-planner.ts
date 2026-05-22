@@ -56,16 +56,19 @@ export function buildArchitecturePlan(input: {
   existingFiles?: GeneratedFile[]
 }): SwiftArchitecturePlan {
   const intent = input.intent
-  const modelRoutes = intent.database.models.map((model) => `app/api/${routeSegmentForModel(model)}/route.ts`)
-  const serviceFiles = unique([
-    ...intent.backend.services.map((service) => `lib/services/${service}.service.ts`),
-    ...intent.database.models.map((model) => `lib/services/${serviceSegmentForModel(model)}.service.ts`),
-  ])
-  const paymentRoutes = intent.payments.provider
+  const frontendOnly = intent.type === "frontend_only"
+  const modelRoutes = frontendOnly ? [] : intent.database.models.map((model) => `app/api/${routeSegmentForModel(model)}/route.ts`)
+  const serviceFiles = frontendOnly
+    ? []
+    : unique([
+        ...intent.backend.services.map((service) => `lib/services/${service}.service.ts`),
+        ...intent.database.models.map((model) => `lib/services/${serviceSegmentForModel(model)}.service.ts`),
+      ])
+  const paymentRoutes = !frontendOnly && intent.payments.provider
     ? ["app/api/payments/checkout/route.ts", "app/api/payments/webhook/route.ts"]
     : []
-  const storageAdapters = intent.storage.provider ? [`lib/storage/${String(intent.storage.provider).replace(/_/g, "-")}.ts`] : []
-  const authRoutes = intent.auth.provider ? ["app/api/auth/[...nextauth]/route.ts"] : []
+  const storageAdapters = !frontendOnly && intent.storage.provider ? [`lib/storage/${String(intent.storage.provider).replace(/_/g, "-")}.ts`] : []
+  const authRoutes = !frontendOnly && intent.auth.provider ? ["app/api/auth/[...nextauth]/route.ts"] : []
   const pages = pagesForIntent(intent)
   const requiredEnvVars = unique(
     intent.integrations.flatMap((integration) => integration.requiredEnvVars)
@@ -83,9 +86,9 @@ export function buildArchitecturePlan(input: {
       services: serviceFiles,
     },
     database: {
-      provider: intent.database.provider,
-      schema: intent.database.provider ? "prisma/schema.prisma" : "none",
-      models: intent.database.models,
+      provider: frontendOnly ? null : intent.database.provider,
+      schema: !frontendOnly && intent.database.provider ? "prisma/schema.prisma" : "none",
+      models: frontendOnly ? [] : intent.database.models,
     },
     storage: {
       provider: intent.storage.provider,
@@ -98,7 +101,7 @@ export function buildArchitecturePlan(input: {
     payments: {
       provider: intent.payments.provider,
       routes: paymentRoutes,
-      services: intent.payments.provider ? ["lib/services/payment.service.ts"] : [],
+      services: !frontendOnly && intent.payments.provider ? ["lib/services/payment.service.ts"] : [],
     },
     integrations: intent.integrations.map((integration) => ({
       kind: integration.kind,
@@ -135,6 +138,7 @@ export function buildArchitectureInstructionBlock(plan: SwiftArchitecturePlan) {
 
 function pagesForIntent(intent: SwiftStructuredIntent) {
   const pages = new Set<string>(["app/page.tsx"])
+  if (intent.type === "frontend_only") return Array.from(pages)
   if (intent.archetype === "FULLSTACK_COMMERCE") {
     pages.add("app/products/page.tsx")
     pages.add("app/products/[id]/page.tsx")
@@ -152,7 +156,9 @@ function pagesForIntent(intent: SwiftStructuredIntent) {
 }
 
 function dependenciesForIntent(intent: SwiftStructuredIntent) {
-  const dependencies = new Set(["next", "react", "react-dom", "typescript", "tailwindcss", "zod"])
+  const dependencies = new Set(["next", "react", "react-dom", "typescript", "tailwindcss"])
+  if (intent.type === "frontend_only") return Array.from(dependencies).sort()
+  dependencies.add("zod")
   if (intent.database.provider) {
     dependencies.add("prisma")
     dependencies.add("@prisma/client")

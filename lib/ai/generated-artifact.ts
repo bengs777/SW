@@ -6,6 +6,7 @@ import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 const MAX_GENERATED_FILES = 100
 const MAX_SINGLE_FILE_BYTES = 200 * 1024
+const ARTIFACT_SCHEMA_POLICY = "strict-json-schema-required"
 const PROTECTED_DELETE_FILES = new Set([
   "app/layout.tsx",
   "app/page.tsx",
@@ -302,19 +303,11 @@ function diagnoseJsonEnvelope(value: string) {
 
 function tryParseJson(value: string) {
   const raw = String(value || "").trim()
+  if (/^```/m.test(raw)) return null
 
   try {
     return JSON.parse(raw)
   } catch {
-    const fenced = extractJsonFence(raw)
-    if (fenced) {
-      try {
-        return JSON.parse(fenced)
-      } catch {
-        return null
-      }
-    }
-
     return null
   }
 }

@@ -1,6 +1,7 @@
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
 import { normalizeFileLanguage, type ValidLanguage } from "@/lib/workspace-state"
+import { validateGeneratedPath } from "@/lib/ai/file-policy"
 
 type ProviderOutputParseResult = {
   files: GeneratedFile[]
@@ -609,16 +610,11 @@ function normalizeGeneratedFiles(files: GeneratedFile[]) {
 }
 
 function normalizePath(path: string) {
-  const normalized = path
-    .replace(/\\/g, "/")
-    .replace(/^\.\//, "")
-    .trim()
-
-  if (!normalized || normalized.startsWith("/") || normalized.includes("..")) {
+  try {
+    return validateGeneratedPath(path).path
+  } catch {
     return ""
   }
-
-  return normalized
 }
 
 function normalizeLanguage(language: string, path: string): ValidLanguage {

@@ -1,4 +1,5 @@
 import type { ControlledAppType } from "@/lib/ai/app-blueprints"
+import { isHardFrontendOnlyPrompt } from "@/lib/ai/architecture-intent"
 
 export type IntentAnalysis = {
   appType: ControlledAppType
@@ -98,6 +99,17 @@ const INTENT_RULES: Array<{
 
 export function analyzePromptIntent(prompt: string): IntentAnalysis {
   const text = normalizeText(prompt)
+  if (isHardFrontendOnlyPrompt(text)) {
+    return {
+      appType: "frontend_landing",
+      domain: inferFrontendDomain(text),
+      confidence: 0.94,
+      keywords: extractMatchedFrontendKeywords(text),
+      forbiddenAssumptions: ["api_routes", "auth", "dashboard", "admin", "database", "prisma", "server_actions"],
+      requiredCapabilities: ["visible_homepage", "responsive_ui", "static_mock_data"],
+    }
+  }
+
   const scored = INTENT_RULES.map((rule) => {
     const matched = rule.keywords.filter((keyword) => text.includes(normalizeText(keyword)))
     return {
@@ -120,11 +132,11 @@ export function analyzePromptIntent(prompt: string): IntentAnalysis {
   }
 
   return {
-    appType: "internal_business_tool",
+    appType: "frontend_landing",
     domain: "custom_web_app",
-    confidence: 0.35,
+    confidence: 0.58,
     keywords: [],
-    forbiddenAssumptions: ["saas_metrics", "commerce_checkout", "financial_dashboard"],
+    forbiddenAssumptions: ["api_routes", "auth", "dashboard", "database", "prisma", "financial_dashboard"],
     requiredCapabilities: ["visible_homepage", "clear_navigation", "domain_specific_content"],
   }
 }
@@ -142,4 +154,16 @@ export function buildIntentInstructionBlock(intent: IntentAnalysis) {
 
 function normalizeText(value: string) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9\u00c0-\u024f\s-]+/g, " ").replace(/\s+/g, " ").trim()
+}
+
+function inferFrontendDomain(text: string) {
+  if (/\b(soto|restaurant|restoran|food|makanan|menu)\b/i.test(text)) return "food_storefront_ui"
+  if (/\b(storefront|catalog|katalog|produk|product|cart|keranjang|checkout)\b/i.test(text)) return "storefront_ui"
+  if (/\b(marketing|landing|homepage|home page)\b/i.test(text)) return "marketing_page"
+  return "frontend_ui"
+}
+
+function extractMatchedFrontendKeywords(text: string) {
+  const keywords = ["static", "frontend only", "ui only", "homepage", "landing", "marketing", "storefront", "catalog", "menu", "restaurant", "food", "soto", "product", "cart", "checkout", "mock data"]
+  return keywords.filter((keyword) => text.includes(keyword))
 }

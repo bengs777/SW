@@ -58,6 +58,12 @@ export type SwiftArchitectureArchetype =
   | "ADMIN_PANEL"
   | "PORTFOLIO_SITE"
 
+const EXPLICIT_BACKEND_RE =
+  /\b(full\s*stack|fullstack|backend|server\s*actions?|server action|api\s+routes?|api route|route handler|database|db|prisma|postgres|postgresql|neon|turso|crud|auth|login|register|session|nextauth|role|rbac|admin|dashboard|payment|payments|pembayaran|stripe|midtrans|xendit|pakasir|webhook|storage|upload|r2)\b/i
+
+const UI_ONLY_PAGE_RE =
+  /\b(static|frontend\s*only|ui\s*only|homepage|home\s*page|landing|marketing\s+page|storefront|catalog|catalogue|katalog|menu|restaurant|restoran|food|makanan|soto|produk|product|cart|keranjang|checkout|hero|section|tailwind|mock\s+data|data\s+dummy)\b/i
+
 const DOMAIN_ALIASES: Array<{ domain: string; patterns: RegExp[] }> = [
   { domain: "coffee_shop", patterns: [/\b(coffee|kopi|cafe|coffee shop|kedai kopi)\b/i] },
   { domain: "commerce_storefront", patterns: [/\b(ecommerce|e-commerce|marketplace|toko|shop|store|produk|cart|checkout)\b/i] },
@@ -93,16 +99,27 @@ export function parseStructuredIntent(input: {
 }): SwiftStructuredIntent {
   const text = normalizeText(input.prompt)
   const providers = detectProviders(text)
-  const services = unique(SERVICE_KEYWORDS.filter((item) => item.patterns.some((pattern) => pattern.test(text))).map((item) => item.service))
-  const explicitFullstack = /\b(full\s*stack|fullstack|backend|api|database|db|prisma|turso|postgres|neon|auth|login|payment|checkout|storage|upload|r2|crud|webhook)\b/i.test(text)
-  const crudModels = unique(MODEL_KEYWORDS.filter((item) => item.patterns.some((pattern) => pattern.test(text))).map((item) => item.model))
+  const hardFrontendOnly = isHardFrontendOnlyPrompt(input.prompt)
+  const explicitFullstack = !hardFrontendOnly && hasExplicitBackendRequest(text)
+  const services = explicitFullstack
+    ? unique(SERVICE_KEYWORDS.filter((item) => item.patterns.some((pattern) => pattern.test(text))).map((item) => item.service))
+    : []
+  const crudModels = explicitFullstack
+    ? unique(MODEL_KEYWORDS.filter((item) => item.patterns.some((pattern) => pattern.test(text))).map((item) => item.model))
+    : []
   const businessRequirements = inferBusinessRequirements(text, services, crudModels)
-  const type: SwiftAppIntentType = explicitFullstack || services.length > 0 || crudModels.length > 0 ? "fullstack_app" : "frontend_only"
+  const type: SwiftAppIntentType = explicitFullstack ? "fullstack_app" : "frontend_only"
   const domain = detectDomain(text, input.appType)
-  const databaseProvider = providers.database || (type === "fullstack_app" && /\b(database|db|prisma|crud)\b/i.test(text) ? "postgres" : null)
-  const authProvider = providers.auth || (/\b(auth|login|register|session|user|role|rbac)\b/i.test(text) ? "nextauth" : null)
-  const paymentProvider = providers.payments || (/\b(payment|checkout|pembayaran)\b/i.test(text) ? "midtrans" : null)
-  const storageProvider = providers.storage || null
+  const databaseProvider = type === "fullstack_app"
+    ? providers.database || (/\b(database|db|prisma|crud)\b/i.test(text) ? "postgres" : null)
+    : null
+  const authProvider = type === "fullstack_app"
+    ? providers.auth || (/\b(auth|login|register|session|user|role|rbac)\b/i.test(text) ? "nextauth" : null)
+    : null
+  const paymentProvider = type === "fullstack_app"
+    ? providers.payments || (/\b(payment|payments|pembayaran|stripe|midtrans|xendit|pakasir)\b/i.test(text) ? "midtrans" : null)
+    : null
+  const storageProvider = type === "fullstack_app" ? providers.storage || null : null
   const models = inferModels({ domain, type, crudModels, services, databaseProvider, paymentProvider, storageProvider, authProvider })
 
   return {
@@ -178,6 +195,7 @@ function detectDomain(text: string, appType?: ControlledAppType) {
 }
 
 function selectArchetype(input: { text: string; domain: string; appType?: ControlledAppType }): SwiftArchitectureArchetype {
+  if (isHardFrontendOnlyPrompt(input.text)) return "PORTFOLIO_SITE"
   if (/\b(booking|reservation|reservasi|appointment|jadwal)\b/i.test(input.text) || input.appType === "booking_app") return "BOOKING_APP"
   if (/\b(saas|dashboard|workspace|analytics|metrics)\b/i.test(input.text) || input.appType === "saas_dashboard") return "DASHBOARD_SAAS"
   if (/\b(blog|news|cms|artikel|portal|content|berita)\b/i.test(input.text) || input.appType === "village_news_portal") return "CONTENT_PLATFORM"
@@ -185,6 +203,17 @@ function selectArchetype(input: { text: string; domain: string; appType?: Contro
   if (/\b(portfolio|portofolio|company profile|profile)\b/i.test(input.text) || input.appType === "sports_portfolio") return "PORTFOLIO_SITE"
   if (input.domain === "coffee_shop" || input.domain === "commerce_storefront" || input.appType === "simple_marketplace") return "FULLSTACK_COMMERCE"
   return input.appType === "landing_auth" ? "PORTFOLIO_SITE" : "ADMIN_PANEL"
+}
+
+export function hasExplicitBackendRequest(prompt: string) {
+  return EXPLICIT_BACKEND_RE.test(normalizeText(prompt))
+}
+
+export function isHardFrontendOnlyPrompt(prompt: string) {
+  const text = normalizeText(prompt)
+  if (!text) return false
+  if (hasExplicitBackendRequest(text)) return false
+  return UI_ONLY_PAGE_RE.test(text)
 }
 
 function inferModels(input: {

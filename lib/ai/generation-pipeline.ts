@@ -6,6 +6,7 @@ import {
   type SwiftTierKey,
 } from "@/lib/ai/swift-tiers"
 import { analyzePromptIntent } from "@/lib/ai/intent-analyzer"
+import { isHardFrontendOnlyPrompt } from "@/lib/ai/architecture-intent"
 
 export type PromptClassification =
   | "simple_ui"
@@ -196,11 +197,13 @@ export function classifyPrompt(
   const text = `${prompt}\n${input?.previewError || ""}`.toLowerCase()
   const intent = analyzePromptIntent(prompt)
   const hasExistingProject = (input?.existingFiles?.length || 0) > 0
+  const hardFrontendOnly = isHardFrontendOnlyPrompt(prompt)
   const backendIntent = intent.requiredCapabilities.some((capability) =>
     /api|prisma|model|admin|crud|management|persistence|route|service/i.test(capability)
   )
 
   if (input?.collaborationMode === "fix" && input.previewError) return "runtime_debug"
+  if (hardFrontendOnly) return hasExistingProject ? "component_edit" : "simple_ui"
   if (PREMIUM_REPAIR_RE.test(text) && REPAIR_RE.test(text)) return "runtime_debug"
   if (REPAIR_RE.test(text)) return "repair"
   if (REFACTOR_RE.test(text)) return "refactor"

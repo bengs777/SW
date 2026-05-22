@@ -46,7 +46,7 @@ import {
   type PartialEditPlan,
 } from "@/lib/ai/edit-planner"
 import { analyzePromptIntent, buildIntentInstructionBlock, type IntentAnalysis } from "@/lib/ai/intent-analyzer"
-import { parseStructuredIntent, type SwiftStructuredIntent } from "@/lib/ai/architecture-intent"
+import { isHardFrontendOnlyPrompt, parseStructuredIntent, type SwiftStructuredIntent } from "@/lib/ai/architecture-intent"
 import {
   buildArchitectureInstructionBlock,
   buildArchitecturePlan,
@@ -1401,7 +1401,9 @@ function buildGenerationPlan(input: {
     activeFilePath: previewContext?.activeFilePath || null,
     previewErrorFile: previewContext?.previewError?.filename || null,
   })
-  const appType = intent.appType || classifyControlledAppType(input.prompt)
+  const appType = structuredIntent.type === "frontend_only" && isHardFrontendOnlyPrompt(input.prompt)
+    ? "frontend_landing"
+    : intent.appType || classifyControlledAppType(input.prompt)
   const blueprint = getControlledAppBlueprint(appType)
   const generationMode = incrementalEdit.generationMode
   const productionMode = generationMode === "BUILD" && (shouldUseProductionFullStackMode(input.prompt, {
@@ -1455,6 +1457,8 @@ function buildGenerationPlan(input: {
 
   const plannedByPath = new Map<string, GenerationPlannerFile>()
   const explicitlyRequestedPaths = extractRequestedFilePaths(input.prompt).map(normalizePath)
+  const singleFileOnly = explicitlyRequestedPaths.length === 1 && /\b(only|saja|hanya)\b/i.test(input.prompt)
+  const frontendOnly = structuredIntent.type === "frontend_only"
 
   if (editPlan.mode === "partial") {
     for (const filePath of [...editPlan.targetPaths, ...editPlan.allowedNewPaths]) {
@@ -1468,7 +1472,9 @@ function buildGenerationPlan(input: {
       })
     }
   } else {
-    for (const filePath of [
+    const architecturePaths = frontendOnly && singleFileOnly
+      ? explicitlyRequestedPaths
+      : [
       ...architecture.frontend.pages,
       ...architecture.backend.apiRoutes,
       ...architecture.backend.services,
@@ -1477,7 +1483,8 @@ function buildGenerationPlan(input: {
       ...architecture.payments.routes,
       ...architecture.payments.services,
       ".env.example",
-    ].filter((filePath) => filePath && filePath !== "none").slice(0, maxFilesThisPass)) {
+    ]
+    for (const filePath of architecturePaths.filter((filePath) => filePath && filePath !== "none").slice(0, maxFilesThisPass)) {
       if (plannedByPath.size >= maxFilesThisPass) break
       const path = normalizePath(filePath)
       plannedByPath.set(path, {
@@ -1498,7 +1505,7 @@ function buildGenerationPlan(input: {
       })
     }
 
-    for (const filePath of requiredFilesForIntent) {
+    for (const filePath of (singleFileOnly ? [] : requiredFilesForIntent)) {
       if (plannedByPath.size >= maxFilesThisPass) break
       plannedByPath.set(normalizePath(filePath), {
         path: normalizePath(filePath),
@@ -1525,7 +1532,7 @@ function buildGenerationPlan(input: {
 
   const filePlan = Array.from(plannedByPath.values()).slice(0, maxFilesThisPass)
 
-  for (const componentPath of orchestration.plannerOutput.requiredComponents) {
+  for (const componentPath of singleFileOnly ? [] : orchestration.plannerOutput.requiredComponents) {
     const path = normalizePath(componentPath)
     if (isImplicitHelperFile(path, explicitlyRequestedPaths)) {
       continue
@@ -1571,7 +1578,7 @@ function buildGenerationPlan(input: {
       }
     }
   }
-  if (editPlan.mode === "full") {
+  if (editPlan.mode === "full" && !singleFileOnly && !frontendOnly) {
     const existingOrPlannedPaths = new Set([
       ...input.existingFiles.map((file) => normalizePath(file.path)),
       ...filePlan.map((file) => normalizePath(file.path)),
@@ -4477,6 +4484,7 @@ async function attemptTargetedRepair(input: {
   const dependencyMap = buildDependencyMap(currentFiles)
   const failingFiles = pickFailingFiles(currentFiles, dependencyMap, input.validationError)
   const syntaxRepairOnly = /tsx[-_ ]validation|Adjacent JSX|Missing closing tag|Unexpected token|Invalid import syntax|Duplicate export/i.test(input.validationError)
+  const minimalRepairOnly = input.plan.generationMode === "FIX" || syntaxRepairOnly
   const failingPathSet = new Set(failingFiles.map((file) => normalizePath(file.path)))
   const repairPrompt = [
     buildStaticValidationPrompt({
@@ -4506,7 +4514,9 @@ async function attemptTargetedRepair(input: {
     "- HELPER_FILE_POLICY: do not create components/app-shell.tsx, components/*-shell.tsx, or components/*helper*.tsx unless that exact path is explicitly listed in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     syntaxRepairOnly
       ? `- SYNTAX_REPAIR_MODE: return changes only for these failing file paths: ${Array.from(failingPathSet).join(", ")}. Do not touch imports unless the syntax diagnostic explicitly names an import statement.`
-      : "- Business or architecture repair may add direct missing dependencies only when validation requires them.",
+      : minimalRepairOnly
+        ? `- MINIMAL_FIX_MODE: return changes only for these failing file paths: ${Array.from(failingPathSet).join(", ")}. Do not create files, add features, or expand architecture.`
+        : "- Business or architecture repair may add direct missing dependencies only when validation requires them.",
     "- Do not regenerate the entire project.",
     "- Return only changed files.",
     "- Never create or modify next-auth.d.ts, root auth.ts, or any .env file during repair; use app/ route handlers or lib/ helpers for NextAuth changes.",
@@ -4574,7 +4584,7 @@ async function attemptTargetedRepair(input: {
   const parsedFileCount = parsed.files.length
   const allowedScopeResult = scopeArtifactToAllowedScope(parsed, input.plan)
   parsed = allowedScopeResult.artifact
-  const scoped = syntaxRepairOnly
+  const scoped = minimalRepairOnly
     ? {
         acceptedFiles: parsed.files.filter((file) => failingPathSet.has(normalizePath(file.path))),
         rejectedFiles: parsed.files.filter((file) => !failingPathSet.has(normalizePath(file.path))),

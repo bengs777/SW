@@ -3,6 +3,7 @@ import { buildProjectFiles } from "@/lib/ai/project-scaffold"
 import { analyzePromptIntent } from "@/lib/ai/intent-analyzer"
 
 export type ControlledAppType =
+  | "frontend_landing"
   | "saas_dashboard"
   | "village_news_portal"
   | "crud_admin_panel"
@@ -70,6 +71,35 @@ const BASE_REQUIRED_FILES = [
 ]
 
 const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
+  frontend_landing: {
+    appType: "frontend_landing",
+    label: "Frontend-only page",
+    starterPrompt: "Build a frontend-only Next.js App Router page with Tailwind and static mock data. Do not create API routes, auth, Prisma, database, dashboard, admin, middleware, or server actions unless explicitly requested.",
+    requiredFiles: ["app/page.tsx"],
+    dependencyPolicy: {
+      stack: ["Next.js App Router", "TypeScript", "Tailwind"],
+      allowedExternalPackages: ["next", "react", "react-dom", "typescript", "tailwindcss", "lucide-react", "clsx", "tailwind-merge"],
+      forbiddenPatterns: [
+        "pages/",
+        "app/api/",
+        "prisma/",
+        "auth.ts",
+        "next-auth.d.ts",
+        "middleware",
+        "proxy.ts",
+      ],
+    },
+    architectureRules: [
+      "Frontend-only scope: generate or edit UI files only.",
+      "Use static mock data in the target file or explicitly requested component files.",
+      "Do not create API routes, Prisma schema, auth files, dashboard/admin routes, middleware/proxy, server actions, services, or database clients.",
+    ],
+    editingRules: [
+      "Preserve existing working files unless the prompt directly targets them.",
+      "Prefer one-file edits when the user names one target file.",
+      "Do not create new files unless the user explicitly asks for components or routes.",
+    ],
+  },
   village_news_portal: blueprint("village_news_portal", "Portal informasi pemerintahan", "Build an official local government public information portal. Use the institution, city, village, agency, or ministry named by the user; if none is named, use a neutral Pemerintah Daerah identity. Public home must show hero with government identity, public services, latest news, citizen announcements, and agenda. Include full article reading pages with comments and Google/Gmail-ready login placeholders. Include admin CRUD for posts and categories. Prisma schema must model posts, categories, and comments. Do not include SaaS finance metrics, revenue, orders, conversion cards, or business analytics.", [
     "app/posts/[slug]/page.tsx",
     "app/admin/posts/page.tsx",

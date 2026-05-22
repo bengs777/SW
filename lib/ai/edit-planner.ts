@@ -67,12 +67,7 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
   const intent = forceFullGeneration ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
   const partial =
     !forceFullGeneration &&
-    hasExistingProject &&
-    (mode === "edit" ||
-      mode === "fix" ||
-      mode === "review" ||
-      intent !== "full_generation" ||
-      /\b(add|tambahkan|ganti|ubah|change|rename|update|edit|fix|perbaiki|connect|integrate|refine|polish)\b/i.test(prompt))
+    hasExistingProject
 
   if (!partial) {
     return {
