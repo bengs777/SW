@@ -680,6 +680,10 @@ function resolveImport(fromPath: string, source: string, index: ReturnType<typeo
     return { kind: "unsupported", specifier: trimmed, reason: "Remote module imports are not allowed in browser preview." }
   }
 
+  if (SHIM_MODULES[trimmed]) {
+    return { kind: "external", packageName: trimmed, specifier: trimmed }
+  }
+
   const unsupportedReason = unsupportedReasonForSpecifier(trimmed)
   if (unsupportedReason) {
     return { kind: "unsupported", specifier: trimmed, reason: unsupportedReason }

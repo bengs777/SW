@@ -38,6 +38,7 @@ function loadModule(file) {
     if (request === "@/lib/ai/file-policy") return loadModule("lib/ai/file-policy.ts")
     if (request === "@/lib/ai/runtime-contracts") return loadModule("lib/ai/runtime-contracts.ts")
     if (request === "@/lib/workspace-state") return loadModule("lib/workspace-state.ts")
+    if (request === "@/lib/types") return {}
     return require(request)
   }
 
@@ -61,6 +62,7 @@ function main() {
   const { parseRuntimeMessage, publicGenerationStructureErrorMessage } = loadModule("lib/ai/runtime-contracts.ts")
   const { SAFE_GENERATED_ROOT_FILES, validateGeneratedPath, formatGeneratedPathValidationError } =
     loadModule("lib/ai/file-policy.ts")
+  const { buildPreviewModuleGraph } = loadModule("lib/preview/module-resolution.ts")
 
   assert(
     "script.registered",
@@ -255,6 +257,20 @@ function main() {
       publicGenerationStructureErrorMessage(new Error("MALFORMED_GENERATED_ARTIFACT:schema:artifact: Unrecognized key(s) in object: 'reason'")) ===
         "AI generated invalid project structure. Repair loop attempting automatic correction...",
     "frontend and shared helper hide raw schema dumps"
+  )
+
+  const nextLinkPreviewGraph = buildPreviewModuleGraph([
+    {
+      path: "app/page.tsx",
+      language: "tsx",
+      content:
+        'import Link from "next/link"; export default function Page(){ return <Link href="/about">About</Link> }',
+    },
+  ])
+  assert(
+    "preview.next-link-shim",
+    Boolean(nextLinkPreviewGraph.shims["next/link"]) && !nextLinkPreviewGraph.importMap["next/link"],
+    "Next Link is served by the browser preview shim instead of the external package allowlist"
   )
 
   console.log("[artifact-schema] artifact schema regression checks passed")
