@@ -1,6 +1,6 @@
 "use client"
 
-import { AlertTriangle, Trash2 } from "lucide-react"
+import { AlertTriangle, RefreshCw, Trash2, Wand2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -17,6 +17,9 @@ type ErrorLogEntry = {
 interface ErrorLogPanelProps {
   logs: ErrorLogEntry[]
   onClear?: () => void
+  onRetry?: () => void
+  onRetryWithRepair?: () => void
+  isRetrying?: boolean
 }
 
 const sourceLabel: Record<ErrorLogSource, string> = {
@@ -30,7 +33,9 @@ const sourceLabel: Record<ErrorLogSource, string> = {
   github: "GitHub",
 }
 
-export function ErrorLogPanel({ logs, onClear }: ErrorLogPanelProps) {
+export function ErrorLogPanel({ logs, onClear, onRetry, onRetryWithRepair, isRetrying = false }: ErrorLogPanelProps) {
+  const hasGenerateError = logs.some((log) => log.source === "generate")
+
   return (
     <div className="flex h-full min-h-0 flex-col border-l border-border bg-background">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
@@ -52,6 +57,36 @@ export function ErrorLogPanel({ logs, onClear }: ErrorLogPanelProps) {
           <Trash2 className="h-4 w-4" />
         </Button>
       </div>
+
+      {hasGenerateError && (onRetry || onRetryWithRepair) && (
+        <div className="grid gap-2 border-b border-border p-3">
+          {onRetryWithRepair && (
+            <Button
+              type="button"
+              size="sm"
+              className="gap-2"
+              onClick={onRetryWithRepair}
+              disabled={isRetrying}
+            >
+              <Wand2 className="h-4 w-4" />
+              Retry with repair
+            </Button>
+          )}
+          {onRetry && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="gap-2"
+              onClick={onRetry}
+              disabled={isRetrying}
+            >
+              <RefreshCw className="h-4 w-4" />
+              Retry prompt
+            </Button>
+          )}
+        </div>
+      )}
 
       <ScrollArea className="min-h-0 flex-1">
         {logs.length === 0 ? (

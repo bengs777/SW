@@ -69,6 +69,7 @@ function main() {
   const incrementalEdit = loadTsModule("lib/ai/incremental-edit.ts")
   const editPlanner = loadTsModule("lib/ai/edit-planner.ts")
   const architecturePlanner = loadTsModule("lib/ai/architecture-planner.ts")
+  const softwareOrchestration = loadTsModule("lib/ai/software-orchestration.ts")
   const filePolicy = loadTsModule("lib/ai/file-policy.ts")
   const collaborationMode = loadTsModule("lib/ai/collaboration-mode.ts")
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
@@ -106,6 +107,51 @@ function main() {
   })
   assert("storefront.frontend-only", storefront.type === "frontend_only", `expected frontend_only, got ${storefront.type}`)
   assert("storefront.no-models", storefront.database.models.length === 0 && storefront.backend.services.length === 0, "storefront UI prompt must not infer products/orders services")
+
+  const warungDashboard = architectureIntent.parseStructuredIntent({
+    prompt: "Buatkan web dashboard penjualan warung",
+    appType: "simple_marketplace",
+  })
+  const warungArchitecture = architecturePlanner.buildArchitecturePlan({ intent: warungDashboard })
+  const warungOrchestration = softwareOrchestration.createSoftwareOrchestration({
+    prompt: "Buatkan web dashboard penjualan warung",
+    appType: "simple_marketplace",
+    structuredIntent: warungDashboard,
+    architecture: warungArchitecture,
+    projectMemory: { nodes: [], edges: [] },
+    dependencyGraph: { nodes: [], edges: [], missingBusinessDependencies: [] },
+    blueprintRequiredFiles: [],
+  })
+  assert(
+    "warung-dashboard.not-storefront",
+    warungOrchestration.plannerOutput.appType === "dashboard",
+    `expected dashboard planner, got ${warungOrchestration.plannerOutput.appType}`
+  )
+  assert(
+    "warung-dashboard.graph-valid",
+    warungOrchestration.validation.ok,
+    `dashboard commerce prompt should not fail storefront product/cart validation: ${warungOrchestration.validation.failures.join("; ")}`
+  )
+
+  const commerceStorefront = architectureIntent.parseStructuredIntent({
+    prompt: "Buat marketplace produk dengan cart checkout seller buyer dan admin",
+    appType: "simple_marketplace",
+  })
+  const commerceArchitecture = architecturePlanner.buildArchitecturePlan({ intent: commerceStorefront })
+  const commerceOrchestration = softwareOrchestration.createSoftwareOrchestration({
+    prompt: "Buat marketplace produk dengan cart checkout seller buyer dan admin",
+    appType: "simple_marketplace",
+    structuredIntent: commerceStorefront,
+    architecture: commerceArchitecture,
+    projectMemory: { nodes: [], edges: [] },
+    dependencyGraph: { nodes: [], edges: [], missingBusinessDependencies: [] },
+    blueprintRequiredFiles: [],
+  })
+  assert(
+    "storefront-commerce.stays-ecommerce",
+    commerceOrchestration.plannerOutput.appType === "ecommerce",
+    `expected ecommerce planner, got ${commerceOrchestration.plannerOutput.appType}`
+  )
 
   const admin = architectureIntent.parseStructuredIntent({
     prompt: "build login admin dashboard with user roles and API routes",

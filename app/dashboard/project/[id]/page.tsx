@@ -2011,6 +2011,39 @@ export default function EditorPage() {
     setErrorLogs([])
   }, [])
 
+  const handleRetryLatestGeneration = useCallback(() => {
+    if (isGenerating) return
+    const prompt = latestUserPrompt.trim()
+    if (!prompt || prompt === "Manual code edit save") {
+      appendAssistantMessage("Belum ada prompt terakhir yang bisa diulang.")
+      return
+    }
+
+    setShowLogsPanel(false)
+    void handleSendMessage(prompt, selectedModel, [], "id")
+  }, [appendAssistantMessage, handleSendMessage, isGenerating, latestUserPrompt, selectedModel])
+
+  const handleRetryLatestGenerationWithRepair = useCallback(() => {
+    if (isGenerating) return
+    const prompt = latestUserPrompt.trim()
+    if (!prompt || prompt === "Manual code edit save") {
+      appendAssistantMessage("Belum ada prompt terakhir yang bisa diperbaiki otomatis.")
+      return
+    }
+
+    const repairPrompt = [
+      prompt,
+      "",
+      "AUTO-REPAIR INSTRUCTION:",
+      "Jika validasi arsitektur gagal karena komponen commerce/dashboard hilang, klasifikasikan ulang intent dengan tepat.",
+      "Untuk dashboard penjualan atau inventory, gunakan KPI, tabel produk/inventory, transaksi, dan grafik. Jangan wajibkan cart/checkout kecuali prompt meminta storefront.",
+      "Tambahkan route atau komponen yang hilang sebelum generate file, lalu lanjutkan sampai preview siap.",
+    ].join("\n")
+
+    setShowLogsPanel(false)
+    void handleSendMessage(repairPrompt, selectedModel, [], "id", latestPreviewError, "fix")
+  }, [appendAssistantMessage, handleSendMessage, isGenerating, latestPreviewError, latestUserPrompt, selectedModel])
+
   const baseChatSize = layoutPreset === "prompt" ? 34 : layoutPreset === "preview" ? 30 : 32
   const logsDefaultSize = showLogsPanel ? 10 : 0
   const availableSize = 100 - logsDefaultSize
@@ -2252,7 +2285,13 @@ export default function EditorPage() {
               <>
                 <ResizableHandle withHandle />
                 <ResizablePanel className="min-h-0" defaultSize={10} minSize={8} maxSize={18}>
-                  <ErrorLogPanel logs={errorLogs} onClear={handleClearErrorLogs} />
+                  <ErrorLogPanel
+                    logs={errorLogs}
+                    onClear={handleClearErrorLogs}
+                    onRetry={handleRetryLatestGeneration}
+                    onRetryWithRepair={handleRetryLatestGenerationWithRepair}
+                    isRetrying={isGenerating}
+                  />
                 </ResizablePanel>
               </>
             )}

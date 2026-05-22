@@ -459,17 +459,26 @@ function buildGraphs(input: {
 function validateGraphsAgainstPlanner(planner: PlannerOutput, graphs: SoftwareOrchestrationGraphs) {
   const failures: string[] = []
   const graphRoutes = new Set(graphs.routeGraph.routes.map((route) => route.path))
+  const componentPaths = graphs.componentGraph.components.map((component) => component.path.toLowerCase())
+  const routePaths = planner.requiredRoutes.map((route) => route.toLowerCase())
+  const featureText = planner.features.join(" ").toLowerCase()
   for (const route of planner.requiredRoutes) {
     if (!graphRoutes.has(route)) failures.push(`Planner required route is absent from route graph: ${route}`)
   }
 
   if (planner.appType === "ecommerce") {
+    const commerceDashboard = isCommerceDashboardPlanner(planner)
     for (const route of ["app/products/page.tsx", "app/cart/page.tsx", "app/checkout/page.tsx"]) {
-      if (planner.requiredRoutes.includes(route) && !graphRoutes.has(route)) {
+      if (!commerceDashboard && planner.requiredRoutes.includes(route) && !graphRoutes.has(route)) {
         failures.push(`Commerce route graph missing ${route}`)
       }
     }
-    if (!graphs.componentGraph.components.some((component) => /product/i.test(component.path))) {
+    const hasProductComponent = componentPaths.some((path) => /product|produk|inventory|stock|stok|catalog|menu/.test(path))
+    const hasProductRouteOrFeature =
+      routePaths.some((path) => /product|produk|inventory|stock|stok|catalog|menu/.test(path)) ||
+      /product|produk|inventory|stock|stok|catalog|menu/.test(featureText)
+
+    if (!hasProductComponent && !hasProductRouteOrFeature) {
       failures.push("Commerce component graph missing product component")
     }
   }
@@ -494,6 +503,21 @@ function validateGraphsAgainstPlanner(planner: PlannerOutput, graphs: SoftwareOr
   if (graphs.componentGraph.components.length === 0) failures.push("Architecture produced no component graph")
 
   return failures
+}
+
+function isCommerceDashboardPlanner(planner: PlannerOutput) {
+  const text = [
+    planner.appType,
+    ...planner.features,
+    ...planner.requiredRoutes,
+    ...planner.requiredComponents,
+    ...planner.requiredFiles,
+  ].join(" ").toLowerCase()
+
+  return (
+    /\b(dashboard|admin|analytics|metric|kpi|overview|report|laporan|penjualan|sales|inventory|stock|stok)\b/.test(text) &&
+    /\b(product|produk|inventory|stock|stok|order|orders|sales|penjualan|transaction|transaksi|warung|store|toko)\b/.test(text)
+  )
 }
 
 function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStructuredIntent) {
@@ -614,8 +638,8 @@ function normalizePath(value: string) {
 
 function toPlannerAppType(archetype: string, appType: string): PlannerOutput["appType"] {
   if (appType === "frontend_landing") return "other"
-  if (archetype === "FULLSTACK_COMMERCE" || appType === "simple_marketplace") return "ecommerce"
   if (archetype === "DASHBOARD_SAAS" || archetype === "ADMIN_PANEL" || /dashboard|admin|saas/i.test(appType)) return "dashboard"
+  if (archetype === "FULLSTACK_COMMERCE" || appType === "simple_marketplace") return "ecommerce"
   if (archetype === "CONTENT_PLATFORM") return "blog"
   if (archetype === "PORTFOLIO_SITE") return /landing/i.test(appType) ? "landing" : "portfolio"
   if (archetype === "BOOKING_APP") return "saas"
