@@ -6,7 +6,6 @@ import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 const MAX_GENERATED_FILES = 100
 const MAX_SINGLE_FILE_BYTES = 200 * 1024
-const ARTIFACT_SCHEMA_POLICY = "strict-json-schema-required"
 const PROTECTED_DELETE_FILES = new Set([
   "app/layout.tsx",
   "app/page.tsx",
@@ -310,9 +309,4 @@ function tryParseJson(value: string) {
   } catch {
     return null
   }
-}
-
-function extractJsonFence(raw: string) {
-  const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  return match?.[1]?.trim() || null
 }

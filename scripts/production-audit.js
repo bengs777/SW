@@ -46,6 +46,8 @@ function staticChecks() {
   const providerRouter = exists("lib/ai/provider-router.ts") ? read("lib/ai/provider-router.ts") : ""
   const swiftTiers = exists("lib/ai/swift-tiers.ts") ? read("lib/ai/swift-tiers.ts") : ""
   const generationPipeline = exists("lib/ai/generation-pipeline.ts") ? read("lib/ai/generation-pipeline.ts") : ""
+  const softwareOrchestration = exists("lib/ai/software-orchestration.ts") ? read("lib/ai/software-orchestration.ts") : ""
+  const productUxPlanner = exists("lib/ai/product-ux-planner.ts") ? read("lib/ai/product-ux-planner.ts") : ""
   const generationOrchestrator = exists("lib/services/generation-orchestrator.service.ts")
     ? read("lib/services/generation-orchestrator.service.ts")
     : ""
@@ -81,13 +83,14 @@ function staticChecks() {
     check("ai.zod-input-validation", /z\.object\(/.test(generateJobsRoute), "Canonical queued AI endpoint validates request input with Zod"),
     check(
       "ai.single-orchestrator-model",
-      /SWIFT_CANONICAL_MODEL_ID\s*=\s*"deepseek\/deepseek-v4-pro"/.test(swiftTiers) &&
-        /SWIFT_FREE_ROUTER_MODEL_ID\s*=\s*"openrouter\/free"/.test(swiftTiers) &&
+      /SWIFT_BUILDER_MODEL_KEY\s*=\s*"swift-builder"/.test(swiftTiers) &&
+        /configuredPrimaryModel/.test(swiftTiers) &&
+        /configuredFallbackModels/.test(swiftTiers) &&
         /SWIFT_AI_FREE_MODE/.test(swiftTiers) &&
         !/deepseek-v4-flash|deepseek-v3\.2|OPENROUTER_DEEPSEEK_FLASH|OPENROUTER_DEEPSEEK_V32/.test(
           [swiftTiers, providerRouter, generationPipeline].join("\n")
         ),
-      "Swift AI runtime uses one orchestrator route, with an explicit OpenRouter free evaluation mode"
+      "Swift AI runtime uses one public builder orchestrator backed by environment-configured model routing"
     ),
     check(
       "ai.single-public-model-option",
@@ -114,6 +117,23 @@ function staticChecks() {
     check("ai.output-file-extraction", /parseGeneratedArtifact/.test(generationOrchestrator) && /generatedArtifactSchema/.test(generatedArtifact), "AI provider output is parsed into a strict GeneratedArtifact schema"),
     check("ai.controlled-app-blueprints", /ControlledAppType/.test(appBlueprints) && /saas_dashboard/.test(appBlueprints) && /simple_marketplace/.test(appBlueprints), "Generation is constrained to controlled app categories"),
     check("ai.intent-taskgraph-generation", /analyzePromptIntent/.test(generationOrchestrator) && /executeGeneratedTaskGraph/.test(generationOrchestrator), "Generation uses intent analysis and TaskGraph execution instead of starter-only output"),
+    check(
+      "ai.product-ux-planner-contract",
+      /UXProductPlan/.test(productUxPlanner) &&
+        /buildUXProductPlan/.test(productUxPlanner) &&
+        /validateGeneratedUXQuality/.test(productUxPlanner) &&
+        /uxProductPlan/.test(softwareOrchestration) &&
+        /UX_PRODUCT_PLAN/.test(softwareOrchestration),
+      "Planner produces a product UX contract that is passed to builders"
+    ),
+    check(
+      "ai.post-generation-ux-gate",
+      /validateGeneratedUXQuality/.test(generationOrchestrator) &&
+        /plannerOutput\.uxProductPlan/.test(generationOrchestrator) &&
+        /Product 1/.test(productUxPlanner) &&
+        /Project 1/.test(productUxPlanner),
+      "Post-generation audit rejects generic placeholders and enforces UX quality"
+    ),
     check("ai.partial-regeneration-contract", /buildPartialEditPlan/.test(editPlanner) && /filterFilesForPartialEdit/.test(generationOrchestrator), "Conversational edits are scoped to target files and allowed new files"),
     check("ai.edit-intent-classifier", /pricing_page/.test(editPlanner) && /schema_change/.test(editPlanner) && /upload_integration/.test(editPlanner), "Edit planner classifies common retention-driving edit intents"),
     check("ai.import-graph", /buildImportGraph/.test(importGraph) && /importedBy/.test(importGraph) && /getTransitiveImpactPaths/.test(editPlanner), "Import graph powers reverse dependency lookup and transitive edit impact analysis"),
