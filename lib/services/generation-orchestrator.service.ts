@@ -2744,7 +2744,13 @@ function auditPostGeneration(input: {
     }
   }
 
-  if (!input.previewUrl && !/ready|running|success|passed|browser-preview-only/i.test(String(input.previewStatus || ""))) {
+  const previewStatus = String(input.previewStatus || "")
+  const acceptsBrowserPreviewOnly =
+    isProductionVercel() &&
+    input.persistedFiles.length > 0 &&
+    process.env.SWIFT_REQUIRE_SANDBOX_FOR_PRODUCTION_FULLSTACK !== "true"
+
+  if (!input.previewUrl && !/ready|running|success|passed|browser-preview-only/i.test(previewStatus) && !acceptsBrowserPreviewOnly) {
     failures.push("Preview did not boot successfully")
   }
 
@@ -2753,6 +2759,11 @@ function auditPostGeneration(input: {
     failures,
     fileCount: input.persistedFiles.length,
     requiredFiles: input.plan.orchestration.plannerOutput.appType === "ecommerce" ? ecommerceRequiredFiles() : [],
+    previewMode: input.previewUrl
+      ? "runtime-sandbox"
+      : /browser-preview-only/i.test(previewStatus) || acceptsBrowserPreviewOnly
+        ? "browser-preview-only"
+        : "unavailable",
   }
 }
 

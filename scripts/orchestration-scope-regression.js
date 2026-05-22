@@ -260,6 +260,12 @@ function main() {
     "unmatched deterministic scoped edits must continue to provider scoped edit instead of failing the job"
   )
   assert(
+    "production-browser-preview-post-audit",
+    /acceptsBrowserPreviewOnly[\s\S]*isProductionVercel\(\)[\s\S]*input\.persistedFiles\.length > 0[\s\S]*SWIFT_REQUIRE_SANDBOX_FOR_PRODUCTION_FULLSTACK/.test(orchestrator) &&
+      /previewMode:[\s\S]*browser-preview-only/.test(orchestrator),
+    "Vercel production post-generation audit must not fail persisted files only because no local preview URL exists"
+  )
+  assert(
     "collaboration-mode.enum",
     collaborationMode.isCollaborationMode("build") &&
       collaborationMode.isCollaborationMode("review") &&
