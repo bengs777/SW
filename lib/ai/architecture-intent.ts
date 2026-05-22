@@ -107,7 +107,7 @@ export function parseStructuredIntent(input: {
   const crudModels = explicitFullstack
     ? unique(MODEL_KEYWORDS.filter((item) => item.patterns.some((pattern) => pattern.test(text))).map((item) => item.model))
     : []
-  const businessRequirements = inferBusinessRequirements(text, services, crudModels)
+  const businessRequirements = explicitFullstack ? inferBusinessRequirements(text, services, crudModels) : []
   const type: SwiftAppIntentType = explicitFullstack ? "fullstack_app" : "frontend_only"
   const domain = detectDomain(text, input.appType)
   const databaseProvider = type === "fullstack_app"
@@ -131,7 +131,7 @@ export function parseStructuredIntent(input: {
       styling: "tailwind",
     },
     backend: {
-      api: type === "fullstack_app" || /\b(api|route|crud|webhook)\b/i.test(text),
+      api: type === "fullstack_app" && /\b(api|api\s+routes?|route handler|crud|webhook|backend|server action)\b/i.test(text),
       services,
       crud: crudModels,
     },

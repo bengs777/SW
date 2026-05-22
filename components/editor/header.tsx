@@ -30,8 +30,10 @@ interface EditorHeaderProps {
   currentVersion: number
   onExportZip?: () => void
   onDeploy?: () => void
+  onPushGitHub?: () => void
   isExporting?: boolean
   isDeploying?: boolean
+  isPushingGitHub?: boolean
   deploymentUrl?: string | null
   customDomain?: string | null
   onDomainSaved?: (domain: string | null) => void
@@ -44,8 +46,10 @@ export function EditorHeader({
   currentVersion,
   onExportZip,
   onDeploy,
+  onPushGitHub,
   isExporting = false,
   isDeploying = false,
+  isPushingGitHub = false,
   deploymentUrl = null,
   customDomain = null,
   onDomainSaved,
@@ -104,9 +108,9 @@ export function EditorHeader({
                 <Download className="mr-2 h-4 w-4" />
                 Download ZIP
               </DropdownMenuItem>
-              <DropdownMenuItem>
+              <DropdownMenuItem onSelect={onPushGitHub} disabled={isPushingGitHub}>
                 <Github className="mr-2 h-4 w-4" />
-                Push to GitHub
+                {isPushingGitHub ? "Pushing..." : "Push to GitHub"}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

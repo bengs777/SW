@@ -10,6 +10,15 @@ import type { GeneratedFile } from "@/lib/types"
 import { readWorkspaceStateFile, splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { log } from "@/lib/logging"
 
+function historyFileCount(result: string) {
+  try {
+    const parsed = JSON.parse(result)
+    return Array.isArray(parsed) ? parsed.length : 0
+  } catch {
+    return 0
+  }
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -113,6 +122,14 @@ export async function GET(
     return NextResponse.json({
       project: {
         ...project,
+        history: project.history.map((entry) => ({
+          id: entry.id,
+          prompt: entry.prompt,
+          intent: entry.intent,
+          usedAutoRepair: entry.usedAutoRepair,
+          createdAt: entry.createdAt.toISOString(),
+          fileCount: historyFileCount(entry.result),
+        })),
         files: visibleFiles,
         workspaceState,
         fileState: {

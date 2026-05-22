@@ -15,6 +15,7 @@ import type { ModelOption, PromptAttachment } from "@/lib/types"
 import { analyzePromptIntent } from "@/lib/ai/prompt-intent"
 import { getTemplate, PROMPT_LANGUAGE_LABELS } from "@/lib/ai/prompt-templates"
 import type { PromptLanguage, PromptTemplateKey, TemplateVariant } from "@/lib/ai/prompt-templates"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 const MAX_PROMPT_LENGTH = 12000
 const MAX_ATTACHMENTS = 5
@@ -40,8 +41,6 @@ const sanitizeModelDisplayName = (value: string) =>
 
 const sanitizePublicAiCopy = (value: string) =>
   value.replace(/DeepSeek V4 Flash/gi, "Swift AI")
-
-export type CollaborationMode = "build" | "edit" | "fix" | "review" | "ask"
 
 interface ChatPanelProps {
   projectId: string

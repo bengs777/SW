@@ -6,6 +6,7 @@ import { auth } from "@/auth"
 import { prisma } from "@/lib/db/client"
 import { env } from "@/lib/env"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
+import { COLLABORATION_MODES } from "@/lib/ai/collaboration-mode"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { enqueueGenerationTask, getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { processGenerationPayload } from "@/lib/workers/generation-worker"
@@ -34,7 +35,7 @@ const CreateJobSchema = z.object({
   provider: z.string().optional(),
   plan: z.array(z.string()).optional(),
   promptLanguage: z.enum(["id", "en"]).optional().default("id"),
-  collaborationMode: z.string().trim().max(80).optional(),
+  collaborationMode: z.enum(COLLABORATION_MODES).optional().default("build"),
   idempotencyKey: z.string().trim().max(160).optional(),
   previewContext: z.unknown().optional(),
   attachments: z.array(z.unknown()).optional().default([]),

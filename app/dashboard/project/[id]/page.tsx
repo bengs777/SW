@@ -4,10 +4,15 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import { useParams } from "next/navigation"
 import { EditorHeader } from "@/components/editor/header"
 import { ChatPanel } from "@/components/editor/chat-panel"
-import type { CollaborationMode } from "@/components/editor/chat-panel"
 import { PreviewPanel } from "@/components/editor/preview-panel"
 import { ErrorLogPanel } from "@/components/editor/error-log-panel"
 import { DeveloperDiagnosticsPanel, type DeveloperDiagnosticsSnapshot } from "@/components/editor/developer-diagnostics-panel"
+import {
+  WorkspaceCommandCenter,
+  type DeployFlowState,
+  type PreviewValidationState,
+  type ProjectHistoryEntry,
+} from "@/components/editor/workspace-command-center"
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable"
 import { Button } from "@/components/ui/button"
 import {
@@ -18,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { DEFAULT_MODEL_KEY, DEFAULT_MODEL_OPTIONS } from "@/lib/ai/models"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 import { buildPreviewContextPacket } from "@/lib/ai/preview-context"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
 import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, PromptAttachment } from "@/lib/types"
@@ -283,7 +289,7 @@ export type GenerationProgress = {
 
 type ErrorLogEntry = {
   id: string
-  source: "project" | "provider" | "generate" | "preview" | "save" | "export" | "deploy"
+  source: "project" | "provider" | "generate" | "preview" | "save" | "export" | "deploy" | "github"
   message: string
   timestamp: Date
 }
@@ -313,7 +319,24 @@ export default function EditorPage() {
   const [layoutRenderKey, setLayoutRenderKey] = useState(0)
   const [isExporting, setIsExporting] = useState(false)
   const [isDeploying, setIsDeploying] = useState(false)
+  const [isPushingGitHub, setIsPushingGitHub] = useState(false)
+  const [isValidatingPreview, setIsValidatingPreview] = useState(false)
+  const [isRollingBackVersion, setIsRollingBackVersion] = useState(false)
   const [deploymentUrl, setDeploymentUrl] = useState<string | null>(null)
+  const [projectHistory, setProjectHistory] = useState<ProjectHistoryEntry[]>([])
+  const [previewValidation, setPreviewValidation] = useState<PreviewValidationState>({
+    status: "idle",
+    diagnosticsCount: 0,
+    warningCount: 0,
+    message: null,
+  })
+  const [deployFlow, setDeployFlow] = useState<DeployFlowState>({
+    githubStatus: "idle",
+    vercelStatus: "idle",
+    githubUrl: null,
+    vercelUrl: null,
+    message: null,
+  })
   const [errorLogs, setErrorLogs] = useState<ErrorLogEntry[]>([])
   const [showLogsPanel, setShowLogsPanel] = useState(false)
   const [developerDiagnostics, setDeveloperDiagnostics] = useState<DeveloperDiagnosticsSnapshot | null>(null)
@@ -405,6 +428,16 @@ export default function EditorPage() {
           language: normalizeLanguage(file.language),
         }))
       : []
+    const serverHistory: ProjectHistoryEntry[] = Array.isArray(data.project?.history)
+      ? data.project.history.map((entry: ProjectHistoryEntry) => ({
+          id: String(entry.id),
+          prompt: String(entry.prompt || "Snapshot"),
+          intent: typeof entry.intent === "string" ? entry.intent : null,
+          usedAutoRepair: Boolean(entry.usedAutoRepair),
+          createdAt: String(entry.createdAt),
+          fileCount: Number(entry.fileCount || 0),
+        }))
+      : []
     const { files } = splitWorkspaceStateFiles(serverFiles)
     const expectedFileCount = Number(data.project?.fileState?.count ?? files.length)
     if (expectedFileCount !== files.length) {
@@ -424,6 +457,7 @@ export default function EditorPage() {
       })
 
     setGeneratedFiles(files)
+    setProjectHistory(serverHistory)
     setPreviewFiles(null)
     if (reason === "project-load") {
       setRuntimePreviewUrl(null)
@@ -1617,6 +1651,7 @@ export default function EditorPage() {
 
     try {
       await saveFiles(generatedFiles, latestPrompt)
+      await refreshProjectState("manual-save")
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to save files"
       pushErrorLog("save", message)
@@ -1630,7 +1665,7 @@ export default function EditorPage() {
         },
       ])
     }
-  }, [generatedFiles, latestUserPrompt, pushErrorLog, saveFiles])
+  }, [generatedFiles, latestUserPrompt, pushErrorLog, refreshProjectState, saveFiles])
 
   const applyLayoutPreset = useCallback((preset: "prompt" | "balanced" | "preview") => {
     setLayoutPreset(preset)
@@ -1726,6 +1761,11 @@ export default function EditorPage() {
     }
 
     setIsDeploying(true)
+    setDeployFlow((current) => ({
+      ...current,
+      vercelStatus: "running",
+      message: "Deploying to Vercel...",
+    }))
     try {
       const response = await fetch(`/api/projects/${projectId}/deploy`, {
         method: "POST",
@@ -1751,6 +1791,12 @@ export default function EditorPage() {
 
       const url = data.deployment?.url || null
       setDeploymentUrl(url)
+      setDeployFlow((current) => ({
+        ...current,
+        vercelStatus: "ready",
+        vercelUrl: url,
+        message: `Vercel deployment ${data.deployment?.readyState || "BUILDING"}`,
+      }))
 
       if (url) {
         appendAssistantMessage(
@@ -1765,6 +1811,11 @@ export default function EditorPage() {
         "deploy",
         error instanceof Error ? error.message : "Gagal deploy project ke Vercel."
       )
+      setDeployFlow((current) => ({
+        ...current,
+        vercelStatus: "failed",
+        message: error instanceof Error ? error.message : "Gagal deploy project ke Vercel.",
+      }))
       appendAssistantMessage(
         error instanceof Error ? error.message : "Gagal deploy project ke Vercel."
       )
@@ -1772,6 +1823,177 @@ export default function EditorPage() {
       setIsDeploying(false)
     }
   }, [appendAssistantMessage, generatedFiles, isDeploying, projectId, pushErrorLog])
+
+  const handlePushToGitHub = useCallback(async () => {
+    if (isPushingGitHub) return
+    if (generatedFiles.length === 0) {
+      appendAssistantMessage("Belum ada file untuk push ke GitHub. Generate dulu, lalu coba lagi.")
+      return
+    }
+
+    setIsPushingGitHub(true)
+    setDeployFlow((current) => ({
+      ...current,
+      githubStatus: "running",
+      message: "Pushing project snapshot to GitHub...",
+    }))
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/github`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files: generatedFiles,
+          repoName: projectName || `swift-project-${projectId}`,
+        }),
+      })
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string
+        setupRequired?: boolean
+        repository?: {
+          url?: string | null
+          owner?: string
+          name?: string
+          branch?: string
+          commitSha?: string
+        }
+      }
+
+      if (!response.ok) {
+        const message = data.error || `GitHub push failed (${response.status})`
+        setDeployFlow((current) => ({
+          ...current,
+          githubStatus: data.setupRequired ? "setup-required" : "failed",
+          message,
+        }))
+        throw new Error(message)
+      }
+
+      const url = data.repository?.url || null
+      setDeployFlow((current) => ({
+        ...current,
+        githubStatus: "ready",
+        githubUrl: url,
+        message: data.repository?.name
+          ? `GitHub repo ready: ${data.repository.owner}/${data.repository.name}`
+          : "GitHub repo ready.",
+      }))
+
+      appendAssistantMessage(url ? `GitHub repository siap: ${url}` : "GitHub repository siap.")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Gagal push project ke GitHub."
+      pushErrorLog("github", message)
+      appendAssistantMessage(message)
+    } finally {
+      setIsPushingGitHub(false)
+    }
+  }, [appendAssistantMessage, generatedFiles, isPushingGitHub, projectId, projectName, pushErrorLog])
+
+  const handleValidatePreview = useCallback(async () => {
+    if (isValidatingPreview) return
+    if (generatedFiles.length === 0) {
+      setPreviewValidation({
+        status: "failed",
+        diagnosticsCount: 1,
+        warningCount: 0,
+        checkedAt: new Date().toISOString(),
+        message: "No files available to validate.",
+      })
+      return
+    }
+
+    setIsValidatingPreview(true)
+    setPreviewValidation((current) => ({
+      ...current,
+      status: "running",
+      message: "Running syntax, import, and preview compile checks...",
+    }))
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/validate-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: generatedFiles }),
+      })
+      const data = (await response.json().catch(() => ({}))) as {
+        ok?: boolean
+        checkedAt?: string
+        diagnostics?: Array<{ message?: string }>
+        warnings?: string[]
+        error?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || `Preview validation failed (${response.status})`)
+      }
+
+      const diagnosticsCount = Array.isArray(data.diagnostics) ? data.diagnostics.length : 0
+      const warningCount = Array.isArray(data.warnings) ? data.warnings.length : 0
+      setPreviewValidation({
+        status: data.ok ? "passed" : "failed",
+        checkedAt: data.checkedAt || new Date().toISOString(),
+        diagnosticsCount,
+        warningCount,
+        message: data.ok
+          ? `Preview validation passed for ${generatedFiles.length} files.`
+          : data.diagnostics?.[0]?.message || "Preview validation found issues.",
+      })
+      appendAssistantMessage(
+        data.ok
+          ? "Preview validation passed. Project siap untuk deploy."
+          : `Preview validation gagal: ${data.diagnostics?.[0]?.message || "cek diagnostics."}`
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Gagal validate preview."
+      setPreviewValidation({
+        status: "failed",
+        checkedAt: new Date().toISOString(),
+        diagnosticsCount: 1,
+        warningCount: 0,
+        message,
+      })
+      pushErrorLog("preview", message)
+      appendAssistantMessage(message)
+    } finally {
+      setIsValidatingPreview(false)
+    }
+  }, [appendAssistantMessage, generatedFiles, isValidatingPreview, projectId, pushErrorLog])
+
+  const handleRollbackVersion = useCallback(async (historyId: string) => {
+    if (isRollingBackVersion) return
+    setIsRollingBackVersion(true)
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/history`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ historyId }),
+      })
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string
+        files?: GeneratedFile[]
+        historyId?: string
+      }
+
+      if (!response.ok || !Array.isArray(data.files)) {
+        throw new Error(data.error || `Rollback failed (${response.status})`)
+      }
+
+      setGeneratedFiles(normalizeWorkspaceFiles(data.files))
+      setPreviewFiles(null)
+      setCurrentVersion((version) => version + 1)
+      setIsDirty(false)
+      setWorkspaceRestoreNotice("Rollback berhasil. Workspace dikembalikan ke snapshot pilihan dan versi baru sudah dibuat.")
+      await refreshProjectState("rollback")
+      appendAssistantMessage("Rollback berhasil. Snapshot lama dipulihkan sebagai versi baru.")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Gagal rollback version."
+      pushErrorLog("project", message)
+      appendAssistantMessage(message)
+    } finally {
+      setIsRollingBackVersion(false)
+    }
+  }, [appendAssistantMessage, isRollingBackVersion, projectId, pushErrorLog, refreshProjectState])
 
   const handleDomainSaved = useCallback((domain: string | null) => {
     setCustomDomain(domain)
@@ -1836,10 +2058,12 @@ export default function EditorPage() {
         projectId={projectId}
         currentVersion={currentVersion}
         onExportZip={handleExportZip}
+        onPushGitHub={handlePushToGitHub}
         subscriptionPlan={subscriptionPlan}
         subscriptionStatus={subscriptionStatus}
         onDeploy={handleDeployToVercel}
         isExporting={isExporting}
+        isPushingGitHub={isPushingGitHub}
         isDeploying={isDeploying}
         deploymentUrl={deploymentUrl}
         customDomain={customDomain}
@@ -1851,6 +2075,24 @@ export default function EditorPage() {
           {workspaceRestoreNotice}
         </div>
       )}
+
+      <WorkspaceCommandCenter
+        projectName={projectName}
+        fileCount={generatedFiles.length}
+        currentVersion={currentVersion}
+        isDirty={isDirty}
+        history={projectHistory}
+        previewValidation={previewValidation}
+        deployFlow={deployFlow}
+        isValidatingPreview={isValidatingPreview}
+        isRollingBack={isRollingBackVersion}
+        isPushingGitHub={isPushingGitHub}
+        isDeploying={isDeploying}
+        onValidatePreview={handleValidatePreview}
+        onRollback={handleRollbackVersion}
+        onPushGitHub={handlePushToGitHub}
+        onDeployVercel={handleDeployToVercel}
+      />
 
       {isMobile ? (
         <>

@@ -7,6 +7,7 @@ import {
 } from "@/lib/ai/swift-tiers"
 import { analyzePromptIntent } from "@/lib/ai/intent-analyzer"
 import { isHardFrontendOnlyPrompt } from "@/lib/ai/architecture-intent"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 export type PromptClassification =
   | "simple_ui"
@@ -189,7 +190,7 @@ const UNSUPPORTED_PREVIEW_IMPORTS = new Map<string, string>([
 export function classifyPrompt(
   prompt: string,
   input?: {
-    collaborationMode?: string
+    collaborationMode?: CollaborationMode
     previewError?: string | null
     existingFiles?: GeneratedFile[]
   }

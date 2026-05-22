@@ -1,5 +1,6 @@
 import type { GeneratedFile, PreviewContext } from "@/lib/types"
 import { buildImportGraph, getTransitiveImpactPaths } from "@/lib/ai/import-graph"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 export type EditIntent =
   | "full_generation"
@@ -36,7 +37,7 @@ export type PartialEditPlan = {
 type BuildEditPlanInput = {
   prompt: string
   existingFiles: GeneratedFile[]
-  collaborationMode?: string | null
+  collaborationMode?: CollaborationMode | null
   previewContext?: PreviewContext | null
 }
 
@@ -64,9 +65,10 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
   const activeFilePath = normalizePath(input.previewContext?.activeFilePath || "")
   const previewErrorFile = normalizePath(input.previewContext?.previewError?.filename || "")
   const forceFullGeneration = isFullReplacementPrompt(prompt)
-  const intent = forceFullGeneration ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
+  const intent = forceFullGeneration && !hasExistingProject ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
+  const promptMentionedPaths = findPromptMentionedPaths(prompt, existingPaths)
+  const singleFileOnly = promptMentionedPaths.length === 1 && /\b(only|hanya|saja)\b/i.test(prompt)
   const partial =
-    !forceFullGeneration &&
     hasExistingProject
 
   if (!partial) {
@@ -95,15 +97,17 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
     targetPaths.add(previewErrorFile)
   }
 
-  addIntentPaths({
-    intent,
-    prompt: normalizedPrompt,
-    existingPaths,
-    targetPaths,
-    allowedNewPaths,
-  })
+  if (!singleFileOnly) {
+    addIntentPaths({
+      intent,
+      prompt: normalizedPrompt,
+      existingPaths,
+      targetPaths,
+      allowedNewPaths,
+    })
+  }
 
-  for (const path of findPromptMentionedPaths(prompt, existingPaths)) {
+  for (const path of promptMentionedPaths) {
     targetPaths.add(path)
   }
 
@@ -113,14 +117,16 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
     }
   }
 
-  const impactPaths = getTransitiveImpactPaths(importGraph, Array.from(targetPaths), {
-    direction: "both",
-    maxDepth: intent === "runtime_fix" || intent === "schema_change" ? 2 : 1,
-    maxFiles: maxSlicesForIntent(intent) + 4,
-  })
-  for (const path of impactPaths) {
-    if (fileExists(path, existingPaths) && targetPaths.size < maxSlicesForIntent(intent)) {
-      targetPaths.add(path)
+  if (!singleFileOnly) {
+    const impactPaths = getTransitiveImpactPaths(importGraph, Array.from(targetPaths), {
+      direction: "both",
+      maxDepth: intent === "runtime_fix" || intent === "schema_change" ? 2 : 1,
+      maxFiles: maxSlicesForIntent(intent) + 4,
+    })
+    for (const path of impactPaths) {
+      if (fileExists(path, existingPaths) && targetPaths.size < maxSlicesForIntent(intent)) {
+        targetPaths.add(path)
+      }
     }
   }
 
@@ -222,7 +228,7 @@ function classifyEditIntent(prompt: string, mode: string): EditIntent {
     return "upload_integration"
   }
 
-  if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/.test(prompt)) {
+  if (/\b(payment|payments|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/.test(prompt)) {
     return "payment_integration"
   }
 

@@ -5,6 +5,7 @@ import { log } from "@/lib/logging"
 import { warnIfSlow } from "@/lib/observability/performance-monitor"
 import { recordRedisLatency, recordWorkerUtilization } from "@/lib/observability/runtime-metrics"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 export type GenerationQueueJobName = "generation.execute"
 
@@ -18,7 +19,7 @@ export type GenerationQueuePayload = {
   usageLogId: string
   reservedCost: number
   modelConfigId: string
-  collaborationMode?: string
+  collaborationMode?: CollaborationMode
   promptLanguage?: "id" | "en"
   idempotencyKey?: string
   requestHash?: string

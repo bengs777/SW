@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 export type GenerationJobRequestHashInput = {
   projectId: string
@@ -7,7 +8,7 @@ export type GenerationJobRequestHashInput = {
   model: string
   provider?: string
   promptLanguage?: "id" | "en"
-  collaborationMode?: string
+  collaborationMode?: CollaborationMode
   previewContext?: unknown
   attachments: unknown[]
 }

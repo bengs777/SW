@@ -2,6 +2,7 @@ import { parse } from "@babel/parser"
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
 import { buildDependencyMap } from "@/lib/ai/generation-pipeline"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 import {
   applySemanticScopedEdit,
   buildSemanticEditDiagnostics,
@@ -130,7 +131,7 @@ export type ScopedEditResult = z.infer<typeof ScopedEditResultSchema>
 export function detectGenerationMode(input: {
   prompt: string
   existingFiles: GeneratedFile[]
-  collaborationMode?: string | null
+  collaborationMode?: CollaborationMode | null
 }): GenerationMode {
   const text = normalizeText(input.prompt)
   const mode = String(input.collaborationMode || "").toLowerCase()
@@ -156,7 +157,7 @@ export function classifyIncrementalEditIntent(prompt: string): IncrementalEditIn
 export function buildIncrementalEditPlan(input: {
   prompt: string
   files: GeneratedFile[]
-  collaborationMode?: string | null
+  collaborationMode?: CollaborationMode | null
   activeFilePath?: string | null
   previewErrorFile?: string | null
 }): IncrementalEditPlan {

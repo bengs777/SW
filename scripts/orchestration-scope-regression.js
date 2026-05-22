@@ -67,8 +67,12 @@ function main() {
   const intentAnalyzer = loadTsModule("lib/ai/intent-analyzer.ts")
   const generationPipeline = loadTsModule("lib/ai/generation-pipeline.ts")
   const incrementalEdit = loadTsModule("lib/ai/incremental-edit.ts")
+  const editPlanner = loadTsModule("lib/ai/edit-planner.ts")
+  const architecturePlanner = loadTsModule("lib/ai/architecture-planner.ts")
   const filePolicy = loadTsModule("lib/ai/file-policy.ts")
+  const collaborationMode = loadTsModule("lib/ai/collaboration-mode.ts")
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
+  const generateJobsRoute = read("app/api/generate/jobs/route.ts")
 
   assert(
     "script.registered",
@@ -81,8 +85,21 @@ function main() {
   })
   assert("soto.frontend-only", soto.type === "frontend_only", `expected frontend_only, got ${soto.type}`)
   assert("soto.no-backend", !soto.backend.api && !soto.database.provider && !soto.auth.provider, "soto UI prompt must not infer API/database/auth")
+  assert("soto.no-business-backend", soto.businessRequirements.length === 0, "frontend-only prompt must not infer checkout/order business requirements")
   assert("soto.intent", intentAnalyzer.analyzePromptIntent("soto restaurant homepage").appType === "frontend_landing", "soto homepage maps to frontend_landing")
   assert("soto.pipeline", generationPipeline.classifyPrompt("soto restaurant homepage") === "simple_ui", "soto homepage maps to simple_ui")
+  assert("checkout.pipeline", generationPipeline.classifyPrompt("food storefront with cart and checkout CTA") === "simple_ui", "checkout CTA must not promote storefront UI to fullstack")
+  const sotoArchitecture = architecturePlanner.buildArchitecturePlan({ intent: soto })
+  assert(
+    "soto.architecture-frontend-only",
+    sotoArchitecture.frontend.pages.length === 1 &&
+      sotoArchitecture.frontend.pages[0] === "app/page.tsx" &&
+      sotoArchitecture.backend.apiRoutes.length === 0 &&
+      sotoArchitecture.backend.services.length === 0 &&
+      sotoArchitecture.database.schema === "none" &&
+      sotoArchitecture.auth.routes.length === 0,
+    "frontend-only architecture must stay one page with no backend/auth/database routes"
+  )
 
   const storefront = architectureIntent.parseStructuredIntent({
     prompt: "food storefront with cart, menu categories, product cards, and mobile responsive layout",
@@ -107,6 +124,39 @@ function main() {
       existingFiles,
     }) === "EDIT",
     "existing project prompts must prefer EDIT over BUILD"
+  )
+  const singleFileEditPlan = editPlanner.buildPartialEditPlan({
+    prompt: "MODE: Edit\nTARGET FILE: app/page.tsx\nedit only one file",
+    existingFiles,
+    collaborationMode: "edit",
+  })
+  assert(
+    "edit-only-one-file",
+    singleFileEditPlan.mode === "partial" &&
+      singleFileEditPlan.targetPaths.length === 1 &&
+      singleFileEditPlan.targetPaths[0] === "app/page.tsx" &&
+      singleFileEditPlan.allowedNewPaths.length === 0,
+    `expected one-file partial edit, got ${JSON.stringify(singleFileEditPlan)}`
+  )
+  const replacementPlan = editPlanner.buildPartialEditPlan({
+    prompt: "rewrite all project but keep app/page.tsx only",
+    existingFiles,
+  })
+  assert(
+    "full-replacement-existing-stays-partial",
+    replacementPlan.mode === "partial",
+    "existing project full replacement language must still prefer smallest safe scope"
+  )
+  const checkoutUiEditPlan = editPlanner.buildPartialEditPlan({
+    prompt: "Tambahkan checkout CTA di app/page.tsx only",
+    existingFiles,
+    collaborationMode: "edit",
+  })
+  assert(
+    "checkout-ui-not-payment-integration",
+    checkoutUiEditPlan.intent !== "payment_integration" &&
+      checkoutUiEditPlan.allowedNewPaths.length === 0,
+    `checkout UI copy must not add payment backend paths, got ${JSON.stringify(checkoutUiEditPlan)}`
   )
   assert(
     "fix-mode",
@@ -145,11 +195,31 @@ function main() {
     "frontend-only prompts select frontend_landing blueprint"
   )
   assert(
+    "orchestrator.checkout-not-fullstack",
+    !/payment\|checkout\|webhook/.test(orchestrator) && /payment\|payments\|bayar/.test(orchestrator),
+    "checkout alone must not be treated as explicit fullstack intent"
+  )
+  assert(
     "repair.minimal-fix",
     /const minimalRepairOnly = input\.plan\.generationMode === "FIX" \|\| syntaxRepairOnly/.test(orchestrator) &&
       /MINIMAL_FIX_MODE/.test(orchestrator) &&
       /minimalRepairOnly[\s\S]*acceptedFiles: parsed\.files\.filter/.test(orchestrator),
     "FIX repair is constrained to failing files"
+  )
+  assert(
+    "collaboration-mode.enum",
+    collaborationMode.isCollaborationMode("build") &&
+      collaborationMode.isCollaborationMode("review") &&
+      !collaborationMode.isCollaborationMode("dashboard") &&
+      collaborationMode.normalizeCollaborationMode("FIX") === "fix" &&
+      collaborationMode.normalizeCollaborationMode("dashboard") === "build",
+    "collaboration mode must be a closed enum with deterministic normalization"
+  )
+  assert(
+    "generate-job-mode-schema",
+    /COLLABORATION_MODES/.test(generateJobsRoute) &&
+      /z\.enum\(COLLABORATION_MODES\)\.optional\(\)\.default\("build"\)/.test(generateJobsRoute),
+    "generate job API must validate collaborationMode against the shared enum"
   )
 
   console.log("[orchestration-scope] orchestration scope regression checks passed")

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 
-type ErrorLogSource = "project" | "provider" | "generate" | "preview" | "save" | "export" | "deploy"
+type ErrorLogSource = "project" | "provider" | "generate" | "preview" | "save" | "export" | "deploy" | "github"
 
 type ErrorLogEntry = {
   id: string
@@ -27,6 +27,7 @@ const sourceLabel: Record<ErrorLogSource, string> = {
   save: "Save",
   export: "Export",
   deploy: "Deploy",
+  github: "GitHub",
 }
 
 export function ErrorLogPanel({ logs, onClear }: ErrorLogPanelProps) {

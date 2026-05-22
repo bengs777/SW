@@ -106,6 +106,7 @@ import {
   recordRuntimeRecoveryEvent,
 } from "@/lib/observability/runtime-recovery"
 import { timeoutConfig } from "@/lib/timeouts"
+import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 type GenerationPlannerFile = {
   path: string
@@ -210,7 +211,7 @@ type ExecuteGenerationJobInput = {
   prompt: string
   selectedModel: string
   promptLanguage?: "id" | "en"
-  collaborationMode?: string
+  collaborationMode?: CollaborationMode
   previewContext?: unknown
   persistenceKey?: string | null
   correlationId?: string
@@ -415,10 +416,10 @@ function assertNotAborted(signal?: AbortSignal) {
   }
 }
 
-function shouldUseProductionFullStackMode(prompt: string, input?: { collaborationMode?: string | null }) {
+function shouldUseProductionFullStackMode(prompt: string, input?: { collaborationMode?: CollaborationMode | null }) {
   const text = `${prompt}\n${input?.collaborationMode || ""}`.toLowerCase()
   const explicitFullStack =
-    /\b(full\s*stack|fullstack|backend|database|db|prisma|postgres|api route|route handler|crud|auth|login|register|role|rbac|admin|pengelola|user|payment|checkout|webhook|integrasi|integration|bpjs|klinik|clinic|rumah sakit|hospital|pasien|patient|dokter|doctor|appointment|janji temu|jadwal)\b/i.test(text)
+    /\b(full\s*stack|fullstack|backend|database|db|prisma|postgres|api route|route handler|crud|auth|login|register|role|rbac|admin|pengelola|user|payment|stripe|webhook|integrasi|integration|bpjs|klinik|clinic|rumah sakit|hospital|pasien|patient|dokter|doctor|appointment|janji temu|jadwal)\b/i.test(text)
   const explicitBuild =
     /\b(buat|bikin|generate|build|jadikan|create|website|web|app|aplikasi|desain|rancang|struktur)\b/i.test(text)
 
@@ -492,7 +493,7 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
     required.add("lib/services/bpjs.ts")
   }
 
-  if (/\b(payment|checkout|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/i.test(text)) {
+  if (/\b(payment|payments|bayar|pembayaran|pakasir|stripe|midtrans|xendit|webhook)\b/i.test(text)) {
     required.add("app/api/payments/checkout/route.ts")
     required.add("app/api/payments/webhook/route.ts")
     required.add("lib/services/payment.service.ts")
@@ -1373,7 +1374,7 @@ export function ClinicDashboard() {
 function buildGenerationPlan(input: {
   prompt: string
   existingFiles: GeneratedFile[]
-  collaborationMode?: string | null
+  collaborationMode?: CollaborationMode | null
   previewContext?: unknown
   previousMemoryJson?: string | null
 }) {
