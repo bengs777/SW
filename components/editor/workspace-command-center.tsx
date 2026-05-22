@@ -3,8 +3,12 @@
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
+  AlertCircle,
+  ArrowRight,
   CheckCircle2,
+  Code2,
   Clock3,
+  ExternalLink,
   Eye,
   GitBranch,
   Github,
@@ -15,6 +19,7 @@ import {
   Rocket,
   RotateCcw,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -69,6 +74,32 @@ const deployStatusLabel: Record<DeployFlowState["githubStatus"] | DeployFlowStat
   failed: "Failed",
 }
 
+const deployStatusTone: Record<DeployFlowState["githubStatus"] | DeployFlowState["vercelStatus"], string> = {
+  idle: "border-border bg-background text-muted-foreground",
+  running: "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+  ready: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  "setup-required": "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  failed: "border-destructive/30 bg-destructive/10 text-destructive",
+}
+
+const stepStateTone = {
+  done: {
+    shell: "border-emerald-500/30 bg-emerald-500/10",
+    icon: "bg-emerald-600 text-white",
+    badge: "Done",
+  },
+  active: {
+    shell: "border-sky-500/35 bg-sky-500/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
+    icon: "bg-sky-600 text-white",
+    badge: "Now",
+  },
+  pending: {
+    shell: "border-border bg-background",
+    icon: "bg-muted text-muted-foreground",
+    badge: "Next",
+  },
+} as const
+
 export function WorkspaceCommandCenter({
   projectName,
   fileCount,
@@ -92,6 +123,32 @@ export function WorkspaceCommandCenter({
   const hasFiles = fileCount > 0
   const githubReady = deployFlow.githubStatus === "ready"
   const vercelReady = deployFlow.vercelStatus === "ready"
+  const hasShipIssue = deployFlow.githubStatus === "failed" || deployFlow.githubStatus === "setup-required" || deployFlow.vercelStatus === "failed"
+  const progressValue = Math.round(
+    ([
+      Boolean(latestHistory),
+      validationPassed || hasFiles,
+      githubReady,
+      vercelReady,
+    ].filter(Boolean).length /
+      4) *
+      100
+  )
+  const activeStage = vercelReady
+    ? "Live"
+    : deployFlow.vercelStatus === "running"
+      ? "Deploying"
+      : githubReady
+        ? "Ready to deploy"
+        : deployFlow.githubStatus === "running"
+          ? "Publishing"
+          : validationPassed
+            ? "Ready to ship"
+            : hasFiles
+              ? "Review preview"
+              : latestHistory
+                ? "Generating"
+                : "Prompting"
   const flowSteps = [
     {
       label: "Prompt",
@@ -124,52 +181,65 @@ export function WorkspaceCommandCenter({
       aria-label="Workspace builder controls"
       className="border-b border-border bg-background px-3 py-3"
     >
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(460px,1.25fr)]">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(560px,1.25fr)]">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary" className="gap-1">
-              <GitBranch className="h-3.5 w-3.5" />
-              Swift Workspace
+            <Badge variant="secondary" className="h-6 gap-1 rounded-md">
+              <Sparkles className="h-3.5 w-3.5" />
+              AI Builder
             </Badge>
-            <Badge variant={isDirty ? "outline" : "secondary"}>
+            <Badge variant={isDirty ? "outline" : "secondary"} className="h-6 rounded-md">
               {isDirty ? "Unsaved edits" : "Saved"}
             </Badge>
-            <Badge variant="outline">v{currentVersion}</Badge>
-            <Badge variant="outline">{fileCount} files</Badge>
+            <Badge variant="outline" className="h-6 rounded-md">v{currentVersion}</Badge>
+            <Badge variant="outline" className="h-6 rounded-md">{fileCount} files</Badge>
           </div>
-          <h1 className="mt-2 truncate text-sm font-semibold text-foreground">
+          <h1 className="mt-2 truncate text-base font-semibold text-foreground">
             {projectName || "Swift project"}
           </h1>
-          <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
-            Prompt, preview, patch, publish, and deploy from the same workspace.
-          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
+              <Code2 className="h-3.5 w-3.5" />
+              Prompt to production
+            </span>
+            <span className="hidden text-border sm:inline">/</span>
+            <span>{activeStage}</span>
+            <span className="hidden text-border sm:inline">/</span>
+            <span>{progressValue}% ready</span>
+          </div>
+          <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-sky-500 via-emerald-500 to-amber-500 transition-all"
+              style={{ width: `${progressValue}%` }}
+            />
+          </div>
         </div>
 
         <div className="grid gap-2 sm:grid-cols-4">
-          {flowSteps.map((step) => {
+          {flowSteps.map((step, index) => {
             const Icon = step.icon
-            const isDone = step.state === "done"
-            const isActive = step.state === "active"
+            const tone = stepStateTone[step.state]
 
             return (
               <div
                 key={step.label}
                 className={cn(
-                  "rounded-md border px-3 py-3",
-                  isDone
-                    ? "border-emerald-500/30 bg-emerald-500/10"
-                    : isActive
-                      ? "border-primary/40 bg-primary/10"
-                      : "border-border bg-muted/30"
+                  "relative rounded-lg border px-3 py-3 transition-colors",
+                  tone.shell
                 )}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <Icon className={cn("h-4 w-4", isDone && "text-emerald-600", isActive && "text-primary")} />
-                  <Badge variant={isDone ? "secondary" : isActive ? "default" : "outline"} className="text-[10px]">
-                    {isDone ? "Done" : isActive ? "Now" : "Next"}
+                  <span className={cn("inline-flex h-7 w-7 items-center justify-center rounded-md", tone.icon)}>
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <Badge variant="outline" className="h-5 rounded-md bg-background/70 text-[10px]">
+                    {tone.badge}
                   </Badge>
                 </div>
-                <div className="mt-3 text-sm font-medium text-foreground">{step.label}</div>
+                <div className="mt-3 flex items-center gap-1 text-sm font-medium text-foreground">
+                  <span>{step.label}</span>
+                  {index < flowSteps.length - 1 && <ArrowRight className="h-3.5 w-3.5 text-muted-foreground sm:hidden" />}
+                </div>
                 <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{step.detail}</div>
               </div>
             )
@@ -178,13 +248,13 @@ export function WorkspaceCommandCenter({
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(320px,0.9fr)_minmax(300px,0.8fr)]">
-        <div className="rounded-md border border-border bg-muted/30 p-3">
+        <div className="rounded-lg border border-border bg-background p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-medium">
               <ShieldCheck className={cn("h-4 w-4", validationPassed && "text-emerald-600", validationFailed && "text-destructive")} />
               Preview validation
             </div>
-            <Badge variant={validationFailed ? "destructive" : validationPassed ? "secondary" : "outline"}>
+            <Badge variant={validationFailed ? "destructive" : validationPassed ? "secondary" : "outline"} className="rounded-md">
               {previewValidation.status}
             </Badge>
           </div>
@@ -206,13 +276,13 @@ export function WorkspaceCommandCenter({
           </Button>
         </div>
 
-        <div className="rounded-md border border-border bg-muted/30 p-3">
+        <div className="rounded-lg border border-border bg-background p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-medium">
               <History className="h-4 w-4" />
               Version history
             </div>
-            <Badge variant="outline">{history.length}</Badge>
+            <Badge variant="outline" className="rounded-md">{history.length}</Badge>
           </div>
           <div className="mt-2 space-y-2">
             {history.slice(0, 3).map((entry, index) => (
@@ -245,26 +315,44 @@ export function WorkspaceCommandCenter({
         </div>
       </div>
 
-      <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <span>Ship flow</span>
-          <Badge variant={deployFlow.githubStatus === "failed" ? "destructive" : "outline"}>
-            GitHub: {deployStatusLabel[deployFlow.githubStatus]}
-          </Badge>
-          <Badge variant={deployFlow.vercelStatus === "failed" ? "destructive" : deployFlow.vercelStatus === "ready" ? "secondary" : "outline"}>
-            Vercel: {deployStatusLabel[deployFlow.vercelStatus]}
-          </Badge>
-          {deployFlow.message && <span className="truncate">{deployFlow.message}</span>}
+      <div className="mt-3 flex flex-col gap-3 border-t border-border pt-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0 space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="inline-flex items-center gap-1 font-medium text-foreground">
+              <GitBranch className="h-3.5 w-3.5" />
+              Ship flow
+            </span>
+            <span className={cn("rounded-md border px-2 py-1", deployStatusTone[deployFlow.githubStatus])}>
+              GitHub: {deployStatusLabel[deployFlow.githubStatus]}
+            </span>
+            <span className={cn("rounded-md border px-2 py-1", deployStatusTone[deployFlow.vercelStatus])}>
+              Vercel: {deployStatusLabel[deployFlow.vercelStatus]}
+            </span>
+          </div>
+          {(hasShipIssue || deployFlow.message) && (
+            <div className="flex min-w-0 items-start gap-2 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">
+                {deployFlow.message || "Connect GitHub and Vercel tokens on the server to unlock one-click publish."}
+              </span>
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {deployFlow.githubUrl && (
-            <Button size="sm" variant="ghost" asChild>
-              <a href={deployFlow.githubUrl} target="_blank" rel="noreferrer">Open GitHub</a>
+            <Button size="sm" variant="ghost" className="gap-2" asChild>
+              <a href={deployFlow.githubUrl} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                GitHub
+              </a>
             </Button>
           )}
           {deployFlow.vercelUrl && (
-            <Button size="sm" variant="ghost" asChild>
-              <a href={deployFlow.vercelUrl} target="_blank" rel="noreferrer">Open Vercel</a>
+            <Button size="sm" variant="ghost" className="gap-2" asChild>
+              <a href={deployFlow.vercelUrl} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                Vercel
+              </a>
             </Button>
           )}
           <Button size="sm" variant="outline" className="gap-2" onClick={onPushGitHub} disabled={isPushingGitHub}>
