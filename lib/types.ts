@@ -67,6 +67,7 @@ export interface PreviewContext {
   previewFiles: PreviewFileSnapshot[]
   generatedFileCount: number
   previewFileCount: number
+  protectedPaths?: string[]
   notes?: string[]
 }
 

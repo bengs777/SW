@@ -30,6 +30,7 @@ export type PartialEditPlan = {
   targetPaths: string[]
   allowedNewPaths: string[]
   preservePaths: string[]
+  protectedPaths: string[]
   maxSlices: number
   requiresFullValidation: boolean
 }
@@ -64,6 +65,9 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
   const hasExistingProject = existingPaths.length > 0
   const activeFilePath = normalizePath(input.previewContext?.activeFilePath || "")
   const previewErrorFile = normalizePath(input.previewContext?.previewError?.filename || "")
+  const protectedPaths = Array.from(
+    new Set((input.previewContext?.protectedPaths || []).map(normalizePath).filter((path) => fileExists(path, existingPaths)))
+  )
   const forceFullGeneration = isFullReplacementPrompt(prompt)
   const intent = forceFullGeneration && !hasExistingProject ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
   const promptMentionedPaths = findPromptMentionedPaths(prompt, existingPaths)
@@ -82,6 +86,7 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
       targetPaths: [],
       allowedNewPaths: [],
       preservePaths: [],
+      protectedPaths: [],
       maxSlices: 3,
       requiresFullValidation: true,
     }
@@ -140,6 +145,7 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
   const preservePaths = existingPaths
     .filter((path) => !targetPaths.has(path))
     .filter((path) => !ALWAYS_ALLOWED_PATCH_FILES.has(path))
+  const protectedPreservePaths = protectedPaths.filter((path) => !targetPaths.has(path))
 
   return {
     mode: "partial",
@@ -148,7 +154,8 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
     reason: buildReason(intent, mode, targetList),
     targetPaths: targetList,
     allowedNewPaths: Array.from(allowedNewPaths).slice(0, 8),
-    preservePaths,
+    preservePaths: Array.from(new Set([...protectedPreservePaths, ...preservePaths])),
+    protectedPaths,
     maxSlices: maxSlicesForIntent(intent),
     requiresFullValidation: true,
   }
@@ -168,6 +175,7 @@ export function buildPartialEditInstructionBlock(plan: PartialEditPlan) {
         targetPaths: plan.targetPaths,
         allowedNewPaths: plan.allowedNewPaths,
         preservePolicy: "Preserve every existing file not listed in targetPaths unless it is a direct import fix needed for validation.",
+        protectedPaths: plan.protectedPaths,
         outputPolicy: [
           "Return only changed files.",
           "Do not return unchanged files.",

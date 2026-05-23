@@ -14,8 +14,10 @@ export const SAFE_GENERATED_ROOT_FILES = [
   "README.md",
   ".env.example",
 ] as const
+export const MANAGED_WORKSPACE_STATE_FILE = ".swift/workspace-state.json" as const
 
 const SAFE_GENERATED_ROOT_FILE_SET = new Set(SAFE_GENERATED_ROOT_FILES.map((file) => file.toLowerCase()))
+const MANAGED_WORKSPACE_STATE_FILE_LOWER = MANAGED_WORKSPACE_STATE_FILE.toLowerCase()
 const BLOCKED_EXACT_FILES = new Set([".env", ".git", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"])
 const BLOCKED_SEGMENTS = new Set(["..", "~", "node_modules", ".git"])
 
@@ -37,6 +39,7 @@ export type GeneratedPathValidationResult = {
 
 type GeneratedPathValidationOptions = {
   allowManagedPackageJson?: boolean
+  allowManagedWorkspaceState?: boolean
 }
 
 export class GeneratedPathValidationError extends Error {
@@ -87,7 +90,9 @@ export function validateGeneratedPath(
   const isAllowedRoot = ALLOWED_GENERATED_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`))
   const isSafeRootFile = SAFE_GENERATED_ROOT_FILE_SET.has(lower)
   const isManagedPackageJson = options.allowManagedPackageJson === true && lower === "package.json"
-  if (!isAllowedRoot && !isSafeRootFile && !isManagedPackageJson) {
+  const isManagedWorkspaceState =
+    options.allowManagedWorkspaceState === true && lower === MANAGED_WORKSPACE_STATE_FILE_LOWER
+  if (!isAllowedRoot && !isSafeRootFile && !isManagedPackageJson && !isManagedWorkspaceState) {
     const isRootFile = !normalized.includes("/")
     throwPathError(
       isRootFile ? "Root file not allowlisted" : "Path must start with an allowed generated root",

@@ -15,6 +15,7 @@ import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
 import { OrchestrationRuntimeService, classifyRetryReason } from "@/lib/services/orchestration-runtime.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
+import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"
 import { log } from "@/lib/logging"
 import { captureException } from "@/lib/observability"
@@ -35,7 +36,8 @@ class GenerationJobTimeoutError extends Error {
 }
 
 async function loadProjectFiles(projectId: string) {
-  return ProjectFilesystemService.readFiles(projectId)
+  const files = await ProjectFilesystemService.readFiles(projectId)
+  return splitWorkspaceStateFiles(files).files
 }
 
 async function loadGenerationHistoryCount(projectId: string) {

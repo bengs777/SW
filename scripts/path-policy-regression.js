@@ -93,6 +93,14 @@ function main() {
   )
 
   assert(
+    "validator.allows-managed-workspace-state",
+    /MANAGED_WORKSPACE_STATE_FILE\s*=\s*"\.swift\/workspace-state\.json"/.test(filePolicy) &&
+      /allowManagedWorkspaceState/.test(filePolicy) &&
+      /allowManagedWorkspaceState:\s*true/.test(read("lib/services/project-filesystem.service.ts")),
+    "manual editor metadata must persist through ProjectFilesystemService without opening arbitrary .swift generated output"
+  )
+
+  assert(
     "pipeline.canonical-before-validation",
     /const generatedPathSchema[\s\S]*validateGeneratedPath\(path\)\.path/.test(generatedArtifact) &&
       /message:\s*JSON\.stringify\(formatGeneratedPathValidationError\(error\)\)/.test(generatedArtifact) &&

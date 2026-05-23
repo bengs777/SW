@@ -1359,6 +1359,7 @@ export default function EditorPage() {
       files: generatedFiles,
       previewFiles,
       previewError: previewErrorContext?.trim() || latestPreviewError,
+      protectedPaths: workspaceProtectedPathsRef.current,
       notes: ["Preview context captured from the editor before sending the request."],
     })
 

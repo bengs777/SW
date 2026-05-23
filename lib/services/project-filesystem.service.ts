@@ -93,7 +93,10 @@ export class ProjectFilesystemService {
     const nextByPath = new Map(currentFiles.map((file) => [normalizeGeneratedPath(file.path), file]))
 
     for (const operation of input.operations) {
-      const path = validateGeneratedPath(operation.path, process.cwd(), { allowManagedPackageJson: true }).path
+      const path = validateGeneratedPath(operation.path, process.cwd(), {
+        allowManagedPackageJson: true,
+        allowManagedWorkspaceState: true,
+      }).path
 
       if (operation.action === "delete") {
         nextByPath.delete(path)
@@ -262,7 +265,10 @@ function normalizeFiles(files: GeneratedFile[]) {
   let totalBytes = 0
 
   for (const file of files) {
-    const path = validateGeneratedPath(file.path, process.cwd(), { allowManagedPackageJson: true }).path
+    const path = validateGeneratedPath(file.path, process.cwd(), {
+      allowManagedPackageJson: true,
+      allowManagedWorkspaceState: true,
+    }).path
     if (!path) continue
 
     const content = String(file.content ?? "")

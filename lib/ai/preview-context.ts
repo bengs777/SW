@@ -46,6 +46,7 @@ const previewContextSchema = z.object({
   previewFiles: z.array(previewFileSnapshotSchema),
   generatedFileCount: z.number().int().nonnegative(),
   previewFileCount: z.number().int().nonnegative(),
+  protectedPaths: z.array(z.string().trim().min(1)).optional().default([]),
   notes: z.array(z.string()).optional(),
 })
 
@@ -61,6 +62,7 @@ type BuildPreviewContextInput = {
   files?: GeneratedFile[]
   previewFiles?: GeneratedFile[] | null
   previewError?: string | PreviewContextError | null
+  protectedPaths?: string[]
   notes?: string[]
 }
 
@@ -89,6 +91,10 @@ export function buildPreviewContextPacket(input: BuildPreviewContextInput): Prev
     notes.add("Preview files may differ from generated files; prefer the browser-safe preview snapshot when explaining runtime behavior.")
   }
 
+  if (input.protectedPaths && input.protectedPaths.length > 0) {
+    notes.add("Protected paths were changed by the user; preserve them unless the prompt explicitly targets them.")
+  }
+
   notes.add("Preview panel tabs: Preview (live sandbox), Code (file editor), Explorer (file tree + create/delete).")
 
   return {
@@ -107,6 +113,7 @@ export function buildPreviewContextPacket(input: BuildPreviewContextInput): Prev
     previewFiles,
     generatedFileCount: (input.files || []).length,
     previewFileCount: previewSourceFiles.length,
+    protectedPaths: normalizeProtectedPaths(input.protectedPaths || []),
     notes: Array.from(notes),
   }
 }
@@ -214,4 +221,14 @@ function excerptText(value: string, limit: number) {
   const tail = normalized.slice(-tailLength).trimStart()
 
   return `${head}\n... [truncated ${normalized.length - (headLength + tailLength)} chars] ...\n${tail}`
+}
+
+function normalizeProtectedPaths(paths: string[]) {
+  return Array.from(
+    new Set(
+      paths
+        .map((path) => String(path || "").replace(/\\/g, "/").replace(/^\.\//, "").trim())
+        .filter(Boolean)
+    )
+  ).sort()
 }
