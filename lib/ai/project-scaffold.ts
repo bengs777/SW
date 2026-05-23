@@ -2018,7 +2018,7 @@ function inferCurrentPhase(intent: BuildIntent, normalizedPrompt: string) {
   if (intent === "dashboard") return "dashboard-overview"
   if (intent === "news") return "village-news-portal"
   if (intent === "booking") return "booking-flow"
-  return "preview-first-foundation"
+  return "full-frontend-foundation"
 }
 
 function buildNextSteps(intent: BuildIntent, normalizedPrompt: string, previewStatus: ModuleStatusReport["previewStatus"]) {

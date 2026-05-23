@@ -138,6 +138,11 @@ export function buildArchitectureInstructionBlock(plan: SwiftArchitecturePlan) {
 
 function pagesForIntent(intent: SwiftStructuredIntent) {
   const pages = new Set<string>(["app/page.tsx"])
+  if (intent.type === "frontend_only" && (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL")) {
+    pages.add("app/dashboard/page.tsx")
+  }
+  if (intent.type === "frontend_only" && intent.archetype === "BOOKING_APP") pages.add("app/booking/page.tsx")
+  if (intent.type === "frontend_only" && intent.archetype === "CONTENT_PLATFORM") pages.add("app/posts/[slug]/page.tsx")
   if (intent.type === "frontend_only") return Array.from(pages)
   if (intent.archetype === "FULLSTACK_COMMERCE") {
     pages.add("app/products/page.tsx")

@@ -51,6 +51,10 @@ const ALWAYS_ALLOWED_PATCH_FILES = new Set([
 
 const FULL_REPLACEMENT_RE =
   /(koreksi\s+total|rombak\s+(ulang|total)|hapus\s+(seluruh|semua)|ganti\s+total|buat\s+ulang|generate\s+ulang|regenerasi\s+ulang|ulang\s+dari\s+awal|salah\s+jalur|replace\s+all|full\s+replacement|start\s+over|rewrite\s+(all|project)|rebuild\s+(all|project))/i
+const BROAD_FRONTEND_RE =
+  /\b(lengkap|full website|website lengkap|landing page lengkap|redesign|rebuild|modern ui|production frontend|multi page|multi-page|expand website|company profile|portfolio|portofolio|travel website|ecommerce ui|dashboard modern)\b/i
+const SMALL_PATCH_RE =
+  /\b(fix bug|bug|small edit|minor edit|patch|typo|ganti teks|ubah teks|ganti warna|style kecil|styling kecil|perbaiki kecil)\b/i
 
 export function isFullReplacementPrompt(prompt: string) {
   return FULL_REPLACEMENT_RE.test(String(prompt || ""))
@@ -69,19 +73,23 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
     new Set((input.previewContext?.protectedPaths || []).map(normalizePath).filter((path) => fileExists(path, existingPaths)))
   )
   const forceFullGeneration = isFullReplacementPrompt(prompt)
+  const broadFrontendGeneration = BROAD_FRONTEND_RE.test(prompt)
+  const smallPatch = mode === "edit" || mode === "fix" || SMALL_PATCH_RE.test(prompt)
   const intent = forceFullGeneration && !hasExistingProject ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
   const promptMentionedPaths = findPromptMentionedPaths(prompt, existingPaths)
   const singleFileOnly = promptMentionedPaths.length === 1 && /\b(only|hanya|saja)\b/i.test(prompt)
   const partial =
-    hasExistingProject
+    hasExistingProject && smallPatch && !forceFullGeneration && !broadFrontendGeneration
 
   if (!partial) {
     return {
       mode: "full",
       intent: "full_generation",
-      confidence: 0.92,
+      confidence: broadFrontendGeneration || forceFullGeneration ? 0.95 : 0.92,
       reason: forceFullGeneration
         ? "Full replacement requested; existing generated files may be rebuilt."
+        : broadFrontendGeneration
+          ? "Full frontend or rebuild request; broad component generation is allowed."
         : "New or broad build request; full controlled generation is allowed.",
       targetPaths: [],
       allowedNewPaths: [],

@@ -550,7 +550,6 @@ function inferComponents(architecture: SwiftArchitecturePlan, intent: SwiftStruc
 
   if (intent.type === "frontend_only") {
     add("app/page.tsx", "app/page.tsx", "frontend-only page scope")
-    return Array.from(components.values())
   }
 
   if (intent.archetype === "FULLSTACK_COMMERCE") {

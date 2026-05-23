@@ -99,13 +99,15 @@ function staticChecks() {
       "Public model selection exposes one Swift AI orchestrator and routing never selects a fast lane"
     ),
     check(
-      "ai.production-fullstack-mode",
+      "ai.full-frontend-and-production-fullstack-mode",
       /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
+        /FULL_FRONTEND_FILE_LIMIT\s*=\s*15/.test(generationOrchestrator) &&
+        /validateFrontendCompleteness/.test(generationOrchestrator) &&
         /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*16/.test(generationOrchestrator) &&
         /PRODUCTION_FULLSTACK_BATCH_SIZE\s*=\s*8/.test(generationOrchestrator) &&
         /buildFastClinicFullStackScaffold/.test(generationOrchestrator) &&
-        /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator),
-      "Explicit full-stack/admin/API/payment prompts use a production full-stack orchestration mode"
+        /productionMode:\s*"preview"\s*\|\s*"full_frontend"\s*\|\s*"production_fullstack"/.test(generationOrchestrator),
+      "Website prompts use full frontend mode and explicit full-stack/admin/API/payment prompts use production full-stack orchestration"
     ),
     check(
       "ai.server-prisma-boundary",

@@ -108,18 +108,20 @@ assert(
 )
 
 assert(
-  "explicit fullstack uses production mode",
-    /productionMode:\s*"preview"\s*\|\s*"production_fullstack"/.test(generationOrchestrator) &&
+  "explicit fullstack and full frontend modes exist",
+    /productionMode:\s*"preview"\s*\|\s*"full_frontend"\s*\|\s*"production_fullstack"/.test(generationOrchestrator) &&
+    /FULL_FRONTEND_FILE_LIMIT\s*=\s*15/.test(generationOrchestrator) &&
+    /validateFrontendCompleteness/.test(generationOrchestrator) &&
     /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
     /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*16/.test(generationOrchestrator) &&
     /buildFastClinicFullStackScaffold/.test(generationOrchestrator) &&
     /Production pass budget/.test(generationOrchestrator),
-  "full-stack/admin/database/payment prompts must use a compact production core instead of the 3-file preview contract"
+  "website prompts must use full frontend mode while full-stack/admin/database/payment prompts use production mode"
 )
 
 assert(
   "production fullstack requires full coverage",
-  /input\.plan\.productionMode !== "production_fullstack"[\s\S]*isPreviewFoundationPass/.test(generationOrchestrator) &&
+  /plan\.productionMode !== "production_fullstack"\) return false/.test(generationOrchestrator) &&
     /requiresFullStackCoverage && fullstack\.missingCategories/.test(generationOrchestrator),
   "production full-stack mode must require frontend, API, data, and config coverage"
 )

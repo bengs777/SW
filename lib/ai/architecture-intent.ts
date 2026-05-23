@@ -59,7 +59,7 @@ export type SwiftArchitectureArchetype =
   | "PORTFOLIO_SITE"
 
 const EXPLICIT_BACKEND_RE =
-  /\b(full\s*stack|fullstack|backend|server\s*actions?|server action|api\s+routes?|api route|route handler|database|db|prisma|postgres|postgresql|neon|turso|crud|auth|login|register|session|nextauth|role|rbac|admin|dashboard|payment|payments|pembayaran|stripe|midtrans|xendit|pakasir|webhook|storage|upload|r2)\b/i
+  /\b(full\s*stack|fullstack|backend|server\s*actions?|server action|api\s+routes?|api route|route handler|database|db|prisma|postgres|postgresql|neon|turso|crud|auth|login|register|session|nextauth|role|rbac|admin|payment|payments|pembayaran|stripe|midtrans|xendit|pakasir|webhook|storage|upload|r2)\b/i
 
 const UI_ONLY_PAGE_RE =
   /\b(static|frontend\s*only|ui\s*only|homepage|home\s*page|landing|marketing\s+page|storefront|catalog|catalogue|katalog|menu|restaurant|restoran|food|makanan|soto|produk|product|cart|keranjang|checkout|hero|section|tailwind|mock\s+data|data\s+dummy)\b/i

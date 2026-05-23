@@ -74,8 +74,8 @@ const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
   frontend_landing: {
     appType: "frontend_landing",
     label: "Frontend-only page",
-    starterPrompt: "Build a frontend-only Next.js App Router page with Tailwind and static mock data. Do not create API routes, auth, Prisma, database, dashboard, admin, middleware, or server actions unless explicitly requested.",
-    requiredFiles: ["app/page.tsx"],
+    starterPrompt: "Build a complete frontend-only Next.js App Router website with Tailwind, reusable components, sections, realistic local data, responsive navigation, footer, CTA, and loading/empty states. Do not create API routes, auth, Prisma, database, middleware, or server actions unless explicitly requested.",
+    requiredFiles: ["app/layout.tsx", "app/page.tsx", "app/globals.css", "components/site-header.tsx", "components/site-footer.tsx", "sections/hero-section.tsx", "sections/features-section.tsx", "components/cta-section.tsx", "lib/data.ts"],
     dependencyPolicy: {
       stack: ["Next.js App Router", "TypeScript", "Tailwind"],
       allowedExternalPackages: ["next", "react", "react-dom", "typescript", "tailwindcss", "lucide-react", "clsx", "tailwind-merge"],
@@ -91,7 +91,7 @@ const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
     },
     architectureRules: [
       "Frontend-only scope: generate or edit UI files only.",
-      "Use static mock data in the target file or explicitly requested component files.",
+      "Use realistic local data in lib/data.ts or typed component props.",
       "Do not create API routes, Prisma schema, auth files, dashboard/admin routes, middleware/proxy, server actions, services, or database clients.",
     ],
     editingRules: [

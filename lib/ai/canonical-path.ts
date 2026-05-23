@@ -18,6 +18,7 @@ export const CANONICAL_PATH_REGRESSION_CASES = [
   { input: "src\\components\\Card.tsx", expected: "src/components/Card.tsx", safe: true },
   { input: "app\\dashboard//page.tsx", expected: "app/dashboard/page.tsx", safe: true },
   { input: "components//ui\\button.tsx", expected: "components/ui/button.tsx", safe: true },
+  { input: "sections\\HeroSection.tsx", expected: "sections/HeroSection.tsx", safe: true },
   { input: "../lib/utils.ts", expected: "../lib/utils.ts", safe: false },
 ] as const
 

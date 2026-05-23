@@ -10,7 +10,7 @@ import {
   type SemanticEditOperation,
 } from "@/lib/ai/semantic-edit"
 
-export type GenerationMode = "BUILD" | "EDIT" | "FIX"
+export type GenerationMode = "PREVIEW" | "FULL_FRONTEND" | "FULLSTACK" | "PATCH" | "REBUILD"
 
 export type IncrementalEditIntent =
   | "text_update"
@@ -135,11 +135,14 @@ export function detectGenerationMode(input: {
 }): GenerationMode {
   const text = normalizeText(input.prompt)
   const mode = String(input.collaborationMode || "").toLowerCase()
-  if (mode === "fix" || /\b(fix|repair|perbaiki|error|bug|crash|module not found|cannot find module|import error)\b/i.test(text)) return "FIX"
-  if (mode === "edit") return "EDIT"
-  if (input.existingFiles.length > 0) return "EDIT"
-  if (input.existingFiles.length > 0 && isEditLikePrompt(text)) return "EDIT"
-  return "BUILD"
+  if (mode === "fix" || /\b(fix|repair|perbaiki|error|bug|crash|module not found|cannot find module|import error)\b/i.test(text)) return "PATCH"
+  if (isRebuildPrompt(text)) return "REBUILD"
+  if (isFullStackPrompt(text)) return "FULLSTACK"
+  if (isFullFrontendPrompt(text)) return "FULL_FRONTEND"
+  if (mode === "edit") return "PATCH"
+  if (isPatchLikePrompt(text)) return "PATCH"
+  if (isPreviewPrompt(text) && input.existingFiles.length === 0) return "PREVIEW"
+  return "FULL_FRONTEND"
 }
 
 export function classifyIncrementalEditIntent(prompt: string): IncrementalEditIntent | null {
@@ -166,7 +169,7 @@ export function buildIncrementalEditPlan(input: {
     existingFiles: input.files,
     collaborationMode: input.collaborationMode,
   })
-  const editIntent = generationMode === "BUILD" ? null : classifyIncrementalEditIntent(input.prompt) || "component_patch"
+  const editIntent = generationMode === "PATCH" ? classifyIncrementalEditIntent(input.prompt) || "component_patch" : null
   const existingPaths = input.files.map((file) => normalizePath(file.path))
   const affected = new Set<string>()
   const allowedNew = new Set<string>()
@@ -176,7 +179,7 @@ export function buildIncrementalEditPlan(input: {
   if (active && existingPaths.includes(active)) affected.add(active)
   if (errorFile && existingPaths.includes(errorFile)) affected.add(errorFile)
 
-  if (generationMode === "FIX") {
+  if (generationMode === "PATCH" && /\b(fix|repair|perbaiki|error|bug|crash|module not found|cannot find module|import error)\b/i.test(input.prompt)) {
     addMatching(affected, existingPaths, [/^app\/.+\/page\.tsx$/i, /^app\/page\.tsx$/i, /^components\//i, /^app\/api\//i], 4)
   } else if (editIntent === "text_update" || editIntent === "component_patch" || editIntent === "style_update") {
     addMatching(affected, existingPaths, [/^app\/page\.tsx$/i, /^app\/.+\/page\.tsx$/i, /^components\//i], editIntent === "text_update" ? 1 : 3)
@@ -208,8 +211,8 @@ export function buildIncrementalEditPlan(input: {
     relatedFiles: related,
     allowedNewFiles: Array.from(allowedNew),
     reason:
-      generationMode === "BUILD"
-        ? "Prompt is a new build request."
+      generationMode !== "PATCH"
+        ? `Prompt classified as ${generationMode}; broad generation is allowed.`
         : `Prompt classified as ${generationMode} / ${editIntent}; scoped to ${affected.size} file(s).`,
   }
 }
@@ -219,8 +222,8 @@ export function applyDeterministicIncrementalPatch(input: {
   files: GeneratedFile[]
   plan: IncrementalEditPlan
 }): IncrementalPatchResult {
-  if (input.plan.generationMode !== "EDIT") {
-    return unchanged(input.files, "Deterministic patch is only used for EDIT mode.")
+  if (input.plan.generationMode !== "PATCH") {
+    return unchanged(input.files, "Deterministic patch is only used for PATCH mode.")
   }
 
   const semanticPatch = applySemanticScopedEdit({
@@ -332,7 +335,7 @@ export function buildScopedEditResult(input: {
   validation: IncrementalValidationResult
 }): ScopedEditResult {
   return ScopedEditResultSchema.parse({
-    generationMode: input.plan.generationMode === "FIX" ? "FIX" : "EDIT",
+    generationMode: "EDIT",
     editIntent: input.plan.editIntent || "component_patch",
     affectedFiles: input.plan.affectedFiles,
     patchSummary: input.patch.patchSummary,
@@ -723,6 +726,26 @@ function unchanged(files: GeneratedFile[], reason: string): IncrementalPatchResu
 
 function isEditLikePrompt(text: string) {
   return /\b(ganti|ubah|update|edit|rename|change|tambahkan|add|hapus|remove|polish|refine|perbaiki|fix)\b/i.test(text)
+}
+
+function isPatchLikePrompt(text: string) {
+  return /\b(typo|small edit|minor edit|patch|ubah teks|ganti teks|ganti warna|style kecil|styling kecil|perbaiki kecil|fix bug|bug kecil)\b/i.test(text)
+}
+
+function isRebuildPrompt(text: string) {
+  return /\b(rebuild|redesign|full redesign|recreate|buat ulang|bikin ulang|rombak|rombak total|rework|convert into production frontend|production frontend)\b/i.test(text)
+}
+
+function isFullFrontendPrompt(text: string) {
+  return /\b(buat website|bikin website|website lengkap|web lengkap|full website|landing page lengkap|company profile|portfolio|portofolio|travel website|web toko|toko online|ecommerce ui|dashboard modern|modern ui|multi page|multi-page|expand website|production frontend|responsive navigation)\b/i.test(text)
+}
+
+function isFullStackPrompt(text: string) {
+  return /\b(full\s*stack|fullstack|backend|database|db|prisma|postgres|api route|route handler|crud|auth|login|register|role|rbac|admin|payment|webhook|storage|upload)\b/i.test(text)
+}
+
+function isPreviewPrompt(text: string) {
+  return /\b(preview kecil|quick preview|prototype kecil|demo kecil|single page demo|mockup cepat)\b/i.test(text)
 }
 
 function normalizeText(value: string) {

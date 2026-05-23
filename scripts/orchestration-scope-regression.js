@@ -231,12 +231,12 @@ function main() {
     { path: "components/ProductCard.tsx", content: "export function ProductCard(){return <article />}", language: "tsx" },
   ]
   assert(
-    "build-existing-is-edit",
+    "existing-project-build-can-stay-full-frontend",
     incrementalEdit.detectGenerationMode({
-      prompt: "build app/page.tsx only",
+      prompt: "build a modern full website",
       existingFiles,
-    }) === "EDIT",
-    "existing project prompts must prefer EDIT over BUILD"
+    }) === "FULL_FRONTEND",
+    "existing project prompts must allow broad frontend generation when the user asks for a full website"
   )
   const singleFileEditPlan = editPlanner.buildPartialEditPlan({
     prompt: "MODE: Edit\nTARGET FILE: app/page.tsx\nedit only one file",
@@ -252,13 +252,13 @@ function main() {
     `expected one-file partial edit, got ${JSON.stringify(singleFileEditPlan)}`
   )
   const replacementPlan = editPlanner.buildPartialEditPlan({
-    prompt: "rewrite all project but keep app/page.tsx only",
+    prompt: "rebuild full website with modern UI",
     existingFiles,
   })
   assert(
-    "full-replacement-existing-stays-partial",
-    replacementPlan.mode === "partial",
-    "existing project full replacement language must still prefer smallest safe scope"
+    "full-replacement-existing-is-broad",
+    replacementPlan.mode === "full",
+    "existing project rebuild language must allow broad full frontend scope"
   )
   const checkoutUiEditPlan = editPlanner.buildPartialEditPlan({
     prompt: "Tambahkan checkout CTA di app/page.tsx only",
@@ -276,8 +276,8 @@ function main() {
     incrementalEdit.detectGenerationMode({
       prompt: "fix runtime error in app/page.tsx",
       existingFiles,
-    }) === "FIX",
-    "fix prompts must remain FIX"
+    }) === "PATCH",
+    "fix prompts must become PATCH"
   )
 
   assert(
@@ -314,7 +314,7 @@ function main() {
   )
   assert(
     "repair.minimal-fix",
-    /const minimalRepairOnly = input\.plan\.generationMode === "FIX" \|\| syntaxRepairOnly/.test(orchestrator) &&
+    /const minimalRepairOnly = syntaxRepairOnly/.test(orchestrator) &&
       /MINIMAL_FIX_MODE/.test(orchestrator) &&
       /minimalRepairOnly[\s\S]*acceptedFiles: parsed\.files\.filter/.test(orchestrator),
     "FIX repair is constrained to failing files"

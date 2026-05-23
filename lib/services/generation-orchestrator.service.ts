@@ -11,6 +11,7 @@ import {
   type DependencyMap,
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
+import { validateFrontendCompleteness } from "@/lib/ai/frontend-completeness-validator"
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import {
   createDeveloperGenerationDiagnostics,
@@ -169,7 +170,7 @@ type GenerationPlan = {
   structuredIntent: SwiftStructuredIntent
   incrementalEdit: IncrementalEditPlan
   editPlan: PartialEditPlan
-  productionMode: "preview" | "production_fullstack"
+  productionMode: "preview" | "full_frontend" | "production_fullstack"
   maxFilesThisPass: number
   blueprint: {
     label: string
@@ -230,6 +231,8 @@ type ExecuteGenerationJobDeps = {
 const MAX_AGENT_ITERATIONS = 5
 const MAX_REPAIR_ATTEMPTS = MAX_AGENT_ITERATIONS - 1
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
+const FULL_FRONTEND_FILE_LIMIT = 15
+const FULL_FRONTEND_BATCH_SIZE = 6
 const PRODUCTION_FULLSTACK_FILE_LIMIT = 16
 const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
 
@@ -520,6 +523,46 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
   return Array.from(required).slice(0, PRODUCTION_FULLSTACK_FILE_LIMIT)
 }
 
+function fullFrontendRequiredFiles(blueprint: ControlledAppBlueprint, prompt: string) {
+  const text = prompt.toLowerCase()
+  const required = new Set<string>([
+    "app/layout.tsx",
+    "app/page.tsx",
+    "app/globals.css",
+    "components/site-header.tsx",
+    "components/site-footer.tsx",
+    "components/cta-section.tsx",
+    "components/loading-skeleton.tsx",
+    "lib/data.ts",
+  ])
+
+  if (/\b(dashboard|analytics|admin|panel|workspace)\b/i.test(text)) {
+    required.add("components/dashboard-shell.tsx")
+    required.add("components/metric-card.tsx")
+    required.add("sections/analytics-overview.tsx")
+    required.add("sections/activity-table.tsx")
+  } else if (/\b(ecommerce|web toko|toko|shop|store|produk|product|marketplace)\b/i.test(text)) {
+    required.add("sections/product-grid.tsx")
+    required.add("sections/category-showcase.tsx")
+    required.add("components/product-card.tsx")
+    required.add("components/cart-summary.tsx")
+  } else if (/\b(travel|destination|tour|trip|hotel|wisata)\b/i.test(text)) {
+    required.add("sections/destination-grid.tsx")
+    required.add("sections/travel-packages.tsx")
+    required.add("components/destination-card.tsx")
+  } else if (/\b(portfolio|portofolio|company profile|agency|profile)\b/i.test(text) || blueprint.appType === "frontend_landing") {
+    required.add("sections/services-section.tsx")
+    required.add("sections/portfolio-section.tsx")
+    required.add("sections/testimonials-section.tsx")
+  }
+
+  required.add("sections/hero-section.tsx")
+  required.add("sections/features-section.tsx")
+  required.add("sections/faq-section.tsx")
+
+  return Array.from(required).slice(0, FULL_FRONTEND_FILE_LIMIT)
+}
+
 function detectIntent(prompt: string) {
   return analyzePromptIntent(prompt)
 }
@@ -534,6 +577,9 @@ function getRequiredFiles(
   const blueprint = getControlledAppBlueprint(intent.appType)
   if (input.productionMode === "production_fullstack") {
     return productionRequiredFiles(blueprint, input.prompt)
+  }
+  if (input.productionMode === "full_frontend") {
+    return fullFrontendRequiredFiles(blueprint, input.prompt)
   }
 
   return blueprint.requiredFiles.slice(0, PREVIEW_FOUNDATION_FILE_LIMIT)
@@ -1408,11 +1454,15 @@ function buildGenerationPlan(input: {
     : intent.appType || classifyControlledAppType(input.prompt)
   const blueprint = getControlledAppBlueprint(appType)
   const generationMode = incrementalEdit.generationMode
-  const productionMode = generationMode === "BUILD" && (shouldUseProductionFullStackMode(input.prompt, {
-    collaborationMode: input.collaborationMode,
-  }) || structuredIntent.type === "fullstack_app")
-    ? "production_fullstack"
-    : "preview"
+  const productionMode =
+    generationMode === "FULLSTACK" ||
+    (generationMode !== "PATCH" && generationMode !== "PREVIEW" && (shouldUseProductionFullStackMode(input.prompt, {
+      collaborationMode: input.collaborationMode,
+    }) || structuredIntent.type === "fullstack_app"))
+      ? "production_fullstack"
+      : generationMode === "PREVIEW"
+        ? "preview"
+        : "full_frontend"
   const architecture = buildArchitecturePlan({
     intent: structuredIntent,
     existingFiles: input.existingFiles,
@@ -1448,7 +1498,9 @@ function buildGenerationPlan(input: {
       ? stagedEcommerceRequested
         ? Math.max(PRODUCTION_FULLSTACK_FILE_LIMIT, 24)
         : PRODUCTION_FULLSTACK_FILE_LIMIT
-      : editPlan.maxSlices
+      : productionMode === "full_frontend"
+        ? FULL_FRONTEND_FILE_LIMIT
+        : editPlan.maxSlices
   const trimmed = trimContextForGeneration({
     prompt: input.prompt,
     files: input.existingFiles,
@@ -1502,7 +1554,9 @@ function buildGenerationPlan(input: {
         reason:
           productionMode === "production_fullstack"
             ? "Explicitly requested by the prompt for the production full-stack plan"
-            : "Explicitly requested by the prompt for the preview-first foundation",
+            : productionMode === "full_frontend"
+              ? "Explicitly requested by the prompt for the full frontend architecture"
+              : "Explicitly requested by the prompt for the preview foundation",
         action: "create_or_update",
       })
     }
@@ -1580,7 +1634,7 @@ function buildGenerationPlan(input: {
       }
     }
   }
-  if (editPlan.mode === "full" && !singleFileOnly && !frontendOnly) {
+  if (editPlan.mode === "full" && !singleFileOnly && (!frontendOnly || productionMode === "full_frontend")) {
     const existingOrPlannedPaths = new Set([
       ...input.existingFiles.map((file) => normalizePath(file.path)),
       ...filePlan.map((file) => normalizePath(file.path)),
@@ -2416,6 +2470,7 @@ function buildSlicePrompt(input: {
   const targetPaths = targets.map((target) => target.path)
   const batchedFoundation = targets.length > 1
   const productionFullStack = input.plan.productionMode === "production_fullstack"
+  const fullFrontend = input.plan.productionMode === "full_frontend"
 
   return [
     context,
@@ -2438,7 +2493,9 @@ function buildSlicePrompt(input: {
     "EXECUTION_RULES:",
     productionFullStack
       ? "- PRODUCTION_FULLSTACK_MODE: generate a deployable full-stack slice with visible UI, route handlers, Prisma/data layer, env example, and package config as requested. Do not downgrade to dummy-only preview."
-      : "- PREVIEW_MODE: generate a small preview-first foundation that can render quickly.",
+      : fullFrontend
+        ? "- FULL_FRONTEND_MODE: generate production-like frontend architecture with reusable components, realistic UI composition, responsive navigation, footer, CTA, loading/empty states, and domain-specific sections."
+        : "- PREVIEW_MODE: generate a small explicit preview prototype only when the user asks for a quick preview.",
     `- STAGED_GENERATION_PHASE: ${input.target.stage || "support"}.`,
     input.target.stage === "scaffold"
       ? "- TAHAP_1_SCAFFOLD_ONLY: generate only valid Next.js App Router scaffold/config files. Do not create ecommerce routes, components, Supabase, or Turso files in this stage."
@@ -2456,7 +2513,9 @@ function buildSlicePrompt(input: {
       : "- Work only on the requested file slice and directly related imports.",
     productionFullStack
       ? `- Production pass budget: this job may create up to ${input.plan.maxFilesThisPass} files across batched slices.`
-      : `- Preview-first budget: the full generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files for the first pass.`,
+      : fullFrontend
+        ? `- Full frontend budget: this job may create ${Math.min(8, input.plan.maxFilesThisPass)}-${input.plan.maxFilesThisPass} files across app/, components/, sections/, and lib/.`
+        : `- Explicit preview budget: the generation plan is capped at ${PREVIEW_FOUNDATION_FILE_LIMIT} files.`,
     productionFullStack && batchedFoundation
       ? `- For this provider call, return exactly ${targets.length} create/modify operations, one per listed target file. Do not skip API, Prisma, service, hook, or page targets.`
       : batchedFoundation
@@ -2466,14 +2525,20 @@ function buildSlicePrompt(input: {
           : "- For this provider call, return exactly one create/modify operation for Current file objective unless a direct import fix is required.",
     productionFullStack
       ? "- Use the existing locked stack. You MAY use Prisma schema, server-only service files, Route Handlers, NextAuth-compatible placeholders, and payment/API integration placeholders when the prompt asks for them."
-      : "- Never install or introduce new libraries in the first preview pass; use the existing Tailwind and shadcn/ui-compatible stack.",
+      : fullFrontend
+        ? "- Use the existing Tailwind and shadcn/ui-compatible stack. Build component hierarchy instead of a single-page demo. Do not introduce backend libraries in FULL_FRONTEND_MODE."
+        : "- Never install or introduce new libraries in explicit preview mode; use the existing Tailwind and shadcn/ui-compatible stack.",
     "- NEXTAUTH_PATH_POLICY: never create or modify next-auth.d.ts, root auth.ts, or any .env file from generated artifacts. Put NextAuth runtime/config changes in route handlers under app/ or helper modules under lib/.",
     productionFullStack
       ? "- Do not use UI-only dummy output. If real external credentials are not available, create server-side integration boundaries, env placeholders, zod validation, and clear TODO-safe service functions instead of fake-only UI."
-      : "- Use in-file dummy arrays for first-pass data. Do not connect Prisma, Turso, Neon, or any database unless this prompt explicitly targets that phase.",
+      : fullFrontend
+        ? "- Use realistic domain data from lib/data.ts or typed local data modules. Avoid generic dummy-first output and never collapse the UI into one file."
+        : "- Preview mock data is allowed only inside the generated preview file.",
     productionFullStack
       ? "- MOCK_DATA_FORBIDDEN_IN_UI: do not create const dummy*, mock*, fake*, or sample* arrays in app pages/components. Pages must call local service/API boundaries or render empty/loading/error states backed by typed service contracts."
-      : "- Preview mock data is allowed only inside the generated preview file.",
+      : fullFrontend
+        ? "- FULL_FRONTEND_DATA_POLICY: realistic local data is allowed in lib/data.ts; avoid generic dummy/mock/fake naming and placeholder copy."
+        : "- Preview mock data is allowed only inside the generated preview file.",
     productionFullStack && input.plan.appType === "clinic_management"
       ? "- CLINIC_FULLSTACK_REQUIRED: include dashboard, patients, doctors, appointments, auth/roles, Prisma schema, clinic service, BPJS integration service/route, and a hook or component boundary as planned."
       : "- Follow the controlled app blueprint exactly.",
@@ -2481,7 +2546,7 @@ function buildSlicePrompt(input: {
     "- Stop after the requested slice; do not create extra support files speculatively.",
     "- APPROVED_SCOPE_ONLY: create or modify files only when their exact canonical path appears in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     "- HELPER_FILE_POLICY: helper/shell files are explicit-only. Do not create components/app-shell.tsx, components/*-shell.tsx, or components/*helper*.tsx unless that exact path appears in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
-    "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
+    "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, sections/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
     "- STRICT_ARTIFACT_ENVELOPE: Return ONLY a JSON object parseable directly by JSON.parse. No markdown fences. No prose. No explanations. No comments outside JSON. No preamble like Here is your app.",
     '- Required BUILD schema: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
@@ -3580,6 +3645,7 @@ function assertDependenciesForBlueprint(files: GeneratedFile[], blueprint: Contr
 }
 
 function shouldRequireFullStackCoverage(plan: GenerationPlan) {
+  if (plan.productionMode !== "production_fullstack") return false
   return ["fullstack_app", "architecture", "refactor", "runtime_debug"].includes(plan.objective)
 }
 
@@ -3736,7 +3802,7 @@ async function runValidationLifecycle(input: {
     conflictsPrevented: normalized.conflictsPrevented,
   })
 
-  if (input.plan.generationMode === "EDIT") {
+  if (input.plan.generationMode === "PATCH") {
     await GenerationJobService.assertNotCancelled(input.jobId)
     stepStartedAt = performance.now()
     await input.emit("validating", "Running scoped edit validation", 70, {
@@ -3832,9 +3898,11 @@ async function runValidationLifecycle(input: {
   const productionRequiredFilesForValidation =
     input.plan.productionMode === "production_fullstack"
       ? plannedRequiredFiles
+      : input.plan.productionMode === "full_frontend"
+        ? plannedRequiredFiles
       : input.plan.blueprint.requiredFiles
   const isPreviewFoundationPass =
-    input.plan.productionMode !== "production_fullstack" &&
+    input.plan.productionMode === "preview" &&
     input.plan.editPlan.mode === "full" &&
     plannedRequiredFiles.length <= PREVIEW_FOUNDATION_FILE_LIMIT
   const partialRequiredFiles =
@@ -3889,6 +3957,13 @@ async function runValidationLifecycle(input: {
   if (mockArtifacts.length > 0) {
     staticFailures.push(`Production full-stack files contain UI-level mock data: ${mockArtifacts.join(", ")}`)
   }
+  const frontendCompleteness =
+    input.plan.productionMode === "full_frontend"
+      ? validateFrontendCompleteness(files)
+      : null
+  if (frontendCompleteness && !frontendCompleteness.ok) {
+    staticFailures.push(`Frontend completeness failed: ${frontendCompleteness.failures.join("; ")}`)
+  }
 
   if (!blueprintValidation.ok) {
     if (blueprintValidation.missingRequiredFiles.length > 0) {
@@ -3934,6 +4009,7 @@ async function runValidationLifecycle(input: {
       projectMemory: currentMemory,
       dependencyGraph: currentDependencyGraph,
       mockArtifacts,
+      frontendCompleteness,
       missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
       unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
     }
@@ -3965,6 +4041,7 @@ async function runValidationLifecycle(input: {
     projectMemory: currentMemory,
     dependencyGraph: currentDependencyGraph,
     mockArtifacts,
+    frontendCompleteness,
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
   })
@@ -4474,7 +4551,7 @@ async function attemptTargetedRepair(input: {
   signal?: AbortSignal
 }) {
   await GenerationJobService.assertNotCancelled(input.jobId)
-  if (input.plan.generationMode === "EDIT") {
+  if (input.plan.generationMode === "PATCH") {
     const scopedPayload = parseRepairPayload({
       mode: "scoped",
       affectedFiles: input.plan.incrementalEdit.affectedFiles,
@@ -4504,7 +4581,7 @@ async function attemptTargetedRepair(input: {
   const dependencyMap = buildDependencyMap(currentFiles)
   const failingFiles = pickFailingFiles(currentFiles, dependencyMap, input.validationError)
   const syntaxRepairOnly = /tsx[-_ ]validation|Adjacent JSX|Missing closing tag|Unexpected token|Invalid import syntax|Duplicate export/i.test(input.validationError)
-  const minimalRepairOnly = input.plan.generationMode === "FIX" || syntaxRepairOnly
+  const minimalRepairOnly = syntaxRepairOnly
   const failingPathSet = new Set(failingFiles.map((file) => normalizePath(file.path)))
   const repairPrompt = [
     buildStaticValidationPrompt({
@@ -4646,7 +4723,7 @@ async function attemptTargetedRepair(input: {
 
 function shouldApplySafePreviewFallback(plan: GenerationPlan, validation: ValidationLifecycleResult) {
   const isPreviewFoundationPass =
-    plan.productionMode !== "production_fullstack" &&
+    plan.productionMode === "preview" &&
     plan.editPlan.mode === "full" &&
     plan.filePlan.length > 0 &&
     plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
@@ -5502,7 +5579,7 @@ export async function executeGenerationJob(
       actions: plan.actionPlan,
     })
 
-    if (plan.generationMode === "EDIT") {
+    if (plan.generationMode === "PATCH") {
       await transition(input.jobId, "generating", "Applying scoped incremental edit", 35, {
         generationMode: plan.generationMode,
         editIntent: plan.incrementalEdit.editIntent,
@@ -5924,15 +6001,21 @@ export async function executeGenerationJob(
         })
       }
       const usePreviewFoundationBatch =
-        plan.productionMode !== "production_fullstack" &&
+        plan.productionMode === "preview" &&
         plan.editPlan.mode === "full" &&
         plan.filePlan.length > 1 &&
         plan.filePlan.length <= PREVIEW_FOUNDATION_FILE_LIMIT
+      const useFullFrontendBatch =
+        plan.productionMode === "full_frontend" &&
+        plan.editPlan.mode === "full" &&
+        plan.filePlan.length > 1
       const stagedEcommerce = isEcommerceStagedPlan(plan)
       const sliceBatchSize = stagedEcommerce
         ? 1
         : plan.productionMode === "production_fullstack"
         ? PRODUCTION_FULLSTACK_BATCH_SIZE
+        : useFullFrontendBatch
+          ? FULL_FRONTEND_BATCH_SIZE
         : usePreviewFoundationBatch
           ? plan.filePlan.length
           : 1
@@ -5951,7 +6034,9 @@ export async function executeGenerationJob(
             reason:
               plan.productionMode === "production_fullstack"
                 ? "Production full-stack batch keeps the job inside timeout while covering UI, API, data, and config"
-                : "Preview-first foundation batch keeps the first render inside the timeout budget",
+                : plan.productionMode === "full_frontend"
+                  ? "Full frontend batch builds a production-like component architecture"
+                  : "Preview foundation batch keeps the first render inside the timeout budget",
             action: "create_or_update" as const,
           }
         : plan.filePlan[index]

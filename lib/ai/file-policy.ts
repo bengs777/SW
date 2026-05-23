@@ -2,7 +2,7 @@ import path from "node:path"
 import { canonicalizeGeneratedPath } from "@/lib/ai/canonical-path"
 
 const WORKSPACE_ROOT = process.cwd()
-export const ALLOWED_GENERATED_ROOTS = ["src", "app", "components", "lib", "prisma"] as const
+export const ALLOWED_GENERATED_ROOTS = ["src", "app", "components", "sections", "lib", "prisma"] as const
 export const SAFE_GENERATED_ROOT_FILES = [
   "package.json",
   "tsconfig.json",

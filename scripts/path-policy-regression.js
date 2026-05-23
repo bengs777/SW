@@ -51,6 +51,7 @@ function main() {
     { input: "src\\components\\Card.tsx", expected: "src/components/Card.tsx", safe: true },
     { input: "app\\dashboard//page.tsx", expected: "app/dashboard/page.tsx", safe: true },
     { input: "components//ui\\button.tsx", expected: "components/ui/button.tsx", safe: true },
+    { input: "sections\\HeroSection.tsx", expected: "sections/HeroSection.tsx", safe: true },
     { input: "../lib/utils.ts", expected: "../lib/utils.ts", safe: false },
   ]
 
@@ -118,8 +119,8 @@ function main() {
 
   assert(
     "prompts.canonical-examples",
-    /Use app\/page\.tsx, components\/Button\.tsx, lib\/utils\.ts, or package\.json/.test(providerRouter) &&
-      /Use app\/page\.tsx, components\/Button\.tsx, lib\/utils\.ts, or package\.json/.test(orchestrator),
+    /Use app\/page\.tsx, sections\/HeroSection\.tsx, components\/Button\.tsx, lib\/utils\.ts, or package\.json/.test(providerRouter) &&
+      /Use app\/page\.tsx, sections\/HeroSection\.tsx, components\/Button\.tsx, lib\/utils\.ts, or package\.json/.test(orchestrator),
     "generation prompts instruct canonical workspace-relative paths"
   )
 
