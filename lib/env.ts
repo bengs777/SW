@@ -109,7 +109,7 @@ export const env = {
   nextAuthUrl: getEnv("NEXTAUTH_URL") || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : ""),
   googleClientId: getEnv("GOOGLE_CLIENT_ID"),
   googleClientSecret: getEnv("GOOGLE_CLIENT_SECRET"),
-  aiTimeoutMs: getEnvNumber(20_000, "AI_TIMEOUT_MS"),
+  aiTimeoutMs: getEnvNumber(500_000, "AI_TIMEOUT_MS"),
   aiMaxRetries: Math.max(0, Math.round(getEnvNumber(2, "AI_MAX_RETRIES"))),
   aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "OPENROUTER_MAX_TOKENS")),
   providerStatusCacheTtlMs: Math.max(
@@ -117,7 +117,7 @@ export const env = {
     Math.round(getEnvNumber(86_400_000, "PROVIDER_STATUS_CACHE_TTL_MS"))
   ),
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
-  aiQueueTimeoutMs: Math.max(10_000, Math.round(getEnvNumber(120_000, "AI_QUEUE_TIMEOUT_MS"))),
+  aiQueueTimeoutMs: Math.max(500_000, Math.round(getEnvNumber(500_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   swiftPrimaryModel,
   swiftFallbackModel1,

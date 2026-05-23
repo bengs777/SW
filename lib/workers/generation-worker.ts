@@ -1,6 +1,6 @@
 import type { Job } from "bullmq"
 import { env } from "@/lib/env"
-import { timeoutConfig } from "@/lib/timeouts"
+import { MIN_GENERATION_JOB_TIMEOUT_MS, timeoutConfig } from "@/lib/timeouts"
 import {
   createGenerationWorker,
   getGenerationQueue,
@@ -24,7 +24,7 @@ import { classifyRuntimeError, warnIfSlow } from "@/lib/observability/performanc
 import { finishAiTask, recordRetry, startAiTask, updateAiTask } from "@/lib/observability/runtime-metrics"
 
 const GENERATION_JOB_TIMEOUT_MS = Math.max(
-  10_000,
+  MIN_GENERATION_JOB_TIMEOUT_MS,
   Math.round(timeoutConfig.generationJobMs || env.aiQueueTimeoutMs)
 )
 
