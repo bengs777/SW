@@ -89,6 +89,7 @@ import {
   validateRuntimeImports,
   validateRuntimeSyntax,
 } from "@/lib/ai/runtime-tsx-validator"
+import { repairRuntimeImportGraph } from "@/lib/ai/import-repair"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
 import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
@@ -1673,9 +1674,17 @@ function buildGenerationPlan(input: {
       turso: 4,
       support: 5,
     }
+    if (productionMode === "full_frontend") {
+      const leftGenerationOrder = generationDependencyOrder(left.path, productionMode)
+      const rightGenerationOrder = generationDependencyOrder(right.path, productionMode)
+      if (leftGenerationOrder !== rightGenerationOrder) return leftGenerationOrder - rightGenerationOrder
+    }
     const leftOrder = phaseOrder[left.stage || "support"]
     const rightOrder = phaseOrder[right.stage || "support"]
     if (leftOrder !== rightOrder) return leftOrder - rightOrder
+    const leftGenerationOrder = generationDependencyOrder(left.path, productionMode)
+    const rightGenerationOrder = generationDependencyOrder(right.path, productionMode)
+    if (leftGenerationOrder !== rightGenerationOrder) return leftGenerationOrder - rightGenerationOrder
     return left.path.localeCompare(right.path)
   })
   if (stagedEcommerceRequested) {
@@ -2498,7 +2507,7 @@ function buildSlicePrompt(input: {
         : "- PREVIEW_MODE: generate a small explicit preview prototype only when the user asks for a quick preview.",
     `- STAGED_GENERATION_PHASE: ${input.target.stage || "support"}.`,
     input.target.stage === "scaffold"
-      ? "- TAHAP_1_SCAFFOLD_ONLY: generate only valid Next.js App Router scaffold/config files. Do not create ecommerce routes, components, Supabase, or Turso files in this stage."
+      ? "- TAHAP_1_SCAFFOLD_ONLY: generate only valid Next.js App Router scaffold/config files. Validation is atomic and will run after planned dependency files exist."
       : input.target.stage === "routes"
         ? "- TAHAP_2_ROUTES_ONLY: generate only ecommerce route page files for products, product detail, cart, checkout, login, or admin. Do not create components yet; use small in-file placeholders and keep imports local to existing scaffold only."
         : input.target.stage === "components"
@@ -2560,7 +2569,9 @@ function buildSlicePrompt(input: {
     "- Prefer task graph operations over raw files.",
     "- Prefer patch-safe, deterministic updates.",
     "- Preserve stable files unless this slice requires a focused update.",
-    "- Keep the app deployable after this slice: no unresolved imports, no forbidden stack drift.",
+    batchedFoundation || fullFrontend
+      ? "- Keep imports resolvable within the final approved scaffold. Imports to files listed in the same generation plan are allowed; final validation runs after the batch graph is complete."
+      : "- Keep the app deployable after this slice: no unresolved imports, no forbidden stack drift.",
     `- Current file objective: ${input.target.path}`,
     `- Why this file matters: ${input.target.reason}`,
     `- Allowed target files for this provider call: ${targetPaths.join(", ")}`,
@@ -2583,8 +2594,9 @@ function buildSlicePrompt(input: {
           "next/link",
           "next/navigation",
           "lucide-react",
-          "@/components/* only when the imported file is already in ALLOWED_FILE_SCOPE",
-          "@/lib/* only when the imported file is already in ALLOWED_FILE_SCOPE",
+          "@/components/* only when the imported file is in ALLOWED_FILE_SCOPE",
+          "@/sections/* only when the imported file is in ALLOWED_FILE_SCOPE",
+          "@/lib/* only when the imported file is in ALLOWED_FILE_SCOPE",
         ],
         allowedExports: ["default React component for route files", "named React component matching component filename"],
         allowedDependencies: input.plan.architecture.dependencies,
@@ -2721,6 +2733,19 @@ function stagedPhaseForPath(path: string, appType?: string): StagedGenerationPha
   return "support"
 }
 
+function generationDependencyOrder(path: string, productionMode: GenerationPlan["productionMode"]) {
+  const normalized = normalizePath(path).toLowerCase()
+  if (productionMode !== "full_frontend" && productionMode !== "production_fullstack") {
+    return 50
+  }
+  if (normalized === "package.json" || normalized === "tsconfig.json" || normalized.startsWith("lib/")) return 0
+  if (normalized.startsWith("components/") || normalized.startsWith("sections/")) return 10
+  if (normalized === "app/globals.css") return 20
+  if (normalized === "app/layout.tsx") return 30
+  if (normalized.startsWith("app/")) return 40
+  return 50
+}
+
 function isEcommerceStagedPlan(plan: GenerationPlan) {
   return plan.orchestration.plannerOutput.appType === "ecommerce" && plan.editPlan.mode === "full"
 }
@@ -2748,10 +2773,16 @@ function validateStagedCheckpoint(input: {
   if (input.phase === "scaffold") {
     const scaffold = validateProjectScaffold({ paths: Array.from(paths) })
     failures.push(...scaffold.missingFiles.map((file) => `Missing scaffold file: ${file}`))
-    try {
-      compileProject(input.files)
-    } catch (error) {
-      failures.push(`Scaffold preview failed: ${error instanceof Error ? error.message : String(error)}`)
+    const hasPendingPlannedDependencies = input.plan.filePlan.some((file) => {
+      const normalized = normalizePath(file.path)
+      return !paths.has(normalized) && /^(components|sections|lib|app)\//i.test(normalized)
+    })
+    if (!hasPendingPlannedDependencies) {
+      try {
+        compileProject(input.files)
+      } catch (error) {
+        failures.push(`Scaffold preview failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
   }
 
@@ -3802,6 +3833,57 @@ async function runValidationLifecycle(input: {
     conflictsPrevented: normalized.conflictsPrevented,
   })
 
+  const plannedPaths = input.plan.filePlan.map((file) => normalizePath(file.path))
+  const shouldAutoRepairImports =
+    input.plan.productionMode === "full_frontend" ||
+    input.plan.productionMode === "production_fullstack" ||
+    input.plan.generationMode === "REBUILD"
+  const importRepair = repairRuntimeImportGraph(files, {
+    plannedPaths,
+    createMissing: shouldAutoRepairImports,
+  })
+  if (importRepair.changedFiles.length > 0 || importRepair.diagnostics.length > 0 || importRepair.deferredMissing.length > 0) {
+    files = importRepair.files
+    if (importRepair.changedFiles.length > 0) {
+      files = normalizeGeneratedDependencies(files).files
+    }
+    recordStep(
+      "import-validation",
+      importRepair.diagnostics.length > 0 ? "failed" : "passed",
+      importRepair.diagnostics.length > 0 ? "required" : "advisory",
+      performance.now(),
+      importRepair.diagnostics.length > 0 ? importRepair.diagnostics.join("; ") : "Auto-repaired generated import graph",
+      {
+        autoRepair: true,
+        changedFiles: importRepair.changedFiles.map((file) => normalizePath(file.path)),
+        createdFiles: importRepair.createdFiles.map((file) => normalizePath(file.path)),
+        rewrites: importRepair.rewrites,
+        deferredMissing: importRepair.deferredMissing,
+        diagnostics: importRepair.diagnostics,
+      }
+    )
+    if (importRepair.diagnostics.length > 0) {
+      return {
+        ok: false,
+        files,
+        previewUrl: null,
+        previewStatus: "import_validation_failed",
+        steps,
+        sandboxValidation: [],
+        failure: {
+          step: "import-validation",
+          message: importRepair.diagnostics.join("; "),
+          data: {
+            autoRepair: true,
+            diagnostics: importRepair.diagnostics,
+            rewrites: importRepair.rewrites,
+            createdFiles: importRepair.createdFiles.map((file) => normalizePath(file.path)),
+          },
+        },
+      }
+    }
+  }
+
   if (input.plan.generationMode === "PATCH") {
     await GenerationJobService.assertNotCancelled(input.jobId)
     stepStartedAt = performance.now()
@@ -3856,7 +3938,10 @@ async function runValidationLifecycle(input: {
   await input.emit("validating", "Validating runtime imports", 66)
   const fullstack = validateFullStackFiles(files)
   const dependencyMap = buildDependencyMap(files)
-  const importValidation = validateRuntimeImports(files)
+  const importValidation = validateRuntimeImports(files, {
+    plannedPaths,
+    requireTsconfigAlias: input.plan.productionMode === "production_fullstack",
+  })
   if (!importValidation.ok) {
     const first = importValidation.diagnostics[0]
     const message = first
@@ -6117,7 +6202,7 @@ export async function executeGenerationJob(
                 "- Do not include taskGraph, operations, dependencies, commands, summary, diagnostics, metadata, repairs, or explanations.",
                 `- Create or modify only exact paths in APPROVED_FILE_SCOPE: ${plan.allowedFileScope.allowedPaths.join(", ")}.`,
                 "- Do not create helper/shell files such as components/app-shell.tsx unless that exact path is in APPROVED_FILE_SCOPE.",
-                "- Paths must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
+                "- Paths must start with src/, app/, components/, sections/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
                 "- files must be non-empty and every listed target file must be present.",
                 `- Cover exactly this slice target: ${target.path}.`,
               ].join("\n"),

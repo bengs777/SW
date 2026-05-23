@@ -2,6 +2,8 @@ import { parse } from "@babel/parser"
 import generate from "@babel/generator"
 import type { GeneratedFile } from "@/lib/types"
 import { buildDependencyMap } from "@/lib/ai/generation-pipeline"
+import { buildImportGraph } from "@/lib/ai/import-graph"
+import { hasValidTsconfigAlias, usesWorkspaceAlias } from "@/lib/ai/import-repair"
 
 export type RuntimeSyntaxDiagnostic = {
   file: string
@@ -87,11 +89,23 @@ export function autoRepairAdjacentJsxFragments(
   }
 }
 
-export function validateRuntimeImports(files: GeneratedFile[]): RuntimeValidationResult {
+export function validateRuntimeImports(
+  files: GeneratedFile[],
+  options?: {
+    plannedPaths?: string[]
+    deferPlannedMissing?: boolean
+    requireTsconfigAlias?: boolean
+  }
+): RuntimeValidationResult {
   const diagnostics: RuntimeSyntaxDiagnostic[] = []
   const dependencyMap = buildDependencyMap(files)
+  const importGraph = buildImportGraph(files)
+  const plannedPaths = new Set((options?.plannedPaths || []).map(normalizePath).filter(Boolean))
 
   for (const missing of dependencyMap.missingLocalImports) {
+    if (options?.deferPlannedMissing && missing.candidates.some((candidate) => plannedPaths.has(normalizePath(candidate)))) {
+      continue
+    }
     diagnostics.push({
       file: missing.file,
       line: null,
@@ -122,10 +136,66 @@ export function validateRuntimeImports(files: GeneratedFile[]): RuntimeValidatio
     }
   }
 
+  if (options?.requireTsconfigAlias && usesWorkspaceAlias(files) && !hasValidTsconfigAlias(files)) {
+    diagnostics.push({
+      file: "tsconfig.json",
+      line: null,
+      column: null,
+      message: "Missing tsconfig alias: compilerOptions.paths must include @/* for workspace alias imports.",
+    })
+  }
+
+  for (const cycle of detectCircularImports(importGraph)) {
+    diagnostics.push({
+      file: cycle[0] || "unknown",
+      line: null,
+      column: null,
+      message: `Circular import: ${cycle.join(" -> ")}`,
+    })
+  }
+
   return {
     ok: diagnostics.length === 0,
     diagnostics,
   }
+}
+
+function detectCircularImports(graph: ReturnType<typeof buildImportGraph>) {
+  const cycles: string[][] = []
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const stack: string[] = []
+
+  const visit = (file: string) => {
+    if (visited.has(file)) return
+    if (visiting.has(file)) {
+      const start = stack.indexOf(file)
+      if (start >= 0) cycles.push([...stack.slice(start), file])
+      return
+    }
+
+    visiting.add(file)
+    stack.push(file)
+    const node = graph.byFile.get(file)
+    for (const edge of node?.imports || []) {
+      if (edge.resolvedPath) visit(edge.resolvedPath)
+    }
+    stack.pop()
+    visiting.delete(file)
+    visited.add(file)
+  }
+
+  for (const node of graph.nodes) {
+    visit(node.file)
+  }
+
+  const seen = new Set<string>()
+  return cycles.filter((cycle) => {
+    const key = cycle.join(" -> ")
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function toSyntaxDiagnostic(file: string, error: unknown): RuntimeSyntaxDiagnostic {

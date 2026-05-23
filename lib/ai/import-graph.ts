@@ -260,18 +260,20 @@ function dedupeImports(imports: Array<{ specifier: string; typeOnly?: boolean }>
 
 function resolveLocalImportCandidates(fromPath: string, specifier: string) {
   const normalizedSpecifier = specifier.replace(/\\/g, "/")
-  const base =
+  const bases =
     normalizedSpecifier.startsWith("@/") || normalizedSpecifier.startsWith("~/")
-      ? normalizedSpecifier.slice(2)
-      : path.posix.normalize(path.posix.join(path.posix.dirname(normalizePath(fromPath)), normalizedSpecifier))
-  const normalizedBase = normalizePath(base)
+      ? [normalizedSpecifier.slice(2), `src/${normalizedSpecifier.slice(2)}`]
+      : [path.posix.normalize(path.posix.join(path.posix.dirname(normalizePath(fromPath)), normalizedSpecifier))]
   const candidates = new Set<string>()
 
-  for (const extension of FILE_EXTENSIONS) {
-    candidates.add(normalizePath(`${normalizedBase}${extension}`))
-  }
-  for (const extension of INDEX_EXTENSIONS) {
-    candidates.add(normalizePath(path.posix.join(normalizedBase, `index${extension}`)))
+  for (const base of bases) {
+    const normalizedBase = normalizePath(base)
+    for (const extension of FILE_EXTENSIONS) {
+      candidates.add(normalizePath(`${normalizedBase}${extension}`))
+    }
+    for (const extension of INDEX_EXTENSIONS) {
+      candidates.add(normalizePath(path.posix.join(normalizedBase, `index${extension}`)))
+    }
   }
 
   return Array.from(candidates)
