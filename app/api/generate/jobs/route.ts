@@ -21,7 +21,7 @@ import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/serv
 import { ModelConfigService } from "@/lib/services/model-config.service"
 
 export const runtime = "nodejs"
-export const maxDuration = 500
+export const maxDuration = 300
 const routeRuntime: string = runtime
 const generationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
 const allowServerlessGenerationFallback =
