@@ -230,12 +230,29 @@ type ExecuteGenerationJobDeps = {
 }
 
 const MAX_AGENT_ITERATIONS = 5
-const MAX_REPAIR_ATTEMPTS = MAX_AGENT_ITERATIONS - 1
+const MAX_REPAIR_ATTEMPTS = 3
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
 const FULL_FRONTEND_FILE_LIMIT = 15
 const FULL_FRONTEND_BATCH_SIZE = 6
 const PRODUCTION_FULLSTACK_FILE_LIMIT = 16
 const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
+const MINIMAL_RUNNABLE_FALLBACK_REQUIRED_FILES = [
+  "package.json",
+  "tsconfig.json",
+  "app/page.tsx",
+  "app/layout.tsx",
+  "components/loading-skeleton.tsx",
+  "components/site-footer.tsx",
+  "lib/data.ts",
+]
+const MINIMAL_RUNNABLE_FALLBACK_SUPPORT_FILES = [
+  "app/globals.css",
+  "components/site-header.tsx",
+  "components/cta-section.tsx",
+  "sections/hero-section.tsx",
+  "sections/features-section.tsx",
+  "sections/faq-section.tsx",
+]
 
 type ValidationLifecycleStep =
   | "normalize"
@@ -308,6 +325,24 @@ function canUseRemoteSandboxService() {
   if (!url || !token) return false
   if (!process.env.VERCEL && process.env.SWIFT_USE_REMOTE_SANDBOX !== "true") return false
   return true
+}
+
+function runtimeLogText(value: string, maxLength = 12000) {
+  const raw = String(value || "")
+  return raw.length > maxLength ? `${raw.slice(0, maxLength)}...<truncated:${raw.length - maxLength}>` : raw
+}
+
+function hashText(value: string) {
+  return createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16)
+}
+
+function filePathList(files: GeneratedFile[], limit = 80) {
+  return files.map((file) => normalizePath(file.path)).slice(0, limit)
+}
+
+function missingNormalizedPaths(files: GeneratedFile[], requiredPaths: string[]) {
+  const present = new Set(files.map((file) => normalizePath(file.path)))
+  return uniquePaths(requiredPaths).filter((path) => !present.has(normalizePath(path)))
 }
 
 async function startConfiguredSandboxService(input: {
@@ -2416,6 +2451,9 @@ async function runProviderAttempt(input: {
       latencyMs: Math.round(performance.now() - startedAt),
       attempts: response.attempts.length,
       tokenUsage: response.tokenUsage || null,
+      rawLength: response.message.length,
+      rawHash: hashText(response.message),
+      RAW_AI_OUTPUT: runtimeLogText(response.message),
     })
 
     await GenerationJobService.finishAttempt({
@@ -3185,7 +3223,163 @@ export default config
     })
   }
 
+  if (missing.has("components/loading-skeleton.tsx")) {
+    files.push({
+      path: "components/loading-skeleton.tsx",
+      language: "tsx",
+      content: `export function LoadingSkeleton() {
+  return (
+    <div className="grid gap-3" aria-label="Loading">
+      <div className="h-4 w-28 rounded bg-slate-200" />
+      <div className="h-24 rounded border border-slate-200 bg-slate-50" />
+    </div>
+  )
+}
+`,
+    })
+  }
+
+  if (missing.has("components/site-footer.tsx")) {
+    files.push({
+      path: "components/site-footer.tsx",
+      language: "tsx",
+      content: `export function SiteFooter() {
+  return (
+    <footer className="border-t border-slate-200 px-6 py-6 text-sm text-slate-600">
+      <div className="mx-auto flex max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <span>Swift generated app</span>
+        <span>Production-ready fallback scaffold</span>
+      </div>
+    </footer>
+  )
+}
+`,
+    })
+  }
+
+  if (missing.has("lib/data.ts")) {
+    files.push({
+      path: "lib/data.ts",
+      language: "ts",
+      content: `export const appData = {
+  title: "Swift App",
+  description: "A minimal runnable project recovered from the generation pipeline.",
+  cta: "Get started",
+  sections: ["hero", "features", "benefit", "pricing", "faq", "contact"],
+}
+`,
+    })
+  }
+
   return files
+}
+
+function fallbackComponentExportName(path: string) {
+  const base = normalizePath(path)
+    .split("/")
+    .pop()
+    ?.replace(/\.(tsx|jsx|ts|js)$/i, "") || "generated-section"
+  return base
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join("") || "GeneratedSection"
+}
+
+function buildGenericFallbackFile(path: string): GeneratedFile | null {
+  const normalized = normalizePath(path)
+  const known = buildMissingScaffoldFiles([normalized])
+  if (known.length > 0) return known[0]
+
+  if (/^components\/.+\.(tsx|jsx)$/i.test(normalized) || /^sections\/.+\.(tsx|jsx)$/i.test(normalized)) {
+    const exportName = fallbackComponentExportName(normalized)
+    const label = normalized
+      .replace(/\.(tsx|jsx)$/i, "")
+      .replace(/^(components|sections)\//, "")
+      .replace(/[-_/]+/g, " ")
+    return {
+      path: normalized,
+      language: "tsx",
+      content: `export function ${exportName}() {
+  return (
+    <section className="grid gap-3 rounded border border-slate-200 bg-white p-5">
+      <p className="text-sm font-medium uppercase tracking-normal text-slate-500">${label}</p>
+      <h2 className="text-xl font-semibold text-slate-950">Reliable ${label} section</h2>
+      <p className="text-sm leading-6 text-slate-600">Responsive fallback content for hero, features, benefit, pricing, faq, contact, and cta coverage.</p>
+    </section>
+  )
+}
+
+export default ${exportName}
+`,
+    }
+  }
+
+  if (/^app\/(?:.+\/)?page\.(tsx|jsx)$/i.test(normalized)) {
+    return {
+      path: normalized,
+      language: "tsx",
+      content: `export default function GeneratedPage() {
+  return (
+    <main className="min-h-screen bg-white px-6 py-10 text-slate-950">
+      <section className="mx-auto grid max-w-4xl gap-4">
+        <p className="text-sm font-medium uppercase tracking-normal text-slate-500">Swift fallback</p>
+        <h1 className="text-3xl font-semibold">Generated page recovered</h1>
+        <p className="text-base text-slate-600">This route is running with a minimal fallback page.</p>
+      </section>
+    </main>
+  )
+}
+`,
+    }
+  }
+
+  if (normalized === ".env.example") {
+    return {
+      path: ".env.example",
+      language: "env",
+      content: `# Add runtime environment variables here when needed.
+`,
+    }
+  }
+
+  return null
+}
+
+function buildMinimalRunnableFallbackProject(input: {
+  files: GeneratedFile[]
+  plan?: GenerationPlan
+  reason: string
+  replaceCore?: boolean
+}) {
+  const required = uniquePaths([
+    ...MINIMAL_RUNNABLE_FALLBACK_REQUIRED_FILES,
+    ...MINIMAL_RUNNABLE_FALLBACK_SUPPORT_FILES,
+    ...(input.plan?.filePlan.map((file) => file.path) || []),
+    ...(input.plan?.blueprint.requiredFiles || []),
+  ])
+  const fallbackFiles = required
+    .map((path) => buildGenericFallbackFile(path))
+    .filter(Boolean) as GeneratedFile[]
+  const fallbackByPath = new Map(fallbackFiles.map((file) => [normalizePath(file.path), file]))
+  const existingByPath = new Map(input.files.map((file) => [normalizePath(file.path), file]))
+  const merged = new Map(existingByPath)
+  const injectedPaths: string[] = []
+
+  for (const [path, file] of fallbackByPath) {
+    if (!existingByPath.has(path) || input.replaceCore) {
+      merged.set(path, file)
+      injectedPaths.push(path)
+    }
+  }
+
+  return {
+    files: Array.from(merged.values()),
+    injectedPaths: uniquePaths(injectedPaths),
+    requiredFiles: required,
+    missingBefore: required.filter((path) => !existingByPath.has(normalizePath(path))),
+    reason: input.reason,
+  }
 }
 
 function buildMissingBackendBlueprintFiles(input: {
@@ -4082,6 +4276,8 @@ async function runValidationLifecycle(input: {
     const message = staticFailures.join("; ")
     const data = {
       appType: input.plan.appType,
+      receivedFiles: filePathList(files),
+      receivedFileCount: files.length,
       coverage: fullstack.coverage,
       missingCategories: fullstack.missingCategories,
       fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
@@ -4098,6 +4294,16 @@ async function runValidationLifecycle(input: {
       missingLocalImports: dependencyMap.missingLocalImports.slice(0, 12),
       unsupportedPreviewImports: dependencyMap.unsupportedPreviewImports.slice(0, 12),
     }
+    log("warn", "project_validator_failed", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      receivedFileCount: files.length,
+      receivedFiles: filePathList(files),
+      missingRequiredFiles: blueprintValidation.missingRequiredFiles,
+      forbiddenFiles: blueprintValidation.forbiddenFiles,
+      missingCategories: fullstack.missingCategories,
+      reasons: staticFailures,
+    })
     recordStep("static", "failed", "required", stepStartedAt, message, data)
     return {
       ok: false,
@@ -4116,6 +4322,7 @@ async function runValidationLifecycle(input: {
 
   recordStep("static", "passed", "required", stepStartedAt, undefined, {
     appType: input.plan.appType,
+    receivedFiles: filePathList(files),
     coverage: fullstack.coverage,
     missingCategories: fullstack.missingCategories,
     fullStackCoveragePolicy: requiresFullStackCoverage ? "required" : "advisory",
@@ -4129,6 +4336,13 @@ async function runValidationLifecycle(input: {
     frontendCompleteness,
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
+  })
+  log("info", "project_validator_passed", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    receivedFileCount: files.length,
+    receivedFiles: filePathList(files),
+    requiredFilesMissing: blueprintValidation.missingRequiredFiles,
   })
 
   await GenerationJobService.assertNotCancelled(input.jobId)
@@ -4704,7 +4918,9 @@ async function attemptTargetedRepair(input: {
     "- Never create or modify next-auth.d.ts, root auth.ts, or any .env file during repair; use app/ route handlers or lib/ helpers for NextAuth changes.",
     "- PATH POLICY: every path must normalize and resolve inside the workspace, and must start with src/, app/, components/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
-    "- Return ONLY strict JSON with files, dependencies, commands, summary, taskGraph, diagnostics, metadata, and repairs keys. commands must be [].",
+    '- Return ONLY strict JSON matching this repair schema: {"files":[{"path":"app/page.tsx","content":"complete replacement content","language":"tsx"}],"dependencies":[],"commands":[],"summary":"short repair summary","diagnostics":[],"metadata":{}}.',
+    "- files must be a non-empty array when a repair is possible. Do not return diagnostics-only, prose, Markdown, or partial snippets.",
+    "- commands must always be []. taskGraph is allowed only when every create/modify operation has full content.",
     "- The repaired file must be syntactically valid TSX/TypeScript. No raw emoji, no unterminated strings, no split quoted strings.",
     "- If a fancy design is causing syntax risk, replace it with a minimal compile-safe version of the failing file.",
     "- The result will be revalidated through normalize -> static validation -> preview compile -> typecheck -> lint -> build before persistence.",
@@ -4743,10 +4959,29 @@ async function attemptTargetedRepair(input: {
     promptLanguage: input.promptLanguage,
     signal: input.signal,
   })
+  log("info", "repair_payload_received", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    repairAttempt: input.repairAttempt,
+    maxRepairAttempts: input.maxRepairAttempts,
+    rawLength: response.message.length,
+    rawHash: hashText(response.message),
+    RAW_REPAIR_PAYLOAD: runtimeLogText(response.message),
+  })
   let parsed: ReturnType<typeof parseGeneratedArtifact>
   try {
     parsed = parseGeneratedArtifact(response.message)
   } catch (error) {
+    const failureMessage = error instanceof Error ? error.message : String(error)
+    log("warn", "repair_payload_schema_validation_failed", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      repairAttempt: input.repairAttempt,
+      maxRepairAttempts: input.maxRepairAttempts,
+      failure: failureMessage,
+      rawHash: hashText(response.message),
+      RAW_REPAIR_PAYLOAD: runtimeLogText(response.message),
+    })
     return {
       files: currentFiles,
       repaired: false,
@@ -4760,9 +4995,17 @@ async function attemptTargetedRepair(input: {
       repairPromptPreview: repairPrompt.slice(0, 6000),
       repairedArtifactSummary: summarizeArtifactPayload({ files: [] }),
       terminationReason: "malformed_repair_payload" as RepairTerminationReason,
-      failureMessage: error instanceof Error ? error.message : String(error),
+      failureMessage,
     }
   }
+  log("info", "repair_payload_schema_validation_passed", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    repairAttempt: input.repairAttempt,
+    parsedFileCount: parsed.files.length,
+    parsedFiles: filePathList(parsed.files),
+    taskOperationCount: parsed.taskGraph?.operations.length || 0,
+  })
   const parsedFileCount = parsed.files.length
   const allowedScopeResult = scopeArtifactToAllowedScope(parsed, input.plan)
   parsed = allowedScopeResult.artifact
@@ -6227,6 +6470,18 @@ export async function executeGenerationJob(
             strictFilesOnly: true,
             requiredFiles: targets.map((item) => item.path),
           })
+          log("info", "generator_parsed_files", {
+            jobId: input.jobId,
+            projectId: input.projectId,
+            sliceIndex,
+            sliceTotal,
+            parseAttempt,
+            parsedFileCount: parsed.files.length,
+            parsedFiles: filePathList(parsed.files),
+            requiredFiles: targets.map((item) => normalizePath(item.path)),
+            missingFiles: missingNormalizedPaths(parsed.files, targets.map((item) => item.path)),
+            rawHash: hashText(response.message),
+          })
           developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({
             files: parsed.files,
             dependencies: parsed.dependencies,
@@ -6243,6 +6498,109 @@ export async function executeGenerationJob(
           break
         } catch (error) {
           parseError = error
+          const parseFailure = error instanceof Error ? error.message : String(error)
+          log("warn", "generator_output_contract_violation", {
+            jobId: input.jobId,
+            projectId: input.projectId,
+            sliceIndex,
+            sliceTotal,
+            parseAttempt,
+            target: target.path,
+            requiredFiles: targets.map((item) => normalizePath(item.path)),
+            parseFailure,
+            rawHash: hashText(response.message),
+            RAW_AI_OUTPUT: runtimeLogText(response.message),
+          })
+          if (parseAttempt >= 2) {
+            const invalidArtifactPath = await persistInvalidArtifactReport({
+              jobId: input.jobId,
+              projectId: input.projectId,
+              payload: response.message,
+              parseFailure,
+              schemaMismatch: parseFailure,
+            }).catch(() => null)
+            let partialFiles: GeneratedFile[] = []
+            try {
+              partialFiles = parseGeneratedArtifact(response.message, { strictFilesOnly: true }).files
+            } catch {
+              partialFiles = []
+            }
+            const fallback = buildMinimalRunnableFallbackProject({
+              files: [...workingFiles, ...partialFiles],
+              plan,
+              reason: parseFailure,
+              replaceCore: partialFiles.length === 0,
+            })
+            parsed = {
+              files: fallback.files,
+              dependencies: [],
+              commands: [],
+              summary: "Minimal runnable fallback project injected after invalid AI artifact output.",
+              diagnostics: [
+                "RAW_AI_OUTPUT failed generator output contract validation.",
+                parseFailure,
+              ],
+              metadata: {
+                fallback: "minimal_runnable_project",
+                invalidArtifactPath,
+                missingBeforeFallback: fallback.missingBefore,
+              },
+              repairs: [],
+            }
+            developerDiagnostics.artifactParseFailures.push({
+              stage: "artifact_parsing",
+              status: "failed",
+              reason: publicArtifactParseError(error),
+              parseAttempt,
+              target: target.path,
+              reportPath: invalidArtifactPath,
+            })
+            developerDiagnostics.reports.lastInvalidArtifactPath = invalidArtifactPath
+            developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({ files: parsed.files })
+            recordDeveloperDiagnostic(developerDiagnostics, {
+              stage: "GENERATING",
+              status: "passed",
+              reason: "Minimal runnable fallback injected after invalid generator output",
+              data: {
+                parseAttempt,
+                target: target.path,
+                reportPath: invalidArtifactPath,
+                parserDiagnostic: publicArtifactParseError(error),
+                fallbackInjectedPaths: fallback.injectedPaths,
+                parsedFiles: filePathList(parsed.files),
+              },
+            })
+            await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+            await appendOrchestrationEvent({
+              jobId: input.jobId,
+              trace: {
+                traceId: correlation.traceId,
+                workerId: null,
+              },
+              type: "minimal_fallback_injected",
+              stage: "parsing",
+              status: "running",
+              message: "Minimal runnable fallback project injected after invalid AI output",
+              data: {
+                reason: parseFailure,
+                reportPath: invalidArtifactPath,
+                injectedPaths: fallback.injectedPaths,
+                parsedFileCount: parsed.files.length,
+              },
+            })
+            log("warn", "minimal_runnable_fallback_injected", {
+              jobId: input.jobId,
+              projectId: input.projectId,
+              sliceIndex,
+              sliceTotal,
+              reason: parseFailure,
+              reportPath: invalidArtifactPath,
+              injectedPaths: fallback.injectedPaths,
+              fileCount: parsed.files.length,
+            })
+            parseError = null
+            break
+          }
           if (!(error instanceof Error) || !error.message.startsWith("MALFORMED_GENERATED_ARTIFACT") || parseAttempt >= 2) {
             const invalidArtifactPath = await persistInvalidArtifactReport({
               jobId: input.jobId,
@@ -7441,6 +7799,108 @@ export async function executeGenerationJob(
       promptTokens,
       completionTokens,
       totalTokens,
+    }
+
+    if (!validation.ok) {
+      const fallback = buildMinimalRunnableFallbackProject({
+        files: workingFiles,
+        plan,
+        reason: validation.failure?.message || "Validation failed after repair loop",
+        replaceCore: true,
+      })
+      if (fallback.injectedPaths.length > 0) {
+        await GenerationJobService.assertNotCancelled(input.jobId)
+        assertNotAborted(input.signal)
+        workingFiles = fallback.files
+        tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
+        repairStopReason = null
+        log("warn", "minimal_runnable_fallback_before_failure", {
+          jobId: input.jobId,
+          projectId: input.projectId,
+          reason: fallback.reason,
+          injectedPaths: fallback.injectedPaths,
+          missingBefore: fallback.missingBefore,
+          fileCount: workingFiles.length,
+        })
+        await appendOrchestrationEvent({
+          jobId: input.jobId,
+          trace: {
+            traceId: correlation.traceId,
+            workerId: null,
+          },
+          type: "minimal_fallback_injected",
+          stage: "repairing",
+          status: "running",
+          message: "Minimal runnable fallback project injected before final failure",
+          data: {
+            reason: fallback.reason,
+            injectedPaths: fallback.injectedPaths,
+            missingBefore: fallback.missingBefore,
+            fileCount: workingFiles.length,
+          },
+        })
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "REPAIRING",
+          status: "passed",
+          reason: "Minimal runnable fallback injected before final failure",
+          data: {
+            previousFailure: validation.failure || null,
+            injectedPaths: fallback.injectedPaths,
+            fileCount: workingFiles.length,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        validation = await runValidationLifecycle({
+          jobId: input.jobId,
+          projectId: input.projectId,
+          prompt: input.prompt,
+          files: workingFiles,
+          plan,
+          blueprint,
+          trace: {
+            traceId: correlation.traceId,
+            workerId: null,
+          },
+          signal: input.signal,
+          emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
+        })
+        markOrchestrationValidation(plan.orchestration, {
+          status: validation.ok ? "passed" : "failed",
+          failedScope: validation.failure?.step || "",
+          failures: validation.ok ? [] : [validation.failure?.message || "Minimal fallback validation failed"],
+        })
+        markPreviewStatus(plan.orchestration, validation.previewStatus)
+        developerDiagnostics.validationStatus = plan.orchestration.validationStatus
+        developerDiagnostics.failedScope = plan.orchestration.failedScope
+        developerDiagnostics.previewStatus = plan.orchestration.previewStatus
+        developerDiagnostics.orchestrationDiagnostics = plan.orchestration as unknown as Record<string, unknown>
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: validation.ok ? "STARTING_PREVIEW" : "VALIDATING",
+          status: validation.ok ? "passed" : "failed",
+          reason: validation.ok ? "Minimal fallback project passed validation" : validation.failure?.message || "Minimal fallback validation failed",
+          data: {
+            fallbackInjectedPaths: fallback.injectedPaths,
+            steps: validation.steps.map((step) => ({
+              name: step.name,
+              status: step.status,
+              policy: step.policy,
+              durationMs: step.durationMs,
+              reason: step.message || null,
+            })),
+            failure: validation.failure || null,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        metrics.validationLifecycle = {
+          ok: validation.ok,
+          repairAttempts: repairAttempt,
+          steps: validation.steps,
+          sandboxValidation: validation.sandboxValidation,
+          failure: validation.failure || null,
+        }
+        metrics.previewStatus = validation.previewStatus
+        metrics.previewError = validation.failure?.message || null
+      }
     }
 
     if (!validation.ok) {
