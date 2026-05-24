@@ -1,6 +1,5 @@
 # Swift AI persistent generation worker host.
-# This intentionally runs the Next.js Node server in a dedicated non-Vercel
-# process so instrumentation can start the BullMQ worker and keep it alive.
+# This intentionally runs the BullMQ worker as a dedicated non-Vercel process.
 
 FROM node:20-alpine AS base
 WORKDIR /app
@@ -20,7 +19,8 @@ RUN npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV SWIFT_ENABLE_GENERATION_WORKER=true
+ENV SWIFT_GENERATION_EXECUTION_MODE=queue
+ENV SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true
 ENV PORT=4000
 
 COPY --from=builder /app/package*.json ./
@@ -31,4 +31,4 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/next.config.js ./next.config.js
 
 EXPOSE 4000
-CMD ["npm", "run", "start"]
+CMD ["npm", "run", "worker:generation"]
