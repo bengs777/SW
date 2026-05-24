@@ -2,7 +2,8 @@ import fs from "node:fs"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
 import { spawn, spawnSync } from "node:child_process"
-import { prisma } from "@/lib/db/client"
+import { disconnectPrisma, getDatabasePoolUsage, getPrismaRuntimeStats, prisma } from "@/lib/db/client"
+import { getDatabaseMetricsSnapshot } from "@/lib/db/metrics"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
@@ -14,6 +15,7 @@ import type { GeneratedFile } from "@/lib/types"
 const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "project-state-live-validation")
 const LIVE_COUNT = Math.max(1, Number(process.env.SWIFT_PROJECT_STATE_LIVE_COUNT || 10))
 const GENERATION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SWIFT_PROJECT_STATE_LIVE_TIMEOUT_MS || 300_000))
+const MAX_CONCURRENT_CHILDREN = Math.max(1, Math.min(2, Number(process.env.SWIFT_PROJECT_STATE_MAX_CONCURRENT_CHILDREN || 2)))
 
 type PromptCase = {
   id: string
@@ -34,6 +36,7 @@ type CaseResult = {
   metrics: any
   lifecycleBreakdown?: any
   lifecycleEvents?: string[]
+  artifactEvents?: any[]
   bottleneckStage?: string | null
   taskgraphFailureReason?: string | null
   taskgraphFailureReportPath?: string | null
@@ -154,21 +157,51 @@ async function runBatch() {
   const reportDir = path.join(REPORT_ROOT, runId)
   await mkdir(reportDir, { recursive: true })
 
+  const dbBefore = await collectDbRuntimeMetrics()
   const results: CaseResult[] = []
-  for (const promptCase of promptSuite()) {
-    const runningProgress = buildProgress(results, 1)
+  const cases = promptSuite()
+  for (let index = 0; index < cases.length; index += MAX_CONCURRENT_CHILDREN) {
+    const batch = cases.slice(index, index + MAX_CONCURRENT_CHILDREN)
+    const runningProgress = buildProgress(results, batch.length)
     await writeBatchProgress(reportDir, { runId, results, progress: runningProgress })
-    const result = await runCaseChild({ runId, reportDir, promptCase })
-    results.push(result)
+    const batchResults = await Promise.all(batch.map((promptCase) => runCaseChild({ runId, reportDir, promptCase })))
+    results.push(...batchResults)
+    await cleanupAfterChildBatch()
     await writeBatchProgress(reportDir, { runId, results, progress: buildProgress(results, 0) })
   }
 
-  const summary = summarize(runId, Date.now() - startedAt, results)
+  const dbAfter = await collectDbRuntimeMetrics()
+  const summary = summarize(runId, Date.now() - startedAt, results, {
+    before: dbBefore,
+    after: dbAfter,
+    maxConcurrentChildren: MAX_CONCURRENT_CHILDREN,
+  })
   await writeFile(path.join(reportDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   await writeFile(path.join(REPORT_ROOT, "latest.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   console.log(JSON.stringify(summary, null, 2))
-  await prisma.$disconnect()
+  await disconnectPrisma()
   process.exit(summary.finalStatus === "NOT_READY" ? 2 : 0)
+}
+
+async function cleanupAfterChildBatch() {
+  await getDatabasePoolUsage().catch(() => null)
+}
+
+async function collectDbRuntimeMetrics() {
+  const pool = await getDatabasePoolUsage()
+  const dbMetrics = getDatabaseMetricsSnapshot()
+  const prismaStats = getPrismaRuntimeStats()
+  return {
+    ...prismaStats,
+    activeDbConnections: pool.activeConnections,
+    dbPoolUsage: pool.usagePct,
+    dbMaxConnections: pool.maxConnections,
+    dbPoolError: "error" in pool ? pool.error : null,
+    dbConnectionFailures: dbMetrics.db_connection_failures,
+    dbRetryCount: dbMetrics.db_retry_count,
+    averageQueryTime: dbMetrics.average_query_time,
+    p95QueryTime: dbMetrics.P95_query_time,
+  }
 }
 
 async function runCaseChild(input: { runId: string; reportDir: string; promptCase: PromptCase }): Promise<CaseResult> {
@@ -192,6 +225,9 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
     env: {
       ...process.env,
       SWIFT_PROJECT_STATE_LIVE_COUNT: String(LIVE_COUNT),
+      SWIFT_PROJECT_STATE_MAX_CONCURRENT_CHILDREN: String(MAX_CONCURRENT_CHILDREN),
+      DB_CONNECTION_LIMIT: process.env.DB_CONNECTION_LIMIT || "2",
+      DB_POOL_TIMEOUT_SECONDS: process.env.DB_POOL_TIMEOUT_SECONDS || "5",
     },
     stdio: ["ignore", "pipe", "pipe"],
   })
@@ -206,7 +242,11 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
       if (settled) return
       settled = true
       killChildTree(child.pid)
-      resolve({ code: null, signal: "SIGKILL", timedOut: true })
+      const forceResolve = setTimeout(() => resolve({ code: null, signal: "SIGKILL", timedOut: true }), 5_000)
+      child.once("exit", (code, signal) => {
+        clearTimeout(forceResolve)
+        resolve({ code, signal, timedOut: true })
+      })
     }, GENERATION_TIMEOUT_MS)
     child.on("exit", (code, signal) => {
       if (settled) return
@@ -227,8 +267,15 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
   }
   const status = parseJson(fs.existsSync(path.join(caseDir, "status.json")) ? fs.readFileSync(path.join(caseDir, "status.json"), "utf8") : null) as any
   const timedOutJob = status?.jobId
-    ? await readJobAudit(status.jobId).catch(() => ({ metrics: null, lifecycleEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }))
-    : { metrics: null, lifecycleEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }
+    ? await readJobAudit(status.jobId).catch(() => ({ metrics: null, lifecycleEvents: [], artifactEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }))
+    : { metrics: null, lifecycleEvents: [], artifactEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }
+  const executorTimeoutReportPath = exit.timedOut && status?.jobId && status?.projectId && timedOutJob.bottleneckStage === "executor"
+    ? await persistChildExecutorTimeoutReport({
+        jobId: status.jobId,
+        projectId: status.projectId,
+        lifecycleEvents: timedOutJob.executorEvents || [],
+      }).catch(() => null)
+    : null
 
   const result: CaseResult = {
     id: input.promptCase.id,
@@ -244,9 +291,10 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
     metrics: timedOutJob.metrics,
     lifecycleBreakdown: timedOutJob.lifecycleBreakdown,
     lifecycleEvents: timedOutJob.lifecycleEvents,
+    artifactEvents: timedOutJob.artifactEvents,
     bottleneckStage: timedOutJob.bottleneckStage,
     taskgraphFailureReason: timedOutJob.taskgraphFailureReason,
-    taskgraphFailureReportPath: timedOutJob.taskgraphFailureReportPath,
+    taskgraphFailureReportPath: timedOutJob.taskgraphFailureReportPath || executorTimeoutReportPath,
     artifactPath: path.join(caseDir, "timeout-artifact.json"),
   }
   await writeFile(result.artifactPath!, `${JSON.stringify({
@@ -381,7 +429,10 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       select: { status: true, stage: true, error: true, metricsJson: true, resultHistoryId: true },
     })
     const audit = await readJobAudit(job.id)
-    const metrics = audit.metrics
+    const metrics = {
+      ...(audit.metrics || {}),
+      dbRuntime: await collectDbRuntimeMetrics(),
+    }
     const artifactPath = path.join(caseDir, "artifact.json")
     await writeFile(artifactPath, `${JSON.stringify({
       promptCase,
@@ -390,6 +441,7 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       metrics,
       finalJob,
       lifecycleEvents: audit.lifecycleEvents,
+      artifactEvents: audit.artifactEvents,
       lifecycleBreakdown: audit.lifecycleBreakdown,
       bottleneckStage: audit.bottleneckStage,
       taskgraphFailureReason: audit.taskgraphFailureReason,
@@ -407,6 +459,7 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       metrics,
       lifecycleBreakdown: audit.lifecycleBreakdown,
       lifecycleEvents: audit.lifecycleEvents,
+      artifactEvents: audit.artifactEvents,
       bottleneckStage: audit.bottleneckStage,
       taskgraphFailureReason: audit.taskgraphFailureReason,
       taskgraphFailureReportPath: audit.taskgraphFailureReportPath,
@@ -414,7 +467,7 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
     }
     await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
     await cleanupDedicatedUserSandbox({ userId: user.id, projectId: project.id }).catch(() => null)
-    await prisma.$disconnect()
+    await disconnectPrisma()
     process.exit(result.success ? 0 : 2)
   } catch (error) {
     if (userId && projectId) {
@@ -429,17 +482,23 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       durationMs: Date.now() - itemStartedAt,
       error: error instanceof Error ? error.message : String(error),
       resultHistoryId: null,
-      metrics: null,
+      metrics: {
+        dbRuntime: await collectDbRuntimeMetrics().catch(() => null),
+      },
       artifactPath: path.join(caseDir, "error-artifact.json"),
     }
     await writeFile(result.artifactPath!, `${JSON.stringify({ promptCase, error: result.error }, null, 2)}\n`, "utf8")
     await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
-    await prisma.$disconnect().catch(() => null)
+    await disconnectPrisma().catch(() => null)
     process.exit(2)
   }
 }
 
-function summarize(runId: string, durationMs: number, results: any[]) {
+function summarize(runId: string, durationMs: number, results: any[], dbRuntime: {
+  before: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
+  after: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
+  maxConcurrentChildren: number
+}) {
   const successes = results.filter((item) => item.success).length
   const projectStateUsed = results.filter((item) =>
     item.metrics?.projectStateLoaded === true || item.lifecycleEvents?.includes("project_state_loaded")
@@ -487,8 +546,12 @@ function summarize(runId: string, durationMs: number, results: any[]) {
     averageChangedFiles,
     generationSuccessRate,
     fullRewriteRate,
+    dbMetrics: summarizeDbMetrics(results, dbRuntime),
     failureBreakdown: summarizeFailures(results),
+    artifactAudit: summarizeArtifactAudit(results),
     lifecycleBreakdown: summarizeLifecycle(results),
+    executorBreakdown: summarizeExecutor(results),
+    timeoutBreakdown: summarizeTimeouts(results),
     bottleneckStage: summarizeBottleneck(results),
     readinessScore,
     finalStatus,
@@ -523,8 +586,16 @@ async function readJobAudit(jobId: string) {
       "first_token_received",
       "early_artifact_persisted",
       "provider_completed",
+      "artifact_validation_started",
+      "artifact_validation_completed",
       "taskgraph_started",
       "taskgraph_completed",
+      "executor_started",
+      "executor_operation_started",
+      "executor_operation_completed",
+      "executor_wait_started",
+      "executor_wait_completed",
+      "executor_completed",
       "taskgraph_validation_started",
       "taskgraph_validation_completed",
       "operation_validation_started",
@@ -540,17 +611,111 @@ async function readJobAudit(jobId: string) {
       "persist_completed",
     ].includes(event.type))
     .map((event) => event.type)
+  const executorEvents = events
+    .filter((event) => event.type.startsWith("executor_") || event.type === "patch_queue_started")
+    .map((event) => ({
+      type: event.type,
+      stage: event.stage,
+      data: parseJson(event.dataJson),
+      createdAt: event.createdAt.toISOString(),
+    }))
+  const artifactEvents = events
+    .filter((event) => event.type === "artifact_validation_completed")
+    .map((event) => ({
+      type: event.type,
+      stage: event.stage,
+      data: parseJson(event.dataJson),
+      createdAt: event.createdAt.toISOString(),
+    }))
   const taskgraphFailure = [...events].reverse().find((event) => event.type === "taskgraph_failure")
   const taskgraphFailureData = parseJson(taskgraphFailure?.dataJson)
   const lifecycleBreakdown = metrics?.generationLifecycle || latestLifecycleFromEvents(events)
   return {
     metrics,
     lifecycleEvents,
+    executorEvents,
+    artifactEvents,
     lifecycleBreakdown,
     bottleneckStage: bottleneckFromBreakdown(lifecycleBreakdown),
     taskgraphFailureReason: taskgraphFailureData?.reason || null,
     taskgraphFailureReportPath: taskgraphFailureData?.reportPath || null,
   }
+}
+
+async function persistChildExecutorTimeoutReport(input: {
+  jobId: string
+  projectId: string
+  lifecycleEvents: Array<{ type: string; data: any; createdAt: string }>
+}) {
+  const dir = path.join(process.cwd(), ".swift-reports", "executor-timeouts", input.jobId)
+  await mkdir(dir, { recursive: true })
+  const operationQueue = buildExecutorOperationQueue(input.lifecycleEvents)
+  const pendingOperations = operationQueue.filter((operation) => operation.status === "pending" || operation.status === "running")
+  const activePromises = operationQueue
+    .filter((operation) => operation.status === "running")
+    .map((operation) => ({
+      id: operation.id,
+      operation: operation.operation,
+      file: operation.file,
+      startedAt: operation.startedAt,
+    }))
+  const writtenAt = new Date().toISOString()
+  await Promise.all([
+    writeFile(path.join(dir, "pending_operations.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      operations: pendingOperations,
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "operation_queue.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      operations: operationQueue,
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "dependency_state.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      reason: "child_timeout_during_executor",
+      lastExecutorEvent: input.lifecycleEvents.at(-1) || null,
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "active_promises.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      activePromises,
+    }, null, 2)}\n`, "utf8"),
+  ])
+  return dir
+}
+
+function buildExecutorOperationQueue(events: Array<{ type: string; data: any; createdAt: string }>) {
+  const queue = new Map<string, any>()
+  for (const event of events) {
+    const data = event.data || {}
+    const id = String(data.operationId || "")
+    if (!id || id === "build_operation_queue" || id === "dependency_install") continue
+    if (event.type === "executor_operation_started") {
+      queue.set(id, {
+        id,
+        operation: String(data.operation || ""),
+        file: String(data.file || ""),
+        status: "running",
+        startedAt: event.createdAt,
+      })
+    }
+    if (event.type === "executor_operation_completed") {
+      const existing = queue.get(id) || { id }
+      queue.set(id, {
+        ...existing,
+        status: data.status || "completed",
+        completedAt: event.createdAt,
+        durationMs: data.durationMs,
+      })
+    }
+  }
+  return Array.from(queue.values())
 }
 
 function latestLifecycleFromEvents(events: Array<{ dataJson: string | null }>) {
@@ -566,9 +731,113 @@ function summarizeLifecycle(results: any[]) {
   return {
     providerLatencyMs: avg(values.map((item) => Number(item.providerLatencyMs || 0)).filter((value) => value > 0)),
     taskgraphLatencyMs: avg(values.map((item) => Number(item.taskgraphLatencyMs || 0)).filter((value) => value > 0)),
+    executorLatencyMs: avg(values.map((item) => Number(item.executorLatencyMs || 0)).filter((value) => value > 0)),
     patchLatencyMs: avg(values.map((item) => Number(item.patchLatencyMs || 0)).filter((value) => value > 0)),
     persistLatencyMs: avg(values.map((item) => Number(item.persistLatencyMs || 0)).filter((value) => value > 0)),
   }
+}
+
+function summarizeDbMetrics(results: any[], dbRuntime: {
+  before: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
+  after: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
+  maxConcurrentChildren: number
+}) {
+  const childSnapshots = results
+    .map((item) => item.metrics?.dbRuntime)
+    .filter(Boolean)
+  const childConnectionFailures = childSnapshots.reduce((sum, item) => sum + Number(item.dbConnectionFailures || 0), 0)
+  const childRetryCount = childSnapshots.reduce((sum, item) => sum + Number(item.dbRetryCount || 0), 0)
+  const childPrismaClients = childSnapshots.reduce((sum, item) => sum + Number(item.prisma_client_count || 0), 0)
+  const childActivePrismaClients = childSnapshots.reduce((sum, item) => sum + Number(item.activePrismaClients || 0), 0)
+  return {
+    maxConcurrentChildren: dbRuntime.maxConcurrentChildren,
+    prisma_client_count: dbRuntime.after.prisma_client_count + childPrismaClients,
+    activePrismaClients: dbRuntime.after.activePrismaClients + childActivePrismaClients,
+    activePrismaClientsAfterRun: dbRuntime.after.activePrismaClients,
+    activeDbConnectionsBefore: dbRuntime.before.activeDbConnections,
+    activeDbConnectionsAfter: dbRuntime.after.activeDbConnections,
+    dbPoolUsageBefore: dbRuntime.before.dbPoolUsage,
+    dbPoolUsageAfter: dbRuntime.after.dbPoolUsage,
+    dbConnectionFailures: dbRuntime.after.dbConnectionFailures + childConnectionFailures,
+    dbRetryCount: dbRuntime.after.dbRetryCount + childRetryCount,
+    parent: dbRuntime.after,
+    children: childSnapshots,
+  }
+}
+
+function summarizeArtifactAudit(results: any[]) {
+  let attempts = 0
+  let completed = 0
+  let malformed = 0
+  let truncated = 0
+  let validTaskGraph = 0
+  let recovered = 0
+
+  for (const item of results) {
+    const metricAudit = item.metrics?.providerArtifactAudit
+    if (metricAudit) {
+      attempts += Number(metricAudit.attempts || 0)
+      completed += Number(metricAudit.completed || 0)
+      malformed += Number(metricAudit.malformed || 0)
+      truncated += Number(metricAudit.truncated || 0)
+      validTaskGraph += Number(metricAudit.validTaskGraph || 0)
+      recovered += Number(metricAudit.recovered || 0)
+      continue
+    }
+
+    for (const event of item.artifactEvents || []) {
+      const audit = event.data?.artifactAudit
+      if (!audit) continue
+      attempts += 1
+      if (audit.objectClosed) completed += 1
+      if (!audit.schemaValid) malformed += 1
+      if (audit.truncated) truncated += 1
+      if (audit.hasTaskGraph) validTaskGraph += 1
+      if (audit.recovered) recovered += 1
+    }
+  }
+
+  return {
+    attempts,
+    artifactCompletionRate: rate(completed, attempts),
+    malformedArtifactRate: rate(malformed, attempts),
+    truncatedArtifactRate: rate(truncated, attempts),
+    validTaskGraphRate: rate(validTaskGraph, attempts),
+    recoveredArtifactRate: rate(recovered, attempts),
+  }
+}
+
+function summarizeExecutor(results: any[]) {
+  const started = results.filter((item) => item.lifecycleEvents?.includes("executor_started")).length
+  const completed = results.filter((item) => item.lifecycleEvents?.includes("executor_completed")).length
+  const operationStarted = results.reduce((sum, item) =>
+    sum + (item.lifecycleEvents || []).filter((event: string) => event === "executor_operation_started").length, 0)
+  const operationCompleted = results.reduce((sum, item) =>
+    sum + (item.lifecycleEvents || []).filter((event: string) => event === "executor_operation_completed").length, 0)
+  const waitStarted = results.filter((item) => item.lifecycleEvents?.includes("executor_wait_started")).length
+  const waitCompleted = results.filter((item) => item.lifecycleEvents?.includes("executor_wait_completed")).length
+  return {
+    executorStartRate: rate(started, results.length),
+    executorCompletionRate: rate(completed, Math.max(1, started)),
+    executorOperationStarted: operationStarted,
+    executorOperationCompleted: operationCompleted,
+    executorWaitStartRate: rate(waitStarted, Math.max(1, started)),
+    executorWaitCompletionRate: rate(waitCompleted, Math.max(1, waitStarted)),
+  }
+}
+
+function summarizeTimeouts(results: any[]) {
+  const counts = new Map<string, number>()
+  for (const item of results) {
+    if (item.success) continue
+    const reason = item.taskgraphFailureReason ||
+      (item.stage === "timeout" ? "child_timeout" : null) ||
+      item.bottleneckStage ||
+      "generation_error"
+    if (!/timeout|executor|queue/i.test(reason)) continue
+    counts.set(reason, (counts.get(reason) || 0) + 1)
+  }
+  return Object.fromEntries(Array.from(counts.entries()).sort((left, right) => right[1] - left[1]))
 }
 
 function summarizeBottleneck(results: any[]) {
@@ -599,6 +868,7 @@ function bottleneckFromBreakdown(breakdown: any) {
   if (!breakdown) return null
   if (breakdown.providerCalledAt && !breakdown.taskgraphStartedAt) return "provider_artifact_completion"
   if (breakdown.taskgraphStartedAt && !breakdown.taskgraphCompletedAt) return "taskgraph"
+  if (breakdown.executorStartedAt && !breakdown.executorCompletedAt) return "executor"
   if (breakdown.taskgraphCompletedAt && !breakdown.taskgraphValidationStartedAt) return "taskgraph_validation_not_started"
   if (breakdown.taskgraphValidationStartedAt && !breakdown.taskgraphValidationCompletedAt) return "taskgraph_validation"
   if (breakdown.taskgraphValidationCompletedAt && !breakdown.operationValidationStartedAt) return "operation_validation_not_started"
@@ -612,6 +882,7 @@ function bottleneckFromBreakdown(breakdown: any) {
   const stages: Array<[string, number]> = [
     ["provider", Number(breakdown.providerLatencyMs || 0)],
     ["taskgraph", Number(breakdown.taskgraphLatencyMs || 0)],
+    ["executor", Number(breakdown.executorLatencyMs || 0)],
     ["patch", Number(breakdown.patchLatencyMs || 0)],
     ["persist", Number(breakdown.persistLatencyMs || 0)],
   ]
@@ -656,6 +927,6 @@ function parseJson(value: string | null | undefined) {
 
 main().catch(async (error) => {
   console.error(error)
-  await prisma.$disconnect().catch(() => null)
+  await disconnectPrisma().catch(() => null)
   process.exit(1)
 })

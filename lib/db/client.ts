@@ -15,8 +15,23 @@ import {
   markDatabaseCircuitSuccess,
 } from '@/lib/db/circuit-breaker'
 
-const globalForPrisma = global as unknown as { prisma?: PrismaClient; prismaProxyCache?: WeakMap<object, object> }
+const globalForPrisma = global as unknown as {
+  prisma?: PrismaClient
+  prismaProxyCache?: WeakMap<object, object>
+  prismaRuntimeStats?: {
+    createdClients: number
+    disconnectedClients: number
+    activeClients: number
+    exitHooksInstalled: boolean
+  }
+}
 let prismaSingleton: PrismaClient | undefined
+const prismaRuntimeStats = globalForPrisma.prismaRuntimeStats || (globalForPrisma.prismaRuntimeStats = {
+  createdClients: 0,
+  disconnectedClients: 0,
+  activeClients: 0,
+  exitHooksInstalled: false,
+})
 const DB_QUERY_TIMEOUT_MS = Math.max(1_000, Number(process.env.DB_QUERY_TIMEOUT_MS || 10_000))
 const DB_MAX_RETRIES = Math.max(0, Math.min(5, Number(process.env.DB_MAX_RETRIES || 2)))
 const DB_RETRY_BASE_DELAY_MS = Math.max(50, Number(process.env.DB_RETRY_BASE_DELAY_MS || 250))
@@ -153,6 +168,8 @@ async function reconnectPrisma() {
   const current = prismaSingleton
   if (!current) return
   await current.$disconnect().catch(() => null)
+  prismaRuntimeStats.disconnectedClients += 1
+  prismaRuntimeStats.activeClients = Math.max(0, prismaRuntimeStats.activeClients - 1)
   prismaSingleton = undefined
   if (env.nodeEnv !== 'production') {
     globalForPrisma.prisma = undefined
@@ -250,6 +267,8 @@ export function getPrisma(): PrismaClient {
   }
 
   const prismaClient = createPrismaClient()
+  prismaRuntimeStats.createdClients += 1
+  prismaRuntimeStats.activeClients += 1
   prismaSingleton = prismaClient
 
   if (env.nodeEnv !== 'production') {
@@ -258,6 +277,45 @@ export function getPrisma(): PrismaClient {
 
   return prismaClient
 }
+
+export async function disconnectPrisma() {
+  await reconnectPrisma()
+}
+
+export function getPrismaRuntimeStats() {
+  return {
+    prisma_client_count: prismaRuntimeStats.createdClients,
+    activePrismaClients: prismaRuntimeStats.activeClients,
+    disconnectedPrismaClients: prismaRuntimeStats.disconnectedClients,
+  }
+}
+
+function installPrismaExitHooks() {
+  if (prismaRuntimeStats.exitHooksInstalled) return
+  prismaRuntimeStats.exitHooksInstalled = true
+  const cleanup = () => {
+    const current = prismaSingleton
+    if (!current) return
+    prismaSingleton = undefined
+    if (env.nodeEnv !== 'production') {
+      globalForPrisma.prisma = undefined
+    }
+    prismaRuntimeStats.disconnectedClients += 1
+    prismaRuntimeStats.activeClients = Math.max(0, prismaRuntimeStats.activeClients - 1)
+    void current.$disconnect().catch(() => null)
+  }
+  process.once("beforeExit", cleanup)
+  process.once("SIGINT", () => {
+    cleanup()
+    process.exit(130)
+  })
+  process.once("SIGTERM", () => {
+    cleanup()
+    process.exit(143)
+  })
+}
+
+installPrismaExitHooks()
 
 const prisma = new Proxy({} as PrismaClient, {
   get(_target, property, receiver) {

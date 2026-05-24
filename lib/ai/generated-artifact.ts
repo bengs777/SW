@@ -196,6 +196,77 @@ export type GeneratedArtifactParseOptions = {
   recoverJson?: boolean
 }
 
+export type GeneratedArtifactEnvelopeAudit = {
+  rawLength: number
+  startsWithObject: boolean
+  strictEnvelope: boolean
+  bracketBalanced: boolean
+  objectClosed: boolean
+  truncated: boolean
+  recovered: boolean
+  schemaValid: boolean
+  hasTaskGraph: boolean
+  taskGraphOperationCount: number
+  issues: string[]
+}
+
+export function auditGeneratedArtifactEnvelope(providerMessage: string): GeneratedArtifactEnvelopeAudit {
+  const raw = String(providerMessage || "").trim()
+  const balance = inspectJsonBalance(raw)
+  const exact = parseJsonCandidate(raw)
+  const extracted = exact ? null : extractLargestJsonObject(raw)
+  const partial = exact || extracted ? null : extractJsonFromFirstObject(raw)
+  const recovered = exact
+    ? null
+    : extracted
+      ? parseJsonCandidate(repairJsonCandidate(extracted))
+      : parseJsonCandidate(repairJsonCandidate(partial || ""))
+  const parsed = exact || recovered
+  const schema = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? generatedArtifactSchema.safeParse(parsed)
+    : null
+  const taskGraphOnly = !schema?.success && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? z.object({
+        taskGraph: taskGraphSchema,
+        framework: z.string().trim().min(1).optional(),
+        dependencies: z.array(dependencySchema).optional().default([]),
+        commands: z.array(runtimeCommandSchema).optional().default([]),
+        summary: z.string().optional().default(""),
+        diagnostics: z.array(z.string()).optional().default([]),
+        metadata: artifactMetadataSchema.optional().default({}),
+      }).strict().safeParse(parsed)
+    : null
+  const hasTaskGraph = Boolean(
+    (schema?.success && schema.data.taskGraph?.operations.length) ||
+    (taskGraphOnly?.success && taskGraphOnly.data.taskGraph.operations.length)
+  )
+
+  return {
+    rawLength: raw.length,
+    startsWithObject: raw.startsWith("{"),
+    strictEnvelope: isStrictJsonObjectEnvelope(raw),
+    bracketBalanced: balance.balanced,
+    objectClosed: balance.objectClosed,
+    truncated: raw.length > 0 && (!balance.objectClosed || balance.inString || balance.brackets > 0),
+    recovered: !exact && Boolean(recovered),
+    schemaValid: Boolean(schema?.success || taskGraphOnly?.success),
+    hasTaskGraph,
+    taskGraphOperationCount:
+      schema?.success && schema.data.taskGraph
+        ? schema.data.taskGraph.operations.length
+        : taskGraphOnly?.success
+          ? taskGraphOnly.data.taskGraph.operations.length
+          : 0,
+    issues: schema?.success || taskGraphOnly?.success
+      ? []
+      : parsed
+        ? schema
+          ? formatArtifactIssues(schema.error.issues).split("; ")
+          : ["Unsupported artifact structure"]
+        : [diagnoseJsonEnvelope(providerMessage)],
+  }
+}
+
 export function parseGeneratedArtifact(
   providerMessage: string,
   options: GeneratedArtifactParseOptions = {}
@@ -362,8 +433,13 @@ function tryParseJson(value: string, options: { strictEnvelope?: boolean; recove
 
   if (!options.recoverJson) return null
   const extracted = extractLargestJsonObject(raw)
-  if (!extracted) return null
-  return parseJsonCandidate(repairJsonCandidate(extracted))
+  if (extracted) {
+    const parsed = parseJsonCandidate(repairJsonCandidate(extracted))
+    if (parsed) return parsed
+  }
+  const partial = extractJsonFromFirstObject(raw)
+  if (!partial) return null
+  return parseJsonCandidate(repairJsonCandidate(partial))
 }
 
 function parseJsonCandidate(raw: string) {
@@ -420,6 +496,47 @@ function extractLargestJsonObject(raw: string) {
     }
   }
   return best || null
+}
+
+function extractJsonFromFirstObject(raw: string) {
+  const start = raw.indexOf("{")
+  if (start < 0) return null
+  return raw.slice(start).trim()
+}
+
+function inspectJsonBalance(raw: string) {
+  let braces = 0
+  let brackets = 0
+  let inString = false
+  let escaped = false
+  let invalidClose = false
+  for (const char of raw) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\") {
+      escaped = inString
+      continue
+    }
+    if (char === "\"") {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (char === "{") braces += 1
+    if (char === "}") braces -= 1
+    if (char === "[") brackets += 1
+    if (char === "]") brackets -= 1
+    if (braces < 0 || brackets < 0) invalidClose = true
+  }
+  return {
+    braces,
+    brackets,
+    inString,
+    objectClosed: braces === 0 && raw.trim().endsWith("}"),
+    balanced: braces === 0 && brackets === 0 && !inString && !invalidClose,
+  }
 }
 
 function repairJsonCandidate(raw: string) {

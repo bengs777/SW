@@ -14,7 +14,7 @@ import {
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { validateFrontendCompleteness } from "@/lib/ai/frontend-completeness-validator"
-import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
+import { auditGeneratedArtifactEnvelope, parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import {
   createDeveloperGenerationDiagnostics,
   persistFailedGenerationArtifacts,
@@ -35,7 +35,13 @@ import { ProjectFilePersistenceService } from "@/lib/services/project-file-persi
 import { ProjectFilesystemService, type ProjectFileManifest } from "@/lib/services/project-filesystem.service"
 import { loadProjectState, buildProjectStatePromptBlock } from "@/lib/project-state/engine"
 import { buildProjectDependencyGraph } from "@/lib/project-state/dependency-graph"
-import { artifactToPatchOperations, applyProjectPatchOperations, MAX_CHANGED_FILES_PER_REQUEST } from "@/lib/project-state/diff-patch-engine"
+import {
+  artifactToPatchOperations,
+  applyProjectPatchOperations,
+  MAX_CHANGED_FILES_PER_REQUEST,
+  type ProjectPatchOperation,
+  type ProjectPatchResult,
+} from "@/lib/project-state/diff-patch-engine"
 import { runDedicatedUserSandbox } from "@/lib/project-state/sandbox-isolation"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
 import { OrchestrationRuntimeService, type TraceIds } from "@/lib/services/orchestration-runtime.service"
@@ -255,10 +261,15 @@ type GenerationLifecycleBreakdown = {
   firstTokenReceivedAt?: string
   taskgraphStartedAt?: string
   taskgraphCompletedAt?: string
+  executorStartedAt?: string
+  executorCompletedAt?: string
+  executorLatencyMs: number
   taskgraphValidationStartedAt?: string
   taskgraphValidationCompletedAt?: string
   operationValidationStartedAt?: string
   operationValidationCompletedAt?: string
+  executorWaitStartedAt?: string
+  executorWaitCompletedAt?: string
   dependencyValidationStartedAt?: string
   dependencyValidationCompletedAt?: string
   patchQueueStartedAt?: string
@@ -283,6 +294,8 @@ type TaskGraphFailureReason =
 
 const MAX_AGENT_ITERATIONS = 5
 const MAX_REPAIR_ATTEMPTS = 3
+const EXECUTOR_HARD_TIMEOUT_MS = 30_000
+const EXECUTOR_STUCK_OPERATION_MS = 15_000
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
 const FULL_FRONTEND_FILE_LIMIT = 15
 const FULL_FRONTEND_BATCH_SIZE = 5
@@ -316,6 +329,27 @@ type RuntimeFailureCategory =
   | "environment_failed"
   | "sandbox_failed"
   | "rendering_failed"
+
+class ExecutorTimeoutError extends Error {
+  reportPath: string | null
+
+  constructor(message: string, reportPath: string | null = null) {
+    super(message)
+    this.name = "ExecutorTimeoutError"
+    this.reportPath = reportPath
+  }
+}
+
+type ExecutorOperationAudit = {
+  id: string
+  operation: string
+  file: string
+  status: "pending" | "running" | "completed" | "stuck" | "cancelled" | "failed"
+  startedAt?: string
+  completedAt?: string
+  durationMs?: number
+  error?: string
+}
 
 type RenderingFailureCategory =
   | "client_server_boundary_failed"
@@ -464,6 +498,46 @@ async function persistTaskGraphFailureReport(input: {
       reason: input.reason,
       writtenAt,
       ...(input.executorState || {}),
+    }, null, 2)}\n`, "utf8"),
+  ])
+  return dir
+}
+
+async function persistExecutorTimeoutReport(input: {
+  jobId: string
+  projectId: string
+  pendingOperations: ExecutorOperationAudit[]
+  operationQueue: ExecutorOperationAudit[]
+  dependencyState: Record<string, unknown>
+  activePromises: Array<Record<string, unknown>>
+}) {
+  const dir = path.join(process.cwd(), ".swift-reports", "executor-timeouts", input.jobId)
+  await mkdir(dir, { recursive: true })
+  const writtenAt = new Date().toISOString()
+  await Promise.all([
+    writeFile(path.join(dir, "pending_operations.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      operations: input.pendingOperations,
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "operation_queue.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      operations: input.operationQueue,
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "dependency_state.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      ...input.dependencyState,
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "active_promises.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      writtenAt,
+      activePromises: input.activePromises,
     }, null, 2)}\n`, "utf8"),
   ])
   return dir
@@ -6130,6 +6204,7 @@ export async function executeGenerationJob(
   const lifecycleBreakdown: GenerationLifecycleBreakdown = {
     providerLatencyMs: 0,
     taskgraphLatencyMs: 0,
+    executorLatencyMs: 0,
     patchLatencyMs: 0,
     persistLatencyMs: 0,
   }
@@ -6151,6 +6226,13 @@ export async function executeGenerationJob(
     if (event === "taskgraph_completed") {
       lifecycleBreakdown.taskgraphCompletedAt = at
       lifecycleBreakdown.taskgraphLatencyMs += Math.max(0, now - (lifecycleStartedAt.taskgraph_started || now))
+    }
+    if (event === "executor_started") lifecycleBreakdown.executorStartedAt = at
+    if (event === "executor_wait_started") lifecycleBreakdown.executorWaitStartedAt = at
+    if (event === "executor_wait_completed") lifecycleBreakdown.executorWaitCompletedAt = at
+    if (event === "executor_completed") {
+      lifecycleBreakdown.executorCompletedAt = at
+      lifecycleBreakdown.executorLatencyMs += Math.max(0, now - (lifecycleStartedAt.executor_started || now))
     }
     if (event === "taskgraph_validation_started") lifecycleBreakdown.taskgraphValidationStartedAt = at
     if (event === "taskgraph_validation_completed") lifecycleBreakdown.taskgraphValidationCompletedAt = at
@@ -7385,6 +7467,15 @@ export async function executeGenerationJob(
           hash: hashText(response.message),
           content: response.message,
         })
+        const artifactAudit = auditGeneratedArtifactEnvelope(response.message)
+        metrics.providerArtifactAudit = {
+          attempts: Number((metrics.providerArtifactAudit as Record<string, number> | undefined)?.attempts || 0) + 1,
+          completed: Number((metrics.providerArtifactAudit as Record<string, number> | undefined)?.completed || 0) + (artifactAudit.objectClosed ? 1 : 0),
+          malformed: Number((metrics.providerArtifactAudit as Record<string, number> | undefined)?.malformed || 0) + (artifactAudit.schemaValid ? 0 : 1),
+          truncated: Number((metrics.providerArtifactAudit as Record<string, number> | undefined)?.truncated || 0) + (artifactAudit.truncated ? 1 : 0),
+          validTaskGraph: Number((metrics.providerArtifactAudit as Record<string, number> | undefined)?.validTaskGraph || 0) + (artifactAudit.hasTaskGraph ? 1 : 0),
+          recovered: Number((metrics.providerArtifactAudit as Record<string, number> | undefined)?.recovered || 0) + (artifactAudit.recovered ? 1 : 0),
+        }
         await markLifecycle("provider_completed", "generating", {
           sliceIndex,
           sliceTotal,
@@ -7392,6 +7483,22 @@ export async function executeGenerationJob(
         })
         assertNotAborted(input.signal)
         try {
+          await markLifecycle("artifact_validation_started", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            rawHash: hashText(response.message),
+          })
+          await markLifecycle("artifact_validation_completed", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            rawHash: hashText(response.message),
+            artifactAudit,
+          })
+          if (!artifactAudit.startsWithObject && !artifactAudit.recovered) {
+            throw new Error("MALFORMED_GENERATED_ARTIFACT:Invalid artifact JSON: response must start with {")
+          }
           await markLifecycle("taskgraph_started", "parsing", {
             sliceIndex,
             sliceTotal,
@@ -7467,6 +7574,7 @@ export async function executeGenerationJob(
                 parseAttempt,
                 rawHash: hashText(response.message),
                 rawLength: response.message.length,
+                artifactAudit,
                 requiredFiles: targets.map((item) => normalizePath(item.path)),
               },
               dependencyGraph: buildProjectDependencyGraph(workingFiles),
@@ -7826,6 +7934,65 @@ export async function executeGenerationJob(
           target: target.path,
         })
       }
+      const executorStartedAtMs = Date.now()
+      const executorOperationQueue: ExecutorOperationAudit[] = []
+      const executorActivePromises: Array<Record<string, unknown>> = []
+      const persistExecutorTimeout = async (message: string, dependencyState: Record<string, unknown> = {}) => {
+        const reportPath = await persistExecutorTimeoutReport({
+          jobId: input.jobId,
+          projectId: input.projectId,
+          pendingOperations: executorOperationQueue.filter((operation) =>
+            operation.status === "pending" || operation.status === "running"
+          ),
+          operationQueue: executorOperationQueue,
+          dependencyState: {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            elapsedMs: Date.now() - executorStartedAtMs,
+            hardTimeoutMs: EXECUTOR_HARD_TIMEOUT_MS,
+            stuckOperationMs: EXECUTOR_STUCK_OPERATION_MS,
+            dependencies: scopedArtifact.dependencies,
+            ...dependencyState,
+          },
+          activePromises: executorActivePromises,
+        }).catch(() => null)
+        await persistTaskGraphFailure({
+          reason: "executor_timeout",
+          message,
+          executorState: {
+            reportPath,
+            operationQueue: executorOperationQueue,
+            activePromises: executorActivePromises,
+          },
+        })
+        return reportPath
+      }
+      const assertExecutorWithinHardTimeout = async (phase: string) => {
+        const elapsedMs = Date.now() - executorStartedAtMs
+        if (elapsedMs <= EXECUTOR_HARD_TIMEOUT_MS) return
+        const reportPath = await persistExecutorTimeout(`Executor hard timeout after ${elapsedMs}ms during ${phase}.`, {
+          phase,
+        })
+        await markLifecycle("taskgraph_failure", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          reason: "executor_timeout",
+          message: `Executor hard timeout after ${elapsedMs}ms during ${phase}.`,
+          reportPath,
+        })
+        throw new ExecutorTimeoutError(`Executor hard timeout after ${elapsedMs}ms during ${phase}.`, reportPath)
+      }
+      if (hasAcceptedScopedArtifact) {
+        await markLifecycle("executor_started", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          hardTimeoutMs: EXECUTOR_HARD_TIMEOUT_MS,
+          stuckOperationMs: EXECUTOR_STUCK_OPERATION_MS,
+        })
+      }
       await markLifecycle("operation_validation_started", "parsing", {
         sliceIndex,
         sliceTotal,
@@ -7834,12 +8001,30 @@ export async function executeGenerationJob(
       })
       let patchOperations: ReturnType<typeof artifactToPatchOperations> = []
       try {
+        if (hasAcceptedScopedArtifact) {
+          await markLifecycle("executor_operation_started", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            operationId: "build_operation_queue",
+          })
+        }
         patchOperations = hasAcceptedScopedArtifact
           ? artifactToPatchOperations({
               artifact: scopedArtifact,
               currentFiles: workingFiles,
             })
           : []
+        if (hasAcceptedScopedArtifact) {
+          await markLifecycle("executor_operation_completed", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            operationId: "build_operation_queue",
+            operationCount: patchOperations.length,
+          })
+          await assertExecutorWithinHardTimeout("build_operation_queue")
+        }
       } catch (error) {
         const reason = categorizeTaskGraphFailure(error, "operation_invalid")
         await persistTaskGraphFailure({
@@ -7851,6 +8036,12 @@ export async function executeGenerationJob(
         })
         throw error
       }
+      executorOperationQueue.push(...patchOperations.map((operation, index): ExecutorOperationAudit => ({
+        id: `patch:${index + 1}`,
+        operation: operation.operation,
+        file: operation.file,
+        status: "pending",
+      })))
       const operationPaths = new Set(patchOperations.map((operation) => normalizePath(operation.file)))
       await markLifecycle("operation_validation_completed", "parsing", {
         sliceIndex,
@@ -7861,6 +8052,15 @@ export async function executeGenerationJob(
       })
       if (operationPaths.size > MAX_CHANGED_FILES_PER_REQUEST) {
         metrics.fullRewriteDetected = Number(metrics.fullRewriteDetected || 0) + 1
+        await persistTaskGraphFailure({
+          reason: "operation_invalid",
+          message: `Diff/Patch request changed ${operationPaths.size} files; maximum is ${MAX_CHANGED_FILES_PER_REQUEST}.`,
+          executorState: {
+            operationPaths: Array.from(operationPaths),
+            maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
+          },
+        })
+        throw new Error(`Diff/Patch request changed ${operationPaths.size} files; maximum is ${MAX_CHANGED_FILES_PER_REQUEST}.`)
       }
       if (hasAcceptedScopedArtifact && patchOperations.length === 0) {
         await persistTaskGraphFailure({
@@ -7872,6 +8072,18 @@ export async function executeGenerationJob(
         })
       }
       if (hasAcceptedScopedArtifact) {
+        await markLifecycle("executor_wait_started", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          pendingOperationCount: executorOperationQueue.filter((operation) => operation.status === "pending").length,
+        })
+        await assertExecutorWithinHardTimeout("before_patch_queue")
+        await markLifecycle("executor_wait_completed", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+        })
         await markLifecycle("patch_queue_started", "parsing", {
           sliceIndex,
           sliceTotal,
@@ -7879,21 +8091,94 @@ export async function executeGenerationJob(
           operationCount: patchOperations.length,
         })
       }
-      let patchResult: ReturnType<typeof applyProjectPatchOperations> | null = null
+      let patchResult: ProjectPatchResult | null = null
       try {
-        patchResult = hasAcceptedScopedArtifact
-          ? applyProjectPatchOperations(
-              workingFiles,
-              patchOperations,
-              { maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST }
+        if (hasAcceptedScopedArtifact) {
+          let executorFiles = workingFiles
+          const changedByPath = new Map<string, GeneratedFile>()
+          const deletedPaths = new Set<string>()
+          const appliedOperations: ProjectPatchOperation[] = []
+          for (let index = 0; index < patchOperations.length; index += 1) {
+            await assertExecutorWithinHardTimeout(`operation_${index + 1}`)
+            const operation = patchOperations[index]
+            const audit = executorOperationQueue[index]
+            const operationStartedAtMs = Date.now()
+            const operationStartedAt = new Date(operationStartedAtMs).toISOString()
+            audit.status = "running"
+            audit.startedAt = operationStartedAt
+            executorActivePromises.splice(0, executorActivePromises.length, {
+              id: audit.id,
+              operation: audit.operation,
+              file: audit.file,
+              startedAt: operationStartedAt,
+            })
+            await markLifecycle("executor_operation_started", "parsing", {
+              sliceIndex,
+              sliceTotal,
+              target: target.path,
+              operationId: audit.id,
+              operation: audit.operation,
+              file: audit.file,
+            })
+            const beforeFiles = executorFiles
+            const singleResult = applyProjectPatchOperations(
+              beforeFiles,
+              [operation],
+              { maxChangedFilesPerRequest: 1 }
             )
-          : null
+            const durationMs = Date.now() - operationStartedAtMs
+            audit.durationMs = durationMs
+            audit.completedAt = new Date().toISOString()
+            executorActivePromises.splice(0, executorActivePromises.length)
+            if (durationMs > EXECUTOR_STUCK_OPERATION_MS) {
+              audit.status = "stuck"
+              audit.error = `Operation exceeded stuck threshold after ${durationMs}ms and was cancelled.`
+              await markLifecycle("executor_operation_completed", "parsing", {
+                sliceIndex,
+                sliceTotal,
+                target: target.path,
+                operationId: audit.id,
+                operation: audit.operation,
+                file: audit.file,
+                status: "stuck",
+                durationMs,
+              })
+              continue
+            }
+            audit.status = "completed"
+            executorFiles = singleResult.files
+            appliedOperations.push(operation)
+            for (const file of singleResult.changedFiles) changedByPath.set(normalizePath(file.path), file)
+            for (const deletedPath of singleResult.deletedPaths) deletedPaths.add(normalizePath(deletedPath))
+            await markLifecycle("executor_operation_completed", "parsing", {
+              sliceIndex,
+              sliceTotal,
+              target: target.path,
+              operationId: audit.id,
+              operation: audit.operation,
+              file: audit.file,
+              status: "completed",
+              durationMs,
+            })
+            await assertExecutorWithinHardTimeout(`operation_${index + 1}`)
+          }
+          patchResult = {
+            files: executorFiles,
+            changedFiles: Array.from(changedByPath.values()),
+            deletedPaths: Array.from(deletedPaths),
+            operations: appliedOperations,
+          }
+        } else {
+          patchResult = null
+        }
       } catch (error) {
-        const reason = categorizeTaskGraphFailure(error, "operation_invalid")
+        const reason = categorizeTaskGraphFailure(error, error instanceof ExecutorTimeoutError ? "executor_timeout" : "operation_invalid")
         await persistTaskGraphFailure({
           reason,
           message: error instanceof Error ? error.message : String(error),
           executorState: {
+            executorTimeoutReportPath: error instanceof ExecutorTimeoutError ? error.reportPath : null,
+            executorOperationQueue,
             patchOperations: patchOperations.map((operation) => ({
               operation: operation.operation,
               file: operation.file,
@@ -7946,9 +8231,28 @@ export async function executeGenerationJob(
       }
       let dependencyResult: ReturnType<typeof executeGeneratedTaskGraph> | null = null
       try {
+        if (patchResult && scopedArtifact.dependencies.length > 0) {
+          await assertExecutorWithinHardTimeout("dependency_validation")
+          await markLifecycle("executor_operation_started", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            operationId: "dependency_install",
+            dependencyCount: scopedArtifact.dependencies.length,
+          })
+        }
         dependencyResult = patchResult && scopedArtifact.dependencies.length > 0
           ? executeGeneratedTaskGraph(patchResult.files, undefined, [], scopedArtifact.dependencies)
           : null
+        if (patchResult && scopedArtifact.dependencies.length > 0) {
+          await markLifecycle("executor_operation_completed", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            operationId: "dependency_install",
+            installedDependencies: dependencyResult?.installedDependencies || [],
+          })
+        }
       } catch (error) {
         const reason = categorizeTaskGraphFailure(error, "dependency_invalid")
         await persistTaskGraphFailure({
@@ -7967,6 +8271,21 @@ export async function executeGenerationJob(
           sliceTotal,
           dependencyCount: scopedArtifact.dependencies.length,
           installedDependencies: dependencyResult?.installedDependencies || [],
+        })
+      }
+      if (hasAcceptedScopedArtifact) {
+        await markLifecycle("executor_completed", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          operationCount: patchOperations.length,
+          completedOperations: executorOperationQueue.filter((operation) => operation.status === "completed").length,
+          stuckOperations: executorOperationQueue.filter((operation) => operation.status === "stuck").map((operation) => ({
+            id: operation.id,
+            operation: operation.operation,
+            file: operation.file,
+            durationMs: operation.durationMs,
+          })),
         })
       }
       const executed = patchResult
