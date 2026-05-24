@@ -28,6 +28,23 @@ function loadCanonicalModule(source) {
   return loadedModule.exports
 }
 
+function loadFilePolicyModule(source, canonicalModule) {
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true,
+    },
+  }).outputText
+  const loadedModule = { exports: {} }
+  const localRequire = (id) => {
+    if (id === "@/lib/ai/canonical-path") return canonicalModule
+    return require(id)
+  }
+  vm.runInNewContext(compiled, { exports: loadedModule.exports, module: loadedModule, require: localRequire, process })
+  return loadedModule.exports
+}
+
 function main() {
   const packageJson = JSON.parse(read("package.json"))
   const canonicalPath = read("lib/ai/canonical-path.ts")
@@ -38,6 +55,7 @@ function main() {
   const providerRouter = read("lib/ai/provider-router.ts")
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
   const canonicalModule = loadCanonicalModule(canonicalPath)
+  const filePolicyModule = loadFilePolicyModule(filePolicy, canonicalModule)
 
   assert(
     "script.registered",
@@ -45,7 +63,7 @@ function main() {
     "package.json exposes npm run test:path-policy"
   )
 
-  const expectedCases = [
+  const canonicalCases = [
     { input: "/components/Button.tsx", expected: "components/Button.tsx", safe: true },
     { input: "./app/page.tsx", expected: "app/page.tsx", safe: true },
     { input: "src\\components\\Card.tsx", expected: "src/components/Card.tsx", safe: true },
@@ -55,13 +73,28 @@ function main() {
     { input: "../lib/utils.ts", expected: "../lib/utils.ts", safe: false },
   ]
 
-  for (const testCase of expectedCases) {
+  const validatorCases = [
+    ...canonicalCases,
+    { input: "app/api/auth/[...nextauth]/route.ts", expected: "app/api/auth/[...nextauth]/route.ts", safe: true },
+    { input: "app/products/[[...slug]]/page.tsx", expected: "app/products/[[...slug]]/page.tsx", safe: true },
+  ]
+
+  for (const testCase of canonicalCases) {
     assert(
       `canonical.case.${testCase.input}`,
       canonicalPath.includes(`input: ${JSON.stringify(testCase.input)}`) &&
         canonicalPath.includes(`expected: ${JSON.stringify(testCase.expected)}`) &&
         canonicalModule.canonicalizeGeneratedPath(testCase.input).path === testCase.expected,
       "canonical regression case is documented and executable"
+    )
+  }
+
+  for (const testCase of validatorCases) {
+    const isSafe = filePolicyModule.isSafeGeneratedPath(testCase.input)
+    assert(
+      `validator.case.${testCase.input}`,
+      isSafe === testCase.safe,
+      `expected safe=${testCase.safe} but got ${isSafe}`
     )
   }
 

@@ -83,7 +83,7 @@ export function validateGeneratedPath(
   }
 
   const lower = normalized.toLowerCase()
-  if (lower.includes("..") || lower.includes("~") || BLOCKED_EXACT_FILES.has(lower) || isBlockedEnvPath(lower)) {
+  if (hasBlockedDotDotPattern(lower) || lower.includes("~") || BLOCKED_EXACT_FILES.has(lower) || isBlockedEnvPath(lower)) {
     throwPathError("Blocked path pattern not allowed", rawPath, normalized)
   }
 
@@ -143,6 +143,12 @@ function isBlockedEnvPath(lowerPath: string) {
   return lowerPath
     .split("/")
     .some((segment) => segment === ".env" || segment.startsWith(".env."))
+}
+
+function hasBlockedDotDotPattern(lowerPath: string) {
+  return lowerPath
+    .split("/")
+    .some((segment) => segment.includes("..") && !/^(\[\.\.\.[a-z0-9_-]+\]|\[\[\.\.\.[a-z0-9_-]+\]\])$/.test(segment))
 }
 
 function throwPathError(

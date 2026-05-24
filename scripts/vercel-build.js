@@ -14,6 +14,7 @@ const isStrictPreflight =
   process.env.VERCEL === "1" ||
   process.env.CI === "true"
 const MAX_PRISMA_GENERATE_ATTEMPTS = 3
+const MAX_MIGRATE_DEPLOY_ATTEMPTS = 3
 
 const prismaClientPackageJson = require.resolve("@prisma/client/package.json")
 const prismaClientDir = path.resolve(path.dirname(prismaClientPackageJson), "..", "..", ".prisma", "client")
@@ -36,14 +37,14 @@ function stringifyError(error) {
 
 function classifyPrismaFailure(errorText) {
   const text = String(errorText || "")
-  if (/invalid.*database_url|must start with the protocol|connection string|postgres/i.test(text)) {
-    return "invalid_database_url"
-  }
   if (/environment variable.*DATABASE_URL|DATABASE_URL.*not found|missing.*DATABASE_URL/i.test(text)) {
     return "missing_env"
   }
   if (/P1000|P1001|P1002|P1003|can't reach database|cannot reach database|timed out|timeout|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|authentication failed/i.test(text)) {
     return "database_unreachable"
+  }
+  if (/invalid.*database_url|must start with the protocol|invalid.*connection string|database url.*invalid/i.test(text)) {
+    return "invalid_database_url"
   }
   if (/P1012|schema parsing|error validating|prisma schema validation|schema\.prisma/i.test(text)) {
     return "schema_parsing_failure"
@@ -148,20 +149,36 @@ async function runPrismaGenerateWithRetry() {
   if (lastError) throw lastError
 }
 
-function runMigrationDeployment() {
+async function runMigrationDeployment() {
   const database = diagnoseDatabaseUrl()
   if (!database.ok) {
     handlePreflightFailure("migrate-deploy", database)
     return false
   }
 
-  try {
-    console.log("[vercel-build] deploying pending Prisma migrations...")
-    const output = execSync("npx prisma migrate deploy", { env, encoding: "utf8" })
-    if (output) process.stdout.write(output)
-    return true
-  } catch (error) {
-    const code = classifyPrismaFailure(stringifyError(error))
+  let lastError = null
+  for (let attempt = 1; attempt <= MAX_MIGRATE_DEPLOY_ATTEMPTS; attempt += 1) {
+    try {
+      console.log(`[vercel-build] deploying pending Prisma migrations... (${attempt}/${MAX_MIGRATE_DEPLOY_ATTEMPTS})`)
+      const output = execSync("npx prisma migrate deploy", { env, encoding: "utf8" })
+      if (output) process.stdout.write(output)
+      return true
+    } catch (error) {
+      lastError = error
+      const errorText = stringifyError(error)
+      const isAdvisoryLockTimeout = /P1002|advisory lock|pg_advisory_lock/i.test(errorText)
+      if (isAdvisoryLockTimeout && attempt < MAX_MIGRATE_DEPLOY_ATTEMPTS) {
+        const retryDelayMs = 2500 * attempt
+        console.warn(`[vercel-build] prisma migrate deploy hit advisory lock timeout on attempt ${attempt}/${MAX_MIGRATE_DEPLOY_ATTEMPTS}, retrying in ${retryDelayMs}ms...`)
+        await sleep(retryDelayMs)
+        continue
+      }
+      break
+    }
+  }
+
+  if (lastError) {
+    const code = classifyPrismaFailure(stringifyError(lastError))
     handlePreflightFailure("migrate-deploy", {
       ok: false,
       code,
@@ -176,9 +193,10 @@ function runMigrationDeployment() {
               : code === "invalid_database_url"
                 ? "DATABASE_URL is invalid; Prisma migrate deploy cannot run."
                 : "Prisma migrate deploy failed.",
-    }, error)
-    return false
+    }, lastError)
   }
+
+  return false
 }
 
 function runSchemaCompatibilityCheck(canReachDatabase) {
@@ -201,7 +219,7 @@ function runSchemaCompatibilityCheck(canReachDatabase) {
 
 ;(async () => {
   await runPrismaGenerateWithRetry()
-  const migrationsDeployed = runMigrationDeployment()
+  const migrationsDeployed = await runMigrationDeployment()
   runSchemaCompatibilityCheck(migrationsDeployed)
 
   execSync("npx next build --webpack", { stdio: "inherit", env })
