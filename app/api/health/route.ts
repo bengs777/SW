@@ -165,6 +165,24 @@ function workerLabel(queue: HealthCheck) {
   return typeof ageMs === "number" && ageMs <= 90_000 ? "ok" : "degraded"
 }
 
+const CORE_ENV_BLOCKING_KEYS = new Set([
+  "DATABASE_URL",
+  "NEXTAUTH_SECRET",
+  "NEXTAUTH_URL",
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+  "OPENROUTER_API_KEY",
+  "REDIS_URL / UPSTASH_REDIS_URL",
+  "SANDBOX_SERVICE_URL",
+  "SANDBOX_SERVICE_TOKEN",
+])
+
+function isCoreEnvironmentIssue(issue: { key: string; severity: string }) {
+  if (issue.severity !== "error") return false
+  if (CORE_ENV_BLOCKING_KEYS.has(issue.key)) return true
+  return issue.key.startsWith("DATABASE_URL") || issue.key.startsWith("NEXTAUTH")
+}
+
 export async function GET(request: NextRequest) {
   const startedAt = Date.now()
   const requestId = request.headers.get("x-request-id") || request.headers.get("x-vercel-id") || randomUUID()
@@ -226,13 +244,13 @@ export async function GET(request: NextRequest) {
   }))
   const missingProductionEnv = env.nodeEnv === "production" ? getMissingProductionEnvVars() : []
   const envReport = validateEnv()
-  const envHasBlockingErrors = envReport.issues.some((issue) => issue.severity === "error")
+  const envBlockingErrors = envReport.issues.filter(isCoreEnvironmentIssue)
   const requiredHealthy =
     database.status !== "unhealthy" &&
     authCheck.status !== "unhealthy" &&
     deployment.status !== "unhealthy" &&
     missingProductionEnv.length === 0 &&
-    !envHasBlockingErrors
+    envBlockingErrors.length === 0
   const operational =
     requiredHealthy &&
     queue.status !== "unhealthy" &&
@@ -253,6 +271,7 @@ export async function GET(request: NextRequest) {
     missingProductionEnvCount: missingProductionEnv.length,
     envIssueCount: envReport.issues.length,
     envErrorCount: envReport.issues.filter((issue) => issue.severity === "error").length,
+    envBlockingErrorCount: envBlockingErrors.length,
   })
 
   return NextResponse.json({
@@ -275,12 +294,15 @@ export async function GET(request: NextRequest) {
       providers,
       runtimeHealth,
       environment: {
-        status: missingProductionEnv.length === 0 && envReport.issues.every((issue) => issue.severity !== "error")
-          ? "healthy"
+        status: missingProductionEnv.length === 0 && envBlockingErrors.length === 0
+          ? envReport.issues.some((issue) => issue.severity === "error")
+            ? "degraded"
+            : "healthy"
           : "unhealthy",
         missingProductionEnv,
         audit: {
           ok: envReport.ok,
+          coreOk: missingProductionEnv.length === 0 && envBlockingErrors.length === 0,
           issues: envReport.issues.map((issue) => ({
             key: issue.key,
             severity: issue.severity,

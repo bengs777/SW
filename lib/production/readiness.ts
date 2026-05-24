@@ -63,6 +63,13 @@ export function getProductionReadiness() {
   const isPreviewDeployment = process.env.VERCEL_ENV === "preview"
   const isVercel = process.env.VERCEL === "1"
   const generationExecutionMode = String(process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
+  const serverlessFallbackEnabled =
+    process.env.SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK !== "true" ||
+    process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true"
+  const generationExecutionReady =
+    !generationExecutionMode ||
+    generationExecutionMode === "queue" ||
+    (isVercel && generationExecutionMode === "serverless" && serverlessFallbackEnabled)
   const checks: ReadinessCheck[] = [
     check("DATABASE_URL", "PostgreSQL runtime URL", database.ok, "critical", "database", database.message),
     check("DATABASE_URL_POOLING", "Neon pooled serverless connection", isNeonPooledUrl(env.databaseUrl), "optional", "database", env.databaseUrl ? "Use the Neon pooler host for app runtime traffic." : undefined, true),
@@ -111,7 +118,18 @@ export function getProductionReadiness() {
     check("PAKASIR_API_KEY", "Pakasir API key", env.pakasirApiKey, "optional", "service", undefined, true),
     check("VERDI_TEAM", "Vercel team scope for generated deployments", env.verdiTeamId, "required", "preview"),
     check("VERPRO_ACCES_TOKEN", "Generated app deploy token", env.verproAccessToken, "optional", "preview", undefined, true),
-    check("SWIFT_GENERATION_EXECUTION_MODE", "Rollback-safe queued generation execution", !generationExecutionMode || generationExecutionMode === "queue", isVercel ? "critical" : "required", "rollback", "Use queue mode in production; serverless generation can hit platform execution limits."),
+    check(
+      "SWIFT_GENERATION_EXECUTION_MODE",
+      "Generation execution mode",
+      generationExecutionReady,
+      isVercel ? "critical" : "required",
+      "rollback",
+      generationExecutionMode === "queue"
+        ? "Queue mode configured."
+        : generationExecutionMode === "serverless" && isVercel && serverlessFallbackEnabled
+          ? "Serverless rescue mode enabled while the dedicated worker is unavailable."
+          : "Use queue mode in production, or enable serverless fallback while provisioning a dedicated worker."
+    ),
     check("DEV_OWNER_EMAIL", "Developer owner email", env.devOwnerEmail, "required", "auth"),
     check("AI_RATE_LIMIT_PER_MINUTE", "AI prompt rate limit per minute", aiRateLimitConfig.perMinute > 0, "required", "service", `${aiRateLimitConfig.perMinute} prompts/minute`),
     check("AI_RATE_LIMIT_PER_DAY", "AI prompt rate limit per day", aiRateLimitConfig.perDay > 0, "required", "service", `${aiRateLimitConfig.perDay} prompts/day`),
