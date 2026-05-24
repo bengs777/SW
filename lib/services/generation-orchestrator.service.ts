@@ -84,6 +84,7 @@ import {
   type GenerationMode,
   type IncrementalEditPlan,
 } from "@/lib/ai/incremental-edit"
+import { validateGeneratedPath } from "@/lib/ai/file-policy"
 import {
   autoRepairAdjacentJsxFragments,
   validateRuntimeImports,
@@ -1697,6 +1698,14 @@ function buildGenerationPlan(input: {
       }
     }
   }
+  for (let index = filePlan.length - 1; index >= 0; index -= 1) {
+    const safePath = safeGeneratedPath(filePlan[index].path)
+    if (!safePath) {
+      filePlan.splice(index, 1)
+      continue
+    }
+    filePlan[index].path = safePath
+  }
   for (const item of filePlan) {
     item.stage = stagedPhaseForPath(item.path, orchestration.plannerOutput.appType)
   }
@@ -2719,7 +2728,8 @@ function extractRequestedFilePaths(prompt: string) {
 
   for (const match of String(prompt || "").matchAll(pattern)) {
     if (match[1]) {
-      paths.add(normalizePath(match[1]))
+      const path = safeGeneratedPath(match[1])
+      if (path) paths.add(path)
     }
   }
 
@@ -2746,6 +2756,14 @@ function extractFilePathsFromError(message: string) {
 
 function normalizePath(value: string) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function safeGeneratedPath(value: string) {
+  try {
+    return validateGeneratedPath(value).path
+  } catch {
+    return null
+  }
 }
 
 function stagedPhaseForPath(path: string, appType?: string): StagedGenerationPhase {
