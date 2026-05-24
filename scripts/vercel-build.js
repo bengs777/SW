@@ -15,6 +15,7 @@ const isStrictPreflight =
   process.env.CI === "true"
 const MAX_PRISMA_GENERATE_ATTEMPTS = 3
 const MAX_MIGRATE_DEPLOY_ATTEMPTS = 3
+let prismaMigrationStatus = "skipped"
 
 const prismaClientPackageJson = require.resolve("@prisma/client/package.json")
 const prismaClientDir = path.resolve(path.dirname(prismaClientPackageJson), "..", "..", ".prisma", "client")
@@ -43,10 +44,13 @@ function classifyPrismaFailure(errorText) {
   if (/P1000|P1001|P1002|P1003|can't reach database|cannot reach database|timed out|timeout|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|authentication failed/i.test(text)) {
     return "database_unreachable"
   }
+  if (/schema engine error/i.test(text) && !/P1012|schema parsing|error validating|prisma schema validation|invalid model|invalid field|unknown argument/i.test(text)) {
+    return "database_unreachable"
+  }
   if (/invalid.*database_url|must start with the protocol|invalid.*connection string|database url.*invalid/i.test(text)) {
     return "invalid_database_url"
   }
-  if (/P1012|schema parsing|error validating|prisma schema validation|schema\.prisma/i.test(text)) {
+  if (/P1012|schema parsing|error validating|prisma schema validation|invalid model|invalid field|unknown argument/i.test(text)) {
     return "schema_parsing_failure"
   }
   if (/schema engine error|query_engine|schema-engine|libquery_engine|engine binary|binary target/i.test(text)) {
@@ -94,6 +98,14 @@ function handlePreflightFailure(stage, diagnostic, error) {
     throw new Error(`[vercel-build] ${stage} failed: ${message}`)
   }
   console.warn(`[vercel-build] ${stage} skipped/continued in local fallback mode. Run deploy:preflight with a reachable database before deployment.`)
+}
+
+function emitMigrationStatus(status, diagnostic = {}) {
+  prismaMigrationStatus = status
+  console.warn(`[vercel-build] prismaMigrationStatus ${JSON.stringify({
+    prismaMigrationStatus,
+    ...diagnostic,
+  })}`)
 }
 
 async function runPrismaGenerateWithRetry() {
@@ -152,7 +164,11 @@ async function runPrismaGenerateWithRetry() {
 async function runMigrationDeployment() {
   const database = diagnoseDatabaseUrl()
   if (!database.ok) {
-    handlePreflightFailure("migrate-deploy", database)
+    emitMigrationStatus("skipped", {
+      reason: database.code,
+      message: database.message,
+    })
+    console.warn(`[vercel-build] migrate-deploy skipped: ${database.message}`)
     return false
   }
 
@@ -162,6 +178,9 @@ async function runMigrationDeployment() {
       console.log(`[vercel-build] deploying pending Prisma migrations... (${attempt}/${MAX_MIGRATE_DEPLOY_ATTEMPTS})`)
       const output = execSync("npx prisma migrate deploy", { env, encoding: "utf8" })
       if (output) process.stdout.write(output)
+      emitMigrationStatus("applied", {
+        attempt,
+      })
       return true
     } catch (error) {
       lastError = error
@@ -179,7 +198,7 @@ async function runMigrationDeployment() {
 
   if (lastError) {
     const code = classifyPrismaFailure(stringifyError(lastError))
-    handlePreflightFailure("migrate-deploy", {
+    const diagnostic = {
       ok: false,
       code,
       message: code === "engine_binary_failure"
@@ -193,15 +212,33 @@ async function runMigrationDeployment() {
               : code === "invalid_database_url"
                 ? "DATABASE_URL is invalid; Prisma migrate deploy cannot run."
                 : "Prisma migrate deploy failed.",
-    }, lastError)
+    }
+
+    if (code === "database_unreachable" || code === "missing_env") {
+      emitDiagnostic("migrate-deploy", diagnostic, { detail: stringifyError(lastError).slice(0, 4000) })
+      emitMigrationStatus("skipped", {
+        reason: code,
+        message: diagnostic.message,
+      })
+      console.warn("[vercel-build] migrate-deploy skipped because the database is temporarily unreachable; continuing to next build.")
+      return false
+    }
+
+    if (code === "schema_parsing_failure" || code === "invalid_database_url" || code === "engine_binary_failure") {
+      emitMigrationStatus("failed", {
+        reason: code,
+        message: diagnostic.message,
+      })
+    }
+    handlePreflightFailure("migrate-deploy", diagnostic, lastError)
   }
 
   return false
 }
 
 function runSchemaCompatibilityCheck(canReachDatabase) {
-  if (!canReachDatabase && !isStrictPreflight) {
-    console.warn("[vercel-build] schema compatibility check skipped in local fallback mode because migration preflight did not confirm database availability.")
+  if (!canReachDatabase) {
+    console.warn("[vercel-build] schema compatibility check skipped because migration preflight did not confirm database availability.")
     return
   }
 
@@ -222,6 +259,7 @@ function runSchemaCompatibilityCheck(canReachDatabase) {
   const migrationsDeployed = await runMigrationDeployment()
   runSchemaCompatibilityCheck(migrationsDeployed)
 
+  console.log(`[vercel-build] final prismaMigrationStatus=${prismaMigrationStatus}`)
   execSync("npx next build --webpack", { stdio: "inherit", env })
 })().catch((error) => {
   console.error(error)

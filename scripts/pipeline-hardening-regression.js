@@ -250,6 +250,16 @@ function main() {
     "deployment applies pending migrations, checks generated Prisma client compatibility, and verifies runtime schema health"
   )
 
+  assert(
+    "deploy.migrate-unreachable-nonfatal",
+    /prismaMigrationStatus/.test(vercelBuild) &&
+      /emitMigrationStatus\("skipped"/.test(vercelBuild) &&
+      /database_unreachable/.test(vercelBuild) &&
+      /continuing to next build/.test(vercelBuild) &&
+      /npx next build --webpack/.test(vercelBuild),
+    "Vercel build skips migrate deploy on temporary database unreachable errors and still runs Next build"
+  )
+
   console.log("\n[hardening] pipeline hardening regression checks passed")
 }
 
