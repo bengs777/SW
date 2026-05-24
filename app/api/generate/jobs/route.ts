@@ -656,6 +656,22 @@ export async function POST(request: NextRequest) {
         })
     const queueUnavailable = !queueHealth || queueHealth.status !== "healthy"
     const shouldUseServerlessFallback = preferServerlessExecution || (allowServerlessGenerationFallback && queueUnavailable)
+    log("info", "generation_runtime_decision", {
+      requestId,
+      correlationId,
+      traceId,
+      executionChainId,
+      jobId: job.id,
+      queueHealthy: Boolean(queueHealth && queueHealth.status === "healthy"),
+      queueStatus: queueHealth?.status || "unknown",
+      queueEnabled: queueHealth?.enabled ?? false,
+      workerHeartbeatAgeMs: queueHealth?.workerHeartbeat?.ageMs ?? null,
+      usingFallback: shouldUseServerlessFallback,
+      fallbackAllowed: allowServerlessGenerationFallback,
+      SWIFT_GENERATION_EXECUTION_MODE: process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue",
+      effectiveGenerationExecutionMode: generationExecutionMode,
+      vercelProductionRuntime: isVercelProductionRuntime,
+    })
     if (shouldUseServerlessFallback) {
       log("warn", "generation_queue_worker_unavailable", {
         requestId,
