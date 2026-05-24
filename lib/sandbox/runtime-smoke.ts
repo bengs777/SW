@@ -29,6 +29,25 @@ export type RuntimeSmokeResult = {
   error?: string
   routes: string[]
   apiRoutes: string[]
+  diagnostics?: RuntimeFailureDiagnostics
+}
+
+export type RuntimeFailureDiagnostics = {
+  browserConsoleErrors: string[]
+  hydrationErrors: string[]
+  runtimeStackTraces: string[]
+  missingDependencies: string[]
+  routeErrors: string[]
+  environmentVariableErrors: string[]
+  importErrors: string[]
+  reactErrorBoundaryOutput: string[]
+  componentTree: string[]
+  propsTree: string[]
+  serverClientComponentMismatches: string[]
+  providerContextTree: string[]
+  asyncRenderingErrors: string[]
+  layoutHierarchy: string[]
+  pageRenderStackTraces: string[]
 }
 
 type SmokePage = {
@@ -65,6 +84,23 @@ export async function verifyRuntimeSmoke(input: {
 }): Promise<RuntimeSmokeResult> {
   const startedAt = Date.now()
   const checks: RuntimeSmokeCheck[] = []
+  const diagnostics: RuntimeFailureDiagnostics = {
+    browserConsoleErrors: [],
+    hydrationErrors: [],
+    runtimeStackTraces: [],
+    missingDependencies: [],
+    routeErrors: [],
+    environmentVariableErrors: [],
+    importErrors: [],
+    reactErrorBoundaryOutput: [],
+    componentTree: buildComponentTree(input.files),
+    propsTree: buildPropsTree(input.files),
+    serverClientComponentMismatches: detectServerClientComponentMismatches(input.files),
+    providerContextTree: buildProviderContextTree(input.files),
+    asyncRenderingErrors: [],
+    layoutHierarchy: buildLayoutHierarchy(input.files),
+    pageRenderStackTraces: [],
+  }
   const routes = inferStaticRoutes(input.files).slice(0, MAX_ROUTE_CHECKS)
   const apiRoutes = inferApiRoutes(input.files).slice(0, MAX_ROUTE_CHECKS)
 
@@ -124,13 +160,23 @@ export async function verifyRuntimeSmoke(input: {
             type: HYDRATION_RE.test(text) ? "hydration_error" : "console_error",
             message: text,
           })
+          diagnostics.browserConsoleErrors.push(text)
+          if (HYDRATION_RE.test(text)) diagnostics.hydrationErrors.push(text)
+          collectRuntimeDiagnosticText(diagnostics, text)
+          collectRenderingDiagnosticText(diagnostics, text)
         }
       })
       page.on("pageerror", (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        const stack = error instanceof Error ? error.stack || error.message : String(error)
         runtimeErrors.push({
           type: "unhandled_exception",
-          message: error instanceof Error ? error.message : String(error),
+          message,
         })
+        diagnostics.runtimeStackTraces.push(stack)
+        diagnostics.pageRenderStackTraces.push(stack)
+        collectRuntimeDiagnosticText(diagnostics, stack)
+        collectRenderingDiagnosticText(diagnostics, stack)
       })
 
       for (const route of routes) {
@@ -151,6 +197,8 @@ export async function verifyRuntimeSmoke(input: {
               data: { route, status, bodyLength: bodyText.length },
               startedAt: checkStartedAt,
             })
+            diagnostics.routeErrors.push(`Route ${route} failed to render with status ${status || "unknown"}.`)
+            diagnostics.pageRenderStackTraces.push(`Route ${route} failed to render with status ${status || "unknown"}.`)
             continue
           }
 
@@ -181,6 +229,7 @@ export async function verifyRuntimeSmoke(input: {
             data: { route },
             startedAt: checkStartedAt,
           })
+          diagnostics.routeErrors.push(error instanceof Error ? error.message : String(error))
         }
       }
 
@@ -211,6 +260,7 @@ export async function verifyRuntimeSmoke(input: {
           data: { route: apiRoute, status: response.status },
           startedAt: checkStartedAt,
         })
+        if (response.status >= 500) diagnostics.routeErrors.push(`API route ${apiRoute} returned ${response.status}.`)
       } catch (error) {
         record({
           name: "runtime.api_route",
@@ -220,6 +270,7 @@ export async function verifyRuntimeSmoke(input: {
           data: { route: apiRoute },
           startedAt: checkStartedAt,
         })
+        diagnostics.routeErrors.push(error instanceof Error ? error.message : String(error))
       }
     }
   } catch (error) {
@@ -231,6 +282,8 @@ export async function verifyRuntimeSmoke(input: {
       category,
       message: error instanceof Error ? error.message : String(error),
     })
+    collectRuntimeDiagnosticText(diagnostics, error instanceof Error ? error.stack || error.message : String(error))
+    collectRenderingDiagnosticText(diagnostics, error instanceof Error ? error.stack || error.message : String(error))
   }
 
   const failed = checks.find((check) => check.status === "failed")
@@ -242,6 +295,7 @@ export async function verifyRuntimeSmoke(input: {
     error: failed?.message,
     routes,
     apiRoutes,
+    diagnostics,
   }
 }
 
@@ -363,7 +417,111 @@ function failedResult(
     error,
     routes,
     apiRoutes,
+    diagnostics: {
+      browserConsoleErrors: [],
+      hydrationErrors: [],
+      runtimeStackTraces: [],
+      missingDependencies: [],
+      routeErrors: error ? [error] : [],
+      environmentVariableErrors: [],
+      importErrors: [],
+      reactErrorBoundaryOutput: [],
+      componentTree: [],
+      propsTree: [],
+      serverClientComponentMismatches: [],
+      providerContextTree: [],
+      asyncRenderingErrors: [],
+      layoutHierarchy: [],
+      pageRenderStackTraces: error ? [error] : [],
+    },
   }
+}
+
+function collectRuntimeDiagnosticText(diagnostics: RuntimeFailureDiagnostics, text: string) {
+  const raw = String(text || "")
+  if (/module not found|cannot find module|can't resolve|failed to resolve|missing dependency/i.test(raw)) {
+    diagnostics.missingDependencies.push(raw)
+  }
+  if (/env|environment variable|process\.env|NEXT_PUBLIC_|DATABASE_URL|NEXTAUTH|OPENROUTER|SUPABASE/i.test(raw)) {
+    diagnostics.environmentVariableErrors.push(raw)
+  }
+  if (/import|export|dynamic import|Cannot access .* before initialization|does not provide an export/i.test(raw)) {
+    diagnostics.importErrors.push(raw)
+  }
+}
+
+function collectRenderingDiagnosticText(diagnostics: RuntimeFailureDiagnostics, text: string) {
+  const raw = String(text || "")
+  if (/error boundary|react will try to recreate|component stack|above error occurred/i.test(raw)) {
+    diagnostics.reactErrorBoundaryOutput.push(raw)
+  }
+  if (/server component|client component|use client|event handlers cannot be passed|createContext only works in client/i.test(raw)) {
+    diagnostics.serverClientComponentMismatches.push(raw)
+  }
+  if (/provider|context|useContext|must be used within|missing provider/i.test(raw)) {
+    diagnostics.providerContextTree.push(raw)
+  }
+  if (/async|promise|suspense|await|thenable|uncached promise/i.test(raw)) {
+    diagnostics.asyncRenderingErrors.push(raw)
+  }
+  if (/layout|root layout|html|body|metadata/i.test(raw)) {
+    diagnostics.layoutHierarchy.push(raw)
+  }
+  if (/props|property|undefined|null|cannot read properties|is not a function/i.test(raw)) {
+    diagnostics.propsTree.push(raw)
+  }
+}
+
+function buildComponentTree(files: GeneratedFile[]) {
+  return files
+    .filter((file) => /\.(tsx|jsx)$/i.test(file.path))
+    .map((file) => {
+      const exports = Array.from(file.content.matchAll(/export\s+(?:default\s+)?function\s+([A-Z][A-Za-z0-9_]*)|function\s+([A-Z][A-Za-z0-9_]*)/g))
+        .map((match) => match[1] || match[2])
+        .filter(Boolean)
+      return `${normalizePath(file.path)}:${exports.length > 0 ? exports.join(",") : "anonymous"}`
+    })
+    .slice(0, 80)
+}
+
+function buildPropsTree(files: GeneratedFile[]) {
+  return files
+    .filter((file) => /\.(tsx|jsx)$/i.test(file.path))
+    .flatMap((file) => {
+      const props = Array.from(file.content.matchAll(/(?:type|interface)\s+([A-Za-z0-9_]*Props)\b/g)).map((match) => match[1])
+      return props.map((prop) => `${normalizePath(file.path)}:${prop}`)
+    })
+    .slice(0, 80)
+}
+
+function buildProviderContextTree(files: GeneratedFile[]) {
+  return files
+    .filter((file) => /createContext|Provider|useContext/i.test(file.content))
+    .map((file) => `${normalizePath(file.path)}:${(/"use client"|'use client'/.test(file.content) ? "client" : "server")}`)
+    .slice(0, 80)
+}
+
+function detectServerClientComponentMismatches(files: GeneratedFile[]) {
+  const mismatches: string[] = []
+  for (const file of files) {
+    const normalized = normalizePath(file.path)
+    const isClient = /"use client"|'use client'/.test(file.content)
+    if (!isClient && /useState|useEffect|useReducer|useRef|useContext|onClick|onSubmit|onChange/.test(file.content)) {
+      mismatches.push(`${normalized}: client-only React API or event handler without use client`)
+    }
+    if (isClient && /^app\/layout\.(tsx|jsx)$/i.test(normalized) && /export\s+const\s+metadata/.test(file.content)) {
+      mismatches.push(`${normalized}: client root layout exports server metadata`)
+    }
+  }
+  return mismatches.slice(0, 80)
+}
+
+function buildLayoutHierarchy(files: GeneratedFile[]) {
+  return files
+    .filter((file) => /^app\/.*(layout|page)\.(tsx|jsx|ts|js)$/i.test(normalizePath(file.path)))
+    .map((file) => normalizePath(file.path))
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, 80)
 }
 
 function normalizePath(value: string) {

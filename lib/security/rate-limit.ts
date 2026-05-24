@@ -16,6 +16,14 @@ const MAX_REQUESTS_PER_DAY = Math.max(
   MAX_REQUESTS_PER_MINUTE,
   Math.round(getEnvNumber(500, "AI_RATE_LIMIT_PER_DAY", "GENERATE_RATE_LIMIT_PER_DAY"))
 )
+const MAX_GENERATIONS_PER_HOUR = Math.max(
+  1,
+  Math.round(getEnvNumber(60, "AI_GENERATION_RATE_LIMIT_PER_HOUR", "GENERATION_RATE_LIMIT_PER_HOUR"))
+)
+const MAX_UPLOADS_PER_DAY = Math.max(
+  1,
+  Math.round(getEnvNumber(100, "UPLOAD_RATE_LIMIT_PER_DAY", "AI_UPLOAD_RATE_LIMIT_PER_DAY"))
+)
 const FREE_GENERATIONS_PER_DAY = Math.max(
   1,
   Math.round(getEnvNumber(3, "FREE_GENERATE_LIMIT_PER_DAY", "FREE_GENERATIONS_PER_DAY"))
@@ -119,6 +127,7 @@ export async function enforceUserRateLimit(userId: string) {
 export async function enforceAiUsageRateLimit(userId: string) {
   // Fast path: Redis-based rate limiting
   await enforceUserRateLimit(userId)
+  await enforceGenerationHourlyRateLimit(userId)
 
   const [user, activePaidSubscription] = await Promise.all([
     prisma.user.findUnique({
@@ -194,6 +203,26 @@ export async function enforceAiUsageRateLimit(userId: string) {
   }
 }
 
+export async function enforceGenerationHourlyRateLimit(userId: string) {
+  const hourKey = `user:${userId}:generation-hour:${Math.floor(Date.now() / 3_600_000)}`
+  const hourResult = await redisRateCheck(hourKey, MAX_GENERATIONS_PER_HOUR, 3600)
+
+  if (!hourResult.allowed) {
+    throw new Error(`Generation rate limit exceeded. Maximum ${MAX_GENERATIONS_PER_HOUR} generations per hour.`)
+  }
+}
+
+export async function enforceUploadDailyRateLimit(userId: string, uploadCount = 1) {
+  const dayKey = `user:${userId}:uploads-day:${new Date().toISOString().slice(0, 10)}`
+
+  for (let index = 0; index < Math.max(1, uploadCount); index += 1) {
+    const dayResult = await redisRateCheck(dayKey, MAX_UPLOADS_PER_DAY, 86400)
+    if (!dayResult.allowed) {
+      throw new Error(`Upload rate limit exceeded. Maximum ${MAX_UPLOADS_PER_DAY} uploaded files per day.`)
+    }
+  }
+}
+
 /**
  * General-purpose rate limiter for any route.
  * Can be used by other endpoints (billing, admin, etc.)
@@ -222,6 +251,8 @@ export async function enforceRouteRateLimit(
 
 export const aiRateLimitConfig = {
   perMinute: MAX_REQUESTS_PER_MINUTE,
+  generationPerHour: MAX_GENERATIONS_PER_HOUR,
   perDay: MAX_REQUESTS_PER_DAY,
+  uploadPerDay: MAX_UPLOADS_PER_DAY,
   freePerDay: FREE_GENERATIONS_PER_DAY,
 }

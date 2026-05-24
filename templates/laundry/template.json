@@ -1,0 +1,7 @@
+{
+  "id": "laundry",
+  "intent": "laundry order management",
+  "requiredCapabilities": ["service packages", "pickup order", "status tracking", "admin queue"],
+  "entryFiles": ["app/page.tsx", "app/dashboard/orders/page.tsx", "components/laundry/order-form.tsx"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

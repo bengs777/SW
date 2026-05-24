@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { randomUUID } from "node:crypto"
-import { getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
+import { getDatabasePoolUsage, getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
+import { getDatabaseCircuitState } from "@/lib/db/circuit-breaker"
+import { getDatabaseMetricsSnapshot } from "@/lib/db/metrics"
 import { env, getMissingProductionEnvVars, validateEnv } from "@/lib/env"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
@@ -61,11 +63,24 @@ async function checkDatabase(): Promise<HealthCheck> {
     const { latencyMs } = await timed(() =>
       withHealthTimeout("database health check", 2_000, () => prisma.$queryRaw`SELECT 1`)
     )
-    return { status: "healthy", latencyMs }
+    return {
+      status: "healthy",
+      latencyMs,
+      detail: {
+        pool: await getDatabasePoolUsage(),
+        metrics: getDatabaseMetricsSnapshot(),
+        circuitBreaker: getDatabaseCircuitState(),
+      },
+    }
   } catch (error) {
     return {
       status: "unhealthy",
-      detail: error instanceof Error ? error.message : String(error),
+      detail: {
+        error: error instanceof Error ? error.message : String(error),
+        pool: await getDatabasePoolUsage(),
+        metrics: getDatabaseMetricsSnapshot(),
+        circuitBreaker: getDatabaseCircuitState(),
+      },
     }
   }
 }

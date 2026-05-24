@@ -19,6 +19,16 @@ import { getHealthSnapshot, isModelTemporarilyUnavailable, markModelFailure, mar
 import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
 import { buildCacheKey, getCachedResponse, setCachedResponse } from "@/lib/ai/response-cache"
 import { buildDomainAnchorDirective } from "@/lib/ai/prompt-guard"
+import {
+  recordProviderAttemptMetric,
+  recordProviderFailoverMetric,
+  recordProviderTokenUsageMetric,
+} from "@/lib/ai/provider-metrics"
+import {
+  isProviderCircuitOpen,
+  markProviderCircuitFailure,
+  markProviderCircuitSuccess,
+} from "@/lib/ai/provider-circuit-breaker"
 import { env } from "@/lib/env"
 import { log } from "@/lib/logging"
 
@@ -109,6 +119,11 @@ export type ProviderResponse = {
     completionTokens?: number
     totalTokens?: number
   }
+}
+
+function recordAttempt(attempts: ProviderAttemptLog[], attempt: ProviderAttemptLog) {
+  attempts.push(attempt)
+  recordProviderAttemptMetric(attempt)
 }
 
 export class SwiftProviderFailureError extends Error {
@@ -229,7 +244,7 @@ export class ProviderRouter {
         error: "No Swift AI model chain is configured",
         failover: "exhausted",
       })
-      attempts.push({
+      recordAttempt(attempts, {
         provider: "openrouter",
         modelName: tier.key,
         status: "failed",
@@ -247,13 +262,25 @@ export class ProviderRouter {
         error: "OPENROUTER_API_KEY is not configured",
         failover: "exhausted",
       })
-      attempts.push({
+      recordAttempt(attempts, {
         provider: "openrouter",
         modelName: targets[0]?.modelId || tier.key,
         status: "failed",
         failureReason: "config",
         latencyMs: 0,
         errorMessage: "OPENROUTER_API_KEY is not configured",
+      })
+      throw new SwiftProviderFailureError(tier.key, attempts)
+    }
+
+    if (isProviderCircuitOpen("openrouter")) {
+      recordAttempt(attempts, {
+        provider: "openrouter",
+        modelName: targets[0]?.modelId || tier.key,
+        status: "failed",
+        failureReason: "overloaded",
+        latencyMs: 0,
+        errorMessage: "OpenRouter circuit breaker is cooling down after repeated failures.",
       })
       throw new SwiftProviderFailureError(tier.key, attempts)
     }
@@ -281,7 +308,7 @@ export class ProviderRouter {
     if (cacheKey) {
       const cached = await getCachedResponse(cacheKey)
       if (cached) {
-        attempts.push({
+        recordAttempt(attempts, {
           provider: "swift",
           modelName: tier.key,
           status: "success",
@@ -318,7 +345,7 @@ export class ProviderRouter {
           error: "Model is cooling down after repeated failures",
           failoverNext: nextProvider || null,
         })
-        attempts.push({
+        recordAttempt(attempts, {
           provider: "openrouter",
           modelName: target.modelId,
           status: "skipped",
@@ -358,7 +385,7 @@ export class ProviderRouter {
             signal,
           })
           const latencyMs = Date.now() - startedAt
-          attempts.push({
+          recordAttempt(attempts, {
             provider: "openrouter",
             modelName: target.modelId,
             status: "success",
@@ -366,6 +393,8 @@ export class ProviderRouter {
             requestId: result.requestId,
           })
           markModelSuccess(target.modelId, latencyMs)
+          markProviderCircuitSuccess("openrouter")
+          recordProviderTokenUsageMetric(result.tokenUsage)
 
           // Persist to cache (fire and forget, never blocks response)
           if (cacheKey) {
@@ -403,7 +432,7 @@ export class ProviderRouter {
             latencyMs,
           })
           firstError = firstError || normalized.message
-          attempts.push({
+          recordAttempt(attempts, {
             provider: "openrouter",
             modelName: target.modelId,
             status: "failed",
@@ -419,8 +448,15 @@ export class ProviderRouter {
             statusCode: normalized.statusCode,
             message: redactedErrorMessage,
           })
+          markProviderCircuitFailure("openrouter", {
+            reason: normalized.reason,
+            message: redactedErrorMessage,
+          })
 
           if (!willRetrySameModel) {
+            if (nextProvider) {
+              recordProviderFailoverMetric()
+            }
             break
           }
 

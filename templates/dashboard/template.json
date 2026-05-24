@@ -1,0 +1,7 @@
+{
+  "id": "dashboard",
+  "intent": "dashboard or admin analytics",
+  "requiredCapabilities": ["metrics", "activity", "tables", "filters"],
+  "entryFiles": ["app/dashboard/page.tsx", "components/dashboard/metric-card.tsx"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

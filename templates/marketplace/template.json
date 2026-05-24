@@ -1,0 +1,7 @@
+{
+  "id": "marketplace",
+  "intent": "multi-vendor marketplace",
+  "requiredCapabilities": ["catalog", "seller profiles", "listing detail", "checkout boundary"],
+  "entryFiles": ["app/page.tsx", "app/products/[id]/page.tsx", "components/marketplace/product-card.tsx"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

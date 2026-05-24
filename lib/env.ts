@@ -74,6 +74,7 @@ const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const verdiTeamId = getEnv("VERDI_TEAM")
 const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
+const swiftAiModelChain = getEnv("SWIFT_AI_MODEL_CHAIN")
 const swiftPrimaryModel = getEnv("SWIFT_PRIMARY_MODEL")
 const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
 const nativeRedisUrlPattern = /^rediss?:\/\//i
@@ -119,6 +120,7 @@ export const env = {
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
   aiQueueTimeoutMs: Math.max(500_000, Math.round(getEnvNumber(500_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
+  swiftAiModelChain,
   swiftPrimaryModel,
   swiftFallbackModel1,
   openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || "https://openrouter.ai/api/v1"),
@@ -179,8 +181,6 @@ export function getMissingProductionEnvVars() {
   if (!env.verdiTeamId) missing.push("VERDI_TEAM")
 
   if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
-  if (!env.swiftPrimaryModel) missing.push("SWIFT_PRIMARY_MODEL")
-  if (!env.swiftFallbackModel1) missing.push("SWIFT_FALLBACK_MODEL_1")
 
   return missing
 }

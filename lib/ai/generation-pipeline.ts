@@ -157,9 +157,9 @@ const BUILTIN_PACKAGES = new Set([
 ])
 
 const DEFAULT_CONTEXT_BUDGETS: Record<GenerationLayer, ContextBudget> = {
-  fast: { maxFiles: 8, maxCharsPerFile: 1200, maxTotalChars: 9000 },
-  builder: { maxFiles: 16, maxCharsPerFile: 2200, maxTotalChars: 26000 },
-  "premium-repair": { maxFiles: 20, maxCharsPerFile: 3000, maxTotalChars: 36000 },
+  fast: { maxFiles: 10, maxCharsPerFile: 8 * 1024, maxTotalChars: 64 * 1024 },
+  builder: { maxFiles: 10, maxCharsPerFile: 8 * 1024, maxTotalChars: 64 * 1024 },
+  "premium-repair": { maxFiles: 10, maxCharsPerFile: 8 * 1024, maxTotalChars: 64 * 1024 },
 }
 
 const SIMPLE_UI_RE =

@@ -202,6 +202,134 @@ export async function persistInvalidArtifactReport(input: {
   return filePath
 }
 
+export async function persistFailedGenerationArtifacts(input: {
+  jobId: string
+  projectId: string
+  prompt: unknown
+  planner?: unknown
+  rawOutput?: unknown
+  validator?: unknown
+  buildLog?: string[] | string | null
+  runtimeLog?: string[] | string | null
+}) {
+  const root = path.join(process.cwd(), ".swift-reports", "failed-generations")
+  const dir = path.join(root, safeSegment(input.jobId))
+  await mkdir(dir, { recursive: true })
+
+  const writeJson = (fileName: string, value: unknown) =>
+    writeFile(
+      path.join(dir, fileName),
+      JSON.stringify({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        capturedAt: new Date().toISOString(),
+        value: sanitizeArtifactValue(value),
+      }, null, 2) + "\n",
+      "utf8"
+    )
+  const writeLog = (fileName: string, value: string[] | string | null | undefined) =>
+    writeFile(
+      path.join(dir, fileName),
+      Array.isArray(value) ? `${value.join("\n")}\n` : `${String(value || "")}\n`,
+      "utf8"
+    )
+
+  await Promise.all([
+    writeJson("prompt.json", input.prompt),
+    writeJson("planner.json", input.planner || null),
+    writeJson("raw-output.json", input.rawOutput || null),
+    writeJson("validator.json", input.validator || null),
+    writeLog("build.log", input.buildLog),
+    writeLog("runtime.log", input.runtimeLog),
+  ])
+
+  return dir
+}
+
+export async function persistRuntimeFailureReport(input: {
+  jobId: string
+  projectId: string
+  category: string
+  message: string
+  diagnostics?: Record<string, unknown> | null
+  logs?: string[] | null
+  files?: GeneratedFile[]
+}) {
+  const root = path.join(process.cwd(), ".swift-reports", "runtime-failures")
+  const dir = path.join(root, safeSegment(input.jobId))
+  await mkdir(dir, { recursive: true })
+  await Promise.all([
+    writeFile(
+      path.join(dir, "runtime-failure.json"),
+      JSON.stringify({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        category: input.category,
+        message: input.message,
+        capturedAt: new Date().toISOString(),
+        diagnostics: sanitizeArtifactValue(input.diagnostics || null),
+        files: input.files ? summarizeGeneratedFiles(input.files) : null,
+      }, null, 2) + "\n",
+      "utf8"
+    ),
+    writeFile(
+      path.join(dir, "runtime.log"),
+      `${(input.logs || []).join("\n")}\n`,
+      "utf8"
+    ),
+  ])
+  return dir
+}
+
+export async function persistRenderFailureReport(input: {
+  jobId: string
+  projectId: string
+  category: string
+  message: string
+  diagnostics?: Record<string, unknown> | null
+  files?: GeneratedFile[]
+}) {
+  const root = path.join(process.cwd(), ".swift-reports", "render-failures")
+  const dir = path.join(root, safeSegment(input.jobId))
+  await mkdir(dir, { recursive: true })
+  await Promise.all([
+    writeFile(
+      path.join(dir, "render-failure.json"),
+      JSON.stringify({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        category: input.category,
+        message: input.message,
+        capturedAt: new Date().toISOString(),
+        diagnostics: sanitizeArtifactValue(input.diagnostics || null),
+        files: input.files ? summarizeGeneratedFiles(input.files) : null,
+      }, null, 2) + "\n",
+      "utf8"
+    ),
+    writeFile(
+      path.join(dir, "component-tree.json"),
+      JSON.stringify({
+        componentTree: sanitizeArtifactValue(input.diagnostics?.componentTree || []),
+        propsTree: sanitizeArtifactValue(input.diagnostics?.propsTree || []),
+        providerContextTree: sanitizeArtifactValue(input.diagnostics?.providerContextTree || []),
+        layoutHierarchy: sanitizeArtifactValue(input.diagnostics?.layoutHierarchy || []),
+      }, null, 2) + "\n",
+      "utf8"
+    ),
+    writeFile(
+      path.join(dir, "render.log"),
+      [
+        ...toLogLines(input.diagnostics?.reactErrorBoundaryOutput),
+        ...toLogLines(input.diagnostics?.serverClientComponentMismatches),
+        ...toLogLines(input.diagnostics?.asyncRenderingErrors),
+        ...toLogLines(input.diagnostics?.pageRenderStackTraces),
+      ].join("\n") + "\n",
+      "utf8"
+    ),
+  ])
+  return dir
+}
+
 function updateRetryMetrics(diagnostics: DeveloperGenerationDiagnostics) {
   const attempts = diagnostics.repairAttempts.length
   const successful = diagnostics.repairAttempts.filter((attempt) => attempt.validatorResult?.status === "passed").length
@@ -222,6 +350,10 @@ function mostCommon(values: string[]) {
   return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] || null
 }
 
+function toLogLines(value: unknown) {
+  return Array.isArray(value) ? value.map(String) : []
+}
+
 function sanitizeDiagnosticData(data?: Record<string, unknown>) {
   if (!data) return undefined
   return JSON.parse(JSON.stringify(data, (_key, value) => {
@@ -229,6 +361,14 @@ function sanitizeDiagnosticData(data?: Record<string, unknown>) {
     if (typeof value === "string") return value.slice(0, 6000)
     return value
   })) as Record<string, unknown>
+}
+
+function sanitizeArtifactValue(value: unknown) {
+  return JSON.parse(JSON.stringify(value, (_key, item) => {
+    if (item instanceof Error) return { name: item.name, message: item.message, stack: item.stack }
+    if (typeof item === "string") return item.slice(0, 500_000)
+    return item
+  }))
 }
 
 function safeSegment(value: string) {

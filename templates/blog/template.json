@@ -1,0 +1,7 @@
+{
+  "id": "blog",
+  "intent": "blog or news portal",
+  "requiredCapabilities": ["posts", "categories", "article detail", "editorial admin"],
+  "entryFiles": ["app/page.tsx", "app/blog/[slug]/page.tsx", "prisma/schema.prisma"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

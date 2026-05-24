@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto"
 import { subHours, subMinutes } from "date-fns"
 import { prisma } from "@/lib/db/client"
+import { renderProviderPrometheusMetrics } from "@/lib/ai/provider-metrics"
+import { renderDatabasePrometheusMetrics } from "@/lib/db/metrics"
 import { log } from "@/lib/logging"
 import { GenerationJobService, type GenerationJobStage, type GenerationJobStatus } from "@/lib/services/generation-job.service"
 
@@ -618,6 +620,8 @@ export class OrchestrationRuntimeService {
       metric("swift_worker_heartbeat_age_ms", { worker_id: heartbeat.workerId, stage: heartbeat.currentStage || "unknown" }, Date.now() - heartbeat.heartbeatAt.getTime())
     }
 
+    lines.push(renderProviderPrometheusMetrics())
+    lines.push(renderDatabasePrometheusMetrics())
     return `${lines.join("\n")}\n`
   }
 }

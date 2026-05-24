@@ -65,6 +65,58 @@ let generationQueue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobNa
 let generationDeadLetterQueue: Queue<GenerationDeadLetterPayload, unknown, "generation.dead_letter"> | null = null
 let generationQueueEvents: QueueEvents | null = null
 
+async function getRedisMemoryHealth(connection: IORedis | null) {
+  if (!connection) {
+    return {
+      evictionPolicy: "unknown",
+      targetEvictionPolicy: "noeviction",
+      evictionPolicyOk: false,
+      usedMemoryBytes: 0,
+      maxMemoryBytes: 0,
+      memoryPressurePct: 0,
+      warning: "Redis connection unavailable.",
+    }
+  }
+
+  let evictionPolicy = "unknown"
+  let warning: string | null = null
+  try {
+    const config = await connection.config("GET", "maxmemory-policy") as string[]
+    evictionPolicy = config?.[1] || "unknown"
+    if (evictionPolicy !== "noeviction" && process.env.SWIFT_REDIS_AUTO_SET_NOEVICTION === "true") {
+      await connection.config("SET", "maxmemory-policy", "noeviction")
+      evictionPolicy = "noeviction"
+    }
+  } catch (error) {
+    warning = error instanceof Error ? error.message : String(error)
+  }
+
+  let usedMemoryBytes = 0
+  let maxMemoryBytes = 0
+  try {
+    const info = await connection.info("memory")
+    for (const line of info.split(/\r?\n/)) {
+      const [key, value] = line.split(":")
+      if (key === "used_memory") usedMemoryBytes = Number(value || 0)
+      if (key === "maxmemory") maxMemoryBytes = Number(value || 0)
+      if (key === "maxmemory_policy" && evictionPolicy === "unknown") evictionPolicy = String(value || "unknown").trim()
+    }
+  } catch (error) {
+    warning = warning || (error instanceof Error ? error.message : String(error))
+  }
+
+  const memoryPressurePct = maxMemoryBytes > 0 ? Math.round((usedMemoryBytes / maxMemoryBytes) * 1000) / 10 : 0
+  return {
+    evictionPolicy,
+    targetEvictionPolicy: "noeviction",
+    evictionPolicyOk: evictionPolicy === "noeviction",
+    usedMemoryBytes,
+    maxMemoryBytes,
+    memoryPressurePct,
+    warning,
+  }
+}
+
 function getRedisConnection() {
   if (!redisConnection) {
     const redisUrl = env.redisUrl
@@ -428,6 +480,7 @@ export async function getGenerationQueueHealth() {
   warnIfSlow("redis", redisLatencyMs, { operation: "queueHealth" })
 
   if (!queue) {
+    const memory = await getRedisMemoryHealth(connection)
     return {
       enabled: false,
       status: "disabled",
@@ -440,6 +493,7 @@ export async function getGenerationQueueHealth() {
         ping: redisPing,
         error: redisError,
         latencyMs: redisLatencyMs,
+        memory,
       },
     }
   }
@@ -473,6 +527,7 @@ export async function getGenerationQueueHealth() {
       })()
     : null
   const heartbeatAgeMs = workerHeartbeat ? Date.now() - Date.parse(workerHeartbeat.at) : null
+  const memory = await getRedisMemoryHealth(connection)
 
   return {
     enabled: true,
@@ -501,6 +556,7 @@ export async function getGenerationQueueHealth() {
       ping: redisPing,
       error: redisError,
       latencyMs: redisLatencyMs,
+      memory,
     },
   }
 }

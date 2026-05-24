@@ -1,0 +1,7 @@
+{
+  "id": "clinic",
+  "intent": "clinic operations app",
+  "requiredCapabilities": ["patients", "doctors", "appointments", "admin dashboard"],
+  "entryFiles": ["app/dashboard/page.tsx", "app/api/appointments/route.ts", "prisma/schema.prisma"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

@@ -8,6 +8,38 @@ export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
 const freeAiMode = process.env.SWIFT_AI_FREE_MODE === "true"
 const envValue = (key: string) => process.env[key]?.trim() || ""
+const DEFAULT_SWIFT_AI_MODEL_CHAIN = [
+  "openrouter:deepseek/deepseek-chat-v3",
+  "openrouter:anthropic/claude-sonnet-4",
+  "openrouter:openai/gpt-4.1-mini",
+]
+let warnedDefaultChain = false
+
+function configuredModelChain() {
+  const raw = envValue("SWIFT_AI_MODEL_CHAIN")
+  if (!raw) return []
+
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item).trim()).filter(Boolean)
+      }
+    } catch {
+      return []
+    }
+  }
+
+  return raw
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function normalizeOpenRouterModelId(modelSpec: string) {
+  return modelSpec.replace(/^openrouter:/i, "").trim()
+}
+
 const configuredPrimaryModel = () => envValue("SWIFT_PRIMARY_MODEL")
 const configuredFallbackModels = () => [
   envValue("SWIFT_FALLBACK_MODEL_1"),
@@ -96,12 +128,26 @@ function uniqueModelIds(modelIds: string[]) {
 }
 
 export function getSwiftModelTargets(task: SwiftModelRoutingTask = "large_generation"): SwiftModelTarget[] {
+  const modelChain = configuredModelChain()
+  const hasConfiguredChain = modelChain.length > 0
   const primary = configuredPrimaryModel()
   const fallbacks = configuredFallbackModels()
+  const legacyChain = [primary, ...fallbacks]
+  const fallbackChain = hasConfiguredChain ? modelChain : legacyChain.filter(Boolean)
+  const chain =
+    fallbackChain.length > 0
+      ? fallbackChain
+      : DEFAULT_SWIFT_AI_MODEL_CHAIN
+
+  if (!hasConfiguredChain && legacyChain.every((modelId) => !modelId) && !warnedDefaultChain) {
+    warnedDefaultChain = true
+    console.warn("[swift-ai] SWIFT_AI_MODEL_CHAIN is empty; using default OpenRouter model chain.")
+  }
+
   const orderedModelIds =
     task === "edit_patch"
-      ? uniqueModelIds([...fallbacks, primary])
-      : uniqueModelIds([primary, ...fallbacks])
+      ? uniqueModelIds([...chain.slice(1), chain[0]].map(normalizeOpenRouterModelId))
+      : uniqueModelIds(chain.map(normalizeOpenRouterModelId))
 
   return orderedModelIds.map((modelId, index) => ({
     modelId,
@@ -193,6 +239,10 @@ export function getDefaultSwiftTier() {
 
 export function hasOpenRouterGatewayKey() {
   return Boolean(process.env.OPENROUTER_API_KEY?.trim())
+}
+
+export function getActiveSwiftModelChain() {
+  return getSwiftModelTargets("large_generation").map((target) => `openrouter:${target.modelId}`)
 }
 
 export function isSwiftFreeAiMode() {

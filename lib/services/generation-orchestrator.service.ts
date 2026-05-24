@@ -15,7 +15,10 @@ import { validateFrontendCompleteness } from "@/lib/ai/frontend-completeness-val
 import { parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
 import {
   createDeveloperGenerationDiagnostics,
+  persistFailedGenerationArtifacts,
   persistInvalidArtifactReport,
+  persistRenderFailureReport,
+  persistRuntimeFailureReport,
   recordDeveloperDiagnostic,
   summarizeArtifactPayload,
   summarizeGeneratedFiles,
@@ -85,6 +88,14 @@ import {
   type IncrementalEditPlan,
 } from "@/lib/ai/incremental-edit"
 import { validateGeneratedPath } from "@/lib/ai/file-policy"
+import { buildImportGraph, getTransitiveImpactPaths } from "@/lib/ai/import-graph"
+import {
+  analyzeComponentRegistryUsage,
+  componentRegistryPromptPayload,
+  ensureComponentRegistryFiles,
+  selectedRegistryComponentsForTemplate,
+  validateComponentContracts,
+} from "@/lib/ai/component-registry"
 import {
   autoRepairAdjacentJsxFragments,
   validateRuntimeImports,
@@ -110,6 +121,7 @@ import {
   recordRuntimeRecoveryEvent,
 } from "@/lib/observability/runtime-recovery"
 import { timeoutConfig } from "@/lib/timeouts"
+import { selectIntentTemplate } from "@/lib/templates/intent-library"
 import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 
 type GenerationPlannerFile = {
@@ -254,11 +266,32 @@ const MINIMAL_RUNNABLE_FALLBACK_SUPPORT_FILES = [
   "sections/features-section.tsx",
   "sections/faq-section.tsx",
 ]
+const MAX_FILES_PER_REPAIR = 3
+const MIN_RENDER_SCORE_TO_PERSIST = 100
+
+type RuntimeFailureCategory =
+  | "hydration_failed"
+  | "import_failed"
+  | "dependency_failed"
+  | "route_failed"
+  | "environment_failed"
+  | "sandbox_failed"
+  | "rendering_failed"
+
+type RenderingFailureCategory =
+  | "client_server_boundary_failed"
+  | "provider_missing"
+  | "props_mismatch"
+  | "async_render_failed"
+  | "layout_failed"
+  | "component_tree_failed"
+  | "state_initialization_failed"
 
 type ValidationLifecycleStep =
   | "normalize"
   | "tsx-validation"
   | "import-validation"
+  | "component-contracts"
   | "static"
   | "preview-compile"
   | "dependency-install"
@@ -292,6 +325,13 @@ type ValidationLifecycleResult = {
   failure?: ValidationLifecycleFailure
 }
 
+class CompileGateError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "CompileGateError"
+  }
+}
+
 type ProjectStateCommitDiagnostics = {
   generatedFileCount: number
   committedFileCount: number
@@ -308,6 +348,7 @@ type RepairTerminationReason =
   | "empty_repair_output"
   | "timeout"
   | "malformed_repair_payload"
+  | "repair_score_regressed"
 
 type RemoteSandboxResponse = {
   status?: string | null
@@ -1882,6 +1923,14 @@ function uniquePaths(paths: string[]) {
   return Array.from(new Set(paths.map(normalizePath).filter(Boolean))).sort()
 }
 
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean))).slice(0, 80)
+}
+
+function asStringArray(value: unknown) {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : []
+}
+
 async function transition(jobId: string, stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) {
   await GenerationJobService.transition(jobId, {
     type: `job.stage.${stage}`,
@@ -1943,6 +1992,44 @@ async function captureValidationRuntimeFailure(input: {
   source: "sandbox" | "orchestrator"
   metadata?: Record<string, unknown>
 }) {
+  const runtimeDiagnostics = extractRuntimeFailureDiagnostics(input.message, input.metadata)
+  const runtimeCategory = categorizeRuntimeFailure(runtimeDiagnostics, input.message, input.metadata)
+  const renderingCategory = runtimeCategory === "rendering_failed"
+    ? categorizeRenderingFailure(runtimeDiagnostics, input.message, input.metadata)
+    : null
+  const reportDir = await persistRuntimeFailureReport({
+    jobId: input.jobId,
+    projectId: input.projectId,
+    category: runtimeCategory,
+    message: input.message,
+    diagnostics: runtimeDiagnostics,
+    logs: runtimeDiagnostics.logs,
+    files: input.files,
+  }).catch((error) => {
+    log("warn", "runtime_failure_report_write_failed", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  })
+  const renderReportDir = renderingCategory
+    ? await persistRenderFailureReport({
+        jobId: input.jobId,
+        projectId: input.projectId,
+        category: renderingCategory,
+        message: input.message,
+        diagnostics: runtimeDiagnostics,
+        files: input.files,
+      }).catch((error) => {
+        log("warn", "render_failure_report_write_failed", {
+          jobId: input.jobId,
+          projectId: input.projectId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return null
+      })
+    : null
   const capture = await captureRuntimeError({
     projectId: input.projectId,
     jobId: input.jobId,
@@ -1950,7 +2037,14 @@ async function captureValidationRuntimeFailure(input: {
     message: input.message,
     source: input.source,
     severity: "error",
-    metadata: input.metadata,
+    metadata: {
+      ...(input.metadata || {}),
+      runtimeCategory,
+      renderingCategory,
+      runtimeDiagnostics,
+      reportDir,
+      renderReportDir,
+    },
   }).catch(() => null)
 
   if (!capture) return null
@@ -1972,11 +2066,150 @@ async function captureValidationRuntimeFailure(input: {
       : "Runtime failure captured but automatic repair requires manual review",
     metadata: {
       ...input.metadata,
+      runtimeCategory,
+      renderingCategory,
+      runtimeDiagnostics,
+      reportDir,
+      renderReportDir,
       fullRegenerationAllowed: false,
       preserveSuccessfulState: true,
     },
   }).catch(() => null)
   return { capture, diagnosis }
+}
+
+function extractRuntimeFailureDiagnostics(message: string, metadata?: Record<string, unknown>) {
+  const runtimeVerification = metadata?.runtimeVerification as {
+    diagnostics?: Record<string, unknown>
+    checks?: Array<{ message?: string; category?: string; data?: unknown }>
+    failureCategory?: string
+    error?: string
+  } | null | undefined
+  const logs = Array.isArray(metadata?.logs) ? metadata.logs.map(String) : []
+  const diagnostics = runtimeVerification?.diagnostics || {}
+  const allText = [
+    message,
+    runtimeVerification?.error,
+    runtimeVerification?.failureCategory,
+    ...logs,
+    ...Object.values(diagnostics).flatMap((value) => Array.isArray(value) ? value.map(String) : [String(value || "")]),
+  ].filter(Boolean).join("\n")
+
+  const pick = (pattern: RegExp) =>
+    allText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => pattern.test(line))
+      .slice(0, 40)
+
+  return {
+    browserConsoleErrors: asStringArray(diagnostics.browserConsoleErrors),
+    hydrationErrors: asStringArray(diagnostics.hydrationErrors),
+    runtimeStackTraces: asStringArray(diagnostics.runtimeStackTraces),
+    missingDependencies: uniqueStrings([
+      ...asStringArray(diagnostics.missingDependencies),
+      ...pick(/module not found|cannot find module|can't resolve|failed to resolve|missing dependency/i),
+    ]),
+    routeErrors: uniqueStrings([
+      ...asStringArray(diagnostics.routeErrors),
+      ...pick(/route|page|api route|returned 5\d\d|failed to render/i),
+    ]),
+    environmentVariableErrors: uniqueStrings([
+      ...asStringArray(diagnostics.environmentVariableErrors),
+      ...pick(/env|environment variable|process\.env|DATABASE_URL|NEXTAUTH|SUPABASE|OPENROUTER/i),
+    ]),
+    importErrors: uniqueStrings([
+      ...asStringArray(diagnostics.importErrors),
+      ...pick(/import|export|does not provide an export|Cannot access .* before initialization/i),
+    ]),
+    reactErrorBoundaryOutput: uniqueStrings(asStringArray(diagnostics.reactErrorBoundaryOutput)),
+    componentTree: uniqueStrings(asStringArray(diagnostics.componentTree)),
+    propsTree: uniqueStrings([
+      ...asStringArray(diagnostics.propsTree),
+      ...pick(/props|property|undefined|null|cannot read properties|is not a function/i),
+    ]),
+    serverClientComponentMismatches: uniqueStrings([
+      ...asStringArray(diagnostics.serverClientComponentMismatches),
+      ...pick(/server component|client component|use client|event handlers cannot be passed|createContext only works in client/i),
+    ]),
+    providerContextTree: uniqueStrings([
+      ...asStringArray(diagnostics.providerContextTree),
+      ...pick(/provider|context|useContext|must be used within|missing provider/i),
+    ]),
+    asyncRenderingErrors: uniqueStrings([
+      ...asStringArray(diagnostics.asyncRenderingErrors),
+      ...pick(/async|promise|suspense|await|thenable|uncached promise/i),
+    ]),
+    layoutHierarchy: uniqueStrings([
+      ...asStringArray(diagnostics.layoutHierarchy),
+      ...pick(/layout|root layout|html|body|metadata/i),
+    ]),
+    pageRenderStackTraces: uniqueStrings(asStringArray(diagnostics.pageRenderStackTraces)),
+    logs,
+  }
+}
+
+function categorizeRuntimeFailure(
+  diagnostics: ReturnType<typeof extractRuntimeFailureDiagnostics>,
+  message: string,
+  metadata?: Record<string, unknown>
+): RuntimeFailureCategory {
+  const runtimeVerification = metadata?.runtimeVerification as { failureCategory?: string } | null | undefined
+  const raw = [
+    message,
+    runtimeVerification?.failureCategory,
+    diagnostics.logs.join("\n"),
+    diagnostics.browserConsoleErrors.join("\n"),
+    diagnostics.runtimeStackTraces.join("\n"),
+  ].join("\n").toLowerCase()
+
+  if (diagnostics.hydrationErrors.length > 0 || /hydration/.test(raw)) return "hydration_failed"
+  if (diagnostics.missingDependencies.length > 0 || /module not found|cannot find module|can't resolve|missing dependency/.test(raw)) return "dependency_failed"
+  if (diagnostics.environmentVariableErrors.length > 0 || /environment variable|process\.env|database_url|nextauth|supabase|openrouter/.test(raw)) return "environment_failed"
+  if (diagnostics.importErrors.length > 0 || /import|export|does not provide an export/.test(raw)) return "import_failed"
+  if (diagnostics.routeErrors.length > 0 || /api_route|route_render|homepage_render|failed to render|returned 5\d\d/.test(raw)) return "route_failed"
+  if (/sandbox|server_unreachable|timeout|preview server exited/.test(raw)) return "sandbox_failed"
+  return "rendering_failed"
+}
+
+function categorizeRenderingFailure(
+  diagnostics: ReturnType<typeof extractRuntimeFailureDiagnostics>,
+  message: string,
+  metadata?: Record<string, unknown>
+): RenderingFailureCategory {
+  const raw = [
+    message,
+    diagnostics.logs.join("\n"),
+    diagnostics.browserConsoleErrors.join("\n"),
+    diagnostics.runtimeStackTraces.join("\n"),
+    diagnostics.reactErrorBoundaryOutput.join("\n"),
+    diagnostics.serverClientComponentMismatches.join("\n"),
+    diagnostics.providerContextTree.join("\n"),
+    diagnostics.propsTree.join("\n"),
+    diagnostics.asyncRenderingErrors.join("\n"),
+    diagnostics.layoutHierarchy.join("\n"),
+    JSON.stringify(metadata || {}),
+  ].join("\n").toLowerCase()
+
+  if (diagnostics.serverClientComponentMismatches.length > 0 || /server component|client component|use client|event handlers cannot be passed|createcontext only works/.test(raw)) {
+    return "client_server_boundary_failed"
+  }
+  if (diagnostics.providerContextTree.length > 0 || /missing provider|must be used within|usecontext|provider/.test(raw)) {
+    return "provider_missing"
+  }
+  if (diagnostics.asyncRenderingErrors.length > 0 || /async|promise|suspense|uncached promise|thenable/.test(raw)) {
+    return "async_render_failed"
+  }
+  if (diagnostics.layoutHierarchy.length > 0 && /root layout|layout|html|body|metadata/.test(raw)) {
+    return "layout_failed"
+  }
+  if (diagnostics.propsTree.length > 0 || /props|property|undefined|null|cannot read properties|is not a function/.test(raw)) {
+    return "props_mismatch"
+  }
+  if (/usestate|initial state|initializer|reducer|setstate|state/.test(raw)) {
+    return "state_initialization_failed"
+  }
+  return "component_tree_failed"
 }
 
 function classifyRepairTerminationReason(input: {
@@ -1992,6 +2225,7 @@ function classifyRepairTerminationReason(input: {
   if (/accepted_file_changes_zero|no accepted|empty|produced no accepted/.test(raw)) return "empty_repair_output"
   if (/patch_changed_no_files|identical|unchanged|same artifact|repeated/.test(raw)) return "repeated_identical_artifact"
   if (/identical_error_repeated|build_output_unchanged|deadlock/.test(raw)) return "validator_deadlock"
+  if (/repair_score_regressed|score regressed/.test(raw)) return "repair_score_regressed"
   if (!input.validation?.ok && input.repairAttempt >= input.maxRepairAttempts) return "max_retries_exceeded"
   return null
 }
@@ -2005,6 +2239,7 @@ function publicRepairTerminationReason(reason: RepairTerminationReason | string 
     empty_repair_output: "Empty repair output",
     timeout: "Repair timeout",
     malformed_repair_payload: "Malformed repair payload",
+    repair_score_regressed: "Repair score regressed",
   }
   return labels[reason as RepairTerminationReason] || reason
 }
@@ -2527,6 +2762,7 @@ function buildSlicePrompt(input: {
   const batchedFoundation = targets.length > 1
   const productionFullStack = input.plan.productionMode === "production_fullstack"
   const fullFrontend = input.plan.productionMode === "full_frontend"
+  const intentTemplate = selectIntentTemplate(input.prompt)
 
   return [
     context,
@@ -2536,6 +2772,26 @@ function buildSlicePrompt(input: {
     buildDynamicSeedDirective(input.prompt),
     "",
     buildBlueprintInstructionBlock(input.blueprint),
+    "",
+    "INTENT_TEMPLATE_LIBRARY:",
+    JSON.stringify(
+      intentTemplate
+        ? {
+            selectedTemplate: intentTemplate.id,
+            templatePath: intentTemplate.path,
+            requiredCapabilities: intentTemplate.requiredCapabilities,
+            instruction: "Use this intent template as the domain skeleton. Adapt copy and data to the user's prompt without changing the compile gate.",
+          }
+        : {
+            selectedTemplate: null,
+            availableTemplates: ["landing", "dashboard", "marketplace", "saas", "crm", "restaurant", "clinic", "laundry", "blog"],
+          },
+      null,
+      2
+    ),
+    "",
+    "COMPONENT_REGISTRY_CONTRACTS:",
+    JSON.stringify(componentRegistryPromptPayload(), null, 2),
     "",
     buildArchitectureInstructionBlock(input.plan.architecture),
     "",
@@ -2602,7 +2858,10 @@ function buildSlicePrompt(input: {
     "- Stop after the requested slice; do not create extra support files speculatively.",
     "- APPROVED_SCOPE_ONLY: create or modify files only when their exact canonical path appears in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     "- HELPER_FILE_POLICY: helper/shell files are explicit-only. Do not create components/app-shell.tsx, components/*-shell.tsx, or components/*helper*.tsx unless that exact path appears in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
-    "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, sections/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
+    "- COMPONENT_REGISTRY_POLICY: compose standard UI from component-registry/* when a matching registry component exists. Do not recreate HeroSection, Navbar, Footer, DashboardCard, FeatureSection, Testimonial, or Pricing from scratch.",
+    "- COMPONENT_REGISTRY_POLICY: registry components have required props, optional props, default props, import dependencies, and client/server type contracts. Pass every required prop with the expected type before render.",
+    "- COMPONENT_REGISTRY_POLICY: import standard components from their registry importPath and keep dependency graph intact: app/page.tsx -> component-registry/* -> any direct dependency.",
+    "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, sections/, component-registry/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, component-registry/hero.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
     "- STRICT_ARTIFACT_ENVELOPE: Return ONLY a JSON object parseable directly by JSON.parse. No markdown fences. No prose. No explanations. No comments outside JSON. No preamble like Here is your app.",
     '- Required BUILD schema: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
@@ -2610,6 +2869,10 @@ function buildSlicePrompt(input: {
     "- Framework labels such as Next.js, React, and TypeScript belong in framework/metadata, never in files[].path or taskGraph.operations[].path.",
     "- Never ask to run shell commands or mutate files outside the files array.",
     "- TSX_PARSE_LOCK: every returned .tsx/.ts/.jsx/.js file must parse with @babel/parser using jsx + typescript plugins.",
+    "- RENDER_SAFE_RULES: app/layout.tsx and app/page.tsx must always exist in the final artifact and must render successfully in Next.js App Router.",
+    "- RENDER_SAFE_RULES: provider wrappers are mandatory when context, createContext, useContext, theme/session/query providers, or dependency-level providers are used.",
+    "- RENDER_SAFE_RULES: use \"use client\" only for files that use client-only React APIs, browser APIs, event handlers, or context creation.",
+    "- RENDER_SAFE_RULES: automatically inject the nearest context Provider into app/layout.tsx or app/page.tsx when any dependency requires that provider.",
     "- Do not use raw emoji or decorative non-ASCII symbols in TSX code. Use plain text labels or imported icons only.",
     "- Never split quoted strings across physical lines. Put long copy in JSX text nodes, arrays of short strings, or properly closed template literals.",
     "- Keep generated code ASCII-safe unless the user explicitly asks for local script characters.",
@@ -2708,7 +2971,21 @@ function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, 
     failing.add(filePath)
   }
 
-  const matchedFiles = files.filter((file) => failing.has(normalizePath(file.path))).slice(0, 8)
+  const graph = buildImportGraph(files)
+  const repairScope = new Set<string>()
+  for (const filePath of failing) {
+    for (const impactPath of getTransitiveImpactPaths(graph, [filePath], {
+      direction: "both",
+      maxDepth: 1,
+      maxFiles: MAX_FILES_PER_REPAIR,
+    })) {
+      repairScope.add(normalizePath(impactPath))
+    }
+  }
+
+  const matchedFiles = files
+    .filter((file) => failing.has(normalizePath(file.path)) || repairScope.has(normalizePath(file.path)))
+    .slice(0, MAX_FILES_PER_REPAIR)
   if (matchedFiles.length > 0) {
     return matchedFiles
   }
@@ -2719,7 +2996,7 @@ function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, 
       /^components\//i.test(normalizePath(file.path)) ||
       normalizePath(file.path) === "package.json"
     )
-    .slice(0, 8)
+    .slice(0, MAX_FILES_PER_REPAIR)
 }
 
 function extractRequestedFilePaths(prompt: string) {
@@ -3940,6 +4217,57 @@ function failureStepFromSandbox(validation: SandboxValidationStep[]): Validation
   return "runtime-smoke"
 }
 
+function validateRenderSafeGenerationRules(files: GeneratedFile[]) {
+  const paths = new Set(files.map((file) => normalizePath(file.path)))
+  const failures: string[] = []
+  const rootLayout = files.find((file) => normalizePath(file.path) === "app/layout.tsx")
+  const rootPage = files.find((file) => normalizePath(file.path) === "app/page.tsx")
+  const providerFiles = files.filter((file) => /createContext|useContext|\.Provider|Provider\b/.test(file.content))
+
+  if (!rootLayout) failures.push("app/layout.tsx is required for render-safe App Router output")
+  if (!rootPage) failures.push("app/page.tsx is required for render-safe App Router output")
+  if (rootLayout && !/<html[\s>]/.test(rootLayout.content)) failures.push("app/layout.tsx must render an html element")
+  if (rootLayout && !/<body[\s>]/.test(rootLayout.content)) failures.push("app/layout.tsx must render a body element")
+
+  for (const file of files.filter((item) => /\.(tsx|jsx)$/i.test(item.path))) {
+    const normalized = normalizePath(file.path)
+    const isClient = /"use client"|'use client'/.test(file.content)
+    const needsClient = /\buse(State|Effect|Reducer|Ref|Context|Memo|Callback)\b|onClick=|onSubmit=|onChange=|createContext\(/.test(file.content)
+    if (!isClient && needsClient) {
+      failures.push(`${normalized} uses client-only React APIs without use client`)
+    }
+    if (isClient && /^app\/layout\.(tsx|jsx)$/i.test(normalized) && /export\s+const\s+metadata/.test(file.content)) {
+      failures.push(`${normalized} mixes use client with server metadata export`)
+    }
+  }
+
+  if (providerFiles.length > 0) {
+    const providerPaths = providerFiles.map((file) => normalizePath(file.path))
+    const wrapperUsed = files.some((file) =>
+      /layout\.(tsx|jsx)$|page\.(tsx|jsx)$/i.test(normalizePath(file.path)) &&
+      (providerPaths.some((providerPath) => file.content.includes(importStem(providerPath))) || /<[A-Z][A-Za-z0-9]*Provider\b/.test(file.content))
+    )
+    if (!wrapperUsed) {
+      failures.push("context provider dependency detected but no Provider wrapper is injected into layout/page")
+    }
+  }
+
+  return {
+    ok: failures.length === 0,
+    failures,
+    requiredFiles: {
+      "app/layout.tsx": paths.has("app/layout.tsx"),
+      "app/page.tsx": paths.has("app/page.tsx"),
+    },
+    providerFiles: providerFiles.map((file) => normalizePath(file.path)),
+  }
+}
+
+function importStem(filePath: string) {
+  const base = normalizePath(filePath).split("/").pop() || ""
+  return base.replace(/\.(tsx|ts|jsx|js)$/i, "")
+}
+
 async function runValidationLifecycle(input: {
   jobId: string
   projectId: string
@@ -4037,12 +4365,35 @@ async function runValidationLifecycle(input: {
   stepStartedAt = performance.now()
   await input.emit("validating", "Normalizing generated artifacts", 63)
   const normalized = normalizeGeneratedDependencies(files)
-  files = normalized.files
+  files = ensureComponentRegistryFiles(normalized.files)
+  const renderSafeRules = validateRenderSafeGenerationRules(files)
+  if (!renderSafeRules.ok) {
+    const message = `Render-safe generation rules failed: ${renderSafeRules.failures.join("; ")}`
+    recordStep("normalize", "failed", "required", stepStartedAt, message, {
+      renderSafeRules,
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: "render_safe_rules_failed",
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "normalize",
+        message,
+        data: {
+          renderSafeRules,
+        },
+      },
+    }
+  }
   recordStep("normalize", "passed", "required", stepStartedAt, undefined, {
     fileCount: files.length,
     addedPackages: normalized.addedPackages,
     normalizedPackages: normalized.normalizedPackages,
     conflictsPrevented: normalized.conflictsPrevented,
+    renderSafeRules,
   })
 
   const plannedPaths = input.plan.filePlan.map((file) => normalizePath(file.path))
@@ -4186,6 +4537,54 @@ async function runValidationLifecycle(input: {
     diagnostics: [],
     localImportCount: dependencyMap.localImports.length,
     externalPackages: dependencyMap.externalPackages,
+  })
+
+  await GenerationJobService.assertNotCancelled(input.jobId)
+  stepStartedAt = performance.now()
+  await input.emit("validating", "Validating component registry contracts", 67)
+  const selectedTemplate = selectIntentTemplate(input.prompt)
+  const componentContracts = validateComponentContracts(files, {
+    selectedTemplate: selectedTemplate?.id || null,
+  })
+  log("info", "component_registry_usage", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    ...componentContracts.usage,
+  })
+  await GenerationJobService.appendEvent({
+    jobId: input.jobId,
+    type: "component_registry_usage",
+    stage: "validating",
+    status: componentContracts.ok ? "completed" : "failed",
+    message: "Component registry usage analyzed",
+    data: componentContracts.usage,
+  }).catch(() => null)
+  if (!componentContracts.ok) {
+    const message = `Component contract validation failed: ${componentContracts.failures.map((failure) => `${failure.file}: ${failure.message}`).slice(0, 8).join("; ")}`
+    recordStep("component-contracts", "failed", "required", stepStartedAt, message, {
+      componentContracts,
+      dependencyGraph: componentContracts.dependencyGraph,
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: "component_contract_failed",
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "component-contracts",
+        message,
+        data: {
+          componentContracts,
+          dependencyGraph: componentContracts.dependencyGraph,
+        },
+      },
+    }
+  }
+  recordStep("component-contracts", "passed", "required", stepStartedAt, undefined, {
+    componentContracts,
+    dependencyGraph: componentContracts.dependencyGraph,
   })
 
   await GenerationJobService.assertNotCancelled(input.jobId)
@@ -4433,32 +4832,6 @@ async function runValidationLifecycle(input: {
     const logs = Array.isArray(preview.logs) ? preview.logs : []
     if (preview.error || preview.status !== "running") {
       const message = preview.error || `Sandbox service did not reach running state (${preview.status || "unknown"})`
-      if (isProductionVercel() && input.plan.productionMode !== "production_fullstack") {
-        recordStep("build", "skipped", "advisory", stepStartedAt, message, {
-          sandboxStatus: preview.status || null,
-          logs: logs.slice(-80),
-        })
-        recordStep(
-          "runtime-smoke",
-          "skipped",
-          "advisory",
-          stepStartedAt,
-          "Sandbox service unavailable; browser iframe preview will validate client-side after persistence.",
-          {
-            sandboxStatus: preview.status || null,
-            logs: logs.slice(-80),
-          }
-        )
-        return {
-          ok: true,
-          files,
-          previewUrl: null,
-          previewStatus: "browser-preview-only",
-          steps,
-          sandboxValidation: [],
-        }
-      }
-
       recordStep("runtime-smoke", "failed", "required", stepStartedAt, message, {
         sandboxStatus: preview.status || null,
         logs: logs.slice(-80),
@@ -4524,6 +4897,10 @@ async function runValidationLifecycle(input: {
       }
     }
 
+    recordStep("typecheck", "passed", "required", stepStartedAt, "Sandbox service accepted the project typecheck/build gate.", {
+      sandboxStatus: preview.status,
+      logs: logs.slice(-20),
+    })
     recordStep("build", "passed", "required", stepStartedAt, "Sandbox service accepted and built the project.", {
       sandboxStatus: preview.status,
       logs: logs.slice(-20),
@@ -4594,33 +4971,21 @@ async function runValidationLifecycle(input: {
   }
 
   if (isProductionVercel()) {
-    await input.emit("building", "Runtime sandbox unavailable; saving browser-previewable files", 84)
-    recordStep(
-      "build",
-      "skipped",
-      "advisory",
-      stepStartedAt,
-      input.plan.productionMode === "production_fullstack"
-        ? "Skipped full-stack runtime validation because SANDBOX_SERVICE_URL/SANDBOX_SERVICE_TOKEN is not configured; artifacts are persisted for editing and browser preview."
-        : "Skipped in Vercel production because SANDBOX_SERVICE_URL is not configured."
-    )
-    recordStep(
-      "runtime-smoke",
-      "skipped",
-      "advisory",
-      stepStartedAt,
-      input.plan.productionMode === "production_fullstack"
-        ? "Runtime smoke skipped; browser iframe preview will validate the visible UI after persistence."
-        : "Browser iframe preview will validate client-side after persistence."
-    )
-
+    const message = "Compile gate requires SANDBOX_SERVICE_URL/SANDBOX_SERVICE_TOKEN so typecheck, build, and runtime smoke pass before persistence."
+    await input.emit("building", "Runtime sandbox required before persistence", 84)
+    recordStep("build", "failed", "required", stepStartedAt, message)
+    recordStep("runtime-smoke", "failed", "required", stepStartedAt, message)
     return {
-      ok: true,
+      ok: false,
       files,
       previewUrl: null,
-      previewStatus: "browser-preview-only",
+      previewStatus: null,
       steps,
       sandboxValidation: [],
+      failure: {
+        step: "build",
+        message,
+      },
     }
   }
 
@@ -4923,7 +5288,7 @@ async function attemptTargetedRepair(input: {
     input.validationError,
     "",
     "TARGETED_REPAIR_ONLY:",
-    "- Repair only the failing files or their direct imports.",
+    `- MAX_FILES_PER_REPAIR: ${MAX_FILES_PER_REPAIR}. Repair only the failing file, its imported dependency, or the nearest dependency graph neighbor.`,
     "- APPROVED_SCOPE_ONLY: repair output may include only exact paths listed in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     "- HELPER_FILE_POLICY: do not create components/app-shell.tsx, components/*-shell.tsx, or components/*helper*.tsx unless that exact path is explicitly listed in APPROVED_FILE_SCOPE_CONTRACT.allowedPaths.",
     syntaxRepairOnly
@@ -5027,6 +5392,19 @@ async function attemptTargetedRepair(input: {
   const parsedFileCount = parsed.files.length
   const allowedScopeResult = scopeArtifactToAllowedScope(parsed, input.plan)
   parsed = allowedScopeResult.artifact
+  const repairScopePathSet = new Set(failingFiles.map((file) => normalizePath(file.path)))
+  parsed = {
+    ...parsed,
+    files: parsed.files.filter((file) => repairScopePathSet.has(normalizePath(file.path))).slice(0, MAX_FILES_PER_REPAIR),
+    taskGraph: parsed.taskGraph
+      ? {
+          ...parsed.taskGraph,
+          operations: parsed.taskGraph.operations
+            .filter((operation) => repairScopePathSet.has(normalizePath(operation.path)))
+            .slice(0, MAX_FILES_PER_REPAIR),
+        }
+      : undefined,
+  }
   const scoped = minimalRepairOnly
     ? {
         acceptedFiles: parsed.files.filter((file) => failingPathSet.has(normalizePath(file.path))),
@@ -5295,6 +5673,7 @@ function mapLifecycleFailureToQualityStage(step?: ValidationLifecycleStep | null
   if (step === "static") return "static-validation"
   if (step === "tsx-validation") return "static-validation"
   if (step === "import-validation") return "static-validation"
+  if (step === "component-contracts") return "static-validation"
   if (step === "dependency-install") return "dependency-planning"
   if (step === "preview-compile") return "preview-compile"
   if (step === "typecheck") return "typecheck"
@@ -5307,6 +5686,92 @@ function mapLifecycleFailureToQualityStage(step?: ValidationLifecycleStep | null
 
 function sumStepDurations(steps: ValidationLifecycleStepResult[]) {
   return steps.reduce((sum, step) => sum + Math.max(0, step.durationMs || 0), 0)
+}
+
+function findStep(validation: ValidationLifecycleResult, name: ValidationLifecycleStep) {
+  return validation.steps.find((step) => step.name === name)
+}
+
+function assertCompileGatePassed(validation: ValidationLifecycleResult) {
+  const required: ValidationLifecycleStep[] = [
+    "component-contracts",
+    "static",
+    "typecheck",
+    "build",
+    "runtime-smoke",
+  ]
+  const failed = required.find((name) => findStep(validation, name)?.status !== "passed")
+  if (failed) {
+    const step = findStep(validation, failed)
+    throw new CompileGateError(
+      `Compile gate blocked persistence: ${failed} did not pass${step?.message ? ` (${step.message})` : ""}.`
+    )
+  }
+  const score = renderScore(validation)
+  if (score < MIN_RENDER_SCORE_TO_PERSIST) {
+    throw new CompileGateError(
+      `Compile gate blocked persistence: renderScore ${score} is below threshold ${MIN_RENDER_SCORE_TO_PERSIST}.`
+    )
+  }
+}
+
+function renderScore(validation: ValidationLifecycleResult | null) {
+  if (!validation) return 0
+  const runtimeStep = validation.steps.find((step) => step.name === "runtime-smoke")
+  if (runtimeStep?.status !== "passed") return 0
+  const verification = runtimeStep.data?.runtimeVerification as {
+    ok?: boolean
+    checks?: Array<{ name?: string; status?: string; category?: string }>
+    diagnostics?: Record<string, unknown>
+  } | null | undefined
+  if (!verification) return 100
+
+  const checks = Array.isArray(verification.checks) ? verification.checks : []
+  const diagnostics = verification.diagnostics || {}
+  const routeSuccess = checks.some((check) => /homepage_render|route_render/.test(String(check.name || "")) && check.status === "passed")
+  const browserRenderSuccess = checks.some((check) => check.name === "runtime.browser_navigation" && check.status === "passed")
+  const hydrationSuccess = asStringArray(diagnostics.hydrationErrors).length === 0
+  const componentSuccess =
+    asStringArray(diagnostics.reactErrorBoundaryOutput).length === 0 &&
+    asStringArray(diagnostics.pageRenderStackTraces).length === 0 &&
+    asStringArray(diagnostics.serverClientComponentMismatches).length === 0
+
+  return [
+    routeSuccess ? 25 : 0,
+    browserRenderSuccess ? 25 : 0,
+    hydrationSuccess ? 25 : 0,
+    componentSuccess ? 25 : 0,
+  ].reduce((sum, value) => sum + value, 0)
+}
+
+function validationLogLines(validation: ValidationLifecycleResult | null, kind: "build" | "runtime") {
+  if (!validation) return []
+  const names: ValidationLifecycleStep[] = kind === "build"
+    ? ["typecheck", "lint", "build", "preview-compile"]
+    : ["runtime-smoke"]
+  return validation.steps
+    .filter((step) => names.includes(step.name))
+    .flatMap((step) => {
+      const logs = Array.isArray(step.data?.logs) ? step.data.logs.map(String) : []
+      return [
+        `${step.name}:${step.status}:${step.policy}:${step.durationMs}ms${step.message ? `:${step.message}` : ""}`,
+        ...logs,
+      ]
+    })
+}
+
+function repairScore(validation: ValidationLifecycleResult | null) {
+  if (!validation) return 0
+  const validatorSuccess = validation.steps.some((step) =>
+    ["tsx-validation", "import-validation", "static"].includes(step.name) && step.status === "passed"
+  )
+  const buildSuccess = validation.steps.some((step) => step.name === "build" && step.status === "passed")
+  const runtimeSuccess = validation.steps.some((step) => step.name === "runtime-smoke" && step.status === "passed")
+  return [
+    validatorSuccess ? 30 : 0,
+    buildSuccess ? 35 : 0,
+    runtimeSuccess ? 35 : 0,
+  ].reduce((sum, value) => sum + value, 0)
 }
 
 async function recordGenerationQuality(input: {
@@ -5363,6 +5828,8 @@ async function recordGenerationQuality(input: {
         durationMs: step.durationMs,
       })),
       previewStatus: input.validation?.previewStatus || null,
+      renderScore: input.validation ? renderScore(input.validation) : null,
+      renderScoreThreshold: MIN_RENDER_SCORE_TO_PERSIST,
     },
   })
 }
@@ -5401,6 +5868,7 @@ export async function executeGenerationJob(
   let totalTokens = 0
   const workflowMemory: AgentWorkflowMemoryEntry[] = []
   let buildLogs: string[] = []
+  const rawOutputs: Array<Record<string, unknown>> = []
   let lastErrorSignature = ""
   let lastBuildOutputSignature = ""
   let repairStopReason: string | null = null
@@ -5564,6 +6032,19 @@ export async function executeGenerationJob(
       previousMemoryJson,
     })
     blueprint = getControlledAppBlueprint(plan.appType)
+    const intentTemplate = selectIntentTemplate(input.prompt)
+    metrics.intentTemplate = intentTemplate
+      ? {
+          id: intentTemplate.id,
+          label: intentTemplate.label,
+          path: intentTemplate.path,
+          requiredCapabilities: intentTemplate.requiredCapabilities,
+        }
+      : null
+    metrics.componentRegistry = {
+      selectedTemplate: intentTemplate?.id || null,
+      selectedRegistryComponents: selectedRegistryComponentsForTemplate(intentTemplate?.id || null),
+    }
     recordGenerationStageTelemetry({
       context: traceContext,
       stage: "planning",
@@ -5670,6 +6151,8 @@ export async function executeGenerationJob(
       productionMode: plan.productionMode,
       editMode: plan.editPlan.mode,
       intent: intentStorageKey(plan.intent),
+      selectedTemplate: intentTemplate?.id || null,
+      selectedRegistryComponents: selectedRegistryComponentsForTemplate(intentTemplate?.id || null),
     })
     log("info", "plan", {
       jobId: input.jobId,
@@ -6000,6 +6483,31 @@ export async function executeGenerationJob(
             architecturePlan: plan.architecture,
             memory: finalProjectMemory,
           })
+          validation = await runValidationLifecycle({
+            jobId: input.jobId,
+            projectId: input.projectId,
+            prompt: input.prompt,
+            files: workingFiles,
+            plan,
+            blueprint,
+            trace: {
+              traceId: correlation.traceId,
+              workerId: null,
+            },
+            signal: input.signal,
+            emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
+          })
+          metrics.validationLifecycle = {
+            ok: validation.ok,
+            repairAttempts: 0,
+            steps: validation.steps,
+            sandboxValidation: validation.sandboxValidation,
+            failure: validation.failure || null,
+          }
+          if (!validation.ok) {
+            throw new CompileGateError(validation.failure?.message || "Scoped edit validation failed before persistence.")
+          }
+          assertCompileGatePassed(validation)
           const saveResult = await ProjectFilePersistenceService["saveBufferedArtifacts"]({
             projectId: input.projectId,
             prompt: input.prompt,
@@ -6481,6 +6989,15 @@ export async function executeGenerationJob(
             existingFileCount: workingFiles.length,
             existingFiles: workingFiles,
           },
+        })
+        rawOutputs.push({
+          phase: "generate",
+          sliceIndex,
+          sliceTotal,
+          parseAttempt,
+          target: target.path,
+          hash: hashText(response.message),
+          content: response.message,
         })
         assertNotAborted(input.signal)
         try {
@@ -7260,6 +7777,8 @@ export async function executeGenerationJob(
       await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
 
       const previousRepairFiles = validation.files
+      const previousValidation = validation
+      const previousRepairScore = repairScore(previousValidation)
       const previousRepairFileHash = hashGeneratedFiles(previousRepairFiles)
       const repaired = await attemptTargetedRepair({
         jobId: input.jobId,
@@ -7454,6 +7973,48 @@ export async function executeGenerationJob(
         signal: input.signal,
         emit: (stage, label, progress, data) => transition(input.jobId, stage, label, progress, data),
       })
+      const nextRepairScore = repairScore(validation)
+      if (nextRepairScore < previousRepairScore) {
+        workingFiles = previousRepairFiles
+        validation = previousValidation
+        repairStopReason = "repair_score_regressed"
+        const repairValidationDiagnostic = developerDiagnostics.repairAttempts.find((item) => item.attempt === repairAttempt)
+        if (repairValidationDiagnostic) {
+          repairValidationDiagnostic.failedBecause = "Repair score regressed; candidate discarded"
+          repairValidationDiagnostic.validatorResult = {
+            status: "failed",
+            repairScore: nextRepairScore,
+            previousRepairScore,
+          }
+        }
+        await OrchestrationRuntimeService.finishRepairAttempt({
+          jobId: input.jobId,
+          attempt: repairAttempt,
+          status: "failed",
+          terminationReason: repairStopReason,
+          validatorError: validation.failure?.step || null,
+          output: summarizeGeneratedFiles(repaired.files),
+          metadata: {
+            repairScore: nextRepairScore,
+            previousRepairScore,
+            discarded: true,
+            maxFilesPerRepair: MAX_FILES_PER_REPAIR,
+          },
+        }).catch(() => null)
+        recordDeveloperDiagnostic(developerDiagnostics, {
+          stage: "REPAIRING",
+          status: "failed",
+          reason: "Repair score regressed; candidate discarded",
+          repairAttempt,
+          data: {
+            repairScore: nextRepairScore,
+            previousRepairScore,
+            maxFilesPerRepair: MAX_FILES_PER_REPAIR,
+          },
+        })
+        await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+        break
+      }
       markOrchestrationValidation(plan.orchestration, {
         status: validation.ok ? "passed" : "failed",
         failedScope: validation.failure?.step || "",
@@ -7991,6 +8552,7 @@ export async function executeGenerationJob(
       dependenciesAdded: extractPackageNames(workingFiles),
     })
 
+    assertCompileGatePassed(validation)
     await GenerationJobService.assertNotCancelled(input.jobId)
     assertNotAborted(input.signal)
     await transition(input.jobId, "persisting", "Persisting validated project artifacts", 94, {
@@ -8222,6 +8784,8 @@ export async function executeGenerationJob(
       postGenerationAudit,
       commitStatus: plan.orchestration.commitStatus,
     }
+    metrics.componentRegistry = analyzeComponentRegistryUsage(workingFiles, (metrics.intentTemplate as { id?: string } | null)?.id || null)
+    metrics.componentGenerationAnalytics = (metrics.componentRegistry as { componentGenerationAnalytics?: unknown }).componentGenerationAnalytics || null
     await GenerationJobService.update(input.jobId, {
       metrics,
       intent: intentStorageKey(plan.intent),
@@ -8275,6 +8839,8 @@ export async function executeGenerationJob(
           preservedFileCount: plan.editPlan.preservePaths.length,
         },
         fileCount: workingFiles.length,
+        componentRegistry: analyzeComponentRegistryUsage(workingFiles, intentTemplate?.id || null),
+        componentGenerationAnalytics: (metrics.componentRegistry as { componentGenerationAnalytics?: unknown }).componentGenerationAnalytics || null,
         agentWorkflow: {
           maxIterations: MAX_AGENT_ITERATIONS,
           completedIterations: Math.min(MAX_AGENT_ITERATIONS, repairAttempt + 1),
@@ -8361,6 +8927,33 @@ export async function executeGenerationJob(
     const orchestrationFailureReason = repairTerminationReason
       ? publicRepairTerminationReason(repairTerminationReason)
       : serialized.message
+    const runtimeFailure =
+      validation?.failure?.step === "runtime-smoke"
+        ? {
+            ...(() => {
+              const diagnostics = extractRuntimeFailureDiagnostics(validation.failure.message, validation.failure.data as Record<string, unknown> | undefined)
+              const runtimeCategory = categorizeRuntimeFailure(
+                diagnostics,
+                validation.failure.message,
+                validation.failure.data as Record<string, unknown> | undefined
+              )
+              return {
+                runtimeCategory,
+                renderingCategory: runtimeCategory === "rendering_failed"
+                  ? categorizeRenderingFailure(
+                      diagnostics,
+                      validation.failure.message,
+                      validation.failure.data as Record<string, unknown> | undefined
+                    )
+                  : null,
+                renderScore: renderScore(validation),
+              }
+            })(),
+          }
+        : null
+    const failedComponentRegistry = validation?.files
+      ? analyzeComponentRegistryUsage(validation.files, (metrics.intentTemplate as { id?: string } | null)?.id || null)
+      : null
     if (plan) {
       if (/persist|database|filesystem|save|commit/i.test(serialized.message)) {
         markCommitStatus(plan.orchestration, "failed")
@@ -8380,7 +8973,38 @@ export async function executeGenerationJob(
         repairTerminationReason: repairTerminationReason || null,
         publicMessage: publicErrorMessage,
         validationFailure: validation?.failure || null,
+        runtimeFailure,
+        componentRegistry: failedComponentRegistry,
       },
+    })
+    const failedArtifactDir = await persistFailedGenerationArtifacts({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      prompt: {
+        prompt: input.prompt,
+        selectedModel: input.selectedModel,
+        collaborationMode: input.collaborationMode || null,
+        promptLanguage,
+      },
+      planner: plan,
+      rawOutput: rawOutputs,
+      validator: {
+        validation,
+        diagnostics: developerDiagnostics,
+        repairTerminationReason: repairTerminationReason || null,
+      },
+      buildLog: [
+        ...buildLogs,
+        ...validationLogLines(validation, "build"),
+      ],
+      runtimeLog: validationLogLines(validation, "runtime"),
+    }).catch((artifactError) => {
+      log("warn", "failed_generation_artifact_storage_failed", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        error: artifactError instanceof Error ? artifactError.message : String(artifactError),
+      })
+      return null
     })
     await GenerationJobService.update(input.jobId, {
       diagnostics: {
@@ -8395,7 +9019,11 @@ export async function executeGenerationJob(
           lastValidatorMessage: validation?.failure?.message || null,
           lastSuccessfulStage: developerDiagnostics.lastSuccessfulStage || null,
           repairTerminationReason: repairTerminationReason || null,
+          failedArtifactDir,
+          runtimeFailure,
+          componentRegistry: failedComponentRegistry,
         },
+        failedArtifactDir,
         developer: developerDiagnostics,
         providerAttempts:
           error instanceof SwiftProviderFailureError
@@ -8422,6 +9050,8 @@ export async function executeGenerationJob(
       metadata: {
         errorName: serialized.name,
         publicErrorMessage,
+        runtimeFailure,
+        componentRegistry: failedComponentRegistry,
         editPlan: plan
           ? {
               mode: plan.editPlan.mode,

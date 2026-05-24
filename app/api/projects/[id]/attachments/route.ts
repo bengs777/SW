@@ -8,6 +8,7 @@ import {
   detectAttachmentKind,
   uploadProjectAssetToStorage,
 } from "@/lib/supabase/storage"
+import { enforceUploadDailyRateLimit } from "@/lib/security/rate-limit"
 import type { PromptAttachment, StoredProjectAsset } from "@/lib/types"
 
 export const runtime = "nodejs"
@@ -90,6 +91,15 @@ export async function POST(
       return NextResponse.json(
         { error: `Maximum ${MAX_ATTACHMENTS} files per upload.` },
         { status: 400 }
+      )
+    }
+
+    try {
+      await enforceUploadDailyRateLimit(userId, files.length)
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Upload rate limit exceeded" },
+        { status: 429 }
       )
     }
 

@@ -1,0 +1,7 @@
+{
+  "id": "saas",
+  "intent": "SaaS workspace application",
+  "requiredCapabilities": ["workspace", "team", "subscription", "settings"],
+  "entryFiles": ["app/dashboard/page.tsx", "app/dashboard/settings/page.tsx", "lib/billing.ts"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

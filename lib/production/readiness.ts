@@ -132,7 +132,9 @@ export function getProductionReadiness() {
     ),
     check("DEV_OWNER_EMAIL", "Developer owner email", env.devOwnerEmail, "required", "auth"),
     check("AI_RATE_LIMIT_PER_MINUTE", "AI prompt rate limit per minute", aiRateLimitConfig.perMinute > 0, "required", "service", `${aiRateLimitConfig.perMinute} prompts/minute`),
+    check("AI_GENERATION_RATE_LIMIT_PER_HOUR", "AI generation rate limit per hour", aiRateLimitConfig.generationPerHour > 0, "required", "service", `${aiRateLimitConfig.generationPerHour} generations/hour`),
     check("AI_RATE_LIMIT_PER_DAY", "AI prompt rate limit per day", aiRateLimitConfig.perDay > 0, "required", "service", `${aiRateLimitConfig.perDay} prompts/day`),
+    check("UPLOAD_RATE_LIMIT_PER_DAY", "Upload rate limit per day", aiRateLimitConfig.uploadPerDay > 0, "required", "service", `${aiRateLimitConfig.uploadPerDay} files/day`),
   ]
 
   const blocking = checks.filter((item) => (item.severity === "critical" || item.severity === "required") && !item.ok)

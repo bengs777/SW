@@ -1,0 +1,7 @@
+{
+  "id": "restaurant",
+  "intent": "restaurant website and ordering",
+  "requiredCapabilities": ["menu", "reservation", "location", "order inquiry"],
+  "entryFiles": ["app/page.tsx", "app/menu/page.tsx", "components/restaurant/menu-card.tsx"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

@@ -1,0 +1,7 @@
+{
+  "id": "landing",
+  "intent": "marketing landing page",
+  "requiredCapabilities": ["hero", "proof", "features", "pricing", "cta"],
+  "entryFiles": ["app/page.tsx", "components/site-header.tsx", "components/site-footer.tsx"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}

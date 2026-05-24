@@ -399,8 +399,20 @@ export function startGenerationWorker() {
     })
   }
   heartbeat()
-  const heartbeatTimer = setInterval(heartbeat, 30_000)
-  worker.on("closed", () => clearInterval(heartbeatTimer))
+  const heartbeatIntervalMs = Math.max(5_000, Number(process.env.SWIFT_WORKER_HEARTBEAT_INTERVAL_MS || 15_000))
+  const heartbeatTimer = setInterval(heartbeat, heartbeatIntervalMs)
+  const recoveryTimer = setInterval(() => {
+    void OrchestrationRuntimeService.recoverOrphanedJobs(25).catch((error) => {
+      log("warn", "worker_orphan_recovery_failed", {
+        workerId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }, Math.max(30_000, Number(process.env.SWIFT_WORKER_RECOVERY_INTERVAL_MS || 60_000)))
+  worker.on("closed", () => {
+    clearInterval(heartbeatTimer)
+    clearInterval(recoveryTimer)
+  })
 
   worker.on("active", async (job) => {
     if (!job) return
@@ -584,6 +596,14 @@ export function startGenerationWorker() {
   })
 
   worker.on("error", (error) => {
+    void recordGenerationWorkerHeartbeat(workerId, {
+      alive: false,
+      currentStage: "worker_error",
+      lastSuccessfulTransition: "worker_error",
+      activeJobIds: [...activeJobs.keys()],
+      idleTimeoutMs: GENERATION_JOB_TIMEOUT_MS,
+      stalledGenerationDetected: false,
+    }).catch(() => null)
     log("error", "generation_worker_runtime_error", {
       workerId,
       error: error.message,

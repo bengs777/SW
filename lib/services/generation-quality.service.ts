@@ -43,6 +43,32 @@ export type GenerationQualitySummaryInput = {
   metadata?: Record<string, unknown> | null
 }
 
+export type GenerationFailureCategory =
+  | "validator_failed"
+  | "repair_failed"
+  | "compile_failed"
+  | "runtime_failed"
+  | "context_overflow"
+  | "provider_failed"
+
+export type RuntimeGenerationFailureCategory =
+  | "hydration_failed"
+  | "import_failed"
+  | "dependency_failed"
+  | "route_failed"
+  | "environment_failed"
+  | "sandbox_failed"
+  | "rendering_failed"
+
+export type RenderingGenerationFailureCategory =
+  | "client_server_boundary_failed"
+  | "provider_missing"
+  | "props_mismatch"
+  | "async_render_failed"
+  | "layout_failed"
+  | "component_tree_failed"
+  | "state_initialization_failed"
+
 function safeStringify(value: unknown) {
   if (value === undefined) return undefined
   if (value === null) return null
@@ -109,6 +135,7 @@ export class GenerationQualityService {
         appType: true,
         status: true,
         failureStage: true,
+        failureCode: true,
         buildPassed: true,
         runtimePassed: true,
         repairSucceeded: true,
@@ -116,8 +143,9 @@ export class GenerationQualityService {
         repairAttempts: true,
         totalLatencyMs: true,
         totalTokens: true,
-        estimatedCost: true,
-      },
+      estimatedCost: true,
+      metadataJson: true,
+    },
     })
 
     const total = metrics.length
@@ -132,6 +160,7 @@ export class GenerationQualityService {
       if (!metric.failureStage) continue
       byFailureStage.set(metric.failureStage, (byFailureStage.get(metric.failureStage) || 0) + 1)
     }
+    const failureBreakdownCounts = buildFailureBreakdown(metrics)
 
     const average = (values: number[]) =>
       values.length === 0 ? 0 : Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
@@ -149,6 +178,11 @@ export class GenerationQualityService {
       averageTokenCost: average(metrics.map((metric) => metric.totalTokens)),
       averageEstimatedCost: average(metrics.map((metric) => metric.estimatedCost)),
       failuresByStage: Object.fromEntries(Array.from(byFailureStage.entries()).sort((left, right) => right[1] - left[1])),
+      failureBreakdown: formatFailureBreakdown(failureBreakdownCounts),
+      failureBreakdownCounts,
+      runtimeBreakdown: formatRuntimeBreakdown(buildRuntimeBreakdown(metrics)),
+      renderingBreakdown: formatRenderingBreakdown(buildRenderingBreakdown(metrics)),
+      repairBreakdown: buildRepairBreakdown(metrics),
     }
   }
 
@@ -183,6 +217,193 @@ export class GenerationQualityService {
         }),
       },
     })
+  }
+}
+
+export function classifyRuntimeGenerationFailure(input: {
+  status: string
+  failureStage?: string | null
+  failureCode?: string | null
+  metadataJson?: string | null
+}): RuntimeGenerationFailureCategory | null {
+  const broad = classifyGenerationFailure(input)
+  if (broad !== "runtime_failed") return null
+  const metadata = parseJsonObject(input.metadataJson ?? null)
+  const raw = [input.failureStage, input.failureCode, metadata ? JSON.stringify(metadata) : ""].join(" ").toLowerCase()
+  if (/hydration/.test(raw)) return "hydration_failed"
+  if (/module not found|cannot find module|can't resolve|missing dependency/.test(raw)) return "dependency_failed"
+  if (/environment|process\.env|database_url|nextauth|supabase|openrouter/.test(raw)) return "environment_failed"
+  if (/import|export|does not provide an export/.test(raw)) return "import_failed"
+  if (/route|api_route|homepage_render|route_render|returned 5\d\d/.test(raw)) return "route_failed"
+  if (/sandbox|server_unreachable|timeout|preview server exited/.test(raw)) return "sandbox_failed"
+  return "rendering_failed"
+}
+
+export function classifyRenderingGenerationFailure(input: {
+  status: string
+  failureStage?: string | null
+  failureCode?: string | null
+  metadataJson?: string | null
+}): RenderingGenerationFailureCategory | null {
+  const runtime = classifyRuntimeGenerationFailure(input)
+  if (runtime !== "rendering_failed") return null
+  const metadata = parseJsonObject(input.metadataJson ?? null)
+  const raw = [input.failureStage, input.failureCode, metadata ? JSON.stringify(metadata) : ""].join(" ").toLowerCase()
+  if (/client_server_boundary_failed|server component|client component|use client|event handlers cannot be passed|createcontext/.test(raw)) return "client_server_boundary_failed"
+  if (/provider_missing|missing provider|must be used within|usecontext|provider/.test(raw)) return "provider_missing"
+  if (/props_mismatch|props|property|undefined|null|cannot read properties|is not a function/.test(raw)) return "props_mismatch"
+  if (/async_render_failed|async|promise|suspense|uncached promise|thenable/.test(raw)) return "async_render_failed"
+  if (/layout_failed|root layout|layout|html|body|metadata/.test(raw)) return "layout_failed"
+  if (/state_initialization_failed|usestate|initial state|initializer|reducer|setstate|state/.test(raw)) return "state_initialization_failed"
+  return "component_tree_failed"
+}
+
+export function classifyGenerationFailure(input: {
+  status: string
+  failureStage?: string | null
+  failureCode?: string | null
+  metadataJson?: string | null
+}): GenerationFailureCategory | null {
+  if (input.status !== "failed") return null
+
+  const metadata = parseJsonObject(input.metadataJson ?? null)
+  const raw = [
+    input.failureStage,
+    input.failureCode,
+    metadata ? JSON.stringify(metadata) : "",
+  ].join(" ").toLowerCase()
+
+  if (/context[_ -]?overflow|context length|token limit|too many files|max(total)?chars|64kb|maxfiles/.test(raw)) {
+    return "context_overflow"
+  }
+  if (/provider|openrouter|429|rate limit|fetch failed|network|timeout|model|api key/.test(raw)) {
+    return "provider_failed"
+  }
+  if (/repair|validator_deadlock|max_retries|repeated_identical|empty_repair|malformed_repair/.test(raw)) {
+    return "repair_failed"
+  }
+  if (/runtime-smoke|runtime smoke|preview|sandbox|browser|page\.goto/.test(raw)) {
+    return "runtime_failed"
+  }
+  if (/preview-compile|typecheck|lint|build|compile|tsc|typescript|next build|module not found/.test(raw)) {
+    return "compile_failed"
+  }
+  return "validator_failed"
+}
+
+function buildFailureBreakdown(metrics: Array<{
+  status: string
+  failureStage: string | null
+  estimatedCost?: number
+  metadataJson?: string | null
+  failureCode?: string | null
+}>) {
+  const counts: Record<GenerationFailureCategory, number> = {
+    validator_failed: 0,
+    repair_failed: 0,
+    compile_failed: 0,
+    runtime_failed: 0,
+    context_overflow: 0,
+    provider_failed: 0,
+  }
+
+  for (const metric of metrics) {
+    const category = classifyGenerationFailure(metric)
+    if (category) counts[category] += 1
+  }
+
+  return counts
+}
+
+function formatFailureBreakdown(counts: Record<GenerationFailureCategory, number>) {
+  const total = Object.values(counts).reduce((sum, value) => sum + value, 0)
+  return Object.fromEntries(
+    Object.entries(counts).map(([key, value]) => [
+      key,
+      `${total === 0 ? 0 : Math.round((value / total) * 1000) / 10}%`,
+    ])
+  ) as Record<GenerationFailureCategory, string>
+}
+
+function buildRuntimeBreakdown(metrics: Array<{
+  status: string
+  failureStage: string | null
+  metadataJson?: string | null
+  failureCode?: string | null
+}>) {
+  const counts: Record<RuntimeGenerationFailureCategory, number> = {
+    hydration_failed: 0,
+    import_failed: 0,
+    dependency_failed: 0,
+    route_failed: 0,
+    environment_failed: 0,
+    sandbox_failed: 0,
+    rendering_failed: 0,
+  }
+  for (const metric of metrics) {
+    const category = classifyRuntimeGenerationFailure(metric)
+    if (category) counts[category] += 1
+  }
+  return counts
+}
+
+function formatRuntimeBreakdown(counts: Record<RuntimeGenerationFailureCategory, number>) {
+  const total = Object.values(counts).reduce((sum, value) => sum + value, 0)
+  return Object.fromEntries(
+    Object.entries(counts).map(([key, value]) => [
+      key,
+      `${total === 0 ? 0 : Math.round((value / total) * 1000) / 10}%`,
+    ])
+  ) as Record<RuntimeGenerationFailureCategory, string>
+}
+
+function buildRenderingBreakdown(metrics: Array<{
+  status: string
+  failureStage: string | null
+  metadataJson?: string | null
+  failureCode?: string | null
+}>) {
+  const counts: Record<RenderingGenerationFailureCategory, number> = {
+    client_server_boundary_failed: 0,
+    provider_missing: 0,
+    props_mismatch: 0,
+    async_render_failed: 0,
+    layout_failed: 0,
+    component_tree_failed: 0,
+    state_initialization_failed: 0,
+  }
+  for (const metric of metrics) {
+    const category = classifyRenderingGenerationFailure(metric)
+    if (category) counts[category] += 1
+  }
+  return counts
+}
+
+function formatRenderingBreakdown(counts: Record<RenderingGenerationFailureCategory, number>) {
+  const total = Object.values(counts).reduce((sum, value) => sum + value, 0)
+  return Object.fromEntries(
+    Object.entries(counts).map(([key, value]) => [
+      key,
+      `${total === 0 ? 0 : Math.round((value / total) * 1000) / 10}%`,
+    ])
+  ) as Record<RenderingGenerationFailureCategory, string>
+}
+
+function buildRepairBreakdown(metrics: Array<{
+  status: string
+  repairSucceeded: boolean
+  repairAttempts: number
+  metadataJson?: string | null
+}>) {
+  const attempted = metrics.filter((metric) => metric.repairAttempts > 0)
+  const succeeded = attempted.filter((metric) => metric.repairSucceeded).length
+  const failed = attempted.length - succeeded
+  return {
+    attempted: attempted.length,
+    succeeded,
+    failed,
+    successRate: rate(succeeded, attempted.length),
+    failedRate: rate(failed, attempted.length),
   }
 }
 

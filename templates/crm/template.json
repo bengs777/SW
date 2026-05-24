@@ -1,0 +1,7 @@
+{
+  "id": "crm",
+  "intent": "customer relationship management",
+  "requiredCapabilities": ["contacts", "lead pipeline", "deal stages", "tasks"],
+  "entryFiles": ["app/dashboard/crm/page.tsx", "components/crm/pipeline-board.tsx"],
+  "runtimeContracts": ["render_test", "route_render", "browser_render"]
+}
