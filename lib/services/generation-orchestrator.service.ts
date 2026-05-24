@@ -1,5 +1,7 @@
 import { performance } from "node:perf_hooks"
 import { createHash } from "node:crypto"
+import path from "node:path"
+import { mkdir, writeFile } from "node:fs/promises"
 import type { GeneratedFile } from "@/lib/types"
 import {
   buildDependencyMap,
@@ -247,6 +249,38 @@ type ExecuteGenerationJobDeps = {
   loadProjectMemoryJson?: (projectId: string) => Promise<string | null>
 }
 
+type GenerationLifecycleBreakdown = {
+  projectStateLoadedAt?: string
+  providerCalledAt?: string
+  firstTokenReceivedAt?: string
+  taskgraphStartedAt?: string
+  taskgraphCompletedAt?: string
+  taskgraphValidationStartedAt?: string
+  taskgraphValidationCompletedAt?: string
+  operationValidationStartedAt?: string
+  operationValidationCompletedAt?: string
+  dependencyValidationStartedAt?: string
+  dependencyValidationCompletedAt?: string
+  patchQueueStartedAt?: string
+  patchQueueCompletedAt?: string
+  patchStartedAt?: string
+  patchCompletedAt?: string
+  persistStartedAt?: string
+  persistCompletedAt?: string
+  providerLatencyMs: number
+  taskgraphLatencyMs: number
+  patchLatencyMs: number
+  persistLatencyMs: number
+}
+
+type TaskGraphFailureReason =
+  | "schema_invalid"
+  | "operation_invalid"
+  | "dependency_invalid"
+  | "file_policy_rejected"
+  | "executor_timeout"
+  | "queue_timeout"
+
 const MAX_AGENT_ITERATIONS = 5
 const MAX_REPAIR_ATTEMPTS = 3
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
@@ -398,6 +432,85 @@ function missingArtifactTargetPaths(artifact: ReturnType<typeof parseGeneratedAr
     ...(artifact.taskGraph?.operations || []).map((operation) => normalizePath(operation.path)),
   ])
   return uniquePaths(requiredPaths).filter((path) => !present.has(normalizePath(path)))
+}
+
+async function persistTaskGraphFailureReport(input: {
+  jobId: string
+  projectId: string
+  reason: TaskGraphFailureReason
+  message: string
+  taskGraph?: ReturnType<typeof parseGeneratedArtifact>["taskGraph"] | null
+  validation?: Record<string, unknown>
+  dependencyGraph?: unknown
+  executorState?: Record<string, unknown>
+}) {
+  const dir = path.join(process.cwd(), ".swift-reports", "taskgraph-failures", input.jobId)
+  await mkdir(dir, { recursive: true })
+  const writtenAt = new Date().toISOString()
+  await Promise.all([
+    writeFile(path.join(dir, "taskgraph.json"), `${JSON.stringify(input.taskGraph || null, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "validation.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      reason: input.reason,
+      message: input.message,
+      writtenAt,
+      ...(input.validation || {}),
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "dependency-graph.json"), `${JSON.stringify(input.dependencyGraph || null, null, 2)}\n`, "utf8"),
+    writeFile(path.join(dir, "executor-state.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      reason: input.reason,
+      writtenAt,
+      ...(input.executorState || {}),
+    }, null, 2)}\n`, "utf8"),
+  ])
+  return dir
+}
+
+function categorizeTaskGraphFailure(error: unknown, fallback: TaskGraphFailureReason): TaskGraphFailureReason {
+  const message = error instanceof Error ? error.message : String(error || "")
+  if (/timeout/i.test(message)) return message.toLowerCase().includes("queue") ? "queue_timeout" : "executor_timeout"
+  if (/outside|forbidden|policy|invalid path|package-lock|node_modules|\.\./i.test(message)) return "file_policy_rejected"
+  if (/dependency|install|package/i.test(message)) return "dependency_invalid"
+  if (/operation|patch|missing file|line|maximum/i.test(message)) return "operation_invalid"
+  if (/schema|malformed|json|artifact/i.test(message)) return "schema_invalid"
+  return fallback
+}
+
+async function persistProviderArtifactTrace(input: {
+  dir: string
+  jobId: string
+  purpose: string
+  model: string
+  status: "completed" | "failed"
+  rawChunks: Array<{ index: number; at: string; text: string }>
+  tokenSequence: Array<{ index: number; at: string; delta: string }>
+  finalOutput: string
+  metadata?: Record<string, unknown>
+}) {
+  await mkdir(input.dir, { recursive: true })
+  await Promise.all([
+    writeFile(path.join(input.dir, "raw-chunks.json"), `${JSON.stringify(input.rawChunks, null, 2)}\n`, "utf8"),
+    writeFile(path.join(input.dir, "token-sequence.json"), `${JSON.stringify(input.tokenSequence, null, 2)}\n`, "utf8"),
+    writeFile(path.join(input.dir, "final-output.json"), `${JSON.stringify({
+      output: input.finalOutput,
+      chars: input.finalOutput.length,
+      sha256: hashText(input.finalOutput),
+    }, null, 2)}\n`, "utf8"),
+    writeFile(path.join(input.dir, "summary.json"), `${JSON.stringify({
+      jobId: input.jobId,
+      purpose: input.purpose,
+      model: input.model,
+      status: input.status,
+      chunkCount: input.rawChunks.length,
+      tokenCount: input.tokenSequence.length,
+      finalOutputChars: input.finalOutput.length,
+      updatedAt: new Date().toISOString(),
+      ...(input.metadata || {}),
+    }, null, 2)}\n`, "utf8"),
+  ])
 }
 
 function buildPersistedProjectStateSnapshot(input: {
@@ -2626,6 +2739,7 @@ async function runProviderAttempt(input: {
     existingFiles: GeneratedFile[]
     existingFileCount?: number
   }
+  onLifecycle?: (event: string, data?: Record<string, unknown>) => void
 }) {
   const routed = routeModelForRequest({
     prompt: input.prompt,
@@ -2656,6 +2770,54 @@ async function runProviderAttempt(input: {
     purpose: input.purpose,
     model: route.modelName,
   })
+  input.onLifecycle?.("provider_called", {
+    purpose: input.purpose,
+    model: route.modelName,
+    provider: route.provider,
+  })
+  const providerArtifactDir = path.join(process.cwd(), ".swift-reports", "provider-artifacts", input.jobId)
+  const rawChunks: Array<{ index: number; at: string; text: string }> = []
+  const tokenSequence: Array<{ index: number; at: string; delta: string }> = []
+  const recordProviderLifecycle = (event: string, data: Record<string, unknown> = {}) => {
+    if (event === "chunk_received" && typeof data.rawChunkText === "string") {
+      rawChunks.push({
+        index: rawChunks.length + 1,
+        at: new Date().toISOString(),
+        text: data.rawChunkText,
+      })
+    }
+    if (event === "token_received" && typeof data.delta === "string") {
+      tokenSequence.push({
+        index: tokenSequence.length + 1,
+        at: new Date().toISOString(),
+        delta: data.delta,
+      })
+    }
+  }
+  let earlyArtifactPersisted = false
+  const earlyArtifactTimer = setTimeout(() => {
+    earlyArtifactPersisted = true
+    const partialTaskGraph = {
+      intent: "early_artifact_checkpoint",
+      dependencies: [] as string[],
+      operations: [] as unknown[],
+      status: "provider_pending",
+      persistedAt: new Date().toISOString(),
+    }
+    input.onLifecycle?.("early_artifact_persisted", {
+      purpose: input.purpose,
+      model: route.modelName,
+      timeoutMs: 30_000,
+      partialTaskGraph,
+      backgroundRepairQueued: false,
+    })
+    void GenerationJobService.update(input.jobId, {
+      context: {
+        earlyArtifactMode: true,
+        partialTaskGraph,
+      },
+    }).catch(() => null)
+  }, 30_000)
   log("info", "generation_provider_attempt_started", {
     jobId: input.jobId,
     purpose: input.purpose,
@@ -2702,7 +2864,18 @@ async function runProviderAttempt(input: {
       mode: "files",
       promptLanguage: input.promptLanguage,
       signal: input.signal,
+      lifecycle: (event) => {
+        recordProviderLifecycle(event.event, event.detail || {})
+        if (event.event === "first_token_received") {
+          input.onLifecycle?.("first_token_received", {
+            model: event.model,
+            latencyMs: event.latencyMs,
+            requestId: event.requestId || null,
+          })
+        }
+      },
     })
+    clearTimeout(earlyArtifactTimer)
     const endedAtWall = Date.now()
     const providerDurationMs = endedAtWall - startedAtWall
     recordOpenRouterLatency(providerDurationMs, {
@@ -2738,6 +2911,23 @@ async function runProviderAttempt(input: {
       rawLength: response.message.length,
       rawHash: hashText(response.message),
       RAW_AI_OUTPUT: runtimeLogText(response.message),
+      earlyArtifactPersisted,
+    })
+    await persistProviderArtifactTrace({
+      dir: providerArtifactDir,
+      jobId: input.jobId,
+      purpose: input.purpose,
+      model: route.modelName,
+      status: "completed",
+      rawChunks,
+      tokenSequence,
+      finalOutput: response.message,
+      metadata: {
+        rawLength: response.message.length,
+        rawHash: hashText(response.message),
+        earlyArtifactPersisted,
+        providerDurationMs,
+      },
     })
 
     await GenerationJobService.finishAttempt({
@@ -2755,6 +2945,21 @@ async function runProviderAttempt(input: {
 
     return response
   } catch (error) {
+    clearTimeout(earlyArtifactTimer)
+    await persistProviderArtifactTrace({
+      dir: providerArtifactDir,
+      jobId: input.jobId,
+      purpose: input.purpose,
+      model: route.modelName,
+      status: "failed",
+      rawChunks,
+      tokenSequence,
+      finalOutput: tokenSequence.map((token) => token.delta).join(""),
+      metadata: {
+        error: error instanceof Error ? error.message : String(error),
+        earlyArtifactPersisted,
+      },
+    }).catch(() => null)
     const providerFailureMetadata =
       error instanceof SwiftProviderFailureError
         ? {
@@ -2909,6 +3114,8 @@ function buildSlicePrompt(input: {
     "- STRICT_ARTIFACT_ENVELOPE: Return ONLY a JSON object parseable directly by JSON.parse. No markdown fences. No prose. No explanations. No comments outside JSON. No preamble like Here is your app.",
     '- Required PATCH schema: {"taskGraph":{"operations":[{"operation":"modifyFile","file":"components/Navbar.tsx","content":"full updated file content"}]}}.',
     '- For tiny deterministic edits, use patchFile: {"operation":"patchFile","file":"components/Navbar.tsx","changes":[{"line":35,"replace":"Dashboard"}]}.',
+    '- STRICT_ARTIFACT_CONTRACT: the entire response must be exactly one JSON object whose top-level key includes "taskGraph" and whose taskGraph.operations is an array.',
+    "- STRICT_ARTIFACT_CONTRACT: markdown, prose, explanations, code fences, and mixed text plus JSON are invalid.",
     "- The root object must contain taskGraph.operations. Do not rewrite the full project. Do not return more than 5 changed files.",
     "- Framework labels such as Next.js, React, and TypeScript belong in framework/metadata, never in files[].path or taskGraph.operations[].path.",
     "- Never ask to run shell commands or mutate files outside the files array.",
@@ -5920,6 +6127,66 @@ export async function executeGenerationJob(
     changedFilesTotal: 0,
     changedFileEvents: 0,
   }
+  const lifecycleBreakdown: GenerationLifecycleBreakdown = {
+    providerLatencyMs: 0,
+    taskgraphLatencyMs: 0,
+    patchLatencyMs: 0,
+    persistLatencyMs: 0,
+  }
+  const lifecycleStartedAt: Record<string, number> = {}
+  const markLifecycle = async (
+    event: string,
+    stage: GenerationJobStage,
+    data: Record<string, unknown> = {}
+  ) => {
+    const now = Date.now()
+    const at = new Date(now).toISOString()
+    if (event.endsWith("_started") || event === "provider_called") {
+      lifecycleStartedAt[event] = now
+    }
+    if (event === "project_state_loaded") lifecycleBreakdown.projectStateLoadedAt = at
+    if (event === "provider_called") lifecycleBreakdown.providerCalledAt = at
+    if (event === "first_token_received" && !lifecycleBreakdown.firstTokenReceivedAt) lifecycleBreakdown.firstTokenReceivedAt = at
+    if (event === "taskgraph_started") lifecycleBreakdown.taskgraphStartedAt = at
+    if (event === "taskgraph_completed") {
+      lifecycleBreakdown.taskgraphCompletedAt = at
+      lifecycleBreakdown.taskgraphLatencyMs += Math.max(0, now - (lifecycleStartedAt.taskgraph_started || now))
+    }
+    if (event === "taskgraph_validation_started") lifecycleBreakdown.taskgraphValidationStartedAt = at
+    if (event === "taskgraph_validation_completed") lifecycleBreakdown.taskgraphValidationCompletedAt = at
+    if (event === "operation_validation_started") lifecycleBreakdown.operationValidationStartedAt = at
+    if (event === "operation_validation_completed") lifecycleBreakdown.operationValidationCompletedAt = at
+    if (event === "dependency_validation_started") lifecycleBreakdown.dependencyValidationStartedAt = at
+    if (event === "dependency_validation_completed") lifecycleBreakdown.dependencyValidationCompletedAt = at
+    if (event === "patch_queue_started") lifecycleBreakdown.patchQueueStartedAt = at
+    if (event === "patch_queue_completed") lifecycleBreakdown.patchQueueCompletedAt = at
+    if (event === "patch_started") lifecycleBreakdown.patchStartedAt = at
+    if (event === "patch_completed") {
+      lifecycleBreakdown.patchCompletedAt = at
+      lifecycleBreakdown.patchLatencyMs += Math.max(0, now - (lifecycleStartedAt.patch_started || now))
+    }
+    if (event === "persist_started") lifecycleBreakdown.persistStartedAt = at
+    if (event === "persist_completed") {
+      lifecycleBreakdown.persistCompletedAt = at
+      lifecycleBreakdown.persistLatencyMs += Math.max(0, now - (lifecycleStartedAt.persist_started || now))
+    }
+    if (event === "provider_completed") {
+      lifecycleBreakdown.providerLatencyMs += Math.max(0, now - (lifecycleStartedAt.provider_called || now))
+    }
+    metrics.generationLifecycle = lifecycleBreakdown
+    await appendOrchestrationEvent({
+      jobId: input.jobId,
+      trace: { traceId: correlation.traceId, workerId: null },
+      type: event,
+      stage,
+      status: "running",
+      message: event,
+      data: {
+        ...data,
+        lifecycleBreakdown,
+      },
+    }).catch(() => null)
+  }
   const developerDiagnostics = createDeveloperGenerationDiagnostics()
   let plan: GenerationPlan | null = null
   let blueprint: ControlledAppBlueprint | null = null
@@ -6011,6 +6278,11 @@ export async function executeGenerationJob(
       contextTotalChars: projectState.metadata.context.totalChars,
     }
     assertNotAborted(input.signal)
+    await markLifecycle("project_state_loaded", "planning", {
+      projectStateFilesCount: projectState.files.length,
+      conversationHistoryUsed: projectState.conversationHistory.length > 0,
+      dependencyGraphNodes: Object.keys(projectState.dependencyGraph.imports).length,
+    })
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
       type: "project_state.loaded",
@@ -6604,6 +6876,10 @@ export async function executeGenerationJob(
             throw new CompileGateError(validation.failure?.message || "Scoped edit validation failed before persistence.")
           }
           assertCompileGatePassed(validation)
+          await markLifecycle("persist_started", "persisting", {
+            fileCount: workingFiles.length,
+            mode: "incremental",
+          })
           const saveResult = await ProjectFilePersistenceService["saveBufferedArtifacts"]({
             projectId: input.projectId,
             prompt: input.prompt,
@@ -6628,6 +6904,11 @@ export async function executeGenerationJob(
             generationJobId: input.jobId,
             intent: intentStorageKey(plan.intent),
             usedAutoRepair: false,
+          })
+          await markLifecycle("persist_completed", "persisting", {
+            historyId: saveResult.historyId,
+            fileCount: saveResult.files.length,
+            mode: "incremental",
           })
           await GenerationJobService.appendEvent({
             jobId: input.jobId,
@@ -7083,6 +7364,9 @@ export async function executeGenerationJob(
           selectedModel: input.selectedModel,
           promptLanguage,
           signal: input.signal,
+          onLifecycle: (event, data) => {
+            void markLifecycle(event, event === "first_token_received" ? "generating" : "generating", data)
+          },
           generationContext: {
             projectId: input.projectId,
             generationMode: `${plan.productionMode}:${plan.editPlan.mode}`,
@@ -7101,13 +7385,33 @@ export async function executeGenerationJob(
           hash: hashText(response.message),
           content: response.message,
         })
+        await markLifecycle("provider_completed", "generating", {
+          sliceIndex,
+          sliceTotal,
+          rawLength: response.message.length,
+        })
         assertNotAborted(input.signal)
         try {
-          parsed = parseGeneratedArtifact(response.message)
+          await markLifecycle("taskgraph_started", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+          })
+          parsed = parseGeneratedArtifact(response.message, {
+            requireTaskGraph: true,
+            strictJsonEnvelope: true,
+            recoverJson: true,
+          })
           const missingRequiredTargets = missingArtifactTargetPaths(parsed, targets.map((item) => item.path))
           if (missingRequiredTargets.length > 0) {
             throw new Error(`MALFORMED_GENERATED_ARTIFACT:Missing required operation/file: ${missingRequiredTargets.join(", ")}`)
           }
+          await markLifecycle("taskgraph_completed", "parsing", {
+            sliceIndex,
+            sliceTotal,
+            taskOperationCount: parsed.taskGraph?.operations.length || 0,
+            parsedFileCount: parsed.files.length,
+          })
           log("info", "generator_parsed_files", {
             jobId: input.jobId,
             projectId: input.projectId,
@@ -7150,6 +7454,37 @@ export async function executeGenerationJob(
             RAW_AI_OUTPUT: runtimeLogText(response.message),
           })
           if (parseAttempt >= 2) {
+            const taskGraphFailurePath = await persistTaskGraphFailureReport({
+              jobId: input.jobId,
+              projectId: input.projectId,
+              reason: categorizeTaskGraphFailure(error, "schema_invalid"),
+              message: parseFailure,
+              taskGraph: null,
+              validation: {
+                sliceIndex,
+                sliceTotal,
+                target: target.path,
+                parseAttempt,
+                rawHash: hashText(response.message),
+                rawLength: response.message.length,
+                requiredFiles: targets.map((item) => normalizePath(item.path)),
+              },
+              dependencyGraph: buildProjectDependencyGraph(workingFiles),
+              executorState: {
+                workingFileCount: workingFiles.length,
+                workingFiles: workingFiles.map((file) => normalizePath(file.path)).slice(0, 80),
+                allowedScope: plan?.orchestration.allowedScope.slice(0, 80) || [],
+                allowedFileScope: plan?.allowedFileScope.allowedPaths.slice(0, 80) || [],
+              },
+            }).catch(() => null)
+            await markLifecycle("taskgraph_failure", "parsing", {
+              sliceIndex,
+              sliceTotal,
+              target: target.path,
+              reason: categorizeTaskGraphFailure(error, "schema_invalid"),
+              message: parseFailure,
+              reportPath: taskGraphFailurePath,
+            })
             const invalidArtifactPath = await persistInvalidArtifactReport({
               jobId: input.jobId,
               projectId: input.projectId,
@@ -7348,6 +7683,63 @@ export async function executeGenerationJob(
       completionTokens += Math.max(0, response.tokenUsage?.completionTokens || 0)
       totalTokens += Math.max(0, response.tokenUsage?.totalTokens || 0)
 
+      const dependencyGraphSnapshot = buildProjectDependencyGraph(workingFiles)
+      const persistTaskGraphFailure = async (inputFailure: {
+        reason: TaskGraphFailureReason
+        message: string
+        validation?: Record<string, unknown>
+        executorState?: Record<string, unknown>
+      }) => {
+        const reportPath = await persistTaskGraphFailureReport({
+          jobId: input.jobId,
+          projectId: input.projectId,
+          reason: inputFailure.reason,
+          message: inputFailure.message,
+          taskGraph: parsed?.taskGraph || null,
+          validation: {
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            targetPaths: targets.map((item) => normalizePath(item.path)),
+            operationCount: parsed?.taskGraph?.operations.length || 0,
+            fileCount: parsed?.files.length || 0,
+            ...inputFailure.validation,
+          },
+          dependencyGraph: dependencyGraphSnapshot,
+          executorState: {
+            workingFileCount: workingFiles.length,
+            workingFiles: workingFiles.map((file) => normalizePath(file.path)).slice(0, 80),
+            allowedScope: plan!.orchestration.allowedScope.slice(0, 80),
+            allowedFileScope: plan!.allowedFileScope.allowedPaths.slice(0, 80),
+            ...inputFailure.executorState,
+          },
+        }).catch(() => null)
+        await markLifecycle("taskgraph_failure", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          reason: inputFailure.reason,
+          message: inputFailure.message,
+          reportPath,
+        })
+        log("warn", "taskgraph_execution_failure", {
+          jobId: input.jobId,
+          projectId: input.projectId,
+          sliceIndex,
+          sliceTotal,
+          reason: inputFailure.reason,
+          message: inputFailure.message,
+          reportPath,
+        })
+        return reportPath
+      }
+
+      await markLifecycle("taskgraph_validation_started", "parsing", {
+        sliceIndex,
+        sliceTotal,
+        target: target.path,
+        taskOperationCount: parsed.taskGraph?.operations.length || 0,
+      })
       const allowedScopeResult = scopeArtifactToAllowedScope(parsed, plan)
       if (allowedScopeResult.rejected.length > 0) {
         const rejectedPaths = allowedScopeResult.rejected.map((item) => item.path)
@@ -7387,23 +7779,138 @@ export async function executeGenerationJob(
       const hasAcceptedScopedArtifact =
         scoped.acceptedFiles.length > 0 ||
         Boolean(scopedArtifact.taskGraph?.operations.length)
-      const patchOperations = hasAcceptedScopedArtifact
-        ? artifactToPatchOperations({
-            artifact: scopedArtifact,
-            currentFiles: workingFiles,
-          })
-        : []
+      await markLifecycle("taskgraph_validation_completed", "parsing", {
+        sliceIndex,
+        sliceTotal,
+        target: target.path,
+        acceptedFileCount: scoped.acceptedFiles.length,
+        acceptedOperationCount: scopedArtifact.taskGraph?.operations.length || 0,
+        rejectedCount: allowedScopeResult.rejected.length + scoped.rejectedFiles.length,
+      })
+      if (allowedScopeResult.rejected.length > 0 || scoped.rejectedFiles.length > 0) {
+        await persistTaskGraphFailure({
+          reason: "file_policy_rejected",
+          message: "TaskGraph contained paths rejected by allowed scope validation.",
+          validation: {
+            rejectedFiles: [
+              ...allowedScopeResult.rejected,
+              ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
+            ].slice(0, 80),
+            acceptedOperationCount: scopedArtifact.taskGraph?.operations.length || 0,
+            acceptedFileCount: scoped.acceptedFiles.length,
+          },
+          executorState: {
+            scopedOperations: scopedArtifact.taskGraph?.operations.map((operation) => ({
+              action: operation.action,
+              path: normalizePath(operation.path),
+            })) || [],
+          },
+        })
+      }
+      if (!hasAcceptedScopedArtifact) {
+        await persistTaskGraphFailure({
+          reason: allowedScopeResult.rejected.length > 0 || scoped.rejectedFiles.length > 0 ? "file_policy_rejected" : "operation_invalid",
+          message: "TaskGraph produced no accepted files or operations for the approved execution scope.",
+          validation: {
+            rejectedFiles: [
+              ...allowedScopeResult.rejected,
+              ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
+            ].slice(0, 80),
+          },
+        })
+      }
+      if (hasAcceptedScopedArtifact) {
+        await markLifecycle("patch_started", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+        })
+      }
+      await markLifecycle("operation_validation_started", "parsing", {
+        sliceIndex,
+        sliceTotal,
+        target: target.path,
+        hasAcceptedScopedArtifact,
+      })
+      let patchOperations: ReturnType<typeof artifactToPatchOperations> = []
+      try {
+        patchOperations = hasAcceptedScopedArtifact
+          ? artifactToPatchOperations({
+              artifact: scopedArtifact,
+              currentFiles: workingFiles,
+            })
+          : []
+      } catch (error) {
+        const reason = categorizeTaskGraphFailure(error, "operation_invalid")
+        await persistTaskGraphFailure({
+          reason,
+          message: error instanceof Error ? error.message : String(error),
+          executorState: {
+            scopedOperations: scopedArtifact.taskGraph?.operations || [],
+          },
+        })
+        throw error
+      }
       const operationPaths = new Set(patchOperations.map((operation) => normalizePath(operation.file)))
+      await markLifecycle("operation_validation_completed", "parsing", {
+        sliceIndex,
+        sliceTotal,
+        target: target.path,
+        operationCount: patchOperations.length,
+        operationPaths: Array.from(operationPaths),
+      })
       if (operationPaths.size > MAX_CHANGED_FILES_PER_REQUEST) {
         metrics.fullRewriteDetected = Number(metrics.fullRewriteDetected || 0) + 1
       }
-      const patchResult = hasAcceptedScopedArtifact
-        ? applyProjectPatchOperations(
-            workingFiles,
-            patchOperations,
-            { maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST }
-          )
-        : null
+      if (hasAcceptedScopedArtifact && patchOperations.length === 0) {
+        await persistTaskGraphFailure({
+          reason: "operation_invalid",
+          message: "Accepted TaskGraph did not convert to any patch operations.",
+          executorState: {
+            scopedOperations: scopedArtifact.taskGraph?.operations || [],
+          },
+        })
+      }
+      if (hasAcceptedScopedArtifact) {
+        await markLifecycle("patch_queue_started", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          operationCount: patchOperations.length,
+        })
+      }
+      let patchResult: ReturnType<typeof applyProjectPatchOperations> | null = null
+      try {
+        patchResult = hasAcceptedScopedArtifact
+          ? applyProjectPatchOperations(
+              workingFiles,
+              patchOperations,
+              { maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST }
+            )
+          : null
+      } catch (error) {
+        const reason = categorizeTaskGraphFailure(error, "operation_invalid")
+        await persistTaskGraphFailure({
+          reason,
+          message: error instanceof Error ? error.message : String(error),
+          executorState: {
+            patchOperations: patchOperations.map((operation) => ({
+              operation: operation.operation,
+              file: operation.file,
+            })),
+          },
+        })
+        throw error
+      }
+      if (hasAcceptedScopedArtifact) {
+        await markLifecycle("patch_queue_completed", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          changedFiles: patchResult?.changedFiles.map((file) => normalizePath(file.path)) || [],
+          deletedPaths: patchResult?.deletedPaths || [],
+        })
+      }
       metrics.patchOperations = Number(metrics.patchOperations || 0) + patchOperations.length
       metrics.createOperations = Number(metrics.createOperations || 0) + patchOperations.filter((operation) => operation.operation === "createFile").length
       metrics.modifyOperations = Number(metrics.modifyOperations || 0) + patchOperations.filter((operation) => operation.operation === "modifyFile" || operation.operation === "patchFile").length
@@ -7418,9 +7925,50 @@ export async function executeGenerationJob(
         fullRewriteDetected: metrics.fullRewriteDetected,
         maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
       }
-      const dependencyResult = patchResult && scopedArtifact.dependencies.length > 0
-        ? executeGeneratedTaskGraph(patchResult.files, undefined, [], scopedArtifact.dependencies)
-        : null
+      if (patchResult) {
+        await markLifecycle("patch_completed", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          changedFiles: patchResult.changedFiles.map((file) => normalizePath(file.path)),
+          deletedPaths: patchResult.deletedPaths,
+          patchOperations: patchOperations.map((operation) => ({
+            operation: operation.operation,
+            file: operation.file,
+          })),
+        })
+      }
+      if (patchResult) {
+        await markLifecycle("dependency_validation_started", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          dependencyCount: scopedArtifact.dependencies.length,
+        })
+      }
+      let dependencyResult: ReturnType<typeof executeGeneratedTaskGraph> | null = null
+      try {
+        dependencyResult = patchResult && scopedArtifact.dependencies.length > 0
+          ? executeGeneratedTaskGraph(patchResult.files, undefined, [], scopedArtifact.dependencies)
+          : null
+      } catch (error) {
+        const reason = categorizeTaskGraphFailure(error, "dependency_invalid")
+        await persistTaskGraphFailure({
+          reason,
+          message: error instanceof Error ? error.message : String(error),
+          executorState: {
+            dependencies: scopedArtifact.dependencies,
+            changedFiles: patchResult?.changedFiles.map((file) => normalizePath(file.path)) || [],
+          },
+        })
+        throw error
+      }
+      if (patchResult) {
+        await markLifecycle("dependency_validation_completed", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          dependencyCount: scopedArtifact.dependencies.length,
+          installedDependencies: dependencyResult?.installedDependencies || [],
+        })
+      }
       const executed = patchResult
         ? {
             files: dependencyResult?.files || patchResult.files,
@@ -8726,6 +9274,10 @@ export async function executeGenerationJob(
       architecturePlan: plan.architecture,
       memory: finalProjectMemory,
     })
+    await markLifecycle("persist_started", "persisting", {
+      fileCount: workingFiles.length,
+      mode: "generation",
+    })
     const saveResult = await ProjectFilePersistenceService.saveBufferedArtifacts({
       projectId: input.projectId,
       prompt: input.prompt,
@@ -8743,6 +9295,11 @@ export async function executeGenerationJob(
       generationJobId: input.jobId,
       intent: intentStorageKey(plan.intent),
       usedAutoRepair: repairAttempt > 0,
+    })
+    await markLifecycle("persist_completed", "persisting", {
+      historyId: saveResult.historyId,
+      fileCount: saveResult.files.length,
+      mode: "generation",
     })
     const persistenceEndedAt = Date.now()
     await GenerationJobService.appendEvent({

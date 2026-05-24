@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { prisma } from "@/lib/db/client"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
@@ -32,6 +32,11 @@ type CaseResult = {
   error: string | null
   resultHistoryId: string | null
   metrics: any
+  lifecycleBreakdown?: any
+  lifecycleEvents?: string[]
+  bottleneckStage?: string | null
+  taskgraphFailureReason?: string | null
+  taskgraphFailureReportPath?: string | null
   artifactPath?: string | null
 }
 
@@ -200,7 +205,7 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
     const timeout = setTimeout(() => {
       if (settled) return
       settled = true
-      child.kill("SIGKILL")
+      killChildTree(child.pid)
       resolve({ code: null, signal: "SIGKILL", timedOut: true })
     }, GENERATION_TIMEOUT_MS)
     child.on("exit", (code, signal) => {
@@ -220,6 +225,10 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
     const result = parseJson(fs.readFileSync(resultPath, "utf8")) as CaseResult | null
     if (result) return result
   }
+  const status = parseJson(fs.existsSync(path.join(caseDir, "status.json")) ? fs.readFileSync(path.join(caseDir, "status.json"), "utf8") : null) as any
+  const timedOutJob = status?.jobId
+    ? await readJobAudit(status.jobId).catch(() => ({ metrics: null, lifecycleEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }))
+    : { metrics: null, lifecycleEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }
 
   const result: CaseResult = {
     id: input.promptCase.id,
@@ -232,7 +241,12 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
       ? `Prompt timed out after ${GENERATION_TIMEOUT_MS}ms`
       : stderr.trim() || stdout.trim() || `Child exited with code ${exit.code ?? "null"} signal ${exit.signal ?? "null"}`,
     resultHistoryId: null,
-    metrics: null,
+    metrics: timedOutJob.metrics,
+    lifecycleBreakdown: timedOutJob.lifecycleBreakdown,
+    lifecycleEvents: timedOutJob.lifecycleEvents,
+    bottleneckStage: timedOutJob.bottleneckStage,
+    taskgraphFailureReason: timedOutJob.taskgraphFailureReason,
+    taskgraphFailureReportPath: timedOutJob.taskgraphFailureReportPath,
     artifactPath: path.join(caseDir, "timeout-artifact.json"),
   }
   await writeFile(result.artifactPath!, `${JSON.stringify({
@@ -243,6 +257,23 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
   }, null, 2)}\n`, "utf8")
   await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
   return result
+}
+
+function killChildTree(pid: number | undefined) {
+  if (!pid) return
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" })
+    return
+  }
+  try {
+    process.kill(-pid, "SIGKILL")
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {
+      // Best-effort cleanup; the timeout artifact records the failure.
+    }
+  }
 }
 
 async function runSingleCase(input: { runId: string; caseId: string; reportDir: string }) {
@@ -307,6 +338,13 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       idempotencyKey: `${input.runId}:${promptCase.id}`,
       requestHash: `${input.runId}:${promptCase.id}`,
     })
+    await writeFile(path.join(caseDir, "status.json"), `${JSON.stringify({
+      id: promptCase.id,
+      status: "running",
+      projectId: project.id,
+      jobId: job.id,
+      startedAt: new Date(itemStartedAt).toISOString(),
+    }, null, 2)}\n`, "utf8")
 
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), GENERATION_TIMEOUT_MS - 5_000)
@@ -342,7 +380,8 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       where: { id: job.id },
       select: { status: true, stage: true, error: true, metricsJson: true, resultHistoryId: true },
     })
-    const metrics = parseJson(finalJob?.metricsJson)
+    const audit = await readJobAudit(job.id)
+    const metrics = audit.metrics
     const artifactPath = path.join(caseDir, "artifact.json")
     await writeFile(artifactPath, `${JSON.stringify({
       promptCase,
@@ -350,6 +389,11 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       jobId: job.id,
       metrics,
       finalJob,
+      lifecycleEvents: audit.lifecycleEvents,
+      lifecycleBreakdown: audit.lifecycleBreakdown,
+      bottleneckStage: audit.bottleneckStage,
+      taskgraphFailureReason: audit.taskgraphFailureReason,
+      taskgraphFailureReportPath: audit.taskgraphFailureReportPath,
     }, null, 2)}\n`, "utf8")
     const result: CaseResult = {
       id: promptCase.id,
@@ -361,6 +405,11 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       error: finalJob?.error || null,
       resultHistoryId: finalJob?.resultHistoryId || null,
       metrics,
+      lifecycleBreakdown: audit.lifecycleBreakdown,
+      lifecycleEvents: audit.lifecycleEvents,
+      bottleneckStage: audit.bottleneckStage,
+      taskgraphFailureReason: audit.taskgraphFailureReason,
+      taskgraphFailureReportPath: audit.taskgraphFailureReportPath,
       artifactPath,
     }
     await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
@@ -392,8 +441,12 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
 
 function summarize(runId: string, durationMs: number, results: any[]) {
   const successes = results.filter((item) => item.success).length
-  const projectStateUsed = results.filter((item) => item.metrics?.projectStateLoaded === true).length
-  const patchUsed = results.filter((item) => Number(item.metrics?.patchOperations || 0) > 0).length
+  const projectStateUsed = results.filter((item) =>
+    item.metrics?.projectStateLoaded === true || item.lifecycleEvents?.includes("project_state_loaded")
+  ).length
+  const patchUsed = results.filter((item) =>
+    Number(item.metrics?.patchOperations || 0) > 0 || item.lifecycleEvents?.includes("patch_completed")
+  ).length
   const fullRewriteCount = results.reduce((sum, item) => sum + Number(item.metrics?.fullRewriteDetected || 0), 0)
   const changedFileAverages = results.map((item) => {
     const events = Number(item.metrics?.changedFileEvents || 0)
@@ -402,6 +455,10 @@ function summarize(runId: string, durationMs: number, results: any[]) {
   const generationSuccessRate = rate(successes, results.length)
   const projectStateUsageRate = rate(projectStateUsed, results.length)
   const patchUsageRate = rate(patchUsed, results.length)
+  const patchStarted = results.filter((item) =>
+    item.lifecycleEvents?.includes("patch_queue_started") || item.lifecycleEvents?.includes("patch_started")
+  ).length
+  const patchStartRate = rate(patchStarted, results.length)
   const fullRewriteRate = rate(fullRewriteCount, Math.max(1, results.length))
   const averageChangedFiles = avg(changedFileAverages)
   const readinessScore = Math.round(
@@ -426,9 +483,13 @@ function summarize(runId: string, durationMs: number, results: any[]) {
     failures: results.length - successes,
     projectStateUsageRate,
     patchUsageRate,
+    patchStartRate,
     averageChangedFiles,
     generationSuccessRate,
     fullRewriteRate,
+    failureBreakdown: summarizeFailures(results),
+    lifecycleBreakdown: summarizeLifecycle(results),
+    bottleneckStage: summarizeBottleneck(results),
     readinessScore,
     finalStatus,
     operationTotals: {
@@ -440,6 +501,122 @@ function summarize(runId: string, durationMs: number, results: any[]) {
     },
     results,
   }
+}
+
+async function readJobAudit(jobId: string) {
+  const [job, events] = await Promise.all([
+    prisma.generationJob.findUnique({
+      where: { id: jobId },
+      select: { metricsJson: true },
+    }),
+    prisma.generationEvent.findMany({
+      where: { jobId },
+      orderBy: { sequence: "asc" },
+      select: { type: true, stage: true, dataJson: true, createdAt: true },
+    }),
+  ])
+  const metrics = parseJson(job?.metricsJson)
+  const lifecycleEvents = events
+    .filter((event) => [
+      "project_state_loaded",
+      "provider_called",
+      "first_token_received",
+      "early_artifact_persisted",
+      "provider_completed",
+      "taskgraph_started",
+      "taskgraph_completed",
+      "taskgraph_validation_started",
+      "taskgraph_validation_completed",
+      "operation_validation_started",
+      "operation_validation_completed",
+      "dependency_validation_started",
+      "dependency_validation_completed",
+      "patch_queue_started",
+      "patch_queue_completed",
+      "taskgraph_failure",
+      "patch_started",
+      "patch_completed",
+      "persist_started",
+      "persist_completed",
+    ].includes(event.type))
+    .map((event) => event.type)
+  const taskgraphFailure = [...events].reverse().find((event) => event.type === "taskgraph_failure")
+  const taskgraphFailureData = parseJson(taskgraphFailure?.dataJson)
+  const lifecycleBreakdown = metrics?.generationLifecycle || latestLifecycleFromEvents(events)
+  return {
+    metrics,
+    lifecycleEvents,
+    lifecycleBreakdown,
+    bottleneckStage: bottleneckFromBreakdown(lifecycleBreakdown),
+    taskgraphFailureReason: taskgraphFailureData?.reason || null,
+    taskgraphFailureReportPath: taskgraphFailureData?.reportPath || null,
+  }
+}
+
+function latestLifecycleFromEvents(events: Array<{ dataJson: string | null }>) {
+  for (const event of [...events].reverse()) {
+    const data = parseJson(event.dataJson)
+    if (data?.lifecycleBreakdown) return data.lifecycleBreakdown
+  }
+  return null
+}
+
+function summarizeLifecycle(results: any[]) {
+  const values = results.map((item) => item.lifecycleBreakdown || item.metrics?.generationLifecycle).filter(Boolean)
+  return {
+    providerLatencyMs: avg(values.map((item) => Number(item.providerLatencyMs || 0)).filter((value) => value > 0)),
+    taskgraphLatencyMs: avg(values.map((item) => Number(item.taskgraphLatencyMs || 0)).filter((value) => value > 0)),
+    patchLatencyMs: avg(values.map((item) => Number(item.patchLatencyMs || 0)).filter((value) => value > 0)),
+    persistLatencyMs: avg(values.map((item) => Number(item.persistLatencyMs || 0)).filter((value) => value > 0)),
+  }
+}
+
+function summarizeBottleneck(results: any[]) {
+  const counts = new Map<string, number>()
+  for (const item of results) {
+    const stage = item.bottleneckStage || bottleneckFromBreakdown(item.lifecycleBreakdown || item.metrics?.generationLifecycle)
+    if (!stage) continue
+    counts.set(stage, (counts.get(stage) || 0) + 1)
+  }
+  return Array.from(counts.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] || null
+}
+
+function summarizeFailures(results: any[]) {
+  const counts = new Map<string, number>()
+  for (const item of results) {
+    if (item.success) continue
+    const reason = item.taskgraphFailureReason ||
+      (item.stage === "timeout" ? "executor_timeout" : null) ||
+      item.bottleneckStage ||
+      bottleneckFromBreakdown(item.lifecycleBreakdown || item.metrics?.generationLifecycle) ||
+      "generation_error"
+    counts.set(reason, (counts.get(reason) || 0) + 1)
+  }
+  return Object.fromEntries(Array.from(counts.entries()).sort((left, right) => right[1] - left[1]))
+}
+
+function bottleneckFromBreakdown(breakdown: any) {
+  if (!breakdown) return null
+  if (breakdown.providerCalledAt && !breakdown.taskgraphStartedAt) return "provider_artifact_completion"
+  if (breakdown.taskgraphStartedAt && !breakdown.taskgraphCompletedAt) return "taskgraph"
+  if (breakdown.taskgraphCompletedAt && !breakdown.taskgraphValidationStartedAt) return "taskgraph_validation_not_started"
+  if (breakdown.taskgraphValidationStartedAt && !breakdown.taskgraphValidationCompletedAt) return "taskgraph_validation"
+  if (breakdown.taskgraphValidationCompletedAt && !breakdown.operationValidationStartedAt) return "operation_validation_not_started"
+  if (breakdown.operationValidationStartedAt && !breakdown.operationValidationCompletedAt) return "operation_validation"
+  if (breakdown.operationValidationCompletedAt && !breakdown.patchQueueStartedAt && !breakdown.patchStartedAt) return "patch_queue_not_started"
+  if (breakdown.patchQueueStartedAt && !breakdown.patchQueueCompletedAt) return "patch_queue"
+  if (breakdown.patchQueueCompletedAt && !breakdown.dependencyValidationStartedAt && !breakdown.patchCompletedAt) return "dependency_validation_not_started"
+  if (breakdown.dependencyValidationStartedAt && !breakdown.dependencyValidationCompletedAt) return "dependency_validation"
+  if (breakdown.patchStartedAt && !breakdown.patchCompletedAt) return "patch"
+  if (breakdown.persistStartedAt && !breakdown.persistCompletedAt) return "persist"
+  const stages: Array<[string, number]> = [
+    ["provider", Number(breakdown.providerLatencyMs || 0)],
+    ["taskgraph", Number(breakdown.taskgraphLatencyMs || 0)],
+    ["patch", Number(breakdown.patchLatencyMs || 0)],
+    ["persist", Number(breakdown.persistLatencyMs || 0)],
+  ]
+  const [stage, value] = stages.sort((left, right) => right[1] - left[1])[0]
+  return value > 0 ? stage : null
 }
 
 function buildProgress(results: CaseResult[], running: number): BatchProgress {

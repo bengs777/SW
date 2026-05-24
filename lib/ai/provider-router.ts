@@ -620,6 +620,9 @@ export class ProviderRouter {
     for await (const event of stream) {
       if (event.type === "delta") {
         message += event.delta
+        if (isCompleteTaskGraphJson(message)) {
+          break
+        }
       } else if (event.type === "done") {
         requestId = event.requestId
       }
@@ -672,4 +675,41 @@ export class ProviderRouter {
       internalModelId: target.modelId,
     })
   }
+}
+
+function isCompleteTaskGraphJson(value: string) {
+  const raw = String(value || "").trim()
+  if (!raw.endsWith("}")) return false
+  if (!isBalancedJsonObject(raw)) return false
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed?.taskGraph?.operations)
+  } catch {
+    return false
+  }
+}
+
+function isBalancedJsonObject(value: string) {
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (const char of value) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\") {
+      escaped = inString
+      continue
+    }
+    if (char === "\"") {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (char === "{") depth += 1
+    if (char === "}") depth -= 1
+    if (depth < 0) return false
+  }
+  return depth === 0 && !inString
 }

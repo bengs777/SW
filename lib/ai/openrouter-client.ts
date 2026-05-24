@@ -264,9 +264,15 @@ export async function* streamOpenRouterChatCompletion(
       if (done) break
 
       chunkCount += 1
-      runtime.emit("chunk_received", { stream: true, chunkBytes: value.byteLength, chunkCount }, requestId)
+      const decodedChunk = decoder.decode(value, { stream: true })
+      runtime.emit("chunk_received", {
+        stream: true,
+        chunkBytes: value.byteLength,
+        chunkCount,
+        rawChunkText: decodedChunk,
+      }, requestId)
 
-      const events = parser.push(decoder.decode(value, { stream: true }))
+      const events = parser.push(decodedChunk)
       for (const event of events) {
         const payload = event.data.trim()
         if (!payload) continue
@@ -301,7 +307,7 @@ export async function* streamOpenRouterChatCompletion(
             firstTokenSeen = true
             runtime.emit("first_token_received", { stream: true }, requestId)
           }
-          runtime.emit("token_received", { stream: true, tokenCount, deltaChars: delta.length }, requestId)
+          runtime.emit("token_received", { stream: true, tokenCount, deltaChars: delta.length, delta }, requestId)
           runtime.resetStreamWatchdog(requestId, { phase: "awaiting_next_token", tokenCount })
           yield { type: "delta", delta }
         }
@@ -322,7 +328,7 @@ export async function* streamOpenRouterChatCompletion(
         firstTokenSeen = true
         runtime.emit("first_token_received", { stream: true }, requestId)
       }
-      runtime.emit("token_received", { stream: true, tokenCount, deltaChars: delta.length }, requestId)
+      runtime.emit("token_received", { stream: true, tokenCount, deltaChars: delta.length, delta }, requestId)
       yield { type: "delta", delta }
     }
 

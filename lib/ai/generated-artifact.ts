@@ -115,7 +115,7 @@ const taskGraphSchema = z.object({
   intent: z.string().optional(),
   summary: z.string().optional(),
   dependencies: z.array(dependencySchema).optional().default([]),
-  operations: z.array(taskGraphOperationSchema).min(1).max(MAX_GENERATED_FILES),
+  operations: z.array(taskGraphOperationSchema).max(MAX_GENERATED_FILES),
 }).strict()
 
 const generatedArtifactSchema = z.object({
@@ -191,13 +191,19 @@ export type GeneratedTaskOperation = {
 export type GeneratedArtifactParseOptions = {
   requiredFiles?: string[]
   strictFilesOnly?: boolean
+  requireTaskGraph?: boolean
+  strictJsonEnvelope?: boolean
+  recoverJson?: boolean
 }
 
 export function parseGeneratedArtifact(
   providerMessage: string,
   options: GeneratedArtifactParseOptions = {}
 ): GeneratedArtifact {
-  const parsedJson = tryParseJson(providerMessage)
+  const parsedJson = tryParseJson(providerMessage, {
+    strictEnvelope: options.strictJsonEnvelope,
+    recoverJson: options.recoverJson,
+  })
   if (parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)) {
     const runtimeMessage = parseRuntimeMessage(parsedJson)
     if (runtimeMessage && runtimeMessage.kind !== "artifact") {
@@ -210,6 +216,9 @@ export function parseGeneratedArtifact(
 
     const strict = generatedArtifactSchema.safeParse(parsedJson)
     if (strict.success) {
+      if (options.requireTaskGraph && !strict.data.taskGraph) {
+        throw new Error("MALFORMED_GENERATED_ARTIFACT:Missing required taskGraph.operations")
+      }
       if (options.strictFilesOnly && strict.data.files.length === 0) {
         throw new Error("MALFORMED_GENERATED_ARTIFACT:Empty files array")
       }
@@ -342,8 +351,22 @@ function diagnoseJsonEnvelope(value: string) {
   return "Invalid artifact JSON"
 }
 
-function tryParseJson(value: string) {
+function tryParseJson(value: string, options: { strictEnvelope?: boolean; recoverJson?: boolean } = {}) {
   const raw = String(value || "").trim()
+  if (options.strictEnvelope && !isStrictJsonObjectEnvelope(raw)) {
+    if (!options.recoverJson) return null
+  } else {
+    const exact = parseJsonCandidate(raw)
+    if (exact) return exact
+  }
+
+  if (!options.recoverJson) return null
+  const extracted = extractLargestJsonObject(raw)
+  if (!extracted) return null
+  return parseJsonCandidate(repairJsonCandidate(extracted))
+}
+
+function parseJsonCandidate(raw: string) {
   const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
   const candidate = fenced ? fenced[1].trim() : raw
 
@@ -352,4 +375,86 @@ function tryParseJson(value: string) {
   } catch {
     return null
   }
+}
+
+function isStrictJsonObjectEnvelope(raw: string) {
+  if (!raw.startsWith("{") || !raw.endsWith("}")) return false
+  if (/```/.test(raw)) return false
+  try {
+    JSON.parse(raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function extractLargestJsonObject(raw: string) {
+  let best = ""
+  for (let start = 0; start < raw.length; start += 1) {
+    if (raw[start] !== "{") continue
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (let index = start; index < raw.length; index += 1) {
+      const char = raw[index]
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === "\\") {
+        escaped = inString
+        continue
+      }
+      if (char === "\"") {
+        inString = !inString
+        continue
+      }
+      if (inString) continue
+      if (char === "{") depth += 1
+      if (char === "}") depth -= 1
+      if (depth === 0) {
+        const candidate = raw.slice(start, index + 1)
+        if (candidate.length > best.length) best = candidate
+        break
+      }
+    }
+  }
+  return best || null
+}
+
+function repairJsonCandidate(raw: string) {
+  let repaired = raw.trim().replace(/,\s*([}\]])/g, "$1")
+  let braces = 0
+  let brackets = 0
+  let inString = false
+  let escaped = false
+  for (const char of repaired) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\") {
+      escaped = inString
+      continue
+    }
+    if (char === "\"") {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (char === "{") braces += 1
+    if (char === "}") braces -= 1
+    if (char === "[") brackets += 1
+    if (char === "]") brackets -= 1
+  }
+  if (inString) repaired += "\""
+  while (brackets > 0) {
+    repaired += "]"
+    brackets -= 1
+  }
+  while (braces > 0) {
+    repaired += "}"
+    braces -= 1
+  }
+  return repaired
 }
