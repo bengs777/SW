@@ -23,10 +23,13 @@ import { ModelConfigService } from "@/lib/services/model-config.service"
 export const runtime = "nodejs"
 export const maxDuration = 300
 const routeRuntime: string = runtime
-const generationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
+const requestedGenerationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
+const isVercelProductionRuntime = process.env.VERCEL === "1" && process.env.NODE_ENV === "production"
+const generationExecutionMode = isVercelProductionRuntime ? "queue" : requestedGenerationExecutionMode
 const allowServerlessGenerationFallback =
-  generationExecutionMode === "serverless" ||
-  process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true"
+  !isVercelProductionRuntime &&
+  (generationExecutionMode === "serverless" ||
+    process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true")
 
 const CreateJobSchema = z.object({
   projectId: z.string().min(1),
