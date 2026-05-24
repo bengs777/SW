@@ -2,9 +2,11 @@ import type { PrismaClient } from "@prisma/client"
 import { prisma } from "@/lib/db/client"
 
 export const REQUIRED_ORCHESTRATION_MIGRATION = "20260520120000_production_orchestration_hardening"
-export const RUNTIME_SCHEMA_VERSION = "20260520120000"
+export const REQUIRED_RUNTIME_MIGRATION = "20260521110000_add_product_runtime_crud"
+export const RUNTIME_SCHEMA_VERSION = "20260521110000"
 
 const REQUIRED_TABLES = [
+  "Product",
   "RepairAttempt",
   "PreviewSession",
   "WorkerHeartbeat",
@@ -12,6 +14,17 @@ const REQUIRED_TABLES = [
 ] as const
 
 const REQUIRED_COLUMNS = {
+  Product: [
+    "id",
+    "name",
+    "description",
+    "area",
+    "price",
+    "status",
+    "ownerId",
+    "createdAt",
+    "updatedAt",
+  ],
   GenerationJob: [
     "orchestrationState",
     "traceId",
@@ -62,7 +75,9 @@ export async function getDatabaseSchemaHealth(db: Db = prisma): Promise<Database
   const latestMigration = migrations.find((item) => item.finished_at)?.migration_name || null
   const databaseSchema = latestMigration?.slice(0, 14) || null
   const missingMigration = appliedMigrationNames.has(REQUIRED_ORCHESTRATION_MIGRATION)
-    ? null
+    ? appliedMigrationNames.has(REQUIRED_RUNTIME_MIGRATION)
+      ? null
+      : REQUIRED_RUNTIME_MIGRATION
     : REQUIRED_ORCHESTRATION_MIGRATION
 
   const tables = await db.$queryRawUnsafe<Array<{ table_name: string }>>(
@@ -89,7 +104,7 @@ export async function getDatabaseSchemaHealth(db: Db = prisma): Promise<Database
     runtimeSchema: RUNTIME_SCHEMA_VERSION,
     databaseSchema,
     compatible,
-    requiredMigration: REQUIRED_ORCHESTRATION_MIGRATION,
+    requiredMigration: REQUIRED_RUNTIME_MIGRATION,
     missingMigration,
     missingTables,
     missingColumns,

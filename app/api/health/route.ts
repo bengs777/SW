@@ -226,11 +226,13 @@ export async function GET(request: NextRequest) {
   }))
   const missingProductionEnv = env.nodeEnv === "production" ? getMissingProductionEnvVars() : []
   const envReport = validateEnv()
+  const envHasBlockingErrors = envReport.issues.some((issue) => issue.severity === "error")
   const requiredHealthy =
     database.status !== "unhealthy" &&
     authCheck.status !== "unhealthy" &&
     deployment.status !== "unhealthy" &&
-    missingProductionEnv.length === 0
+    missingProductionEnv.length === 0 &&
+    !envHasBlockingErrors
   const operational =
     requiredHealthy &&
     queue.status !== "unhealthy" &&
@@ -250,6 +252,7 @@ export async function GET(request: NextRequest) {
     runtimeHealth: runtimeHealth.status,
     missingProductionEnvCount: missingProductionEnv.length,
     envIssueCount: envReport.issues.length,
+    envErrorCount: envReport.issues.filter((issue) => issue.severity === "error").length,
   })
 
   return NextResponse.json({

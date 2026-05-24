@@ -724,10 +724,6 @@ function unchanged(files: GeneratedFile[], reason: string): IncrementalPatchResu
   }
 }
 
-function isEditLikePrompt(text: string) {
-  return /\b(ganti|ubah|update|edit|rename|change|tambahkan|add|hapus|remove|polish|refine|perbaiki|fix)\b/i.test(text)
-}
-
 function isPatchLikePrompt(text: string) {
   return /\b(typo|small edit|minor edit|patch|ubah teks|ganti teks|ganti warna|style kecil|styling kecil|perbaiki kecil|fix bug|bug kecil)\b/i.test(text)
 }

@@ -13,6 +13,7 @@
     "cold-start": "node scripts/cold-start.js",
     "real-e2e": "node scripts/real-e2e.js",
     "deploy:gate": "npm run real-e2e",
+    "postdeploy:health": "node scripts/post-deploy-health.js",
     "audit:production": "node scripts/production-audit.js",
     "schema:health": "node scripts/schema-health-check.js",
     "deploy:preflight": "npx prisma migrate status && node scripts/schema-health-check.js && npm run typecheck && npm run lint",

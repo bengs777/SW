@@ -1,9 +1,11 @@
 const { PrismaClient } = require("@prisma/client")
 
 const REQUIRED_ORCHESTRATION_MIGRATION = "20260520120000_production_orchestration_hardening"
-const RUNTIME_SCHEMA_VERSION = "20260520120000"
+const REQUIRED_RUNTIME_MIGRATION = "20260521110000_add_product_runtime_crud"
+const RUNTIME_SCHEMA_VERSION = "20260521110000"
 
 const REQUIRED_TABLES = [
+  "Product",
   "RepairAttempt",
   "PreviewSession",
   "WorkerHeartbeat",
@@ -11,6 +13,17 @@ const REQUIRED_TABLES = [
 ]
 
 const REQUIRED_COLUMNS = {
+  Product: [
+    "id",
+    "name",
+    "description",
+    "area",
+    "price",
+    "status",
+    "ownerId",
+    "createdAt",
+    "updatedAt",
+  ],
   GenerationJob: [
     "orchestrationState",
     "traceId",
@@ -62,7 +75,9 @@ async function getDatabaseSchemaHealth(prisma) {
   const latestMigration = migrations.find((item) => item.finished_at)?.migration_name || null
   const databaseSchema = latestMigration?.slice(0, 14) || null
   const missingMigration = appliedMigrationNames.has(REQUIRED_ORCHESTRATION_MIGRATION)
-    ? null
+    ? appliedMigrationNames.has(REQUIRED_RUNTIME_MIGRATION)
+      ? null
+      : REQUIRED_RUNTIME_MIGRATION
     : REQUIRED_ORCHESTRATION_MIGRATION
 
   const tables = await prisma.$queryRawUnsafe(
@@ -89,7 +104,7 @@ async function getDatabaseSchemaHealth(prisma) {
     runtimeSchema: RUNTIME_SCHEMA_VERSION,
     databaseSchema,
     compatible,
-    requiredMigration: REQUIRED_ORCHESTRATION_MIGRATION,
+    requiredMigration: REQUIRED_RUNTIME_MIGRATION,
     missingMigration,
     missingTables,
     missingColumns,
