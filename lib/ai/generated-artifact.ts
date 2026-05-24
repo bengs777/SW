@@ -46,19 +46,59 @@ const dependencySchema = z.string().trim().min(1)
 
 const taskGraphOperationSchema = z.object({
   id: z.string().trim().min(1).optional(),
-  action: z.enum(["create", "modify", "delete"]),
-  path: generatedPathSchema,
+  action: z.enum(["create", "modify", "delete", "patch"]).optional(),
+  operation: z.enum(["createFile", "modifyFile", "deleteFile", "patchFile", "create", "modify", "delete", "patch"]).optional(),
+  path: generatedPathSchema.optional(),
+  file: generatedPathSchema.optional(),
   content: z.string().optional(),
+  changes: z.array(z.object({
+    line: z.number().int().positive(),
+    replace: z.string(),
+  }).strict()).optional(),
   language: z.string().trim().optional(),
   reason: z.string().optional(),
-}).strict().superRefine((operation, ctx) => {
+}).strict().transform((operation) => {
+  const rawAction = operation.action || operation.operation || "modify"
+  const action =
+    rawAction === "createFile"
+      ? "create"
+      : rawAction === "modifyFile"
+        ? "modify"
+        : rawAction === "deleteFile"
+          ? "delete"
+          : rawAction === "patchFile"
+            ? "patch"
+            : rawAction
+
+  return {
+    ...operation,
+    action,
+    path: operation.file || operation.path || "",
+  }
+}).superRefine((operation, ctx) => {
   const path = normalizeGeneratedPath(operation.path)
+
+  if (!path) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "operation requires path or file",
+      path: ["path"],
+    })
+  }
 
   if ((operation.action === "create" || operation.action === "modify") && typeof operation.content !== "string") {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "create/modify operation requires full content",
       path: ["content"],
+    })
+  }
+
+  if (operation.action === "patch" && (!operation.changes || operation.changes.length === 0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "patch operation requires non-empty line changes",
+      path: ["changes"],
     })
   }
 
@@ -140,9 +180,10 @@ export type GeneratedTaskGraph = {
 
 export type GeneratedTaskOperation = {
   id?: string
-  action: "create" | "modify" | "delete"
+  action: "create" | "modify" | "delete" | "patch"
   path: string
   content?: string
+  changes?: Array<{ line: number; replace: string }>
   language?: GeneratedFile["language"]
   reason?: string
 }
@@ -262,6 +303,7 @@ function toGeneratedTaskGraph(graph: z.infer<typeof taskGraphSchema>): Generated
       action: operation.action,
       path: validateGeneratedPath(operation.path).path,
       content: operation.content,
+      changes: operation.changes,
       language: operation.language ? normalizeFileLanguage(operation.language) : undefined,
       reason: operation.reason,
     })),
@@ -302,10 +344,11 @@ function diagnoseJsonEnvelope(value: string) {
 
 function tryParseJson(value: string) {
   const raw = String(value || "").trim()
-  if (/^```/m.test(raw)) return null
+  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  const candidate = fenced ? fenced[1].trim() : raw
 
   try {
-    return JSON.parse(raw)
+    return JSON.parse(candidate)
   } catch {
     return null
   }

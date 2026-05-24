@@ -31,6 +31,10 @@ import { compileProject } from "@/lib/preview/module-resolution"
 import { runRuntimeCommand, startRuntimeSandbox, type RuntimeCommandName, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { ProjectFilesystemService, type ProjectFileManifest } from "@/lib/services/project-filesystem.service"
+import { loadProjectState, buildProjectStatePromptBlock } from "@/lib/project-state/engine"
+import { buildProjectDependencyGraph } from "@/lib/project-state/dependency-graph"
+import { artifactToPatchOperations, applyProjectPatchOperations, MAX_CHANGED_FILES_PER_REQUEST } from "@/lib/project-state/diff-patch-engine"
+import { runDedicatedUserSandbox } from "@/lib/project-state/sandbox-isolation"
 import { GenerationJobCancelledError, GenerationJobService, type GenerationJobStage } from "@/lib/services/generation-job.service"
 import { OrchestrationRuntimeService, type TraceIds } from "@/lib/services/orchestration-runtime.service"
 import { GenerationQualityService, type GenerationQualityStage } from "@/lib/services/generation-quality.service"
@@ -223,6 +227,7 @@ type AllowedFileScopeContract = {
 
 type ExecuteGenerationJobInput = {
   jobId: string
+  userId?: string
   projectId: string
   prompt: string
   selectedModel: string
@@ -246,9 +251,9 @@ const MAX_AGENT_ITERATIONS = 5
 const MAX_REPAIR_ATTEMPTS = 3
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
 const FULL_FRONTEND_FILE_LIMIT = 15
-const FULL_FRONTEND_BATCH_SIZE = 6
+const FULL_FRONTEND_BATCH_SIZE = 5
 const PRODUCTION_FULLSTACK_FILE_LIMIT = 16
-const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
+const PRODUCTION_FULLSTACK_BATCH_SIZE = 5
 const MINIMAL_RUNNABLE_FALLBACK_REQUIRED_FILES = [
   "package.json",
   "tsconfig.json",
@@ -385,6 +390,41 @@ function filePathList(files: GeneratedFile[], limit = 80) {
 function missingNormalizedPaths(files: GeneratedFile[], requiredPaths: string[]) {
   const present = new Set(files.map((file) => normalizePath(file.path)))
   return uniquePaths(requiredPaths).filter((path) => !present.has(normalizePath(path)))
+}
+
+function missingArtifactTargetPaths(artifact: ReturnType<typeof parseGeneratedArtifact>, requiredPaths: string[]) {
+  const present = new Set([
+    ...artifact.files.map((file) => normalizePath(file.path)),
+    ...(artifact.taskGraph?.operations || []).map((operation) => normalizePath(operation.path)),
+  ])
+  return uniquePaths(requiredPaths).filter((path) => !present.has(normalizePath(path)))
+}
+
+function buildPersistedProjectStateSnapshot(input: {
+  files: GeneratedFile[]
+  validation?: ValidationLifecycleResult | null
+}) {
+  const manifest = ProjectFilesystemService.buildManifest(input.files)
+  return {
+    files: manifest.paths,
+    dependencyGraph: buildProjectDependencyGraph(input.files),
+    buildStatus: {
+      status: input.validation?.ok ? "passed" : input.validation ? "failed" : "unknown",
+      checkedAt: new Date().toISOString(),
+      failingFiles: input.validation?.failure?.data?.filePath
+        ? [String(input.validation.failure.data.filePath)]
+        : [],
+      summary: input.validation?.failure?.message || null,
+    },
+    generatedArtifacts: {
+      lastSnapshotAt: new Date().toISOString(),
+    },
+    metadata: {
+      manifest,
+      maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
+      updatedAt: new Date().toISOString(),
+    },
+  }
 }
 
 async function startConfiguredSandboxService(input: {
@@ -2752,6 +2792,7 @@ function buildSlicePrompt(input: {
   plan: GenerationPlan
   blueprint: ControlledAppBlueprint
   existingFiles: GeneratedFile[]
+  projectStateBlock?: string
   target: GenerationPlannerFile
   targets?: GenerationPlannerFile[]
   observation?: AgentWorkflowObservation
@@ -2802,6 +2843,8 @@ function buildSlicePrompt(input: {
     "",
     buildPartialEditInstructionBlock(input.plan.editPlan),
     "",
+    input.projectStateBlock || "",
+    input.projectStateBlock ? "" : "",
     "EXECUTION_RULES:",
     productionFullStack
       ? "- PRODUCTION_FULLSTACK_MODE: generate a deployable full-stack slice with visible UI, route handlers, Prisma/data layer, env example, and package config as requested. Do not downgrade to dummy-only preview."
@@ -2864,8 +2907,9 @@ function buildSlicePrompt(input: {
     "- PATH POLICY: every path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, sections/, component-registry/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, component-registry/hero.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
     "- BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
     "- STRICT_ARTIFACT_ENVELOPE: Return ONLY a JSON object parseable directly by JSON.parse. No markdown fences. No prose. No explanations. No comments outside JSON. No preamble like Here is your app.",
-    '- Required BUILD schema: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
-    "- The root object must contain files. files must be a non-empty array. Each file must have path and content. Do not use taskGraph, operations, repairs, commands, diagnostics, metadata, or summary for BUILD output.",
+    '- Required PATCH schema: {"taskGraph":{"operations":[{"operation":"modifyFile","file":"components/Navbar.tsx","content":"full updated file content"}]}}.',
+    '- For tiny deterministic edits, use patchFile: {"operation":"patchFile","file":"components/Navbar.tsx","changes":[{"line":35,"replace":"Dashboard"}]}.',
+    "- The root object must contain taskGraph.operations. Do not rewrite the full project. Do not return more than 5 changed files.",
     "- Framework labels such as Next.js, React, and TypeScript belong in framework/metadata, never in files[].path or taskGraph.operations[].path.",
     "- Never ask to run shell commands or mutate files outside the files array.",
     "- TSX_PARSE_LOCK: every returned .tsx/.ts/.jsx/.js file must parse with @babel/parser using jsx + typescript plugins.",
@@ -4270,6 +4314,7 @@ function importStem(filePath: string) {
 
 async function runValidationLifecycle(input: {
   jobId: string
+  userId?: string
   projectId: string
   prompt: string
   files: GeneratedFile[]
@@ -5012,7 +5057,14 @@ async function runValidationLifecycle(input: {
     mark: "boot",
     diagnostics: { sandbox: "local" },
   }).catch(() => null)
-  const preview = await startRuntimeSandbox(input.projectId, files, { signal: input.signal })
+  const preview = input.userId
+    ? await runDedicatedUserSandbox({
+        userId: input.userId,
+        projectId: input.projectId,
+        files,
+        signal: input.signal,
+      })
+    : await startRuntimeSandbox(input.projectId, files, { signal: input.signal })
   for (const sandboxStep of preview.validation) {
     const lifecycleStep = summarizeSandboxStep(sandboxStep)
     if (lifecycleStep) {
@@ -5856,6 +5908,17 @@ export async function executeGenerationJob(
   const metrics: Record<string, unknown> = {
     startedAt: new Date().toISOString(),
     correlation,
+    projectStateLoaded: false,
+    projectStateFilesCount: 0,
+    conversationHistoryUsed: false,
+    dependencyGraphNodes: 0,
+    patchOperations: 0,
+    createOperations: 0,
+    modifyOperations: 0,
+    deleteOperations: 0,
+    fullRewriteDetected: 0,
+    changedFilesTotal: 0,
+    changedFileEvents: 0,
   }
   const developerDiagnostics = createDeveloperGenerationDiagnostics()
   let plan: GenerationPlan | null = null
@@ -5905,8 +5968,12 @@ export async function executeGenerationJob(
     })
     await GenerationJobService.assertNotCancelled(input.jobId)
 
-    const [loadedExistingFiles, previousPromptCount, previousMemoryJson] = await Promise.all([
-      deps.loadProjectFiles(input.projectId),
+    const [loadedProjectState, previousPromptCount, previousMemoryJson] = await Promise.all([
+      loadProjectState({
+        projectId: input.projectId,
+        prompt: input.prompt,
+        modifiedPaths: extractRequestedFilePaths(input.prompt),
+      }),
       deps.loadGenerationHistoryCount
         ? deps.loadGenerationHistoryCount(input.projectId).catch((error) => {
             log("warn", "generation_history_count_failed", {
@@ -5928,8 +5995,36 @@ export async function executeGenerationJob(
           })
         : Promise.resolve(null),
     ])
-    let existingFiles = loadedExistingFiles
+    let projectState = loadedProjectState
+    const projectStatePromptBlock = buildProjectStatePromptBlock(projectState)
+    let existingFiles = projectState.files
+    metrics.projectStateLoaded = true
+    metrics.projectStateFilesCount = projectState.files.length
+    metrics.conversationHistoryUsed = projectState.conversationHistory.length > 0
+    metrics.dependencyGraphNodes = Object.keys(projectState.dependencyGraph.imports).length
+    metrics.projectStateAudit = {
+      loaded: true,
+      filesCount: projectState.files.length,
+      conversationHistoryCount: projectState.conversationHistory.length,
+      dependencyGraphNodes: Object.keys(projectState.dependencyGraph.imports).length,
+      contextFiles: projectState.metadata.context.selectedPaths,
+      contextTotalChars: projectState.metadata.context.totalChars,
+    }
     assertNotAborted(input.signal)
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "project_state.loaded",
+      stage: "planning",
+      status: "running",
+      message: "Project state loaded before generation",
+      data: {
+        fileCount: projectState.files.length,
+        version: projectState.metadata.version,
+        contextFiles: projectState.metadata.context.selectedPaths,
+        maxFiles: 10,
+        maxTotalChars: 64 * 1024,
+      },
+    })
     const prePlanScaffoldValidation = validateProjectScaffold({
       paths: existingFiles.map((file) => file.path),
     })
@@ -6485,6 +6580,7 @@ export async function executeGenerationJob(
           })
           validation = await runValidationLifecycle({
             jobId: input.jobId,
+            userId: input.userId,
             projectId: input.projectId,
             prompt: input.prompt,
             files: workingFiles,
@@ -6523,6 +6619,10 @@ export async function executeGenerationJob(
                 components: finalProjectMemory.components,
                 imports: finalProjectMemory.imports,
               },
+              projectState: buildPersistedProjectStateSnapshot({
+                files: workingFiles,
+                validation,
+              }),
             }),
             idempotencyKey: input.persistenceKey,
             generationJobId: input.jobId,
@@ -6925,6 +7025,7 @@ export async function executeGenerationJob(
           plan,
           blueprint,
           existingFiles: workingFiles,
+          projectStateBlock: projectStatePromptBlock,
           target,
           targets,
           observation: sliceObservation,
@@ -6967,8 +7068,9 @@ export async function executeGenerationJob(
                 "RETRY_DUE_TO_MALFORMED_ARTIFACT:",
                 "- Your previous response could not be parsed as a GeneratedArtifact.",
                 "- Return ONLY valid JSON. No Markdown fences, no prose, no comments.",
-                '- Use exactly this BUILD envelope: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
-                "- Do not include taskGraph, operations, dependencies, commands, summary, diagnostics, metadata, repairs, or explanations.",
+                '- Use exactly this PATCH envelope: {"taskGraph":{"operations":[{"operation":"modifyFile","file":"app/page.tsx","content":"full updated file content"}]}}.',
+                "- Use createFile, modifyFile, deleteFile, or patchFile operations only.",
+                `- Do not return more than ${MAX_CHANGED_FILES_PER_REQUEST} changed files.`,
                 `- Create or modify only exact paths in APPROVED_FILE_SCOPE: ${plan.allowedFileScope.allowedPaths.join(", ")}.`,
                 "- Do not create helper/shell files such as components/app-shell.tsx unless that exact path is in APPROVED_FILE_SCOPE.",
                 "- Paths must start with src/, app/, components/, sections/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
@@ -7001,10 +7103,11 @@ export async function executeGenerationJob(
         })
         assertNotAborted(input.signal)
         try {
-          parsed = parseGeneratedArtifact(response.message, {
-            strictFilesOnly: true,
-            requiredFiles: targets.map((item) => item.path),
-          })
+          parsed = parseGeneratedArtifact(response.message)
+          const missingRequiredTargets = missingArtifactTargetPaths(parsed, targets.map((item) => item.path))
+          if (missingRequiredTargets.length > 0) {
+            throw new Error(`MALFORMED_GENERATED_ARTIFACT:Missing required operation/file: ${missingRequiredTargets.join(", ")}`)
+          }
           log("info", "generator_parsed_files", {
             jobId: input.jobId,
             projectId: input.projectId,
@@ -7014,7 +7117,7 @@ export async function executeGenerationJob(
             parsedFileCount: parsed.files.length,
             parsedFiles: filePathList(parsed.files),
             requiredFiles: targets.map((item) => normalizePath(item.path)),
-            missingFiles: missingNormalizedPaths(parsed.files, targets.map((item) => item.path)),
+            missingFiles: missingRequiredTargets,
             rawHash: hashText(response.message),
           })
           developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({
@@ -7284,13 +7387,50 @@ export async function executeGenerationJob(
       const hasAcceptedScopedArtifact =
         scoped.acceptedFiles.length > 0 ||
         Boolean(scopedArtifact.taskGraph?.operations.length)
-      const executed = hasAcceptedScopedArtifact
-        ? executeGeneratedTaskGraph(
+      const patchOperations = hasAcceptedScopedArtifact
+        ? artifactToPatchOperations({
+            artifact: scopedArtifact,
+            currentFiles: workingFiles,
+          })
+        : []
+      const operationPaths = new Set(patchOperations.map((operation) => normalizePath(operation.file)))
+      if (operationPaths.size > MAX_CHANGED_FILES_PER_REQUEST) {
+        metrics.fullRewriteDetected = Number(metrics.fullRewriteDetected || 0) + 1
+      }
+      const patchResult = hasAcceptedScopedArtifact
+        ? applyProjectPatchOperations(
             workingFiles,
-            scopedArtifact.taskGraph,
-            scoped.acceptedFiles,
-            scopedArtifact.dependencies
+            patchOperations,
+            { maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST }
           )
+        : null
+      metrics.patchOperations = Number(metrics.patchOperations || 0) + patchOperations.length
+      metrics.createOperations = Number(metrics.createOperations || 0) + patchOperations.filter((operation) => operation.operation === "createFile").length
+      metrics.modifyOperations = Number(metrics.modifyOperations || 0) + patchOperations.filter((operation) => operation.operation === "modifyFile" || operation.operation === "patchFile").length
+      metrics.deleteOperations = Number(metrics.deleteOperations || 0) + patchOperations.filter((operation) => operation.operation === "deleteFile").length
+      metrics.changedFilesTotal = Number(metrics.changedFilesTotal || 0) + (patchResult?.changedFiles.length || 0)
+      metrics.changedFileEvents = Number(metrics.changedFileEvents || 0) + (patchResult ? 1 : 0)
+      metrics.diffPatchAudit = {
+        patchOperations: metrics.patchOperations,
+        createOperations: metrics.createOperations,
+        modifyOperations: metrics.modifyOperations,
+        deleteOperations: metrics.deleteOperations,
+        fullRewriteDetected: metrics.fullRewriteDetected,
+        maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
+      }
+      const dependencyResult = patchResult && scopedArtifact.dependencies.length > 0
+        ? executeGeneratedTaskGraph(patchResult.files, undefined, [], scopedArtifact.dependencies)
+        : null
+      const executed = patchResult
+        ? {
+            files: dependencyResult?.files || patchResult.files,
+            changedFiles: [
+              ...patchResult.changedFiles,
+              ...(dependencyResult?.changedFiles || []).filter((file) => !patchResult.changedFiles.some((changedFile) => normalizePath(changedFile.path) === normalizePath(file.path))),
+            ],
+            deletedPaths: patchResult.deletedPaths,
+            installedDependencies: dependencyResult?.installedDependencies || [],
+          }
         : {
             files: workingFiles,
             changedFiles: [] as GeneratedFile[],
@@ -7324,6 +7464,11 @@ export async function executeGenerationJob(
             ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
           ].slice(0, 20),
           changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)).slice(0, 40),
+          patchOperations: patchResult?.operations.map((operation) => ({
+            operation: operation.operation,
+            file: operation.file,
+          })) || [],
+          maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
           addedPackages: normalized.addedPackages,
         },
       })
@@ -7499,6 +7644,7 @@ export async function executeGenerationJob(
     })
     validation = await runValidationLifecycle({
       jobId: input.jobId,
+      userId: input.userId,
       projectId: input.projectId,
       prompt: input.prompt,
       files: workingFiles,
@@ -7961,6 +8107,7 @@ export async function executeGenerationJob(
       })
       validation = await runValidationLifecycle({
         jobId: input.jobId,
+        userId: input.userId,
         projectId: input.projectId,
         prompt: input.prompt,
         files: workingFiles,
@@ -8431,6 +8578,7 @@ export async function executeGenerationJob(
         await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
         validation = await runValidationLifecycle({
           jobId: input.jobId,
+          userId: input.userId,
           projectId: input.projectId,
           prompt: input.prompt,
           files: workingFiles,
@@ -8586,6 +8734,10 @@ export async function executeGenerationJob(
         ...finalProjectMemory,
         dependencyGraph: finalDependencyGraph,
         architectureSnapshot: finalProjectMemory,
+        projectState: buildPersistedProjectStateSnapshot({
+          files: workingFiles,
+          validation,
+        }),
       }),
       idempotencyKey: input.persistenceKey,
       generationJobId: input.jobId,

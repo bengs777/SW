@@ -9,7 +9,7 @@ export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 const freeAiMode = process.env.SWIFT_AI_FREE_MODE === "true"
 const envValue = (key: string) => process.env[key]?.trim() || ""
 const DEFAULT_SWIFT_AI_MODEL_CHAIN = [
-  "openrouter:deepseek/deepseek-chat-v3",
+  "openrouter:deepseek/deepseek-v4-pro",
   "openrouter:anthropic/claude-sonnet-4",
   "openrouter:openai/gpt-4.1-mini",
 ]

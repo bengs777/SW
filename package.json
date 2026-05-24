@@ -33,6 +33,7 @@
     "test:e2e-generation": "node scripts/run-ts-script.js scripts/e2e-generation-test.ts",
     "test:resilience": "node scripts/pipeline-resilience-smoke.js",
     "test:load:production": "node scripts/run-ts-script.js scripts/production-load-validation.ts",
+    "test:final-production": "node scripts/run-ts-script.js scripts/final-production-validation.ts",
     "test:regression": "node scripts/regression-tests.js",
     "demo:readiness": "node scripts/demo-readiness.js",
     "deploy:readiness": "node scripts/deploy-readiness.js",

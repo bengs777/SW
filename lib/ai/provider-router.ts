@@ -13,7 +13,11 @@ import {
   type SwiftTierConfig,
   type SwiftTierKey,
 } from "@/lib/ai/swift-tiers"
-import { createOpenRouterChatCompletion } from "@/lib/ai/openrouter-client"
+import {
+  createOpenRouterChatCompletion,
+  streamOpenRouterChatCompletion,
+  type OpenRouterLifecycleEvent,
+} from "@/lib/ai/openrouter-client"
 import { SwiftAiError, redactAiSecret } from "@/lib/ai/errors"
 import { getHealthSnapshot, isModelTemporarilyUnavailable, markModelFailure, markModelSuccess } from "@/lib/ai/provider-health"
 import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
@@ -74,6 +78,7 @@ type ProviderRequest = {
   attachments?: PromptAttachment[]
   routingTask?: SwiftModelRoutingTask
   signal?: AbortSignal
+  lifecycle?: (event: OpenRouterLifecycleEvent) => void
 }
 
 function nextAvailableTarget(targets: SwiftModelTarget[], currentModelId: string) {
@@ -224,6 +229,7 @@ export class ProviderRouter {
     routingTask,
     signal,
     provider,
+    lifecycle,
   }: ProviderRequest): Promise<ProviderResponse> {
     validateProvider(provider)
     const tier = this.resolveTier(modelName, mode)
@@ -358,6 +364,18 @@ export class ProviderRouter {
 
       let retryCount = 0
       while (true) {
+        if (signal?.aborted) {
+          recordAttempt(attempts, {
+            provider: "openrouter",
+            modelName: target.modelId,
+            status: "failed",
+            failureReason: "cancelled",
+            latencyMs: 0,
+            errorMessage: "Request was cancelled before provider attempt started.",
+          })
+          throw new SwiftProviderFailureError(tier.key, attempts)
+        }
+
         if (totalAttempts >= maxAttemptsForChain) {
           log("error", "provider_failover_exhausted", {
             provider: "openrouter",
@@ -383,6 +401,7 @@ export class ProviderRouter {
             tier,
             temperatureOverride,
             signal,
+            lifecycle,
           })
           const latencyMs = Date.now() - startedAt
           recordAttempt(attempts, {
@@ -418,7 +437,7 @@ export class ProviderRouter {
           const normalized = this.normalizeError(error, target)
           const latencyMs = Date.now() - startedAt
           const redactedErrorMessage = redactAiSecret(normalized.message)
-          const willRetrySameModel = shouldRetryModel(normalized.reason, retryCount)
+          const willRetrySameModel = normalized.reason === "timeout" ? false : shouldRetryModel(normalized.reason, retryCount)
           const nextProvider = willRetrySameModel
             ? target.modelId
             : nextAvailableTarget(targets, target.modelId)
@@ -442,6 +461,15 @@ export class ProviderRouter {
             requestId: normalized.requestId,
             errorMessage: redactedErrorMessage,
           })
+          if (normalized.reason === "cancelled") {
+            log("warn", "provider_request_cancelled", {
+              provider: "openrouter",
+              model: target.modelId,
+              requestId: normalized.requestId,
+              latencyMs,
+            })
+            throw new SwiftProviderFailureError(tier.key, attempts)
+          }
           markModelFailure(target.modelId, {
             reason: normalized.reason,
             latencyMs,
@@ -573,9 +601,10 @@ export class ProviderRouter {
       tier: SwiftTierConfig
       temperatureOverride?: number
       signal?: AbortSignal
+      lifecycle?: (event: OpenRouterLifecycleEvent) => void
     }
   ) {
-    return createOpenRouterChatCompletion({
+    const stream = streamOpenRouterChatCompletion({
       model: target.modelId,
       messages: this.buildMessages(input.prompt, input.mode, input.promptLanguage),
       temperature: this.getTemperature(input.mode, input.temperatureOverride),
@@ -583,7 +612,32 @@ export class ProviderRouter {
       responseFormat: input.mode === "files" ? "json_object" : undefined,
       timeoutMs: target.timeoutMs || input.tier.timeoutMs,
       signal: input.signal,
+      lifecycle: input.lifecycle,
     })
+
+    let message = ""
+    let requestId: string | null | undefined = null
+    for await (const event of stream) {
+      if (event.type === "delta") {
+        message += event.delta
+      } else if (event.type === "done") {
+        requestId = event.requestId
+      }
+    }
+
+    if (!message.trim()) {
+      throw new SwiftAiError("OpenRouter returned an empty streamed response", {
+        reason: "empty_response",
+        requestId,
+        internalModelId: target.modelId,
+      })
+    }
+
+    return {
+      message,
+      requestId,
+      tokenUsage: undefined,
+    }
   }
 
   private static buildMessages(prompt: string, mode: "chat" | "files" | "inspect", promptLanguage: PromptLanguage) {

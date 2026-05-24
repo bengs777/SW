@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "provider-live-samples")
-const SAMPLE_COUNT = 10
+const SAMPLE_COUNT = Math.max(1, Number(process.env.SWIFT_PROVIDER_SAMPLE_COUNT || 5))
 const SAMPLE_TIMEOUT_MS = Number(process.env.SWIFT_PROVIDER_SAMPLE_TIMEOUT_MS || 25_000)
 
 function loadLocalEnv() {
@@ -44,6 +44,7 @@ async function main() {
     const startedAt = Date.now()
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), SAMPLE_TIMEOUT_MS)
+    const lifecycleLog: any[] = []
     try {
       const response = await ProviderRouter.generate({
         modelName: DEFAULT_SWIFT_TIER_KEY,
@@ -52,6 +53,9 @@ async function main() {
         routingTask: "large_generation",
         temperatureOverride: 0,
         signal: controller.signal,
+        lifecycle: (event: any) => {
+          lifecycleLog.push(event)
+        },
         prompt: [
           `Provider live sample ${index + 1}/${SAMPLE_COUNT}.`,
           `Run id: ${runId}.`,
@@ -64,6 +68,10 @@ async function main() {
         durationMs: Date.now() - startedAt,
         usedFallback: response.usedFallback,
         attempts: response.attempts,
+        lifecycleLog,
+        lifecycle: lifecycleLog.map((event) => event.event),
+        tokenReceivedCount: lifecycleLog.filter((event) => event.event === "token_received").length,
+        chunkReceivedCount: lifecycleLog.filter((event) => event.event === "chunk_received").length,
         tokenUsage: response.tokenUsage || null,
       })
     } catch (error) {
@@ -71,6 +79,10 @@ async function main() {
         index: index + 1,
         status: "failure",
         durationMs: Date.now() - startedAt,
+        lifecycleLog,
+        lifecycle: lifecycleLog.map((event) => event.event),
+        tokenReceivedCount: lifecycleLog.filter((event) => event.event === "token_received").length,
+        chunkReceivedCount: lifecycleLog.filter((event) => event.event === "chunk_received").length,
         error: error instanceof Error ? error.message : String(error),
       })
     } finally {
@@ -79,12 +91,37 @@ async function main() {
   }
 
   const successes = results.filter((item) => item.status === "success").length
+  const providerFailoverCount = results.reduce((count, item: any) => {
+    const attempts = Array.isArray(item.attempts) ? item.attempts : []
+    const attemptedModels = new Set(
+      attempts
+        .filter((attempt: any) => attempt.provider === "openrouter")
+        .map((attempt: any) => attempt.modelName)
+        .filter(Boolean)
+    )
+    return count + Math.max(0, attemptedModels.size - 1)
+  }, 0)
+  const tokenReceivedCount = results.reduce((count, item: any) => count + Number(item.tokenReceivedCount || 0), 0)
+  const streamClosedCount = results.reduce((count, item: any) => {
+    const lifecycle = Array.isArray(item.lifecycle) ? item.lifecycle : []
+    return count + lifecycle.filter((event: string) => event === "stream_closed").length
+  }, 0)
+  const readinessScore = Math.round(
+    (rate(successes, SAMPLE_COUNT) >= 80 ? 55 : rate(successes, SAMPLE_COUNT) * 0.55) +
+      (tokenReceivedCount >= successes ? 25 : 0) +
+      (streamClosedCount >= successes ? 10 : 0) +
+      (results.every((item: any) => Array.isArray(item.lifecycle) && item.lifecycle.includes("request_stream_started")) ? 10 : 0)
+  )
   const summary = {
     runId,
     sampleCount: SAMPLE_COUNT,
     successes,
     failures: SAMPLE_COUNT - successes,
+    liveSuccessRate: rate(successes, SAMPLE_COUNT),
     generationSuccessRate: rate(successes, SAMPLE_COUNT),
+    tokenReceivedCount,
+    providerFailoverCount,
+    readinessScore,
     providerChain: getActiveSwiftModelChain(),
     providerMetrics: getProviderMetricsSnapshot(),
     results,

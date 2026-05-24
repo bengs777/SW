@@ -133,6 +133,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     const execution = executeGenerationJob(
       {
         jobId: payload.jobId,
+        userId: payload.userId,
         projectId: payload.projectId,
         prompt: payload.prompt,
         selectedModel: payload.model,

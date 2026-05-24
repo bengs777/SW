@@ -51,6 +51,21 @@ export function executeGeneratedTaskGraph(
       continue
     }
 
+    if (operation.action === "patch") {
+      const currentFile = byPath.get(path)
+      if (!currentFile) {
+        throw new Error(`Cannot patch missing file: ${path}`)
+      }
+      byPath.set(path, {
+        ...currentFile,
+        content: applyLineChanges(currentFile.content, operation.changes || []),
+        language: operation.language || currentFile.language || inferLanguageFromPath(path),
+      })
+      changedPaths.add(path)
+      assertResourceLimits(Array.from(byPath.values()), operations.length)
+      continue
+    }
+
     const content = typeof operation.content === "string" ? operation.content : byPath.get(path)?.content ?? ""
     byPath.set(path, {
       path,
@@ -262,4 +277,21 @@ function inferLanguageFromPath(path: string): GeneratedFile["language"] {
   if (path.endsWith(".md")) return "md"
   if (path.endsWith(".env")) return "env"
   return "ts"
+}
+
+function applyLineChanges(content: string, changes: Array<{ line: number; replace: string }>) {
+  if (changes.length === 0) {
+    throw new Error("Patch operation requires at least one line change.")
+  }
+
+  const lines = String(content || "").split(/\r?\n/)
+  for (const change of changes) {
+    const index = Math.max(0, Math.floor(change.line) - 1)
+    if (index >= lines.length) {
+      throw new Error(`Patch line ${change.line} is outside file length.`)
+    }
+    lines[index] = change.replace
+  }
+
+  return lines.join("\n")
 }
