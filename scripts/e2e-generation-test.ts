@@ -6,6 +6,7 @@ import { ProviderRouter, type ProviderAttemptLog } from "@/lib/ai/provider-route
 import { DEFAULT_SWIFT_TIER_KEY } from "@/lib/ai/swift-tiers"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { validateGeneratedPath } from "@/lib/ai/file-policy"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 import { startRuntimeSandbox, resetRuntimeSandbox, type SandboxValidationStep } from "@/lib/sandbox/runtime"
 import type { RuntimeSmokeResult } from "@/lib/sandbox/runtime-smoke"
 import type { GeneratedFile } from "@/lib/types"
@@ -114,7 +115,7 @@ const SCENARIOS: Scenario[] = [
   },
 ]
 
-const DEFAULT_REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "e2e-generation")
+const DEFAULT_REPORT_ROOT = path.join(getReportStoragePath(), "e2e-generation")
 const MAX_REPAIR_ATTEMPTS = 2
 const SCENARIO_TIMEOUT_MS = Number(process.env.SWIFT_E2E_GENERATION_TIMEOUT_MS || 10 * 60 * 1000)
 

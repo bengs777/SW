@@ -164,7 +164,7 @@ function main() {
   assert(
     "runtime.failure-audit",
     /persistRuntimeFailureReport/.test(diagnostics) &&
-      /\.swift-reports/.test(diagnostics) &&
+      /getReportStoragePath/.test(diagnostics) &&
       /runtime-failures/.test(diagnostics) &&
       /browserConsoleErrors/.test(orchestrator) &&
       /hydrationErrors/.test(orchestrator) &&

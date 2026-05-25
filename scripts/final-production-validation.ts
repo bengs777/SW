@@ -4,8 +4,9 @@ import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { Queue, Worker } from "bullmq"
 import IORedis from "ioredis"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 
-const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "final-production-validation")
+const REPORT_ROOT = path.join(getReportStoragePath(), "final-production-validation")
 const LIVE_PROMPT_LIMIT = Math.max(1, Number(process.env.SWIFT_FINAL_LIVE_PROMPTS || 5))
 const LIVE_PROMPT_TIMEOUT_MS = Math.max(30_000, Number(process.env.SWIFT_FINAL_LIVE_PROMPT_TIMEOUT_MS || 90_000))
 

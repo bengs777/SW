@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 import type { GeneratedFile } from "@/lib/types"
 import type { GenerationJobStage } from "@/lib/services/generation-job.service"
 
@@ -181,7 +182,7 @@ export async function persistInvalidArtifactReport(input: {
   rejectedPaths?: string[]
   schemaMismatch?: string
 }) {
-  const root = path.join(process.cwd(), ".swift-reports", "failed-generations")
+  const root = path.join(getReportStoragePath(), "failed-generations")
   const dir = path.join(root, safeSegment(input.jobId))
   await mkdir(dir, { recursive: true })
   const filePath = path.join(dir, "last-invalid-artifact.json")
@@ -212,7 +213,7 @@ export async function persistFailedGenerationArtifacts(input: {
   buildLog?: string[] | string | null
   runtimeLog?: string[] | string | null
 }) {
-  const root = path.join(process.cwd(), ".swift-reports", "failed-generations")
+  const root = path.join(getReportStoragePath(), "failed-generations")
   const dir = path.join(root, safeSegment(input.jobId))
   await mkdir(dir, { recursive: true })
 
@@ -255,7 +256,7 @@ export async function persistRuntimeFailureReport(input: {
   logs?: string[] | null
   files?: GeneratedFile[]
 }) {
-  const root = path.join(process.cwd(), ".swift-reports", "runtime-failures")
+  const root = path.join(getReportStoragePath(), "runtime-failures")
   const dir = path.join(root, safeSegment(input.jobId))
   await mkdir(dir, { recursive: true })
   await Promise.all([
@@ -289,7 +290,7 @@ export async function persistRenderFailureReport(input: {
   diagnostics?: Record<string, unknown> | null
   files?: GeneratedFile[]
 }) {
-  const root = path.join(process.cwd(), ".swift-reports", "render-failures")
+  const root = path.join(getReportStoragePath(), "render-failures")
   const dir = path.join(root, safeSegment(input.jobId))
   await mkdir(dir, { recursive: true })
   await Promise.all([

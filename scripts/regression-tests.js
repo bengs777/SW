@@ -172,7 +172,7 @@ assert(
 assert(
   "repair introspection captures failed artifacts",
   /persistInvalidArtifactReport/.test(generationOrchestrator) &&
-    /\.swift-reports", "failed-generations"/.test(developerDiagnostics) &&
+    /getReportStoragePath\(\), "failed-generations"/.test(developerDiagnostics) &&
     /repairPromptPreview/.test(generationOrchestrator) &&
     /validatorResult/.test(generationOrchestrator),
   "orchestrator must capture invalid artifacts and repair-chain details"

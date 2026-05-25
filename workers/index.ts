@@ -4,6 +4,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 import http from "node:http"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 
 const WORKER_TYPES = ["generation", "repair", "sandbox"] as const
 type SwiftWorkerType = (typeof WORKER_TYPES)[number]
@@ -59,6 +60,10 @@ function assertRuntimeDatabaseSchema() {
 
 async function startWorker(workerType: SwiftWorkerType) {
   console.log(`[Worker] Starting ${workerType} worker...`)
+  console.log(
+    '[report-storage]',
+    getReportStoragePath()
+  )
   runtimeState.workerType = workerType
   assertRuntimeDatabaseSchema()
 

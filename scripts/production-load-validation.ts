@@ -2,8 +2,9 @@ import fs from "node:fs"
 import os from "node:os"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 
-const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "production-load")
+const REPORT_ROOT = path.join(getReportStoragePath(), "production-load")
 const CONCURRENCY_LEVELS = [10, 25, 50, 100]
 const PROVIDER_TIMEOUT_MS = Number(process.env.SWIFT_LOAD_PROVIDER_TIMEOUT_MS || 15_000)
 

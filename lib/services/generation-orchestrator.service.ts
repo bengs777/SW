@@ -116,6 +116,7 @@ import {
 import { repairRuntimeImportGraph } from "@/lib/ai/import-repair"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
 import { warnIfSlow } from "@/lib/observability/performance-monitor"
 import {
@@ -478,7 +479,7 @@ async function persistTaskGraphFailureReport(input: {
   dependencyGraph?: unknown
   executorState?: Record<string, unknown>
 }) {
-  const dir = path.join(process.cwd(), ".swift-reports", "taskgraph-failures", input.jobId)
+  const dir = path.join(getReportStoragePath(), "taskgraph-failures", input.jobId)
   await mkdir(dir, { recursive: true })
   const writtenAt = new Date().toISOString()
   await Promise.all([
@@ -511,7 +512,7 @@ async function persistExecutorTimeoutReport(input: {
   dependencyState: Record<string, unknown>
   activePromises: Array<Record<string, unknown>>
 }) {
-  const dir = path.join(process.cwd(), ".swift-reports", "executor-timeouts", input.jobId)
+  const dir = path.join(getReportStoragePath(), "executor-timeouts", input.jobId)
   await mkdir(dir, { recursive: true })
   const writtenAt = new Date().toISOString()
   await Promise.all([
@@ -2849,7 +2850,7 @@ async function runProviderAttempt(input: {
     model: route.modelName,
     provider: route.provider,
   })
-  const providerArtifactDir = path.join(process.cwd(), ".swift-reports", "provider-artifacts", input.jobId)
+  const providerArtifactDir = path.join(getReportStoragePath(), "provider-artifacts", input.jobId)
   const rawChunks: Array<{ index: number; at: string; text: string }> = []
   const tokenSequence: Array<{ index: number; at: string; delta: string }> = []
   const recordProviderLifecycle = (event: string, data: Record<string, unknown> = {}) => {
@@ -6172,6 +6173,10 @@ export async function executeGenerationJob(
   deps: ExecuteGenerationJobDeps
 ) {
   const promptLanguage = input.promptLanguage || "id"
+  console.log(
+    '[report-storage]',
+    getReportStoragePath()
+  )
   const jobStartedAt = performance.now()
   const correlation = createCorrelationIds({
     correlationId: input.correlationId || input.jobId,

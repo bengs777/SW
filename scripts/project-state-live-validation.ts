@@ -9,10 +9,11 @@ import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import { DEFAULT_SWIFT_TIER_KEY } from "@/lib/ai/swift-tiers"
 import { cleanupDedicatedUserSandbox } from "@/lib/project-state/sandbox-isolation"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import type { GeneratedFile } from "@/lib/types"
 
-const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "project-state-live-validation")
+const REPORT_ROOT = path.join(getReportStoragePath(), "project-state-live-validation")
 const LIVE_COUNT = Math.max(1, Number(process.env.SWIFT_PROJECT_STATE_LIVE_COUNT || 10))
 const GENERATION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SWIFT_PROJECT_STATE_LIVE_TIMEOUT_MS || 300_000))
 const MAX_CONCURRENT_CHILDREN = Math.max(1, Math.min(2, Number(process.env.SWIFT_PROJECT_STATE_MAX_CONCURRENT_CHILDREN || 2)))
@@ -647,7 +648,7 @@ async function persistChildExecutorTimeoutReport(input: {
   projectId: string
   lifecycleEvents: Array<{ type: string; data: any; createdAt: string }>
 }) {
-  const dir = path.join(process.cwd(), ".swift-reports", "executor-timeouts", input.jobId)
+  const dir = path.join(getReportStoragePath(), "executor-timeouts", input.jobId)
   await mkdir(dir, { recursive: true })
   const operationQueue = buildExecutorOperationQueue(input.lifecycleEvents)
   const pendingOperations = operationQueue.filter((operation) => operation.status === "pending" || operation.status === "running")

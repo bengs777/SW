@@ -13,6 +13,7 @@ import { validateGeneratedPath } from "@/lib/ai/file-policy"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { DEFAULT_SWIFT_TIER_KEY } from "@/lib/ai/swift-tiers"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 import { resetRuntimeSandbox, startRuntimeSandbox } from "@/lib/sandbox/runtime"
 import type { GeneratedFile } from "@/lib/types"
 
@@ -35,7 +36,7 @@ const SAMPLES: Sample[] = [
   { id: "portfolio", template: "portfolio", prompt: "Create a portfolio homepage with intro, selected work, testimonial, and contact CTA." },
 ]
 
-const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "component-registry-samples")
+const REPORT_ROOT = path.join(getReportStoragePath(), "component-registry-samples")
 const SAMPLE_TIMEOUT_MS = Number(process.env.SWIFT_COMPONENT_SAMPLE_TIMEOUT_MS || 8 * 60_000)
 
 async function main() {

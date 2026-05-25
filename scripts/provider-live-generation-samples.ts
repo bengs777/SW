@@ -1,8 +1,9 @@
 import fs from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { getReportStoragePath } from "@/lib/runtime/report-storage"
 
-const REPORT_ROOT = path.join(process.cwd(), ".swift-reports", "provider-live-samples")
+const REPORT_ROOT = path.join(getReportStoragePath(), "provider-live-samples")
 const SAMPLE_COUNT = Math.max(1, Number(process.env.SWIFT_PROVIDER_SAMPLE_COUNT || 5))
 const SAMPLE_TIMEOUT_MS = Number(process.env.SWIFT_PROVIDER_SAMPLE_TIMEOUT_MS || 25_000)
 
