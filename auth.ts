@@ -1,6 +1,5 @@
-import NextAuth from "next-auth"
+import NextAuth, { type Session } from "next-auth"
 import Google from "next-auth/providers/google"
-import type { Session } from "next-auth"
 import type { JWT } from "next-auth/jwt"
 import { prisma } from "@/lib/db/client"
 import { isMissingRequiredTableError, shouldSoftFailMissingTable } from "@/lib/db/errors"
