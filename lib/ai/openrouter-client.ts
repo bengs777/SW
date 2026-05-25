@@ -249,6 +249,7 @@ export async function* streamOpenRouterChatCompletion(
   runtime.emit("request_started", { stream: true, timeoutMs: Math.min(input.timeoutMs, PROVIDER_HARD_TIMEOUT_MS) })
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   let requestId: string | null = null
+  let streamFinished = false
 
   try {
     const response = await fetchOpenRouter(input, true, runtime.signal)
@@ -274,7 +275,7 @@ export async function* streamOpenRouterChatCompletion(
     let doneSeen = false
 
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await readStreamChunk(reader, runtime.signal)
       if (done) break
 
       chunkCount += 1
@@ -348,6 +349,7 @@ export async function* streamOpenRouterChatCompletion(
     }
 
     runtime.clearStreamWatchdog()
+    streamFinished = true
     runtime.emit("stream_closed", { stream: true, chunkCount, tokenCount, doneSeen }, requestId)
     runtime.emit("request_completed", { stream: true, tokenCount }, requestId)
     yield { type: "done", requestId: response.headers.get("x-request-id") }
@@ -376,13 +378,37 @@ export async function* streamOpenRouterChatCompletion(
   } finally {
     runtime.clearStreamWatchdog()
     if (reader) {
-      if (runtime.signal.aborted) {
+      if (runtime.signal.aborted || !streamFinished) {
         await reader.cancel().catch(() => null)
       }
       reader.releaseLock()
     }
     runtime.cleanup()
   }
+}
+
+function readStreamChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Stream read aborted", "AbortError"))
+  }
+
+  return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+    const abort = () => {
+      reject(new DOMException("Stream read aborted", "AbortError"))
+    }
+
+    signal.addEventListener("abort", abort, { once: true })
+    reader.read().then(
+      (result) => {
+        signal.removeEventListener("abort", abort)
+        resolve(result)
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort)
+        reject(error)
+      }
+    )
+  })
 }
 
 type ParsedSseEvent = {

@@ -77,6 +77,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   let timeoutTriggered = false
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
   let lastSuccessfulTransition = "worker_started"
+  let execution: Promise<unknown> | null = null
 
   try {
     const leaseAcquired = await OrchestrationRuntimeService.acquireLease({
@@ -130,7 +131,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     })
     lastSuccessfulTransition = "orchestrator_started"
 
-    const execution = executeGenerationJob(
+    execution = executeGenerationJob(
       {
         jobId: payload.jobId,
         userId: payload.userId,
@@ -222,6 +223,22 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
     const isCancelled =
       error instanceof GenerationJobCancelledError ||
       (error instanceof Error && error.message === "GENERATION_JOB_CANCELLED")
+
+    if (isTimeout) {
+      abortController.abort()
+      if (execution) {
+        await Promise.race([
+          execution.catch(() => null),
+          new Promise((resolve) => setTimeout(resolve, 5_000)),
+        ])
+        log("warn", "generation_timeout_cleanup_completed", {
+          jobId: payload.jobId,
+          queueJobId: resolvedQueueJobId,
+          cleanupWaitMs: 5_000,
+          currentStage: lastSuccessfulTransition,
+        })
+      }
+    }
 
     await BillingService.refundReservation(
       payload.usageLogId,

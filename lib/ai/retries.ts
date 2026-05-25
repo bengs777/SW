@@ -3,7 +3,10 @@ import { isTransientFailure } from "@/lib/ai/errors"
 import { env } from "@/lib/env"
 
 export const MAX_RETRIES_PER_MODEL = Math.min(2, Math.max(0, env.aiMaxRetries))
-export const MAX_PROVIDER_ATTEMPTS_PER_REQUEST = 64
+export const MAX_PROVIDER_ATTEMPTS_PER_REQUEST = Math.min(
+  6,
+  Math.max(1, Number(process.env.AI_MAX_PROVIDER_ATTEMPTS_PER_REQUEST || 6))
+)
 
 export function shouldRetryModel(reason: ProviderFailureReason, retryCount: number) {
   return retryCount < MAX_RETRIES_PER_MODEL && isTransientFailure(reason)
@@ -17,6 +20,23 @@ export function retryDelayMs(retryCount: number) {
   return Math.min(Math.max(1000, maxDelayMs), Math.round(exponential + jitter))
 }
 
-export function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+export function sleep(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("Sleep aborted", "AbortError"))
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const abort = () => {
+      clearTimeout(timeout)
+      cleanup()
+      reject(new DOMException("Sleep aborted", "AbortError"))
+    }
+    const cleanup = () => signal?.removeEventListener("abort", abort)
+
+    signal?.addEventListener("abort", abort, { once: true })
+  })
 }

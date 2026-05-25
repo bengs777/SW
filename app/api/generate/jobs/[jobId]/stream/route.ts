@@ -34,6 +34,26 @@ function safeJsonParse(value: string | null) {
   }
 }
 
+function sleep(ms: number, signal: AbortSignal) {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("SSE sleep aborted", "AbortError"))
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", abort)
+      resolve()
+    }, ms)
+    const abort = () => {
+      clearTimeout(timeout)
+      signal.removeEventListener("abort", abort)
+      reject(new DOMException("SSE sleep aborted", "AbortError"))
+    }
+
+    signal.addEventListener("abort", abort, { once: true })
+  })
+}
+
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
@@ -212,7 +232,15 @@ export async function GET(
           return
         }
 
-        await new Promise((resolve) => setTimeout(resolve, POLL_MS))
+        try {
+          await sleep(POLL_MS, abortSignal)
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") {
+            await close("stream_aborted")
+            return
+          }
+          throw error
+        }
       }
     },
     cancel() {

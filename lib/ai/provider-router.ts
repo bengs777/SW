@@ -36,6 +36,11 @@ import {
 import { env } from "@/lib/env"
 import { log } from "@/lib/logging"
 
+const PROVIDER_REQUEST_BUDGET_MS = Math.max(
+  30_000,
+  Math.min(240_000, Number(process.env.AI_PROVIDER_REQUEST_BUDGET_MS || 180_000))
+)
+
 export type ProviderName = string
 
 type ProviderRegistryEntry = {
@@ -66,6 +71,31 @@ function validateProvider(provider: ProviderName | undefined): ProviderName {
   }
 
   return registered.id
+}
+
+function createProviderBudget(upstreamSignal: AbortSignal | undefined, budgetMs: number) {
+  const startedAt = Date.now()
+  const controller = new AbortController()
+  const abortForBudget = () => controller.abort()
+  const abortForUpstream = () => controller.abort()
+  const timeout = setTimeout(abortForBudget, budgetMs)
+
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      abortForUpstream()
+    } else {
+      upstreamSignal.addEventListener("abort", abortForUpstream, { once: true })
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    expired: () => Date.now() - startedAt >= budgetMs,
+    cleanup: () => {
+      clearTimeout(timeout)
+      upstreamSignal?.removeEventListener("abort", abortForUpstream)
+    },
+  }
 }
 
 type ProviderRequest = {
@@ -341,8 +371,10 @@ export class ProviderRouter {
     let firstError: string | undefined
 
     const maxAttemptsForChain = Math.min(MAX_PROVIDER_ATTEMPTS_PER_REQUEST, targets.length * 3)
+    const providerBudget = createProviderBudget(signal, PROVIDER_REQUEST_BUDGET_MS)
 
-    for (const [targetIndex, target] of targets.entries()) {
+    try {
+      for (const [targetIndex, target] of targets.entries()) {
       if (isModelTemporarilyUnavailable(target.modelId)) {
         const nextProvider = nextAvailableTarget(targets, target.modelId)
         log("warn", "provider_attempt_skipped", {
@@ -364,7 +396,7 @@ export class ProviderRouter {
 
       let retryCount = 0
       while (true) {
-        if (signal?.aborted) {
+        if (providerBudget.signal.aborted) {
           recordAttempt(attempts, {
             provider: "openrouter",
             modelName: target.modelId,
@@ -385,6 +417,19 @@ export class ProviderRouter {
           throw new SwiftProviderFailureError(tier.key, attempts)
         }
 
+        if (providerBudget.expired()) {
+          log("warn", "provider_request_budget_exhausted", {
+            provider: "openrouter",
+            tier: tier.key,
+            budgetMs: PROVIDER_REQUEST_BUDGET_MS,
+            totalAttempts,
+          })
+          throw new SwiftAiError(`Provider request budget exceeded after ${Math.round(PROVIDER_REQUEST_BUDGET_MS / 1000)} seconds`, {
+            reason: "timeout",
+            internalModelId: target.modelId,
+          })
+        }
+
         totalAttempts += 1
         const startedAt = Date.now()
         log("info", "provider_attempt", {
@@ -400,7 +445,7 @@ export class ProviderRouter {
             promptLanguage,
             tier,
             temperatureOverride,
-            signal,
+            signal: providerBudget.signal,
             lifecycle,
           })
           const latencyMs = Date.now() - startedAt
@@ -434,7 +479,13 @@ export class ProviderRouter {
             tokenUsage: result.tokenUsage,
           }
         } catch (error) {
-          const normalized = this.normalizeError(error, target)
+          const normalized =
+            providerBudget.expired() && error instanceof Error && error.name === "AbortError"
+              ? new SwiftAiError(`Provider request budget exceeded after ${Math.round(PROVIDER_REQUEST_BUDGET_MS / 1000)} seconds`, {
+                  reason: "timeout",
+                  internalModelId: target.modelId,
+                })
+              : this.normalizeError(error, target)
           const latencyMs = Date.now() - startedAt
           const redactedErrorMessage = redactAiSecret(normalized.message)
           const willRetrySameModel = normalized.reason === "timeout" ? false : shouldRetryModel(normalized.reason, retryCount)
@@ -500,12 +551,12 @@ export class ProviderRouter {
             delayMs,
             requestId: normalized.requestId,
           })
-          await sleep(delayMs)
+          await sleep(delayMs, providerBudget.signal)
         }
       }
     }
 
-    log("warn", "Swift AI OpenRouter request exhausted", {
+      log("warn", "Swift AI OpenRouter request exhausted", {
       selectedTier: tier.key,
       attempts: attempts.map((attempt) => ({
         provider: attempt.provider,
@@ -517,12 +568,15 @@ export class ProviderRouter {
       })),
     })
 
-    log("error", "provider_failover_exhausted", {
+      log("error", "provider_failover_exhausted", {
       provider: "openrouter",
       tier: tier.key,
       totalAttempts,
     })
-    throw new SwiftProviderFailureError(tier.key, attempts)
+      throw new SwiftProviderFailureError(tier.key, attempts)
+    } finally {
+      providerBudget.cleanup()
+    }
   }
 
   static async getConfiguredProviderHealth() {
