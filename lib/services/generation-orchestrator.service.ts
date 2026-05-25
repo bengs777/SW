@@ -3581,8 +3581,9 @@ function requiredFilesForCommittedProject(plan: GenerationPlan) {
 function validateGeneratedFilesAgainstAllowedScope(input: {
   files: GeneratedFile[]
   plan: GenerationPlan
+  allowedPaths?: string[]
 }) {
-  const allowed = new Set(input.plan.orchestration.allowedScope.map(normalizePath))
+  const allowed = (input.allowedPaths || input.plan.orchestration.allowedScope).map(normalizePath)
   const forbiddenPatterns = input.plan.orchestration.architectureOutput.forbiddenPatterns
   const rejected: Array<{ path: string; reason: string }> = []
   const accepted: GeneratedFile[] = []
@@ -3594,7 +3595,7 @@ function validateGeneratedFilesAgainstAllowedScope(input: {
       rejected.push({ path, reason: `Forbidden pattern matched: ${forbidden}` })
       continue
     }
-    if (!allowed.has(path)) {
+    if (!scopeAllowsPath(allowed, path)) {
       rejected.push({ path, reason: "File is outside ALLOWED_FILE_SCOPE" })
       continue
     }
@@ -3604,7 +3605,7 @@ function validateGeneratedFilesAgainstAllowedScope(input: {
   const existingAcceptedPaths = new Set(accepted.map((file) => normalizePath(file.path)))
   const missingRequired = input.plan.orchestration.architectureOutput.requiredFiles
     .map(normalizePath)
-    .filter((path) => allowed.has(path) && !existingAcceptedPaths.has(path))
+    .filter((path) => scopeAllowsPath(allowed, path) && !existingAcceptedPaths.has(path))
 
   return {
     ok: rejected.length === 0,
@@ -3620,11 +3621,20 @@ function scopeArtifactToAllowedScope(
 ): {
   artifact: ReturnType<typeof parseGeneratedArtifact>
   rejected: Array<{ path: string; reason: string }>
+  allowedPaths: string[]
+  expansion: AllowedScopeExpansion
 } {
-  const fileValidation = validateGeneratedFilesAgainstAllowedScope({ files: artifact.files, plan })
-  const allowed = new Set(plan.orchestration.allowedScope.map(normalizePath))
+  const expansion = reconcileAllowedScopeFromArtifactDependencies(artifact, plan)
+  const fileValidation = validateGeneratedFilesAgainstAllowedScope({
+    files: artifact.files,
+    plan,
+    allowedPaths: expansion.allowedPaths,
+  })
+  const allowed = expansion.allowedPaths.map(normalizePath)
   const forbiddenPatterns = plan.orchestration.architectureOutput.forbiddenPatterns
   const rejected = [...fileValidation.rejected]
+
+  applyAllowedScopeExpansion(plan, expansion)
 
   if (!artifact.taskGraph) {
     return {
@@ -3633,6 +3643,8 @@ function scopeArtifactToAllowedScope(
         files: fileValidation.accepted,
       },
       rejected,
+      allowedPaths: expansion.allowedPaths,
+      expansion,
     }
   }
 
@@ -3643,7 +3655,7 @@ function scopeArtifactToAllowedScope(
       rejected.push({ path, reason: `Forbidden taskGraph path pattern matched: ${forbidden}` })
       return false
     }
-    if (!allowed.has(path)) {
+    if (!scopeAllowsPath(allowed, path)) {
       rejected.push({ path, reason: "taskGraph operation is outside ALLOWED_FILE_SCOPE" })
       return false
     }
@@ -3660,7 +3672,149 @@ function scopeArtifactToAllowedScope(
       },
     },
     rejected,
+    allowedPaths: expansion.allowedPaths,
+    expansion,
   }
+}
+
+type AllowedScopeExpansion = {
+  allowedPaths: string[]
+  expandedPaths: Array<{ path: string; source: string; reason: string }>
+  unsafeExpansions: Array<{ path: string; source: string; reason: string }>
+}
+
+function reconcileAllowedScopeFromArtifactDependencies(
+  artifact: ReturnType<typeof parseGeneratedArtifact>,
+  plan: GenerationPlan
+): AllowedScopeExpansion {
+  const baseAllowed = uniquePaths(plan.orchestration.allowedScope)
+  const allowed = new Set(baseAllowed)
+  const artifactFiles = artifactFilesForScopeGraph(artifact).map((file) => ({
+    ...file,
+    path: normalizePath(file.path),
+    content: String(file.content || ""),
+  }))
+  for (const file of artifactFiles) {
+    if (scopeAllowsPath(baseAllowed, file.path)) {
+      allowed.add(file.path)
+    }
+  }
+  const graph = buildImportGraph(artifactFiles)
+  const expandedPaths: AllowedScopeExpansion["expandedPaths"] = []
+  const unsafeExpansions: AllowedScopeExpansion["unsafeExpansions"] = []
+  const queue = Array.from(allowed)
+  const visited = new Set<string>()
+
+  while (queue.length > 0) {
+    const source = normalizePath(queue.shift() || "")
+    if (!source || visited.has(source)) continue
+    visited.add(source)
+    const node = graph.byFile.get(source)
+    if (!node) continue
+
+    for (const edge of node.imports) {
+      const dependencyPath = edge.resolvedPath ? normalizePath(edge.resolvedPath) : null
+      if (!dependencyPath || allowed.has(dependencyPath)) continue
+
+      const safety = classifyScopeExpansionPath(dependencyPath, plan)
+      if (!safety.ok) {
+        unsafeExpansions.push({
+          path: dependencyPath,
+          source,
+          reason: safety.reason,
+        })
+        continue
+      }
+
+      allowed.add(dependencyPath)
+      queue.push(dependencyPath)
+      expandedPaths.push({
+        path: dependencyPath,
+        source,
+        reason: edge.typeOnly ? "Imported as local type dependency by allowed file" : "Imported as local runtime dependency by allowed file",
+      })
+    }
+  }
+
+  return {
+    allowedPaths: uniquePaths(Array.from(allowed)),
+    expandedPaths,
+    unsafeExpansions,
+  }
+}
+
+function artifactFilesForScopeGraph(artifact: ReturnType<typeof parseGeneratedArtifact>): GeneratedFile[] {
+  const byPath = new Map<string, GeneratedFile>()
+  for (const file of artifact.files) {
+    byPath.set(normalizePath(file.path), { ...file, path: normalizePath(file.path) })
+  }
+  for (const operation of artifact.taskGraph?.operations || []) {
+    if ((operation.action === "create" || operation.action === "modify") && typeof operation.content === "string") {
+      const path = normalizePath(operation.path)
+      byPath.set(path, {
+        path,
+        content: operation.content,
+        language: operation.language || inferLanguageFromPath(path),
+      })
+    }
+  }
+  return Array.from(byPath.values())
+}
+
+function classifyScopeExpansionPath(path: string, plan: GenerationPlan): { ok: true } | { ok: false; reason: string } {
+  const normalized = normalizePath(path)
+  const forbidden = plan.orchestration.architectureOutput.forbiddenPatterns.find((pattern) => normalized.includes(pattern))
+  if (forbidden) return { ok: false, reason: `Forbidden pattern matched: ${forbidden}` }
+  if (isUnsafeGeneratedPath(normalized)) return { ok: false, reason: "Unsafe generated path" }
+  if (isImplicitHelperFile(normalized, plan.allowedFileScope.targetPaths)) {
+    return { ok: false, reason: "Implicit helper/shell files remain explicit-only" }
+  }
+  if (!isAllowedSupportingDependencyPath(normalized)) {
+    return { ok: false, reason: "Path root is not eligible for dependency scope expansion" }
+  }
+  return { ok: true }
+}
+
+function isAllowedSupportingDependencyPath(path: string) {
+  return (
+    /^components\/[^/].*\.(tsx|ts|jsx|js)$/i.test(path) ||
+    /^sections\/[^/].*\.(tsx|ts|jsx|js)$/i.test(path) ||
+    /^hooks\/[^/].*\.(tsx|ts|jsx|js)$/i.test(path) ||
+    /^types\/[^/].*\.d\.ts$/i.test(path) ||
+    /^types\/[^/].*\.(tsx|ts|jsx|js)$/i.test(path) ||
+    /^lib\/[^/].*\.(tsx|ts|jsx|js)$/i.test(path) ||
+    /^app\/api\/.+\/route\.(ts|js)$/i.test(path) ||
+    /^prisma\/schema\.prisma$/i.test(path)
+  )
+}
+
+function isUnsafeGeneratedPath(path: string) {
+  const normalized = normalizePath(path)
+  return (
+    !normalized ||
+    normalized.includes("..") ||
+    normalized.startsWith("~") ||
+    /(^|\/)(node_modules|\.git)(\/|$)/i.test(normalized) ||
+    /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb)$/i.test(normalized) ||
+    /^\.env(?:\.|$)/i.test(normalized)
+  )
+}
+
+function applyAllowedScopeExpansion(plan: GenerationPlan, expansion: AllowedScopeExpansion) {
+  if (expansion.expandedPaths.length === 0) return
+  plan.allowedFileScope.allowedPaths = expansion.allowedPaths
+  plan.orchestration.allowedScope = expansion.allowedPaths
+}
+
+function scopeAllowsPath(allowedPaths: string[], path: string) {
+  const normalized = normalizePath(path)
+  return allowedPaths.some((allowedPath) => {
+    const allowed = normalizePath(allowedPath)
+    if (allowed === normalized) return true
+    if (!allowed.includes("*")) return false
+    const prefix = allowed.split("*")[0] || ""
+    return Boolean(prefix) && normalized.startsWith(prefix)
+  })
 }
 
 function ecommerceRequiredFiles() {
@@ -4350,12 +4504,12 @@ function commandOutputSignature(commands: Array<{ command: string; success: bool
 }
 
 function filterGeneratedFilesToTargets(files: GeneratedFile[], targetPaths: string[]) {
-  const allowed = new Set(targetPaths.map(normalizePath))
+  const allowed = targetPaths.map(normalizePath)
   const acceptedFiles: GeneratedFile[] = []
   const rejectedFiles: GeneratedFile[] = []
   for (const file of files) {
     const normalized = normalizePath(file.path)
-    if (allowed.has(normalized)) {
+    if (scopeAllowsPath(allowed, normalized)) {
       acceptedFiles.push({ ...file, path: normalized })
     } else {
       rejectedFiles.push({ ...file, path: normalized })
@@ -4368,9 +4522,9 @@ function scopeGeneratedArtifactToTargets(
   artifact: ReturnType<typeof parseGeneratedArtifact>,
   targetPaths: string[]
 ): ReturnType<typeof parseGeneratedArtifact> {
-  const allowed = new Set(targetPaths.map(normalizePath))
+  const allowed = targetPaths.map(normalizePath)
   const files = artifact.files
-    .filter((file) => allowed.has(normalizePath(file.path)))
+    .filter((file) => scopeAllowsPath(allowed, normalizePath(file.path)))
     .map((file) => ({ ...file, path: normalizePath(file.path) }))
 
   if (!artifact.taskGraph) {
@@ -4381,7 +4535,7 @@ function scopeGeneratedArtifactToTargets(
   }
 
   const operations = artifact.taskGraph.operations
-    .filter((operation) => allowed.has(normalizePath(operation.path)))
+    .filter((operation) => scopeAllowsPath(allowed, normalizePath(operation.path)))
     .map((operation) => ({ ...operation, path: normalizePath(operation.path) }))
 
   return {
@@ -7853,6 +8007,27 @@ export async function executeGenerationJob(
         taskOperationCount: parsed.taskGraph?.operations.length || 0,
       })
       const allowedScopeResult = scopeArtifactToAllowedScope(parsed, plan)
+      if (allowedScopeResult.expansion.expandedPaths.length > 0 || allowedScopeResult.expansion.unsafeExpansions.length > 0) {
+        await markLifecycle("allowed_scope_reconciled", "parsing", {
+          sliceIndex,
+          sliceTotal,
+          target: target.path,
+          expansionCount: allowedScopeResult.expansion.expandedPaths.length,
+          unsafeExpansionCount: allowedScopeResult.expansion.unsafeExpansions.length,
+          expandedPaths: allowedScopeResult.expansion.expandedPaths.slice(0, 40),
+          unsafeExpansions: allowedScopeResult.expansion.unsafeExpansions.slice(0, 40),
+        })
+        log("info", "allowed_scope_reconciled", {
+          jobId: input.jobId,
+          projectId: input.projectId,
+          sliceIndex,
+          sliceTotal,
+          expansionCount: allowedScopeResult.expansion.expandedPaths.length,
+          unsafeExpansionCount: allowedScopeResult.expansion.unsafeExpansions.length,
+          expandedPaths: allowedScopeResult.expansion.expandedPaths.slice(0, 40),
+          unsafeExpansions: allowedScopeResult.expansion.unsafeExpansions.slice(0, 40),
+        })
+      }
       if (allowedScopeResult.rejected.length > 0) {
         const rejectedPaths = allowedScopeResult.rejected.map((item) => item.path)
         markScopeRejections(plan.orchestration, rejectedPaths)
@@ -7873,6 +8048,7 @@ export async function executeGenerationJob(
           data: {
             target: target.path,
             rejectedFiles: allowedScopeResult.rejected,
+            scopeExpansion: allowedScopeResult.expansion,
             allowedScope: plan.orchestration.allowedScope,
           },
         })
@@ -7881,12 +8057,12 @@ export async function executeGenerationJob(
 
       const scopedArtifact =
         plan.productionMode === "production_fullstack"
-          ? scopeGeneratedArtifactToTargets(allowedScopeResult.artifact, targets.map((item) => item.path))
+          ? scopeGeneratedArtifactToTargets(allowedScopeResult.artifact, allowedScopeResult.allowedPaths)
           : allowedScopeResult.artifact
       const scoped = scopedArtifact.taskGraph
         ? { acceptedFiles: scopedArtifact.files, rejectedFiles: [] as GeneratedFile[] }
         : plan.productionMode === "production_fullstack"
-          ? filterGeneratedFilesToTargets(scopedArtifact.files, targets.map((item) => item.path))
+          ? filterGeneratedFilesToTargets(scopedArtifact.files, allowedScopeResult.allowedPaths)
           : filterFilesForPartialEdit(scopedArtifact.files, plan.editPlan)
       const hasAcceptedScopedArtifact =
         scoped.acceptedFiles.length > 0 ||
@@ -7908,6 +8084,7 @@ export async function executeGenerationJob(
               ...allowedScopeResult.rejected,
               ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
             ].slice(0, 80),
+            scopeExpansion: allowedScopeResult.expansion,
             acceptedOperationCount: scopedArtifact.taskGraph?.operations.length || 0,
             acceptedFileCount: scoped.acceptedFiles.length,
           },
@@ -8334,6 +8511,7 @@ export async function executeGenerationJob(
             ...allowedScopeResult.rejected,
             ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
           ].slice(0, 20),
+          scopeExpansion: allowedScopeResult.expansion,
           changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)).slice(0, 40),
           patchOperations: patchResult?.operations.map((operation) => ({
             operation: operation.operation,
@@ -8375,6 +8553,7 @@ export async function executeGenerationJob(
             ...allowedScopeResult.rejected,
             ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
           ].slice(0, 8),
+          scopeExpansion: allowedScopeResult.expansion,
           taskOperationCount: scopedArtifact.taskGraph?.operations.length || 0,
           deletedPaths: executed.deletedPaths,
           installedDependencies: executed.installedDependencies,
