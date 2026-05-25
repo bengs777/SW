@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Validation script inspects dynamic runtime module results and persists pass-through diagnostics. */
 import fs from "node:fs"
 import http from "node:http"
 import { mkdir, writeFile } from "node:fs/promises"

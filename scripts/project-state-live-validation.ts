@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Validation script inspects dynamic generation lifecycle payloads and persists pass-through diagnostics. */
 import fs from "node:fs"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"

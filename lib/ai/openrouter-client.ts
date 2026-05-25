@@ -30,6 +30,20 @@ type OpenRouterCompletionResult = {
   }
 }
 
+type OpenRouterStreamPayload = {
+  error?: {
+    message?: string
+  } | string
+  choices?: Array<{
+    delta?: {
+      content?: string
+    }
+    message?: {
+      content?: string
+    }
+  }>
+}
+
 export type OpenRouterStreamEvent =
   | { type: "delta"; delta: string }
   | { type: "done"; requestId?: string | null; tokenUsage?: OpenRouterCompletionResult["tokenUsage"] }
@@ -281,10 +295,10 @@ export async function* streamOpenRouterChatCompletion(
           break
         }
 
-        let parsed: any
+        let parsed: OpenRouterStreamPayload
         try {
           parsed = JSON.parse(payload)
-        } catch (error) {
+        } catch {
           throw new SwiftAiError("OpenRouter returned malformed stream event JSON", {
             reason: "invalid_output",
             requestId,
@@ -293,7 +307,8 @@ export async function* streamOpenRouterChatCompletion(
         }
 
         if (parsed.error) {
-          throw new SwiftAiError(`OpenRouter stream error: ${redactAiSecret(parsed.error.message || "Unknown error")}`, {
+          const errorMessage = typeof parsed.error === "string" ? parsed.error : parsed.error.message
+          throw new SwiftAiError(`OpenRouter stream error: ${redactAiSecret(errorMessage || "Unknown error")}`, {
             reason: "server_error",
             requestId,
             internalModelId: input.model,

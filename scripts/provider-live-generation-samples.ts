@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Validation script records provider lifecycle payloads from dynamic runtime imports. */
 import fs from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"

@@ -456,11 +456,6 @@ function filePathList(files: GeneratedFile[], limit = 80) {
   return files.map((file) => normalizePath(file.path)).slice(0, limit)
 }
 
-function missingNormalizedPaths(files: GeneratedFile[], requiredPaths: string[]) {
-  const present = new Set(files.map((file) => normalizePath(file.path)))
-  return uniquePaths(requiredPaths).filter((path) => !present.has(normalizePath(path)))
-}
-
 function missingArtifactTargetPaths(artifact: ReturnType<typeof parseGeneratedArtifact>, requiredPaths: string[]) {
   const present = new Set([
     ...artifact.files.map((file) => normalizePath(file.path)),
@@ -6349,7 +6344,7 @@ export async function executeGenerationJob(
           })
         : Promise.resolve(null),
     ])
-    let projectState = loadedProjectState
+    const projectState = loadedProjectState
     const projectStatePromptBlock = buildProjectStatePromptBlock(projectState)
     let existingFiles = projectState.files
     metrics.projectStateLoaded = true
