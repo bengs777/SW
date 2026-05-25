@@ -14,6 +14,7 @@ export type ComponentContract = {
   name: string
   importPath: string
   filePath: string
+  implementationPaths: string[]
   requiredProps: string[]
   optionalProps: string[]
   defaultProps: Record<string, unknown>
@@ -65,15 +66,15 @@ export const STANDARD_COMPONENT_CONTRACTS: ComponentContract[] = [
     prop("eyebrow", "string", false, "Swift AI"),
     prop("primaryAction", "string", false, "Get started"),
     prop("secondaryAction", "string", false, "Learn more"),
-  ]),
+  ], ["sections/hero-section.tsx", "sections/HeroSection.tsx"]),
   contract("Navbar", "navbar", "server", [
     prop("brand", "string", true),
     prop("links", "link[]", false, []),
-  ]),
+  ], ["components/site-header.tsx", "components/header.tsx"]),
   contract("Footer", "footer", "server", [
     prop("brand", "string", true),
     prop("tagline", "string", false, "Reliable software generated with clear contracts."),
-  ]),
+  ], ["components/site-footer.tsx", "components/footer.tsx"]),
   contract("DashboardCard", "dashboard-card", "server", [
     prop("label", "string", true),
     prop("value", "string", true),
@@ -82,7 +83,7 @@ export const STANDARD_COMPONENT_CONTRACTS: ComponentContract[] = [
   contract("FeatureSection", "feature-section", "server", [
     prop("title", "string", true),
     prop("features", "feature[]", false, []),
-  ]),
+  ], ["sections/features-section.tsx", "sections/feature-section.tsx", "sections/FeaturesSection.tsx"]),
   contract("Testimonial", "testimonial", "server", [
     prop("quote", "string", true),
     prop("author", "string", true),
@@ -310,6 +311,7 @@ export function componentRegistryPromptPayload() {
   return STANDARD_COMPONENT_CONTRACTS.map((item) => ({
     name: item.name,
     importPath: item.importPath,
+    implementationPaths: item.implementationPaths,
     requiredProps: item.requiredProps,
     optionalProps: item.optionalProps,
     defaultProps: item.defaultProps,
@@ -339,7 +341,7 @@ export function analyzeComponentRegistryUsage(files: GeneratedFile[], selectedTe
 
   for (const item of STANDARD_COMPONENT_CONTRACTS) {
     for (const usage of findComponentUsages(normalized, item)) {
-      if (importsRegistryComponent(graph, usage.file.path, item)) reused.add(item.name)
+      if (importsComponentImplementation(graph, usage.file.path, item)) reused.add(item.name)
     }
   }
 
@@ -347,6 +349,8 @@ export function analyzeComponentRegistryUsage(files: GeneratedFile[], selectedTe
     if (!/\.(tsx|jsx)$/i.test(file.path) || file.path.startsWith(`${REGISTRY_ROOT}/`)) continue
     for (const name of declaredComponentNames(file.content)) {
       generated.add(name)
+      const standardContract = STANDARD_COMPONENT_CONTRACTS.find((item) => item.name === name)
+      if (standardContract?.implementationPaths.includes(file.path)) continue
       if (registryNames.has(name)) duplicate.add(name)
       else if (!["Page", "RootLayout", "Layout", "Loading", "Error", "NotFound"].includes(name)) custom.add(name)
     }
@@ -395,7 +399,7 @@ export function validateComponentContracts(files: GeneratedFile[], options?: { s
 
   for (const item of STANDARD_COMPONENT_CONTRACTS) {
     for (const file of normalized) {
-      if (file.path === item.filePath) continue
+      if (item.implementationPaths.includes(file.path)) continue
       if (declaresComponent(file.content, item.name)) {
         failures.push({
           code: "freeform_standard_component",
@@ -407,38 +411,42 @@ export function validateComponentContracts(files: GeneratedFile[], options?: { s
     }
 
     for (const usage of findComponentUsages(normalized, item)) {
-      componentUsage.push({ file: usage.file.path, component: item.name, importPath: item.importPath })
-      if (!importsRegistryComponent(graph, usage.file.path, item)) {
+      const implementation = importsComponentImplementation(graph, usage.file.path, item)
+      componentUsage.push({ file: usage.file.path, component: item.name, importPath: implementation?.specifier || item.importPath })
+      if (!implementation) {
         failures.push({
           code: "component_dependency_missing",
           file: usage.file.path,
           component: item.name,
-          message: `${usage.file.path} renders ${item.name} but does not import ${item.importPath}.`,
+          message: `${usage.file.path} renders ${item.name} but does not import a valid implementation (${item.importPath} or ${item.implementationPaths.filter((filePath) => filePath !== item.filePath).join(", ")}).`,
         })
+        continue
       }
 
-      for (const required of item.requiredProps) {
-        if (!hasProp(usage.attributes, required)) {
-          failures.push({
-            code: "required_prop_missing",
-            file: usage.file.path,
-            component: item.name,
-            prop: required,
-            message: `${usage.file.path} renders ${item.name} without required prop ${required}.`,
-          })
+      if (implementation.kind === "registry") {
+        for (const required of item.requiredProps) {
+          if (!hasProp(usage.attributes, required)) {
+            failures.push({
+              code: "required_prop_missing",
+              file: usage.file.path,
+              component: item.name,
+              prop: required,
+              message: `${usage.file.path} renders ${item.name} without required prop ${required}.`,
+            })
+          }
         }
-      }
 
-      for (const propContract of item.props) {
-        const value = readPropValue(usage.attributes, propContract.name)
-        if (value && !isPropValueCompatible(value, propContract.type)) {
-          failures.push({
-            code: "prop_type_invalid",
-            file: usage.file.path,
-            component: item.name,
-            prop: propContract.name,
-            message: `${usage.file.path} passes an invalid ${propContract.type} value to ${item.name}.${propContract.name}.`,
-          })
+        for (const propContract of item.props) {
+          const value = readPropValue(usage.attributes, propContract.name)
+          if (value && !isPropValueCompatible(value, propContract.type)) {
+            failures.push({
+              code: "prop_type_invalid",
+              file: usage.file.path,
+              component: item.name,
+              prop: propContract.name,
+              message: `${usage.file.path} passes an invalid ${propContract.type} value to ${item.name}.${propContract.name}.`,
+            })
+          }
         }
       }
     }
@@ -462,11 +470,20 @@ export function validateComponentContracts(files: GeneratedFile[], options?: { s
   }
 }
 
-function contract(name: string, slug: string, type: ComponentContract["type"], props: ComponentPropContract[]): ComponentContract {
+function contract(
+  name: string,
+  slug: string,
+  type: ComponentContract["type"],
+  props: ComponentPropContract[],
+  implementationAliases: string[] = []
+): ComponentContract {
+  const filePath = `${REGISTRY_ROOT}/${slug}.tsx`
+
   return {
     name,
     importPath: `@/${REGISTRY_ROOT}/${slug}`,
-    filePath: `${REGISTRY_ROOT}/${slug}.tsx`,
+    filePath,
+    implementationPaths: uniquePaths([filePath, ...implementationAliases]),
     requiredProps: props.filter((item) => item.required).map((item) => item.name),
     optionalProps: props.filter((item) => !item.required).map((item) => item.name),
     defaultProps: Object.fromEntries(props.filter((item) => !item.required).map((item) => [item.name, item.defaultValue])),
@@ -506,7 +523,7 @@ function findComponentUsages(files: Array<GeneratedFile & { path: string; conten
   const usages: Array<{ file: GeneratedFile & { path: string; content: string }; attributes: string }> = []
   const tagRe = new RegExp(`<${escapeRegExp(contract.name)}\\b([^>]*)\\/?>(?:</${escapeRegExp(contract.name)}>)?`, "g")
   for (const file of files) {
-    if (file.path === contract.filePath || !/\.(tsx|jsx)$/i.test(file.path)) continue
+    if (contract.implementationPaths.includes(file.path) || !/\.(tsx|jsx)$/i.test(file.path)) continue
     for (const match of file.content.matchAll(tagRe)) {
       usages.push({ file, attributes: match[1] || "" })
     }
@@ -514,9 +531,29 @@ function findComponentUsages(files: Array<GeneratedFile & { path: string; conten
   return usages
 }
 
-function importsRegistryComponent(graph: ReturnType<typeof buildImportGraph>, source: string, contract: ComponentContract) {
+function importsComponentImplementation(graph: ReturnType<typeof buildImportGraph>, source: string, contract: ComponentContract) {
   const node = graph.byFile.get(normalizePath(source))
-  return Boolean(node?.imports.some((edge) => edge.resolvedPath === contract.filePath || edge.specifier === contract.importPath))
+  if (!node) return null
+
+  for (const edge of node.imports) {
+    const resolvedPath = edge.resolvedPath ? normalizePath(edge.resolvedPath) : null
+    if (resolvedPath && contract.implementationPaths.includes(resolvedPath)) {
+      return {
+        kind: resolvedPath === contract.filePath ? "registry" as const : "local" as const,
+        path: resolvedPath,
+        specifier: edge.specifier,
+      }
+    }
+    if (edge.specifier === contract.importPath) {
+      return {
+        kind: "registry" as const,
+        path: contract.filePath,
+        specifier: edge.specifier,
+      }
+    }
+  }
+
+  return null
 }
 
 function hasProp(attributes: string, name: string) {
@@ -552,4 +589,8 @@ function escapeRegExp(value: string) {
 
 function normalizePath(value: string) {
   return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").trim()
+}
+
+function uniquePaths(paths: string[]) {
+  return Array.from(new Set(paths.map(normalizePath).filter(Boolean)))
 }
