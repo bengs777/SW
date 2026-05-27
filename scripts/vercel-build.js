@@ -38,6 +38,9 @@ function stringifyError(error) {
 
 function classifyPrismaFailure(errorText) {
   const text = String(errorText || "")
+  if (/P3005|database schema is not empty|migrate-baseline/i.test(text)) {
+    return "migration_baseline_required"
+  }
   if (/environment variable.*DATABASE_URL|DATABASE_URL.*not found|missing.*DATABASE_URL/i.test(text)) {
     return "missing_env"
   }
@@ -211,6 +214,8 @@ async function runMigrationDeployment() {
               ? "DATABASE_URL is missing; Prisma migrate deploy cannot run."
               : code === "invalid_database_url"
                 ? "DATABASE_URL is invalid; Prisma migrate deploy cannot run."
+                : code === "migration_baseline_required"
+                  ? "Database is not empty and Prisma migration history is not baselined. Run a one-time migrate resolve baseline before deploy."
                 : "Prisma migrate deploy failed.",
     }
 

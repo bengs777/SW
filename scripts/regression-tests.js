@@ -42,6 +42,7 @@ const instrumentation = read("instrumentation.ts")
 const generationPipeline = read("lib/ai/generation-pipeline.ts")
 const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
 const generationStabilization = read("lib/ai/generation-stabilization.ts")
+const prismaSchema = read("prisma/schema.prisma")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -211,8 +212,16 @@ assert(
     /isStrictPreflight/.test(vercelBuild) &&
     /engine_binary_failure/.test(vercelBuild) &&
     /schema_parsing_failure/.test(vercelBuild) &&
+    /migration_baseline_required/.test(vercelBuild) &&
     /schema compatibility check skipped in local fallback mode/.test(vercelBuild),
   "builds must generate Prisma first, deploy pending migrations, diagnose deploy failures, and skip unavailable DB checks locally"
+)
+
+assert(
+  "prisma migrations use direct database url",
+  /url\s*=\s*env\("DATABASE_URL"\)/.test(prismaSchema) &&
+    /directUrl\s*=\s*env\("DIRECT_DATABASE_URL"\)/.test(prismaSchema),
+  "Prisma runtime must use pooled DATABASE_URL while migrations/admin commands use DIRECT_DATABASE_URL"
 )
 
 assert(
