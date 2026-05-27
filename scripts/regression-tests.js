@@ -41,6 +41,7 @@ const deployReadiness = read("scripts/deploy-readiness.js")
 const instrumentation = read("instrumentation.ts")
 const generationPipeline = read("lib/ai/generation-pipeline.ts")
 const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
+const generationStabilization = read("lib/ai/generation-stabilization.ts")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -233,6 +234,51 @@ assert(
     /final_dependency_manifest/.test(generationOrchestrator) &&
     /missing_dependency_diagnostic/.test(generationOrchestrator),
   "generation validation must log detected, rejected, final, and missing dependency diagnostics"
+)
+
+assert(
+  "generation snapshot and replay are deterministic",
+  /persistGenerationSnapshot/.test(generationStabilization) &&
+    /snapshotHash\s*=\s*stableHash\(snapshotPayload\)/.test(generationStabilization) &&
+    /replayHash\s*=\s*stableHash\(replayPayload\)/.test(generationStabilization) &&
+    /stableSnapshotDiagnostics/.test(generationStabilization) &&
+    /generation\.snapshot\.persisted/.test(generationOrchestrator),
+  "snapshot and replay artifacts must be persisted with stable hashes that exclude runtime metadata"
+)
+
+assert(
+  "phase diagnostics cover generation lifecycle",
+  /prompt_analysis/.test(generationStabilization) &&
+    /blueprint_selection/.test(generationStabilization) &&
+    /scope_reconciliation/.test(generationStabilization) &&
+    /artifact_filtering/.test(generationStabilization) &&
+    /dependency_extraction/.test(generationStabilization) &&
+    /package_synthesis/.test(generationStabilization) &&
+    /runtime_validation/.test(generationStabilization) &&
+    /completeGenerationPhase/.test(generationOrchestrator),
+  "generation diagnostics must be phase-based with warnings and hard failures"
+)
+
+assert(
+  "generation invariants hard fail before build persistence",
+  /assertGenerationInvariants/.test(generationStabilization) &&
+    /missing_blueprint_dependency/.test(generationStabilization) &&
+    /unresolved_import/.test(generationStabilization) &&
+    /forbidden_path_access/.test(generationStabilization) &&
+    /invalid_runtime_assumption/.test(generationStabilization) &&
+    /missing_prisma_schema/.test(generationStabilization) &&
+    /invalid_auth_configuration/.test(generationStabilization) &&
+    /Generation invariant hard failure before persist/.test(generationOrchestrator),
+  "hard fail invariants must stop generation before build success or persistence"
+)
+
+assert(
+  "deterministic ordering guards dependency and file outputs",
+  /stableFiles/.test(generationStabilization) &&
+    /stableUnique/.test(generationStabilization) &&
+    /sort\(\(left, right\)/.test(generationPipeline) &&
+    /mergedDependencies/.test(generationStabilization),
+  "file traversal, dependency merge, and package synthesis must use stable ordering"
 )
 
 assert(

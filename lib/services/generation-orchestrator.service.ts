@@ -79,6 +79,14 @@ import {
 import { validateArchitectureFiles } from "@/lib/ai/architecture-validator"
 import { validateGeneratedUXQuality } from "@/lib/ai/product-ux-planner"
 import {
+  assertGenerationInvariants,
+  completeGenerationPhase,
+  createGenerationPhaseDiagnostics,
+  parsePackageJson as parseStablePackageJson,
+  persistGenerationSnapshot,
+  type GenerationPhaseDiagnostics,
+} from "@/lib/ai/generation-stabilization"
+import {
   appendRepairPath,
   assertSoftwareOrchestrationReady,
   buildRoleInstructionBlock,
@@ -398,6 +406,16 @@ type ValidationLifecycleResult = {
   steps: ValidationLifecycleStepResult[]
   sandboxValidation: SandboxValidationStep[]
   failure?: ValidationLifecycleFailure
+}
+
+type GenerationStabilizationContext = {
+  phases: GenerationPhaseDiagnostics
+  rejectedArtifacts: Array<Record<string, unknown>>
+  replay: {
+    taskGraph: unknown[]
+    scopeReconciliation: unknown[]
+    packageSynthesis: unknown[]
+  }
 }
 
 class CompileGateError extends Error {
@@ -4786,6 +4804,7 @@ async function runValidationLifecycle(input: {
   files: GeneratedFile[]
   plan: GenerationPlan
   blueprint: ControlledAppBlueprint
+  stabilization?: GenerationStabilizationContext
   trace?: TraceIds
   signal?: AbortSignal
   emit: (stage: GenerationJobStage, label: string, progress: number, data?: Record<string, unknown>) => Promise<void>
@@ -4911,6 +4930,19 @@ async function runValidationLifecycle(input: {
     dependencies: normalizedManifest.dependencies,
     devDependencies: normalizedManifest.devDependencies,
     detectedPackages: dependencyScan.sources.map((source) => source.packageName),
+  })
+  completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "dependency_extraction", {
+    warnings: [...normalized.rejectedPackages, ...dependencyScan.rejected].map((item) => `${item.packageName}:${item.reason}`),
+  })
+  completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "package_synthesis", {
+    warnings: normalized.conflictsPrevented.map((item) => `Dependency placement conflict normalized: ${item}`),
+  })
+  input.stabilization?.replay.packageSynthesis.push({
+    phase: "validation-normalize",
+    addedPackages: normalized.addedPackages.slice().sort(),
+    normalizedPackages: normalized.normalizedPackages.slice().sort(),
+    conflictsPrevented: normalized.conflictsPrevented.slice().sort(),
+    finalManifest: normalized.finalManifest,
   })
   const renderSafeRules = validateRenderSafeGenerationRules(files)
   if (!renderSafeRules.ok) {
@@ -5139,6 +5171,55 @@ async function runValidationLifecycle(input: {
   await GenerationJobService.assertNotCancelled(input.jobId)
   stepStartedAt = performance.now()
   await input.emit("validating", "Checking static project invariants", 68)
+  const invariantResult = assertGenerationInvariants({
+    files,
+    blueprint: input.blueprint,
+    allowedScope: input.plan.allowedFileScope.allowedPaths,
+    expandedScope: input.plan.orchestration.allowedScope,
+    authActive: input.plan.structuredIntent.auth.provider !== null,
+    prismaActive: Boolean(input.plan.structuredIntent.database.provider) || files.some((file) => normalizePath(file.path) === "prisma/schema.prisma"),
+  })
+  completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "runtime_validation", {
+    warnings: invariantResult.warnings.map((warning) => warning.message),
+    hardFailures: invariantResult.hardFailures.map((failure) => failure.message),
+  })
+  log(invariantResult.ok ? "info" : "error", "generation_invariant_validation", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    ok: invariantResult.ok,
+    hardFailures: invariantResult.hardFailures,
+    warnings: invariantResult.warnings,
+    dependencyDiagnostics: invariantResult.dependencyDiagnostics,
+  })
+  await GenerationJobService.appendEvent({
+    jobId: input.jobId,
+    type: "generation.invariants",
+    stage: "validating",
+    status: invariantResult.ok ? "completed" : "failed",
+    message: invariantResult.ok ? "Generation invariants passed" : "Generation invariants failed",
+    data: invariantResult,
+  }).catch(() => null)
+  if (!invariantResult.ok) {
+    const message = `Generation invariant hard failure: ${invariantResult.hardFailures.map((failure) => failure.message).join("; ")}`
+    recordStep("static", "failed", "required", stepStartedAt, message, {
+      invariants: invariantResult,
+    })
+    return {
+      ok: false,
+      files,
+      previewUrl: null,
+      previewStatus: "invariant_validation_failed",
+      steps,
+      sandboxValidation: [],
+      failure: {
+        step: "static",
+        message,
+        data: {
+          invariants: invariantResult,
+        },
+      },
+    }
+  }
   const plannedRequiredFiles = input.plan.filePlan.map((file) => normalizePath(file.path))
   const productionRequiredFilesForValidation =
     input.plan.productionMode === "production_fullstack"
@@ -6445,6 +6526,15 @@ export async function executeGenerationJob(
     changedFilesTotal: 0,
     changedFileEvents: 0,
   }
+  const stabilization: GenerationStabilizationContext = {
+    phases: createGenerationPhaseDiagnostics(),
+    rejectedArtifacts: [],
+    replay: {
+      taskGraph: [],
+      scopeReconciliation: [],
+      packageSynthesis: [],
+    },
+  }
   const lifecycleBreakdown: GenerationLifecycleBreakdown = {
     providerLatencyMs: 0,
     taskgraphLatencyMs: 0,
@@ -6724,7 +6814,12 @@ export async function executeGenerationJob(
       previewContext: input.previewContext,
       previousMemoryJson,
     })
+    completeGenerationPhase(stabilization.phases, "prompt_analysis")
     blueprint = getControlledAppBlueprint(plan.appType)
+    completeGenerationPhase(stabilization.phases, "blueprint_selection")
+    completeGenerationPhase(stabilization.phases, "scope_reconciliation", {
+      warnings: plan.orchestration.rejectedFiles || [],
+    })
     const intentTemplate = selectIntentTemplate(input.prompt)
     metrics.intentTemplate = intentTemplate
       ? {
@@ -7184,6 +7279,7 @@ export async function executeGenerationJob(
             files: workingFiles,
             plan,
             blueprint,
+            stabilization,
             trace: {
               traceId: correlation.traceId,
               workerId: null,
@@ -7762,6 +7858,20 @@ export async function executeGenerationJob(
             sliceTotal,
             taskOperationCount: parsed.taskGraph?.operations.length || 0,
             parsedFileCount: parsed.files.length,
+          })
+          stabilization.replay.taskGraph.push({
+            sliceIndex,
+            sliceTotal,
+            target: target.path,
+            dependencies: parsed.dependencies.slice().sort(),
+            operations: (parsed.taskGraph?.operations || [])
+              .map((operation) => ({
+                action: operation.action,
+                path: normalizePath(operation.path),
+                hasContent: typeof operation.content === "string",
+                language: operation.language || null,
+              }))
+              .sort((left, right) => `${left.path}:${left.action}`.localeCompare(`${right.path}:${right.action}`)),
           })
           log("info", "generator_parsed_files", {
             jobId: input.jobId,
@@ -8576,6 +8686,16 @@ export async function executeGenerationJob(
       workingFiles = normalized.files
       tools = createAgentWorkflowTools(workingFiles, { projectId: input.projectId, signal: input.signal })
       if (scoped.rejectedFiles.length > 0) {
+        stabilization.rejectedArtifacts.push(
+          ...scoped.rejectedFiles
+            .map((file) => ({
+              path: normalizePath(file.path),
+              reason: "File is outside provider-call target scope",
+              sliceIndex,
+              sliceTotal,
+            }))
+            .sort((left, right) => left.path.localeCompare(right.path))
+        )
         developerDiagnostics.validatorFailures.push({
           stage: "scope_filter",
           status: "failed",
@@ -8606,6 +8726,28 @@ export async function executeGenerationJob(
           maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
           addedPackages: normalized.addedPackages,
         },
+      })
+      completeGenerationPhase(stabilization.phases, "artifact_filtering", {
+        warnings: scoped.rejectedFiles.map((file) => `Rejected artifact outside scope: ${normalizePath(file.path)}`),
+      })
+      stabilization.replay.scopeReconciliation.push({
+        sliceIndex,
+        sliceTotal,
+        target: target.path,
+        changedFiles: executed.changedFiles.map((file) => normalizePath(file.path)).sort(),
+        deletedPaths: executed.deletedPaths.slice().sort(),
+        scopeExpansion: allowedScopeResult.expansion,
+        rejectedFiles: [
+          ...allowedScopeResult.rejected,
+          ...scoped.rejectedFiles.map((file) => ({ path: normalizePath(file.path), reason: "File is outside provider-call target scope" })),
+        ].sort((left, right) => String(left.path || "").localeCompare(String(right.path || ""))),
+      })
+      stabilization.replay.packageSynthesis.push({
+        sliceIndex,
+        sliceTotal,
+        installedDependencies: executed.installedDependencies.slice().sort(),
+        addedPackages: normalized.addedPackages.slice().sort(),
+        normalizedPackages: normalized.normalizedPackages.slice().sort(),
       })
       await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
       log("info", "agent_execute_tools", {
@@ -8786,6 +8928,7 @@ export async function executeGenerationJob(
       files: workingFiles,
       plan,
       blueprint,
+      stabilization,
       trace: {
         traceId: correlation.traceId,
         workerId: null,
@@ -9249,6 +9392,7 @@ export async function executeGenerationJob(
         files: workingFiles,
         plan,
         blueprint,
+        stabilization,
         trace: {
           traceId: correlation.traceId,
           workerId: null,
@@ -9720,6 +9864,7 @@ export async function executeGenerationJob(
           files: workingFiles,
           plan,
           blueprint,
+          stabilization,
           trace: {
             traceId: correlation.traceId,
             workerId: null,
@@ -9837,6 +9982,66 @@ export async function executeGenerationJob(
     })
 
     assertCompileGatePassed(validation)
+    const finalDependencyScan = collectInstallableDependencies({ files: workingFiles })
+    const finalPackageJson = parseStablePackageJson(workingFiles)
+    const finalInvariantResult = assertGenerationInvariants({
+      files: workingFiles,
+      blueprint,
+      allowedScope: plan.allowedFileScope.allowedPaths,
+      expandedScope: plan.orchestration.allowedScope,
+      authActive: plan.structuredIntent.auth.provider !== null,
+      prismaActive: Boolean(plan.structuredIntent.database.provider) || workingFiles.some((file) => normalizePath(file.path) === "prisma/schema.prisma"),
+    })
+    if (!finalInvariantResult.ok) {
+      throw new Error(`Generation invariant hard failure before persist: ${finalInvariantResult.hardFailures.map((failure) => failure.message).join("; ")}`)
+    }
+    const snapshotResult = await persistGenerationSnapshot({
+      jobId: input.jobId,
+      projectId: input.projectId,
+      prompt: input.prompt,
+      blueprint: {
+        appType: blueprint.appType,
+        label: blueprint.label,
+        requiredFiles: blueprint.requiredFiles.slice().sort(),
+        dependencyPolicy: {
+          stack: blueprint.dependencyPolicy.stack.slice().sort(),
+          allowedExternalPackages: blueprint.dependencyPolicy.allowedExternalPackages.slice().sort(),
+          forbiddenPatterns: blueprint.dependencyPolicy.forbiddenPatterns.slice().sort(),
+        },
+      },
+      allowedScope: plan.allowedFileScope.allowedPaths,
+      expandedScope: plan.orchestration.allowedScope,
+      generatedFiles: workingFiles,
+      rejectedArtifacts: stabilization.rejectedArtifacts,
+      detectedDependencies: finalDependencyScan.sources,
+      finalPackageJson: finalPackageJson.raw,
+      runtimeFlags: {
+        productionMode: plan.productionMode,
+        generationMode: plan.generationMode,
+        previewStatus: validation.previewStatus,
+        validationOk: validation.ok,
+      },
+      diagnostics: {
+        phases: stabilization.phases,
+        invariants: finalInvariantResult,
+        validationSteps: validation.steps,
+        lifecycle: lifecycleBreakdown,
+      },
+      replay: {
+        taskGraph: stabilization.replay.taskGraph,
+        scopeReconciliation: stabilization.replay.scopeReconciliation,
+        packageSynthesis: stabilization.replay.packageSynthesis,
+      },
+    })
+    metrics.generationSnapshot = snapshotResult
+    await GenerationJobService.appendEvent({
+      jobId: input.jobId,
+      type: "generation.snapshot.persisted",
+      stage: "validating",
+      status: "completed",
+      message: "Deterministic generation snapshot and replay artifact persisted",
+      data: snapshotResult,
+    }).catch(() => null)
     await GenerationJobService.assertNotCancelled(input.jobId)
     assertNotAborted(input.signal)
     await transition(input.jobId, "persisting", "Persisting validated project artifacts", 94, {
