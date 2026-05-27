@@ -1,6 +1,7 @@
 import path from "node:path"
 import {
   ensureReportDirectory,
+  getReportStoragePath,
   writeJsonReport,
   writeTextReport,
 } from "@/lib/runtime/report-storage"
@@ -262,6 +263,7 @@ export async function persistRuntimeFailureReport(input: {
         category: input.category,
         message: input.message,
         capturedAt: new Date().toISOString(),
+        storageRoot: getReportStoragePath(),
         diagnostics: sanitizeArtifactValue(input.diagnostics || null),
         files: input.files ? summarizeGeneratedFiles(input.files) : null,
       }
