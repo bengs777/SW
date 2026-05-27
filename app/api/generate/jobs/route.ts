@@ -19,6 +19,7 @@ import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/services/generation-job-request.service"
 import { ModelConfigService } from "@/lib/services/model-config.service"
+import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -33,6 +34,26 @@ const allowServerlessGenerationFallback =
   !isProductionRuntime &&
   !serverlessFallbackDisabled &&
   (generationExecutionMode === "serverless" || explicitServerlessFallbackAllowed)
+const MAX_QUEUED_JOBS_PER_USER = Math.max(1, Number(process.env.SWIFT_MAX_QUEUED_GENERATION_JOBS_PER_USER || 5))
+const GENERATION_COOLDOWN_MS = Math.max(0, Number(process.env.SWIFT_GENERATION_COOLDOWN_MS || 750))
+
+class SystemSaturatedError extends Error {
+  code = "SYSTEM_SATURATED" as const
+  status = 503
+  retryAfterSeconds = 30
+
+  constructor(public saturation: {
+    saturationPct?: number
+    reasons?: string[]
+    backlogDepth?: number
+    backlogAgeMs?: number
+    averageWaitDurationMs?: number
+    workerUtilizationPct?: number
+  }) {
+    super("SYSTEM_SATURATED")
+    this.name = "SystemSaturatedError"
+  }
+}
 
 const CreateJobSchema = z.object({
   projectId: z.string().min(1),
@@ -110,6 +131,11 @@ function developerGenerationFailureMessage(input: {
     "Trace:",
     input.traceId,
   ].join("\n")
+}
+
+function isSystemSaturatedError(error: unknown): error is SystemSaturatedError {
+  return error instanceof SystemSaturatedError ||
+    (typeof error === "object" && error !== null && "code" in error && String(error.code) === "SYSTEM_SATURATED")
 }
 
 export async function POST(request: NextRequest) {
@@ -494,6 +520,38 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  const [queuedGenerationCount, latestUserJob] = await Promise.all([
+    prisma.generationJob.count({
+      where: {
+        userId: user.id,
+        status: { in: ["queued", "retrying", "orphaned"] },
+      },
+    }),
+    prisma.generationJob.findFirst({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    }),
+  ])
+  const cooldownRemainingMs = latestUserJob
+    ? Math.max(0, GENERATION_COOLDOWN_MS - (Date.now() - latestUserJob.createdAt.getTime()))
+    : 0
+  if (queuedGenerationCount >= MAX_QUEUED_JOBS_PER_USER) {
+    return NextResponse.json({
+      error: "Too many queued generation jobs. Wait for the queue to drain before starting another.",
+      requestId,
+      queuedGenerationCount,
+      limit: MAX_QUEUED_JOBS_PER_USER,
+    }, { status: 429 })
+  }
+  if (cooldownRemainingMs > 0) {
+    return NextResponse.json({
+      error: "Generation cooldown active. Please retry shortly.",
+      requestId,
+      cooldownRemainingMs,
+    }, { status: 429 })
+  }
+
   try {
     await enforceAiUsageRateLimit(user.id)
   } catch (error) {
@@ -572,6 +630,18 @@ export async function POST(request: NextRequest) {
     usageLogId = usageLog.id
     jobId = job.id
     dbCreated = true
+    await OrchestrationRuntimeService.persistDurableState({
+      jobId,
+      orchestrationState: "queued",
+      currentPhase: "queued",
+      generationProgress: 0,
+      queueAttempt: 0,
+      traceId,
+      recoveryState: {
+        state: "queued",
+        recoveryEligible: false,
+      },
+    }).catch(() => null)
     log("info", "job_db_create", {
       stage: "db_job_creation",
       success: true,
@@ -671,6 +741,7 @@ export async function POST(request: NextRequest) {
       queueHealthy: Boolean(queueHealth && queueHealth.status === "healthy"),
       queueStatus: queueHealth?.status || "unknown",
       queueEnabled: queueHealth?.enabled ?? false,
+      queueSaturation: queueHealth?.saturation || null,
       workerHeartbeatAgeMs: queueHealth?.workerHeartbeat?.ageMs ?? null,
       usingFallback: shouldUseServerlessFallback,
       fallbackAllowed: allowServerlessGenerationFallback,
@@ -689,7 +760,18 @@ export async function POST(request: NextRequest) {
         vercelProductionRuntime: isVercelProductionRuntime,
         queueStatus: queueHealth?.status || "unknown",
         queueEnabled: queueHealth?.enabled ?? false,
+        queueSaturation: queueHealth?.saturation || null,
         workerHeartbeat: queueHealth?.workerHeartbeat || null,
+      })
+    }
+    if (!preferServerlessExecution && queueHealth?.saturation?.saturated && !allowServerlessGenerationFallback) {
+      throw new SystemSaturatedError({
+        saturationPct: queueHealth.saturation.saturationPct,
+        reasons: queueHealth.saturation.reasons,
+        backlogDepth: queueHealth.saturation.backlogDepth,
+        backlogAgeMs: queueHealth.saturation.backlogAgeMs,
+        averageWaitDurationMs: queueHealth.saturation.averageWaitDurationMs,
+        workerUtilizationPct: queueHealth.saturation.workerUtilizationPct,
       })
     }
     if (!preferServerlessExecution && queueUnavailable && !allowServerlessGenerationFallback) {
@@ -857,6 +939,21 @@ export async function POST(request: NextRequest) {
     })
 
     await GenerationJobService.attachQueueJob(job.id, queueJob.id || job.id)
+    await OrchestrationRuntimeService.persistDurableState({
+      jobId: job.id,
+      orchestrationState: "queued",
+      currentPhase: "queued",
+      generationProgress: 0,
+      queueAttempt: 0,
+      traceId,
+      recoveryState: {
+        state: "queued",
+        recoveryEligible: true,
+      },
+      lease: {
+        queueJobId: queueJob.id || job.id,
+      },
+    }).catch(() => null)
     const publicJob = await GenerationJobService.findById(job.id)
 
     currentStage = "response_return"
@@ -907,6 +1004,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to enqueue generation"
     const failureStage = currentStage === "queue_enqueue" ? "queue_enqueue" : "db_job_creation"
+    const saturationError = isSystemSaturatedError(error) ? error : null
+    const saturated = Boolean(saturationError)
     failedStage = failureStage
     if (failureStage === "queue_enqueue") {
       log("error", "queue_enqueue_failed", {
@@ -919,6 +1018,8 @@ export async function POST(request: NextRequest) {
         jobId,
         usageLogId,
         error: message,
+        code: saturated ? "SYSTEM_SATURATED" : undefined,
+        saturation: saturationError?.saturation,
         stack: error instanceof Error ? error.stack : undefined,
       })
     } else {
@@ -941,6 +1042,8 @@ export async function POST(request: NextRequest) {
       jobId,
       usageLogId,
       requestHash,
+      code: saturated ? "SYSTEM_SATURATED" : undefined,
+      saturation: saturationError?.saturation,
     })
     const duplicateJob =
       error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -1006,7 +1109,7 @@ export async function POST(request: NextRequest) {
 
     const summary = auditSummary(error)
 
-    const status = /insufficient balance/i.test(message) ? 402 : 503
+    const status = saturated ? 503 : /insufficient balance/i.test(message) ? 402 : 503
     // SECURITY: In production, hide internal stage/root cause from client
     const isProduction = process.env.NODE_ENV === "production"
     const developerError = developerGenerationFailureMessage({
@@ -1017,11 +1120,22 @@ export async function POST(request: NextRequest) {
     const safeMessage = isProduction
       ? developerDiagnosticsAllowed
         ? developerError
-        : (status === 402 ? "Insufficient balance" : "Service temporarily unavailable. Please try again.")
-      : message
+        : saturated
+          ? "Swift is temporarily saturated. Please try again shortly."
+          : (status === 402 ? "Insufficient balance" : "Service temporarily unavailable. Please try again.")
+      : saturated
+        ? "SYSTEM_SATURATED"
+        : message
     return NextResponse.json(
       {
         error: safeMessage,
+        ...(saturated
+          ? {
+              code: "SYSTEM_SATURATED",
+              retryAfterSeconds: saturationError?.retryAfterSeconds ?? 30,
+              saturation: saturationError?.saturation,
+            }
+          : {}),
         ...(developerDiagnosticsAllowed || !isProduction
           ? {
               stage: failureStage,

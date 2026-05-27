@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client"
 import { getProductionReadiness } from "@/lib/production/readiness"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { getRuntimeHealthDashboard } from "@/lib/observability/runtime-recovery"
+import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 
 const DEFAULT_WINDOW_HOURS = 24
 export const ALERT_THRESHOLDS = {
@@ -30,6 +31,7 @@ type MonitoringAlertSeverity = "warning" | "critical"
 type MonitoringAlertType =
   | "redis_down"
   | "queue_unhealthy"
+  | "queue_saturated"
   | "queue_failed_jobs"
   | "database_latency_high"
   | "api_latency_high"
@@ -61,6 +63,10 @@ type MonitoringAlertMetrics = {
   databaseLatencyMs: number
   apiLatencyMs: number
   queueLatencyMs: number
+  queueSaturationPct?: number
+  queueBacklogAgeMs?: number
+  queueAverageWaitDurationMs?: number
+  queueSaturationReasons?: string[]
   workerStalls?: number
   previewFailures?: number
   orchestrationDeadlocks?: number
@@ -174,6 +180,17 @@ export function buildMonitoringAlerts(metrics: MonitoringAlertMetrics): Monitori
       severity: "warning",
       message: `Generation queue status is ${metrics.queueStatus}.`,
       value: metrics.queueStatus,
+    })
+  }
+
+  if (countMetric(metrics.queueSaturationPct) >= 100) {
+    pushAlert(alerts, {
+      type: "queue_saturated",
+      key: "queue_saturated",
+      severity: countMetric(metrics.queueSaturationPct) >= 150 ? "critical" : "warning",
+      message: `Generation queue is saturated at ${countMetric(metrics.queueSaturationPct)}%.`,
+      value: countMetric(metrics.queueSaturationPct),
+      threshold: "100%",
     })
   }
 
@@ -324,6 +341,7 @@ export class AdminMonitoringService {
       generationJobsInWindow,
       recentGenerationJobs,
       queueHealth,
+      workerPressure,
       databaseLatencyMs,
       operationalFailures,
       runtimeHealth,
@@ -486,6 +504,21 @@ export class AdminMonitoringService {
           latencyMs: 0,
         },
       })),
+      OrchestrationRuntimeService.getWorkerPressure(hours).catch((error) => ({
+        activeWorkers: 0,
+        busyWorkers: 0,
+        workerUtilization: 0,
+        queueGrowthRate: 0,
+        averageDequeueLatency: 0,
+        recoveryFrequency: 0,
+        retryFrequency: 0,
+        scalingRecommendation: {
+          recommendedWorkerCount: 1,
+          saturationTrend: "unknown",
+          projectedBacklogMinutes: 0,
+        },
+        error: error instanceof Error ? error.message : String(error),
+      })),
       measureLatency(() => prisma.$queryRaw`SELECT 1`).catch(() => 0),
       prisma.orchestrationFailure.groupBy({
         by: ["eventType", "terminationReason"],
@@ -536,6 +569,18 @@ export class AdminMonitoringService {
     const workerHeartbeat = (queueHealth as { workerHeartbeat?: { ageMs?: number | null } | null }).workerHeartbeat
     const redis = (queueHealth as { redis?: { error?: string | null; status?: string | null } | null }).redis
     const deadLetterCounts = (queueHealth as { deadLetter?: { counts?: Record<string, number> | null } | null }).deadLetter?.counts || null
+    const queueSaturation = (queueHealth as {
+      saturation?: {
+        saturationPct?: number
+        backlogDepth?: number
+        backlogAgeMs?: number
+        averageWaitDurationMs?: number
+        workerUtilizationPct?: number
+        reasons?: string[]
+        saturated?: boolean
+        heavy?: boolean
+      }
+    }).saturation
     const queueLatencyMs = Number((queueHealth as { redis?: { latencyMs?: number } }).redis?.latencyMs || 0)
     const apiLatencyMs = Date.now() - overviewStartedAt
     const failureCount = (eventType: string, terminationReason?: string) =>
@@ -640,6 +685,10 @@ export class AdminMonitoringService {
       databaseLatencyMs,
       apiLatencyMs,
       queueLatencyMs,
+      queueSaturationPct: queueSaturation?.saturationPct || 0,
+      queueBacklogAgeMs: queueSaturation?.backlogAgeMs || 0,
+      queueAverageWaitDurationMs: queueSaturation?.averageWaitDurationMs || 0,
+      queueSaturationReasons: queueSaturation?.reasons || [],
       workerStalls: failureCount("worker_stalled"),
       previewFailures: failureCount("preview_failed"),
       orchestrationDeadlocks: operationalFailures
@@ -692,6 +741,17 @@ export class AdminMonitoringService {
         databaseLatencyMs,
         apiLatencyMs,
         queueLatencyMs,
+        queueSaturation: {
+          saturated: Boolean(queueSaturation?.saturated),
+          heavy: Boolean(queueSaturation?.heavy),
+          saturationPct: Math.round(Number(queueSaturation?.saturationPct || 0) * 10) / 10,
+          backlogDepth: Number(queueSaturation?.backlogDepth || 0),
+          backlogAgeMs: Number(queueSaturation?.backlogAgeMs || 0),
+          averageWaitDurationMs: Number(queueSaturation?.averageWaitDurationMs || 0),
+          workerUtilizationPct: Math.round(Number(queueSaturation?.workerUtilizationPct || 0) * 10) / 10,
+          reasons: queueSaturation?.reasons || [],
+        },
+        workerPressure,
         failures: operationalFailures,
         runtimeHealth,
       },

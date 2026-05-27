@@ -8,10 +8,17 @@ import { GenerationJobService, type GenerationJobStage, type GenerationJobStatus
 
 export type OrchestrationRecoveryState =
   | "queued"
+  | "assigned"
+  | "running"
   | "processing"
+  | "recovering"
   | "retrying"
   | "stalled"
   | "orphaned"
+  | "completed"
+  | "failed"
+  | "abandoned"
+  | "cancelled"
   | "dead_lettered"
   | "terminated"
 
@@ -37,6 +44,35 @@ const DEFAULT_LEASE_MS = 120_000
 const DEFAULT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const STALE_SSE_MINUTES = 10
 const ORPHANED_JOB_MINUTES = 5
+export const MAX_JOB_RECOVERY_ATTEMPTS = 3
+
+const RETRYABLE_RETRY_CLASSES = new Set<RetryClass>([
+  "provider_transient",
+  "sandbox_transient",
+  "worker_recovery",
+  "unknown",
+])
+
+const TERMINAL_RETRY_PATTERNS = [
+  /invariant fatal/i,
+  /security violation/i,
+  /forbidden execution/i,
+  /forbidden/i,
+  /invalid auth/i,
+  /unauthorized/i,
+  /invalid prisma/i,
+  /prisma.*schema/i,
+]
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`
+}
 
 function safeStringify(value: unknown) {
   if (value === undefined) return undefined
@@ -61,12 +97,95 @@ function millisBucket(value: number, buckets: number[]) {
 }
 
 function hashPayload(value: unknown) {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex")
+  return createHash("sha256").update(stableStringify(value)).digest("hex")
+}
+
+function boundedRecord(value: unknown, maxBytes = 24_000) {
+  const parsed = value && typeof value === "object" ? value as Record<string, unknown> : {}
+  const serialized = stableStringify(parsed)
+  if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return parsed
+  return {
+    compressed: true,
+    originalBytes: Buffer.byteLength(serialized, "utf8"),
+    hash: hashPayload(parsed),
+  }
+}
+
+function retryAllowed(retryClass: RetryClass, reason: string) {
+  if (retryClass === "terminal" || retryClass === "user_cancelled") return false
+  if (TERMINAL_RETRY_PATTERNS.some((pattern) => pattern.test(reason))) return false
+  return RETRYABLE_RETRY_CLASSES.has(retryClass)
+}
+
+function asGenerationJobStage(value?: string | null): GenerationJobStage | undefined {
+  const allowed = new Set<GenerationJobStage>([
+    "queued",
+    "planning",
+    "scaffolding",
+    "generating",
+    "parsing",
+    "validating",
+    "building",
+    "persisting",
+    "saving",
+    "compiling",
+    "repairing",
+    "completed",
+    "failed",
+    "cancelled",
+    "timeout",
+  ])
+  return value && allowed.has(value as GenerationJobStage) ? value as GenerationJobStage : undefined
+}
+
+export function buildDurableOrchestrationSnapshot(input: {
+  jobId: string
+  orchestrationState: OrchestrationRecoveryState | string
+  currentPhase?: string | null
+  phaseDurations?: Record<string, unknown> | null
+  replayHash?: string | null
+  repairIterations?: number | null
+  validationState?: Record<string, unknown> | null
+  generationProgress?: number | null
+  workerId?: string | null
+  queueAttempt?: number | null
+  recoveryState?: Record<string, unknown> | null
+  lease?: Record<string, unknown> | null
+}) {
+  const snapshot = {
+    jobId: input.jobId,
+    orchestrationState: input.orchestrationState,
+    currentPhase: input.currentPhase || null,
+    phaseDurations: boundedRecord(input.phaseDurations || {}),
+    replayHash: input.replayHash || null,
+    repairIterations: Math.max(0, Number(input.repairIterations || 0)),
+    validationState: boundedRecord(input.validationState || {}),
+    generationProgress: Math.max(0, Math.min(100, Math.round(Number(input.generationProgress || 0)))),
+    workerId: input.workerId || null,
+    queueAttempt: Math.max(0, Number(input.queueAttempt || 0)),
+    recoveryState: boundedRecord(input.recoveryState || {}),
+    lease: boundedRecord(input.lease || {}),
+  }
+  return {
+    ...snapshot,
+    orchestrationStateHash: hashPayload({
+      jobId: snapshot.jobId,
+      orchestrationState: snapshot.orchestrationState,
+      currentPhase: snapshot.currentPhase,
+      replayHash: snapshot.replayHash,
+      repairIterations: snapshot.repairIterations,
+      validationState: snapshot.validationState,
+      generationProgress: snapshot.generationProgress,
+      queueAttempt: snapshot.queueAttempt,
+      recoveryState: snapshot.recoveryState,
+    }),
+  }
 }
 
 export function classifyRetryReason(error: unknown, context?: { stage?: string | null; reason?: string | null }): RetryClass {
   const raw = `${context?.stage || ""} ${context?.reason || ""} ${error instanceof Error ? error.message : error ? String(error) : ""}`.toLowerCase()
   if (/cancel/.test(raw)) return "user_cancelled"
+  if (/invariant fatal|security violation|forbidden execution|invalid auth|invalid prisma|unauthorized/.test(raw)) return "terminal"
   if (/rate limit|429|timeout|network|fetch failed|econnreset|etimedout|temporar/.test(raw)) return "provider_transient"
   if (/sandbox|preview|runtime smoke|build timed out/.test(raw)) return "sandbox_transient"
   if (/validation|validator|malformed|artifact|repair/.test(raw)) return "validation_retryable"
@@ -81,6 +200,92 @@ export class OrchestrationRuntimeService {
       spanId: randomUUID(),
       parentSpanId: parentSpanId || null,
     }
+  }
+
+  static async persistDurableState(input: {
+    jobId: string
+    orchestrationState: OrchestrationRecoveryState | string
+    currentPhase?: string | null
+    phaseDurations?: Record<string, unknown> | null
+    replayHash?: string | null
+    repairIterations?: number | null
+    validationState?: Record<string, unknown> | null
+    generationProgress?: number | null
+    workerId?: string | null
+    queueAttempt?: number | null
+    recoveryState?: Record<string, unknown> | null
+    lease?: Record<string, unknown> | null
+    traceId?: string | null
+  }) {
+    const existing = await prisma.generationJob.findUnique({
+      where: { id: input.jobId },
+      select: {
+        diagnosticsJson: true,
+        metricsJson: true,
+        stage: true,
+        progress: true,
+      },
+    }).catch(() => null)
+    if (!existing) return null
+
+    const existingDiagnostics = parseJson(existing.diagnosticsJson) || {}
+    const existingMetrics = parseJson(existing.metricsJson) || {}
+    const existingDurable = existingDiagnostics && typeof existingDiagnostics === "object"
+      ? (existingDiagnostics as Record<string, unknown>).durableOrchestration as Record<string, unknown> | undefined
+      : undefined
+    const metricsRecord = existingMetrics && typeof existingMetrics === "object" ? existingMetrics as Record<string, unknown> : {}
+    const replayHash =
+      input.replayHash ||
+      (typeof metricsRecord.replayHash === "string" ? metricsRecord.replayHash : null) ||
+      (typeof existingDurable?.replayHash === "string" ? existingDurable.replayHash : null)
+    const phaseDurations =
+      input.phaseDurations ||
+      (metricsRecord.phaseDurations && typeof metricsRecord.phaseDurations === "object"
+        ? metricsRecord.phaseDurations as Record<string, unknown>
+        : null) ||
+      (existingDurable?.phaseDurations && typeof existingDurable.phaseDurations === "object"
+        ? existingDurable.phaseDurations as Record<string, unknown>
+        : null)
+    const snapshot = buildDurableOrchestrationSnapshot({
+      jobId: input.jobId,
+      orchestrationState: input.orchestrationState,
+      currentPhase: input.currentPhase || existing.stage,
+      phaseDurations,
+      replayHash,
+      repairIterations: input.repairIterations ?? Number(metricsRecord.repairIterations || 0),
+      validationState: input.validationState || (metricsRecord.validationState as Record<string, unknown> | undefined) || null,
+      generationProgress: input.generationProgress ?? existing.progress,
+      workerId: input.workerId || null,
+      queueAttempt: input.queueAttempt,
+      recoveryState: input.recoveryState || (existingDurable?.recoveryState as Record<string, unknown> | undefined) || null,
+      lease: input.lease || (existingDurable?.lease as Record<string, unknown> | undefined) || null,
+    })
+    const diagnostics = {
+      ...(existingDiagnostics && typeof existingDiagnostics === "object" ? existingDiagnostics as Record<string, unknown> : {}),
+      durableOrchestration: snapshot,
+      progressStreaming: {
+        ready: true,
+        transports: ["polling", "sse"],
+        eventStreamCompatible: true,
+      },
+    }
+
+    const stage = asGenerationJobStage(input.currentPhase)
+    await prisma.generationJob.updateMany({
+      where: { id: input.jobId, status: { notIn: ["completed", "failed", "cancelled"] } },
+      data: {
+        orchestrationState: input.orchestrationState,
+        ...(stage ? { stage } : {}),
+        ...(typeof input.generationProgress === "number"
+          ? { progress: Math.max(0, Math.min(100, Math.round(input.generationProgress))) }
+          : {}),
+        ...(input.workerId ? { workerId: input.workerId } : {}),
+        ...(input.traceId ? { traceId: input.traceId } : {}),
+        diagnosticsJson: safeStringify(diagnostics),
+        version: { increment: 1 },
+      },
+    })
+    return snapshot
   }
 
   static async appendEvent(input: {
@@ -148,9 +353,15 @@ export class OrchestrationRuntimeService {
     traceId?: string | null
     leaseMs?: number
     queueJobId?: string | number | null
+    queueAttempt?: number | null
   }) {
     const now = new Date()
     const leaseExpiresAt = new Date(now.getTime() + Math.max(10_000, input.leaseMs || DEFAULT_LEASE_MS))
+    const leaseId = `lease:${hashPayload({
+      jobId: input.jobId,
+      workerId: input.workerId,
+      queueJobId: input.queueJobId || input.jobId,
+    }).slice(0, 24)}`
     const result = await prisma.generationJob.updateMany({
       where: {
         id: input.jobId,
@@ -162,7 +373,7 @@ export class OrchestrationRuntimeService {
         ],
       },
       data: {
-        orchestrationState: "processing",
+        orchestrationState: "assigned",
         status: "running",
         workerId: input.workerId,
         traceId: input.traceId || undefined,
@@ -175,6 +386,27 @@ export class OrchestrationRuntimeService {
     })
 
     const acquired = result.count === 1
+    if (acquired) {
+      await this.persistDurableState({
+        jobId: input.jobId,
+        orchestrationState: "assigned",
+        currentPhase: "queued",
+        generationProgress: 1,
+        workerId: input.workerId,
+        queueAttempt: input.queueAttempt || 0,
+        traceId: input.traceId || null,
+        recoveryState: {
+          state: "assigned",
+          recoveryEligible: false,
+        },
+        lease: {
+          workerId: input.workerId,
+          leaseId,
+          leaseExpiration: leaseExpiresAt.toISOString(),
+          queueJobId: input.queueJobId || null,
+        },
+      }).catch(() => null)
+    }
     await this.appendEvent({
       jobId: input.jobId,
       type: acquired ? "lease_acquired" : "lease_denied",
@@ -182,7 +414,7 @@ export class OrchestrationRuntimeService {
       status: acquired ? "running" : "retrying",
       message: acquired ? "Worker lease acquired" : "Worker lease denied because another owner is active",
       trace: { traceId: input.traceId, workerId: input.workerId },
-      metadata: { leaseExpiresAt: leaseExpiresAt.toISOString(), queueJobId: input.queueJobId || null },
+      metadata: { leaseId, leaseExpiresAt: leaseExpiresAt.toISOString(), queueJobId: input.queueJobId || null },
     }).catch(() => null)
     return acquired
   }
@@ -210,6 +442,24 @@ export class OrchestrationRuntimeService {
         version: { increment: 1 },
       },
     })
+    if (updated.count === 1) {
+      await this.persistDurableState({
+        jobId: input.jobId,
+        orchestrationState: "running",
+        currentPhase: input.currentStage || "generating",
+        workerId: input.workerId,
+        recoveryState: {
+          state: "running",
+          recoveryEligible: false,
+          lastSuccessfulTransition: input.lastSuccessfulTransition || null,
+        },
+        lease: {
+          workerId: input.workerId,
+          leaseId: `lease:${hashPayload({ jobId: input.jobId, workerId: input.workerId }).slice(0, 24)}`,
+          leaseExpiration: leaseExpiresAt.toISOString(),
+        },
+      }).catch(() => null)
+    }
     return updated.count === 1
   }
 
@@ -429,6 +679,7 @@ export class OrchestrationRuntimeService {
 
   static async recoverOrphanedJobs(limit = 25) {
     const now = new Date()
+    const recoveryStartedAt = Date.now()
     const orphanCutoff = subMinutes(now, ORPHANED_JOB_MINUTES)
     const expired = await prisma.generationJob.findMany({
       where: {
@@ -442,17 +693,26 @@ export class OrchestrationRuntimeService {
       orderBy: { updatedAt: "asc" },
     })
 
+    let recovered = 0
+    let abandoned = 0
+    let retryContained = 0
     for (const job of expired) {
-      const retryClass = classifyRetryReason(null, { stage: job.stage, reason: "lease_expired" })
+      const recoveryReason = job.leaseExpiresAt && job.leaseExpiresAt < now ? "lease_expired" : "heartbeat_stale"
+      const retryClass = classifyRetryReason(null, { stage: job.stage, reason: recoveryReason })
       const nextRecoveryCount = job.recoveryCount + 1
-      const shouldDeadLetter = nextRecoveryCount > Math.max(1, job.maxRetries)
+      const canRetry = retryAllowed(retryClass, [recoveryReason, job.retryReason || "", job.error || ""].join(" "))
+      const shouldDeadLetter = !canRetry || nextRecoveryCount > MAX_JOB_RECOVERY_ATTEMPTS
+      const recoveryDurationMs = Date.now() - recoveryStartedAt
+      if (shouldDeadLetter) abandoned += 1
+      else recovered += 1
+      if (!canRetry) retryContained += 1
       await prisma.generationJob.update({
         where: { id: job.id },
         data: shouldDeadLetter
           ? {
               status: "dead_lettered",
-              orchestrationState: "dead_lettered",
-              retryReason: "lease_expired",
+              orchestrationState: "abandoned",
+              retryReason: recoveryReason,
               retryClass,
               recoveryCount: nextRecoveryCount,
               deadLetteredAt: now,
@@ -462,32 +722,128 @@ export class OrchestrationRuntimeService {
             }
           : {
               status: "retrying",
-              orchestrationState: "orphaned",
-              retryReason: "lease_expired",
+              orchestrationState: "recovering",
+              retryReason: recoveryReason,
               retryClass,
               recoveryCount: nextRecoveryCount,
               leaseOwner: null,
               leaseExpiresAt: null,
             },
       })
+      await this.persistDurableState({
+        jobId: job.id,
+        orchestrationState: shouldDeadLetter ? "abandoned" : "recovering",
+        currentPhase: job.stage,
+        generationProgress: job.progress,
+        workerId: job.workerId,
+        queueAttempt: nextRecoveryCount,
+        recoveryState: {
+          retryAttempt: nextRecoveryCount,
+          recoveryReason,
+          restoredCheckpoint: Boolean(job.metricsJson || job.contextJson || job.planJson),
+          recoveryDurationMs,
+          recoveryEligible: !shouldDeadLetter,
+          retryContained: !canRetry,
+          previousLeaseOwner: job.leaseOwner,
+          previousLeaseExpiresAt: job.leaseExpiresAt?.toISOString() || null,
+        },
+      }).catch(() => null)
       await this.appendEvent({
         jobId: job.id,
-        type: shouldDeadLetter ? "job.dead_lettered" : "job.orphaned",
+        type: shouldDeadLetter ? "job.abandoned" : "job.recovering",
         stage: shouldDeadLetter ? "failed" : "queued",
         status: shouldDeadLetter ? "dead_lettered" : "retrying",
-        message: shouldDeadLetter ? "Expired lease exceeded recovery limit" : "Expired lease marked job orphaned for safe retry",
+        message: shouldDeadLetter
+          ? "Recovery boundary reached; job abandoned without unsafe retry"
+          : "Expired lease marked job recoverable from durable checkpoint",
         trace: { traceId: job.traceId, workerId: job.workerId },
         retryCount: nextRecoveryCount,
-        terminationReason: shouldDeadLetter ? "lease_expired" : null,
+        terminationReason: shouldDeadLetter ? recoveryReason : null,
         metadata: {
           previousLeaseOwner: job.leaseOwner,
           previousLeaseExpiresAt: job.leaseExpiresAt?.toISOString() || null,
           retryClass,
+          retryAttempt: nextRecoveryCount,
+          recoveryReason,
+          restoredCheckpoint: Boolean(job.metricsJson || job.contextJson || job.planJson),
+          recoveryDurationMs,
+          maxJobRecoveryAttempts: MAX_JOB_RECOVERY_ATTEMPTS,
         },
       }).catch(() => null)
     }
 
-    return { inspected: expired.length, recovered: expired.filter((job) => job.recoveryCount + 1 <= Math.max(1, job.maxRetries)).length }
+    return { inspected: expired.length, recovered, abandoned, retryContained, maxJobRecoveryAttempts: MAX_JOB_RECOVERY_ATTEMPTS }
+  }
+
+  static async reconcileQueueState(limit = 50) {
+    const now = new Date()
+    const staleCutoff = subMinutes(now, ORPHANED_JOB_MINUTES)
+    const [stuckJobs, duplicateJobs, zombieWorkers, orphanLeases, abandonedCheckpoints] = await Promise.all([
+      prisma.generationJob.findMany({
+        where: {
+          status: { in: ["queued", "running", "processing", "retrying", "stalled", "orphaned"] },
+          updatedAt: { lt: staleCutoff },
+        },
+        take: limit,
+        orderBy: { updatedAt: "asc" },
+      }),
+      prisma.generationJob.groupBy({
+        by: ["idempotencyKey"],
+        where: {
+          idempotencyKey: { not: null },
+          status: { in: ["queued", "running", "processing", "retrying"] },
+        },
+        _count: { _all: true },
+        having: { idempotencyKey: { _count: { gt: 1 } } },
+      }).catch(() => []),
+      prisma.workerHeartbeat.findMany({
+        where: { heartbeatAt: { lt: staleCutoff } },
+        take: limit,
+        orderBy: { heartbeatAt: "asc" },
+      }),
+      prisma.generationJob.findMany({
+        where: {
+          leaseOwner: { not: null },
+          leaseExpiresAt: { lt: now },
+          status: { notIn: ["completed", "failed", "cancelled"] },
+        },
+        take: limit,
+      }),
+      prisma.generationJob.count({
+        where: {
+          orchestrationState: { in: ["recovering", "orphaned", "stalled"] },
+          updatedAt: { lt: staleCutoff },
+        },
+      }),
+    ])
+
+    const recovery = await this.recoverOrphanedJobs(Math.min(limit, Math.max(stuckJobs.length, orphanLeases.length, 1)))
+    for (const worker of zombieWorkers) {
+      if (!worker.currentJobId) continue
+      await this.persistFailure({
+        jobId: worker.currentJobId,
+        eventType: "worker_unhealthy",
+        stage: worker.currentStage || "unknown",
+        severity: "warning",
+        reason: "Worker heartbeat is stale and eligible for recovery reconciliation",
+        trace: { traceId: worker.traceId, workerId: worker.workerId },
+        metadata: {
+          workerId: worker.workerId,
+          heartbeatAt: worker.heartbeatAt.toISOString(),
+          currentJobId: worker.currentJobId,
+        },
+      }).catch(() => null)
+    }
+
+    return {
+      checkedAt: now.toISOString(),
+      stuckJobs: stuckJobs.length,
+      duplicateJobs: duplicateJobs.reduce((sum, item) => sum + item._count._all, 0),
+      zombieWorkers: zombieWorkers.length,
+      orphanLeases: orphanLeases.length,
+      abandonedCheckpoints,
+      cleanup: recovery,
+    }
   }
 
   static async cleanupExpiredLifecycle() {
@@ -567,6 +923,138 @@ export class OrchestrationRuntimeService {
         ...failure,
         metadata: parseJson(failure.metadataJson),
       })),
+    }
+  }
+
+  static async getStatus(jobId: string) {
+    const job = await prisma.generationJob.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        status: true,
+        orchestrationState: true,
+        stage: true,
+        progress: true,
+        queueJobId: true,
+        createdAt: true,
+        startedAt: true,
+        updatedAt: true,
+        diagnosticsJson: true,
+        metricsJson: true,
+        retryReason: true,
+        retryClass: true,
+        recoveryCount: true,
+        workerId: true,
+        leaseOwner: true,
+        leaseExpiresAt: true,
+        lastHeartbeatAt: true,
+      },
+    })
+    if (!job) return null
+
+    const diagnostics = parseJson(job.diagnosticsJson) as Record<string, unknown> | null
+    const metrics = parseJson(job.metricsJson) as Record<string, unknown> | null
+    const durable = diagnostics?.durableOrchestration && typeof diagnostics.durableOrchestration === "object"
+      ? diagnostics.durableOrchestration as Record<string, unknown>
+      : null
+    const replayHash =
+      typeof durable?.replayHash === "string"
+        ? durable.replayHash
+        : typeof metrics?.replayHash === "string"
+          ? metrics.replayHash
+          : null
+    const recoveryState = durable?.recoveryState && typeof durable.recoveryState === "object"
+      ? durable.recoveryState
+      : {
+          retryAttempt: job.recoveryCount,
+          recoveryReason: job.retryReason,
+          retryClass: job.retryClass,
+        }
+    const queuePosition = job.status === "queued" ? 0 : null
+    const estimatedWaitMs = job.status === "queued"
+      ? Math.max(0, Date.now() - job.createdAt.getTime())
+      : null
+
+    return {
+      status: job.status,
+      currentPhase: job.stage,
+      progressPct: job.progress,
+      queuePosition,
+      estimatedWaitMs,
+      replayHash,
+      recoveryState,
+      orchestrationState: job.orchestrationState,
+      worker: {
+        workerId: job.workerId,
+        leaseOwner: job.leaseOwner,
+        leaseExpiration: job.leaseExpiresAt?.toISOString() || null,
+        heartbeatAt: job.lastHeartbeatAt?.toISOString() || null,
+        heartbeatAgeMs: job.lastHeartbeatAt ? Date.now() - job.lastHeartbeatAt.getTime() : null,
+      },
+      durability: {
+        durableStatePresent: Boolean(durable),
+        orchestrationStateHash: typeof durable?.orchestrationStateHash === "string" ? durable.orchestrationStateHash : null,
+        progressStreamingReady: Boolean(diagnostics?.progressStreaming),
+      },
+      timestamps: {
+        createdAt: job.createdAt.toISOString(),
+        startedAt: job.startedAt?.toISOString() || null,
+        updatedAt: job.updatedAt.toISOString(),
+      },
+    }
+  }
+
+  static async getWorkerPressure(windowHours = 1) {
+    const since = subHours(new Date(), Math.max(1, Math.min(24, Math.round(windowHours))))
+    const [workers, recoveryEvents, retryEvents, dequeuedEvents] = await Promise.all([
+      prisma.workerHeartbeat.findMany({
+        where: { heartbeatAt: { gte: since } },
+        select: { workerId: true, currentJobId: true, heartbeatAt: true },
+      }),
+      prisma.orchestrationFailure.count({
+        where: {
+          createdAt: { gte: since },
+          eventType: { in: ["worker_stalled", "worker_unhealthy", "worker_timeout"] },
+        },
+      }),
+      prisma.generationJob.count({
+        where: {
+          updatedAt: { gte: since },
+          status: { in: ["retrying", "dead_lettered"] },
+        },
+      }),
+      prisma.generationEvent.findMany({
+        where: { createdAt: { gte: since }, type: "lease_acquired" },
+        select: { createdAt: true, metadataJson: true },
+      }),
+    ])
+    const activeWorkers = new Set(workers.map((worker) => worker.workerId)).size
+    const busyWorkers = new Set(workers.filter((worker) => worker.currentJobId).map((worker) => worker.workerId)).size
+    const workerUtilization = activeWorkers === 0 ? 0 : Math.round((busyWorkers / activeWorkers) * 1000) / 10
+    const averageDequeueLatency = dequeuedEvents.length === 0 ? 0 : Math.round(
+      dequeuedEvents
+        .map((event) => {
+          const metadata = parseJson(event.metadataJson) as Record<string, unknown> | null
+          const queuedAt = typeof metadata?.queuedAt === "string" ? Date.parse(metadata.queuedAt) : 0
+          return queuedAt > 0 ? Math.max(0, event.createdAt.getTime() - queuedAt) : 0
+        })
+        .reduce((sum, value) => sum + value, 0) / dequeuedEvents.length
+    )
+
+    const recommendedWorkerCount = Math.max(1, Math.ceil(Math.max(busyWorkers, 1) * Math.max(1, workerUtilization / 75)))
+    return {
+      activeWorkers,
+      busyWorkers,
+      workerUtilization,
+      queueGrowthRate: 0,
+      averageDequeueLatency,
+      recoveryFrequency: recoveryEvents,
+      retryFrequency: retryEvents,
+      scalingRecommendation: {
+        recommendedWorkerCount,
+        saturationTrend: workerUtilization >= 90 ? "rising" : workerUtilization >= 70 ? "watch" : "stable",
+        projectedBacklogMinutes: averageDequeueLatency > 0 ? Math.round(averageDequeueLatency / 60_000) : 0,
+      },
     }
   }
 

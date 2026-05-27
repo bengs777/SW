@@ -3,6 +3,7 @@ import { aiRateLimitConfig } from "@/lib/security/rate-limit"
 import { getAuthRuntimeDiagnostic } from "@/lib/auth/runtime"
 import { getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
 import { getDatabaseSchemaHealth, type DatabaseSchemaHealth } from "@/lib/db/schema-health"
+import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 
 type ReadinessCheck = {
   key: string
@@ -158,6 +159,7 @@ export async function getDeploymentRuntimeReadiness() {
   const base = getProductionReadiness()
   let dbConnectivity: { ok: boolean; latencyMs?: number; error?: string } = { ok: false }
   let migration: DatabaseSchemaHealth | { compatible: false; error: string } | null = null
+  let queueSaturation: Awaited<ReturnType<typeof getGenerationQueueHealth>>["saturation"] | null = null
 
   if (base.database.ok) {
     try {
@@ -175,7 +177,15 @@ export async function getDeploymentRuntimeReadiness() {
     }
   }
 
+  try {
+    const queueHealth = await getGenerationQueueHealth()
+    queueSaturation = queueHealth.saturation
+  } catch {
+    queueSaturation = null
+  }
+
   const migrationReady = migration ? migration.compatible : false
+  const saturationDegraded = Boolean(queueSaturation?.heavy)
   const runtimeBlocking = [
     ...base.blockingFailures,
     ...(dbConnectivity.ok ? [] : ["DB_CONNECTIVITY"]),
@@ -185,10 +195,15 @@ export async function getDeploymentRuntimeReadiness() {
   return {
     ...base,
     ok: runtimeBlocking.length === 0,
-    status: runtimeBlocking.length > 0 ? "blocked" : base.status,
+    status: runtimeBlocking.length > 0 ? "blocked" : saturationDegraded ? "degraded" : base.status,
     blockingFailures: runtimeBlocking,
+    degradedServices: Array.from(new Set([
+      ...base.degradedServices,
+      ...(saturationDegraded ? ["QUEUE_SATURATION"] : []),
+    ])),
     dbConnectivity,
     migration,
+    queueSaturation,
     migrationMismatch: migration && !migration.compatible ? migration : null,
   }
 }

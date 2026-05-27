@@ -54,7 +54,12 @@ async function loadProjectMemoryJson(projectId: string) {
   return project?.memoryJson || null
 }
 
-export async function processGenerationPayload(payload: GenerationQueuePayload, queueJobId?: string | number) {
+export async function processGenerationPayload(
+  payload: GenerationQueuePayload,
+  queueJobId?: string | number,
+  workerId?: string | null,
+  queueAttempt = 0
+) {
   const abortController = new AbortController()
   const unregisterAbort = registerGenerationAbortController(payload.jobId, abortController)
   const startedAt = Date.now()
@@ -68,7 +73,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   const traceContext = {
     taskId: payload.jobId,
     sessionId: payload.userId,
-    workerId: null as string | null,
+    workerId: workerId || null,
     agentType: "generation-worker",
     correlationId: correlation.correlationId,
     traceId: correlation.traceId,
@@ -86,6 +91,7 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       traceId: correlation.traceId,
       queueJobId: resolvedQueueJobId,
       leaseMs: GENERATION_JOB_TIMEOUT_MS,
+      queueAttempt,
     })
     if (!leaseAcquired) {
       log("warn", "duplicate_job_execution_prevented", {
@@ -130,6 +136,20 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
       executionChainId: correlation.executionChainId,
     })
     lastSuccessfulTransition = "orchestrator_started"
+    await OrchestrationRuntimeService.persistDurableState({
+      jobId: payload.jobId,
+      orchestrationState: "running",
+      currentPhase: "generating",
+      generationProgress: 5,
+      workerId: String(traceContext.workerId || resolvedQueueJobId),
+      queueAttempt,
+      traceId: correlation.traceId,
+      recoveryState: {
+        state: "running",
+        recoveryEligible: false,
+        lastSuccessfulTransition,
+      },
+    }).catch(() => null)
 
     execution = executeGenerationJob(
       {
@@ -353,14 +373,14 @@ export async function processGenerationPayload(payload: GenerationQueuePayload, 
   }
 }
 
-export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>) {
-  return processGenerationPayload(job.data, job.id)
+export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>, workerId?: string | null) {
+  return processGenerationPayload(job.data, job.id, workerId, job.attemptsMade)
 }
 
 export function startGenerationWorker() {
   const bootStartedAt = Date.now()
-  const worker = createGenerationWorker(processGenerationQueueJob)
   const workerId = `generation:${process.env.VERCEL_REGION || "local"}:${process.pid}`
+  const worker = createGenerationWorker((job) => processGenerationQueueJob(job, workerId))
   const activeJobs = new Map<string, { stage: string; lastSuccessfulTransition: string; startedAt: number }>()
 
   log("info", "generation_worker_booted", {

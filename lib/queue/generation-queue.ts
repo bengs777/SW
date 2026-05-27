@@ -28,11 +28,22 @@ export type GenerationQueuePayload = {
   executionChainId?: string
   previewContext?: unknown
   attachments?: unknown[]
+  priority?: GenerationQueuePriority
 }
+
+export type GenerationQueuePriority = "normal" | "retry" | "recovery" | "admin"
 
 const QUEUE_NAME = "swift-generation-v2"
 const DEAD_LETTER_QUEUE_NAME = "swift-generation-dead-letter-v1"
 const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
+const QUEUE_SATURATION_LIMITS = {
+  maxBacklogDepth: Math.max(1, Number(process.env.SWIFT_QUEUE_MAX_BACKLOG_DEPTH || 30)),
+  maxBacklogAgeMs: Math.max(5_000, Number(process.env.SWIFT_QUEUE_MAX_BACKLOG_AGE_MS || 120_000)),
+  maxAverageWaitMs: Math.max(5_000, Number(process.env.SWIFT_QUEUE_MAX_AVERAGE_WAIT_MS || 60_000)),
+  maxWorkerUtilizationPct: Math.max(1, Math.min(100, Number(process.env.SWIFT_QUEUE_MAX_WORKER_UTILIZATION_PCT || 90))),
+  heavySaturationPct: Math.max(100, Number(process.env.SWIFT_QUEUE_HEAVY_SATURATION_PCT || 150)),
+  waitSampleSize: Math.max(1, Math.min(200, Number(process.env.SWIFT_QUEUE_WAIT_SAMPLE_SIZE || 50))),
+}
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
   backoff: {
@@ -41,6 +52,17 @@ const DEFAULT_JOB_OPTIONS: JobsOptions = {
   },
   removeOnComplete: 200,
   removeOnFail: 500,
+}
+export const GENERATION_QUEUE_PRIORITY: Record<GenerationQueuePriority, number> = {
+  admin: 1,
+  recovery: 2,
+  retry: 3,
+  normal: 4,
+}
+
+export function resolveGenerationQueuePriority(payload: Pick<GenerationQueuePayload, "priority">, options?: JobsOptions) {
+  if (typeof options?.priority === "number") return options.priority
+  return GENERATION_QUEUE_PRIORITY[payload.priority || "normal"]
 }
 
 export type GenerationDeadLetterPayload = {
@@ -64,6 +86,68 @@ let redisConnection: IORedis | null = null
 let generationQueue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobName> | null = null
 let generationDeadLetterQueue: Queue<GenerationDeadLetterPayload, unknown, "generation.dead_letter"> | null = null
 let generationQueueEvents: QueueEvents | null = null
+
+function pct(value: number, limit: number) {
+  if (!Number.isFinite(value) || !Number.isFinite(limit) || limit <= 0) return 0
+  return Math.round((value / limit) * 1000) / 10
+}
+
+async function getQueueSaturation(input: {
+  queue: Queue<GenerationQueuePayload, unknown, GenerationQueueJobName>
+  counts: Record<string, number>
+  workerConcurrency: number
+}) {
+  const waiting = Number(input.counts.waiting || 0)
+  const delayed = Number(input.counts.delayed || 0)
+  const active = Number(input.counts.active || 0)
+  const backlogDepth = waiting + delayed
+  const workerUtilizationPct = pct(active, input.workerConcurrency)
+  const sampleSize = QUEUE_SATURATION_LIMITS.waitSampleSize
+  const sampledJobs = backlogDepth > 0
+    ? await input.queue.getJobs(["waiting", "delayed"], 0, sampleSize - 1, true).catch(() => [])
+    : []
+  const now = Date.now()
+  const waitDurations = sampledJobs
+    .map((job) => Math.max(0, now - Number(job.timestamp || now)))
+    .filter((duration) => Number.isFinite(duration))
+  const backlogAgeMs = waitDurations.length > 0 ? Math.max(...waitDurations) : 0
+  const averageWaitDurationMs = waitDurations.length > 0
+    ? Math.round(waitDurations.reduce((sum, duration) => sum + duration, 0) / waitDurations.length)
+    : 0
+  const pressure = {
+    backlogDepthPct: pct(backlogDepth, QUEUE_SATURATION_LIMITS.maxBacklogDepth),
+    backlogAgePct: pct(backlogAgeMs, QUEUE_SATURATION_LIMITS.maxBacklogAgeMs),
+    averageWaitPct: pct(averageWaitDurationMs, QUEUE_SATURATION_LIMITS.maxAverageWaitMs),
+    workerUtilizationPct,
+  }
+  const saturationPct = Math.max(
+    pressure.backlogDepthPct,
+    pressure.backlogAgePct,
+    pressure.averageWaitPct,
+    pressure.workerUtilizationPct
+  )
+  const reasons = [
+    backlogDepth > QUEUE_SATURATION_LIMITS.maxBacklogDepth ? "backlog_depth" : "",
+    backlogAgeMs > QUEUE_SATURATION_LIMITS.maxBacklogAgeMs ? "backlog_age" : "",
+    averageWaitDurationMs > QUEUE_SATURATION_LIMITS.maxAverageWaitMs ? "average_wait" : "",
+    workerUtilizationPct >= QUEUE_SATURATION_LIMITS.maxWorkerUtilizationPct ? "worker_utilization" : "",
+  ].filter(Boolean)
+
+  return {
+    saturated: reasons.length > 0,
+    heavy: saturationPct >= QUEUE_SATURATION_LIMITS.heavySaturationPct || reasons.length >= 2,
+    saturationPct,
+    reasons,
+    backlogDepth,
+    backlogAgeMs,
+    averageWaitDurationMs,
+    workerUtilizationPct,
+    activeJobs: active,
+    sampledJobs: waitDurations.length,
+    limits: QUEUE_SATURATION_LIMITS,
+    pressure,
+  }
+}
 
 async function getRedisMemoryHealth(connection: IORedis | null) {
   if (!connection) {
@@ -284,6 +368,7 @@ export async function enqueueGenerationTask(
       ...DEFAULT_JOB_OPTIONS,
       ...options,
       jobId: dedupeJobId,
+      priority: resolveGenerationQueuePriority(payload, options),
     })
     const latencyMs = Date.now() - startedAt
     recordRedisLatency(latencyMs, { operation: "enqueueGenerationTask", jobId: payload.jobId })
@@ -485,6 +570,25 @@ export async function getGenerationQueueHealth() {
       enabled: false,
       status: "disabled",
       counts: null,
+      saturation: {
+        saturated: false,
+        heavy: false,
+        saturationPct: 0,
+        reasons: ["queue_disabled"],
+        backlogDepth: 0,
+        backlogAgeMs: 0,
+        averageWaitDurationMs: 0,
+        workerUtilizationPct: 0,
+        activeJobs: 0,
+        sampledJobs: 0,
+        limits: QUEUE_SATURATION_LIMITS,
+        pressure: {
+          backlogDepthPct: 0,
+          backlogAgePct: 0,
+          averageWaitPct: 0,
+          workerUtilizationPct: 0,
+        },
+      },
       deadLetter: null,
       workerHeartbeat: null,
       redis: {
@@ -499,7 +603,8 @@ export async function getGenerationQueueHealth() {
   }
 
   const counts = await queue.getJobCounts("waiting", "active", "delayed", "failed", "completed", "paused")
-  recordWorkerUtilization(Number(counts.active || 0), Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2), {
+  const workerConcurrency = Math.max(1, Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2))
+  recordWorkerUtilization(Number(counts.active || 0), workerConcurrency, {
     queueName: QUEUE_NAME,
   })
   const rawHeartbeat = connection ? await connection.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null) : null
@@ -528,12 +633,15 @@ export async function getGenerationQueueHealth() {
     : null
   const heartbeatAgeMs = workerHeartbeat ? Date.now() - Date.parse(workerHeartbeat.at) : null
   const memory = await getRedisMemoryHealth(connection)
+  const saturation = await getQueueSaturation({ queue, counts, workerConcurrency })
 
   return {
     enabled: true,
     status:
       redisError
         ? "degraded"
+        : saturation.heavy
+          ? "degraded"
         : !memory.evictionPolicyOk
           ? "degraded"
         : heartbeatAgeMs === null
@@ -542,6 +650,7 @@ export async function getGenerationQueueHealth() {
             ? "stale"
             : "healthy",
     counts,
+    saturation,
     deadLetter: {
       queueName: DEAD_LETTER_QUEUE_NAME,
       counts: deadLetterCounts,

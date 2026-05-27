@@ -10151,7 +10151,7 @@ export async function executeGenerationJob(
     })
     metrics.generationTiming = timingSummary
     metrics.generationSnapshot = snapshotResult
-    metrics.orchestrationPersistenceState = {
+    const orchestrationPersistenceState = {
       jobId: input.jobId,
       currentPhase: "persisting",
       phaseDurations: Object.fromEntries(
@@ -10168,6 +10168,25 @@ export async function executeGenerationJob(
       },
       generationProgress: 94,
     }
+    metrics.orchestrationPersistenceState = orchestrationPersistenceState
+    await OrchestrationRuntimeService.persistDurableState({
+      jobId: input.jobId,
+      orchestrationState: "running",
+      currentPhase: "persisting",
+      phaseDurations: orchestrationPersistenceState.phaseDurations,
+      replayHash: snapshotResult.replayHash,
+      repairIterations: Array.isArray(orchestrationPersistenceState.repairIterations)
+        ? orchestrationPersistenceState.repairIterations.length
+        : 0,
+      validationState: orchestrationPersistenceState.validationState,
+      generationProgress: orchestrationPersistenceState.generationProgress,
+      traceId: correlation.traceId,
+      recoveryState: {
+        state: "checkpoint_persisted",
+        restoredCheckpoint: true,
+        recoveryEligible: true,
+      },
+    }).catch(() => null)
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
       type: "generation.snapshot.persisted",
