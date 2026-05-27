@@ -10,6 +10,8 @@
     "worker:generation": "node scripts/run-ts-script.js workers/index.ts --type=generation",
     "worker:health": "node scripts/worker-health-smoke.js",
     "metrics:generation": "node scripts/generation-metrics-report.js",
+    "reports:audit": "node scripts/run-ts-script.js scripts/report-storage-audit.ts",
+    "reports:migrate:blob": "node scripts/run-ts-script.js scripts/migrate-reports-to-supabase.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "runtime-smoke": "node scripts/runtime-smoke.js",

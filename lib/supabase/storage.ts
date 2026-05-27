@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
+import { randomUUID } from "node:crypto"
 import { env } from "@/lib/env"
 
 let storageAdminClient: SupabaseClient | null = null
@@ -80,11 +81,12 @@ export function detectAttachmentKind(mimeType: string, fileName: string) {
 
 export function buildProjectAssetStoragePath(projectId: string, userId: string, fileName: string) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+  const nonce = randomUUID().slice(0, 12)
   const safeProjectId = normalizeStorageSegment(projectId)
   const safeUserId = normalizeStorageSegment(userId)
   const safeFileName = normalizeStorageSegment(fileName)
 
-  return `projects/${safeProjectId}/users/${safeUserId}/${stamp}-${safeFileName}`
+  return `projects/${safeProjectId}/users/${safeUserId}/${stamp}-${nonce}-${safeFileName}`
 }
 
 export function createSupabaseStorageAdminClient() {
@@ -119,6 +121,25 @@ export async function uploadProjectAssetToStorage(input: {
 
   if (error) {
     throw new Error(`Supabase upload failed for ${input.file.name || input.storagePath}: ${error.message}`)
+  }
+}
+
+export async function uploadBufferToStorage(input: {
+  bucket: string
+  storagePath: string
+  buffer: Buffer
+  contentType?: string
+  cacheControl?: string
+}) {
+  const client = createSupabaseStorageAdminClient()
+  const { error } = await client.storage.from(input.bucket).upload(input.storagePath, input.buffer, {
+    contentType: input.contentType || "application/octet-stream",
+    cacheControl: input.cacheControl || "3600",
+    upsert: false,
+  })
+
+  if (error) {
+    throw new Error(`Supabase upload failed for ${input.storagePath}: ${error.message}`)
   }
 }
 

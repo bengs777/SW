@@ -1,6 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { getReportStoragePath } from "@/lib/runtime/report-storage"
+import {
+  ensureReportDirectory,
+  writeJsonReport,
+  writeTextReport,
+} from "@/lib/runtime/report-storage"
 import type { GeneratedFile } from "@/lib/types"
 import type { GenerationJobStage } from "@/lib/services/generation-job.service"
 
@@ -182,13 +185,11 @@ export async function persistInvalidArtifactReport(input: {
   rejectedPaths?: string[]
   schemaMismatch?: string
 }) {
-  const root = path.join(getReportStoragePath(), "failed-generations")
-  const dir = path.join(root, safeSegment(input.jobId))
-  await mkdir(dir, { recursive: true })
+  const dir = await ensureReportDirectory("failed-generations", input.jobId)
   const filePath = path.join(dir, "last-invalid-artifact.json")
-  await writeFile(
+  await writeJsonReport(
     filePath,
-    JSON.stringify({
+    {
       jobId: input.jobId,
       projectId: input.projectId,
       capturedAt: new Date().toISOString(),
@@ -197,8 +198,7 @@ export async function persistInvalidArtifactReport(input: {
       validatorDiagnostics: input.validatorDiagnostics || null,
       rejectedPaths: input.rejectedPaths || [],
       schemaMismatch: input.schemaMismatch || null,
-    }, null, 2) + "\n",
-    "utf8"
+    }
   )
   return filePath
 }
@@ -213,26 +213,22 @@ export async function persistFailedGenerationArtifacts(input: {
   buildLog?: string[] | string | null
   runtimeLog?: string[] | string | null
 }) {
-  const root = path.join(getReportStoragePath(), "failed-generations")
-  const dir = path.join(root, safeSegment(input.jobId))
-  await mkdir(dir, { recursive: true })
+  const dir = await ensureReportDirectory("failed-generations", input.jobId)
 
   const writeJson = (fileName: string, value: unknown) =>
-    writeFile(
+    writeJsonReport(
       path.join(dir, fileName),
-      JSON.stringify({
+      {
         jobId: input.jobId,
         projectId: input.projectId,
         capturedAt: new Date().toISOString(),
         value: sanitizeArtifactValue(value),
-      }, null, 2) + "\n",
-      "utf8"
+      }
     )
   const writeLog = (fileName: string, value: string[] | string | null | undefined) =>
-    writeFile(
+    writeTextReport(
       path.join(dir, fileName),
-      Array.isArray(value) ? `${value.join("\n")}\n` : `${String(value || "")}\n`,
-      "utf8"
+      Array.isArray(value) ? value.join("\n") : String(value || "")
     )
 
   await Promise.all([
@@ -256,13 +252,11 @@ export async function persistRuntimeFailureReport(input: {
   logs?: string[] | null
   files?: GeneratedFile[]
 }) {
-  const root = path.join(getReportStoragePath(), "runtime-failures")
-  const dir = path.join(root, safeSegment(input.jobId))
-  await mkdir(dir, { recursive: true })
+  const dir = await ensureReportDirectory("runtime-failures", input.jobId)
   await Promise.all([
-    writeFile(
+    writeJsonReport(
       path.join(dir, "runtime-failure.json"),
-      JSON.stringify({
+      {
         jobId: input.jobId,
         projectId: input.projectId,
         category: input.category,
@@ -270,13 +264,11 @@ export async function persistRuntimeFailureReport(input: {
         capturedAt: new Date().toISOString(),
         diagnostics: sanitizeArtifactValue(input.diagnostics || null),
         files: input.files ? summarizeGeneratedFiles(input.files) : null,
-      }, null, 2) + "\n",
-      "utf8"
+      }
     ),
-    writeFile(
+    writeTextReport(
       path.join(dir, "runtime.log"),
-      `${(input.logs || []).join("\n")}\n`,
-      "utf8"
+      (input.logs || []).join("\n")
     ),
   ])
   return dir
@@ -290,13 +282,11 @@ export async function persistRenderFailureReport(input: {
   diagnostics?: Record<string, unknown> | null
   files?: GeneratedFile[]
 }) {
-  const root = path.join(getReportStoragePath(), "render-failures")
-  const dir = path.join(root, safeSegment(input.jobId))
-  await mkdir(dir, { recursive: true })
+  const dir = await ensureReportDirectory("render-failures", input.jobId)
   await Promise.all([
-    writeFile(
+    writeJsonReport(
       path.join(dir, "render-failure.json"),
-      JSON.stringify({
+      {
         jobId: input.jobId,
         projectId: input.projectId,
         category: input.category,
@@ -304,28 +294,25 @@ export async function persistRenderFailureReport(input: {
         capturedAt: new Date().toISOString(),
         diagnostics: sanitizeArtifactValue(input.diagnostics || null),
         files: input.files ? summarizeGeneratedFiles(input.files) : null,
-      }, null, 2) + "\n",
-      "utf8"
+      }
     ),
-    writeFile(
+    writeJsonReport(
       path.join(dir, "component-tree.json"),
-      JSON.stringify({
+      {
         componentTree: sanitizeArtifactValue(input.diagnostics?.componentTree || []),
         propsTree: sanitizeArtifactValue(input.diagnostics?.propsTree || []),
         providerContextTree: sanitizeArtifactValue(input.diagnostics?.providerContextTree || []),
         layoutHierarchy: sanitizeArtifactValue(input.diagnostics?.layoutHierarchy || []),
-      }, null, 2) + "\n",
-      "utf8"
+      }
     ),
-    writeFile(
+    writeTextReport(
       path.join(dir, "render.log"),
       [
         ...toLogLines(input.diagnostics?.reactErrorBoundaryOutput),
         ...toLogLines(input.diagnostics?.serverClientComponentMismatches),
         ...toLogLines(input.diagnostics?.asyncRenderingErrors),
         ...toLogLines(input.diagnostics?.pageRenderStackTraces),
-      ].join("\n") + "\n",
-      "utf8"
+      ].join("\n")
     ),
   ])
   return dir
@@ -370,8 +357,4 @@ function sanitizeArtifactValue(value: unknown) {
     if (typeof item === "string") return item.slice(0, 500_000)
     return item
   }))
-}
-
-function safeSegment(value: string) {
-  return String(value || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "unknown"
 }

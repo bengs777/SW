@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks"
 import { createHash } from "node:crypto"
 import path from "node:path"
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir } from "node:fs/promises"
 import type { GeneratedFile } from "@/lib/types"
 import {
   buildDependencyMap,
@@ -116,7 +116,7 @@ import {
 import { repairRuntimeImportGraph } from "@/lib/ai/import-repair"
 import { executeGeneratedTaskGraph } from "@/lib/ai/task-graph-executor"
 import { log } from "@/lib/logging"
-import { getReportStoragePath } from "@/lib/runtime/report-storage"
+import { ensureReportDirectory, getReportStoragePath, writeJsonReport } from "@/lib/runtime/report-storage"
 import { createCorrelationIds, traceError, traceExecution } from "@/lib/observability/execution-tracer"
 import { warnIfSlow } from "@/lib/observability/performance-monitor"
 import {
@@ -474,27 +474,26 @@ async function persistTaskGraphFailureReport(input: {
   dependencyGraph?: unknown
   executorState?: Record<string, unknown>
 }) {
-  const dir = path.join(getReportStoragePath(), "taskgraph-failures", input.jobId)
-  await mkdir(dir, { recursive: true })
+  const dir = await ensureReportDirectory("taskgraph-failures", input.jobId)
   const writtenAt = new Date().toISOString()
   await Promise.all([
-    writeFile(path.join(dir, "taskgraph.json"), `${JSON.stringify(input.taskGraph || null, null, 2)}\n`, "utf8"),
-    writeFile(path.join(dir, "validation.json"), `${JSON.stringify({
+    writeJsonReport(path.join(dir, "taskgraph.json"), input.taskGraph || null),
+    writeJsonReport(path.join(dir, "validation.json"), {
       jobId: input.jobId,
       projectId: input.projectId,
       reason: input.reason,
       message: input.message,
       writtenAt,
       ...(input.validation || {}),
-    }, null, 2)}\n`, "utf8"),
-    writeFile(path.join(dir, "dependency-graph.json"), `${JSON.stringify(input.dependencyGraph || null, null, 2)}\n`, "utf8"),
-    writeFile(path.join(dir, "executor-state.json"), `${JSON.stringify({
+    }),
+    writeJsonReport(path.join(dir, "dependency-graph.json"), input.dependencyGraph || null),
+    writeJsonReport(path.join(dir, "executor-state.json"), {
       jobId: input.jobId,
       projectId: input.projectId,
       reason: input.reason,
       writtenAt,
       ...(input.executorState || {}),
-    }, null, 2)}\n`, "utf8"),
+    }),
   ])
   return dir
 }
@@ -507,34 +506,33 @@ async function persistExecutorTimeoutReport(input: {
   dependencyState: Record<string, unknown>
   activePromises: Array<Record<string, unknown>>
 }) {
-  const dir = path.join(getReportStoragePath(), "executor-timeouts", input.jobId)
-  await mkdir(dir, { recursive: true })
+  const dir = await ensureReportDirectory("executor-timeouts", input.jobId)
   const writtenAt = new Date().toISOString()
   await Promise.all([
-    writeFile(path.join(dir, "pending_operations.json"), `${JSON.stringify({
+    writeJsonReport(path.join(dir, "pending_operations.json"), {
       jobId: input.jobId,
       projectId: input.projectId,
       writtenAt,
       operations: input.pendingOperations,
-    }, null, 2)}\n`, "utf8"),
-    writeFile(path.join(dir, "operation_queue.json"), `${JSON.stringify({
+    }),
+    writeJsonReport(path.join(dir, "operation_queue.json"), {
       jobId: input.jobId,
       projectId: input.projectId,
       writtenAt,
       operations: input.operationQueue,
-    }, null, 2)}\n`, "utf8"),
-    writeFile(path.join(dir, "dependency_state.json"), `${JSON.stringify({
+    }),
+    writeJsonReport(path.join(dir, "dependency_state.json"), {
       jobId: input.jobId,
       projectId: input.projectId,
       writtenAt,
       ...input.dependencyState,
-    }, null, 2)}\n`, "utf8"),
-    writeFile(path.join(dir, "active_promises.json"), `${JSON.stringify({
+    }),
+    writeJsonReport(path.join(dir, "active_promises.json"), {
       jobId: input.jobId,
       projectId: input.projectId,
       writtenAt,
       activePromises: input.activePromises,
-    }, null, 2)}\n`, "utf8"),
+    }),
   ])
   return dir
 }
@@ -561,15 +559,18 @@ async function persistProviderArtifactTrace(input: {
   metadata?: Record<string, unknown>
 }) {
   await mkdir(input.dir, { recursive: true })
+  const compressedChunks = compressTraceSequence(input.rawChunks, "text")
+  const compressedTokens = compressTraceSequence(input.tokenSequence, "delta")
   await Promise.all([
-    writeFile(path.join(input.dir, "raw-chunks.json"), `${JSON.stringify(input.rawChunks, null, 2)}\n`, "utf8"),
-    writeFile(path.join(input.dir, "token-sequence.json"), `${JSON.stringify(input.tokenSequence, null, 2)}\n`, "utf8"),
-    writeFile(path.join(input.dir, "final-output.json"), `${JSON.stringify({
-      output: input.finalOutput,
+    writeJsonReport(path.join(input.dir, "raw-chunks.json"), compressedChunks),
+    writeJsonReport(path.join(input.dir, "token-sequence.json"), compressedTokens),
+    writeJsonReport(path.join(input.dir, "final-output.json"), {
+      preview: truncateTraceText(input.finalOutput, 20_000),
       chars: input.finalOutput.length,
       sha256: hashText(input.finalOutput),
-    }, null, 2)}\n`, "utf8"),
-    writeFile(path.join(input.dir, "summary.json"), `${JSON.stringify({
+      compressed: input.finalOutput.length > 20_000,
+    }),
+    writeJsonReport(path.join(input.dir, "summary.json"), {
       jobId: input.jobId,
       purpose: input.purpose,
       model: input.model,
@@ -577,10 +578,43 @@ async function persistProviderArtifactTrace(input: {
       chunkCount: input.rawChunks.length,
       tokenCount: input.tokenSequence.length,
       finalOutputChars: input.finalOutput.length,
+      rawChunksCompressed: compressedChunks.compressed,
+      tokenSequenceCompressed: compressedTokens.compressed,
       updatedAt: new Date().toISOString(),
       ...(input.metadata || {}),
-    }, null, 2)}\n`, "utf8"),
+    }),
   ])
+}
+
+function compressTraceSequence<T extends { index: number; at: string }>(
+  sequence: T[],
+  textKey: keyof T
+) {
+  const maxItems = 120
+  const head = sequence.slice(0, 40)
+  const tail = sequence.slice(-80)
+  const selected = sequence.length > maxItems ? [...head, ...tail] : sequence
+  const omitted = Math.max(0, sequence.length - selected.length)
+
+  return {
+    compressed: omitted > 0,
+    originalCount: sequence.length,
+    retainedCount: selected.length,
+    omitted,
+    items: selected.map((item) => {
+      const value = item[textKey]
+      return {
+        ...item,
+        [textKey]: typeof value === "string" ? truncateTraceText(value, 4000) : value,
+      }
+    }),
+  }
+}
+
+function truncateTraceText(value: string, maxLength: number) {
+  const text = String(value || "")
+  if (text.length <= maxLength) return text
+  return `${text.slice(0, maxLength)}...<truncated:${text.length - maxLength}>`
 }
 
 function buildPersistedProjectStateSnapshot(input: {

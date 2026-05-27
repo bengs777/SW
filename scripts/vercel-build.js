@@ -238,7 +238,7 @@ async function runMigrationDeployment() {
 
 function runSchemaCompatibilityCheck(canReachDatabase) {
   if (!canReachDatabase) {
-    console.warn("[vercel-build] schema compatibility check skipped because migration preflight did not confirm database availability.")
+    console.warn("[vercel-build] schema compatibility check skipped in local fallback mode because migration preflight did not confirm database availability.")
     return
   }
 

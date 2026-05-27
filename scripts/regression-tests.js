@@ -172,7 +172,8 @@ assert(
 assert(
   "repair introspection captures failed artifacts",
   /persistInvalidArtifactReport/.test(generationOrchestrator) &&
-    /getReportStoragePath\(\), "failed-generations"/.test(developerDiagnostics) &&
+    /ensureReportDirectory\("failed-generations"/.test(developerDiagnostics) &&
+    /writeJsonReport/.test(developerDiagnostics) &&
     /repairPromptPreview/.test(generationOrchestrator) &&
     /validatorResult/.test(generationOrchestrator),
   "orchestrator must capture invalid artifacts and repair-chain details"

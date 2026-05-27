@@ -4,7 +4,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 import http from "node:http"
-import { getReportStoragePath } from "@/lib/runtime/report-storage"
+import { cleanupReportStorage, getReportRetentionPolicy, getReportStoragePath } from "@/lib/runtime/report-storage"
 
 const WORKER_TYPES = ["generation", "repair", "sandbox"] as const
 type SwiftWorkerType = (typeof WORKER_TYPES)[number]
@@ -62,8 +62,18 @@ async function startWorker(workerType: SwiftWorkerType) {
   console.log(`[Worker] Starting ${workerType} worker...`)
   console.log(
     '[report-storage]',
-    getReportStoragePath()
+    getReportStoragePath(),
+    getReportRetentionPolicy()
   )
+  cleanupReportStorage()
+    .then((result) => {
+      if (result.removed > 0 || result.errors.length > 0) {
+        console.log("[report-storage:cleanup]", result)
+      }
+    })
+    .catch((error) => {
+      console.warn("[report-storage:cleanup] failed", error instanceof Error ? error.message : String(error))
+    })
   runtimeState.workerType = workerType
   assertRuntimeDatabaseSchema()
 
