@@ -18,6 +18,13 @@ export const ALERT_THRESHOLDS = {
   previewFailureWarning: 3,
 } as const
 
+const RELIABILITY_TARGETS = {
+  firstGenerationSuccessPct: 70,
+  deploySuccessPct: 90,
+  repairRecoverySuccessPct: 60,
+  fatalCorruptionStuckJobMaxPct: 1,
+} as const
+
 type MonitoringAlertSeverity = "warning" | "critical"
 
 type MonitoringAlertType =
@@ -99,6 +106,21 @@ async function measureLatency(operation: () => Promise<unknown>) {
 function countMetric(value: unknown) {
   const current = Number(value || 0)
   return Number.isFinite(current) ? current : 0
+}
+
+function percentage(numerator: number, denominator: number) {
+  if (denominator <= 0) return 0
+  return Math.round((numerator / denominator) * 1000) / 10
+}
+
+function passRateTarget(value: number, target: number, sampleCount: number) {
+  if (sampleCount <= 0) return "no_data"
+  return value >= target ? "pass" : "fail"
+}
+
+function maxRateTarget(value: number, target: number, sampleCount: number) {
+  if (sampleCount <= 0) return "no_data"
+  return value <= target ? "pass" : "fail"
 }
 
 function pushAlert(alerts: MonitoringAlert[], alert: MonitoringAlert) {
@@ -417,11 +439,18 @@ export class AdminMonitoringService {
         where: { createdAt: { gte: since } },
         orderBy: { createdAt: "asc" },
         select: {
+          id: true,
           status: true,
           createdAt: true,
           startedAt: true,
           completedAt: true,
           failedAt: true,
+          attemptCount: true,
+          retryCount: true,
+          recoveryCount: true,
+          deadLetteredAt: true,
+          timedOutAt: true,
+          error: true,
         },
       }),
       prisma.generationJob.findMany({
@@ -516,6 +545,92 @@ export class AdminMonitoringService {
           (terminationReason ? item.terminationReason === terminationReason : true)
         )
         .reduce((sum, item) => sum + item._count._all, 0)
+    const completedJobsInWindow = generationJobsInWindow.filter((job) => job.status === "completed")
+    const terminalJobsInWindow = generationJobsInWindow.filter((job) =>
+      ["completed", "failed", "cancelled", "dead_lettered"].includes(job.status)
+    )
+    const firstGenerationSuccessCount = completedJobsInWindow.filter((job) =>
+      Math.max(job.attemptCount || 0, job.retryCount || 0, job.recoveryCount || 0) <= 1
+    ).length
+    const fatalJobIds = new Set<string>()
+    for (const job of generationJobsInWindow) {
+      const raw = [job.status, job.error || ""].join(" ").toLowerCase()
+      if (
+        job.deadLetteredAt ||
+        job.timedOutAt ||
+        /dead.?letter|stuck|stall|corrupt|corruption|timeout|timed out|validator_deadlock/.test(raw)
+      ) {
+        fatalJobIds.add(job.id)
+      }
+    }
+    const fatalOperationalEvents = operationalFailures
+      .filter((failure) => {
+        const raw = [failure.eventType, failure.terminationReason || ""].join(" ").toLowerCase()
+        return /stalled|dead.?letter|timeout|timed out|validator_deadlock|corrupt|corruption|max_retries/.test(raw)
+      })
+      .reduce((sum, failure) => sum + failure._count._all, 0)
+    const fatalCorruptionStuckCount = Math.max(fatalJobIds.size, fatalOperationalEvents)
+    const qualitySummary = await prisma.generationQualityMetric.findMany({
+      where: { createdAt: { gte: since } },
+      select: {
+        status: true,
+        failureStage: true,
+        repairSucceeded: true,
+        repairAttempts: true,
+        deployValidated: true,
+        metadataJson: true,
+      },
+    })
+    const deployAttempted = qualitySummary.filter((metric) =>
+      metric.deployValidated ||
+      metric.failureStage === "deploy" ||
+      /"deploy"\s*:/.test(metric.metadataJson || "")
+    )
+    const repairAttempted = qualitySummary.filter((metric) => metric.repairAttempts > 0)
+    const firstGenerationSuccessPct = percentage(firstGenerationSuccessCount, terminalJobsInWindow.length)
+    const deploySuccessPct = percentage(deployAttempted.filter((metric) => metric.deployValidated).length, deployAttempted.length)
+    const repairRecoverySuccessPct = percentage(repairAttempted.filter((metric) => metric.repairSucceeded).length, repairAttempted.length)
+    const fatalCorruptionStuckJobPct = percentage(fatalCorruptionStuckCount, Math.max(terminalJobsInWindow.length, generationJobsInWindow.length))
+    const reliabilityMetrics = {
+      targets: RELIABILITY_TARGETS,
+      windowHours: hours,
+      firstGenerationSuccess: {
+        percent: firstGenerationSuccessPct,
+        numerator: firstGenerationSuccessCount,
+        denominator: terminalJobsInWindow.length,
+        target: RELIABILITY_TARGETS.firstGenerationSuccessPct,
+        status: passRateTarget(firstGenerationSuccessPct, RELIABILITY_TARGETS.firstGenerationSuccessPct, terminalJobsInWindow.length),
+        definition: "Completed generation jobs that reached success without retry/recovery divided by terminal generation jobs.",
+      },
+      deploySuccess: {
+        percent: deploySuccessPct,
+        numerator: deployAttempted.filter((metric) => metric.deployValidated).length,
+        denominator: deployAttempted.length,
+        target: RELIABILITY_TARGETS.deploySuccessPct,
+        status: passRateTarget(deploySuccessPct, RELIABILITY_TARGETS.deploySuccessPct, deployAttempted.length),
+        definition: "Deploy-validated generation metrics divided by generation metrics with a deploy attempt.",
+      },
+      repairRecoverySuccess: {
+        percent: repairRecoverySuccessPct,
+        numerator: repairAttempted.filter((metric) => metric.repairSucceeded).length,
+        denominator: repairAttempted.length,
+        target: RELIABILITY_TARGETS.repairRecoverySuccessPct,
+        status: passRateTarget(repairRecoverySuccessPct, RELIABILITY_TARGETS.repairRecoverySuccessPct, repairAttempted.length),
+        definition: "Generations recovered by repair divided by generations where repair was attempted.",
+      },
+      fatalCorruptionStuckJob: {
+        percent: fatalCorruptionStuckJobPct,
+        numerator: fatalCorruptionStuckCount,
+        denominator: Math.max(terminalJobsInWindow.length, generationJobsInWindow.length),
+        targetMax: RELIABILITY_TARGETS.fatalCorruptionStuckJobMaxPct,
+        status: maxRateTarget(
+          fatalCorruptionStuckJobPct,
+          RELIABILITY_TARGETS.fatalCorruptionStuckJobMaxPct,
+          Math.max(terminalJobsInWindow.length, generationJobsInWindow.length)
+        ),
+        definition: "Dead-lettered, timed-out, stalled, validator-deadlocked, or corruption-marked jobs/events divided by jobs in the window.",
+      },
+    }
     const alerts = buildMonitoringAlerts({
       queueStatus,
       queueCounts,
@@ -562,6 +677,7 @@ export class AdminMonitoringService {
       generation: {
         jobsByStatus: statusCountMap(generationJobStatus),
         attemptsByStatus: statusCountMap(generationAttemptStatus),
+        reliability: reliabilityMetrics,
         latency: {
           sampleCount: generationLatency._count._all,
           providerAvgMs: Math.round(generationLatency._avg.providerLatencyMs || 0),

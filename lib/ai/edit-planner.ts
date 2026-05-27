@@ -52,7 +52,11 @@ const ALWAYS_ALLOWED_PATCH_FILES = new Set([
 const FULL_REPLACEMENT_RE =
   /(koreksi\s+total|rombak\s+(ulang|total)|hapus\s+(seluruh|semua)|ganti\s+total|buat\s+ulang|generate\s+ulang|regenerasi\s+ulang|ulang\s+dari\s+awal|salah\s+jalur|replace\s+all|full\s+replacement|start\s+over|rewrite\s+(all|project)|rebuild\s+(all|project))/i
 const BROAD_FRONTEND_RE =
-  /\b(lengkap|full website|website lengkap|landing page lengkap|redesign|rebuild|modern ui|production frontend|multi page|multi-page|expand website|company profile|portfolio|portofolio|travel website|ecommerce ui|dashboard modern)\b/i
+  /\b(lengkap|full website|website lengkap|landing page lengkap|redesign|rebuild|modern ui|production frontend|multi page|multi-page|expand website|company profile|portfolio|portofolio|travel website|ecommerce ui|e-commerce|ecommerce|marketplace|web toko|toko online|dashboard modern)\b/i
+const BROAD_BUILD_RE =
+  /\b(buat|bikin|create|generate|bangun|rakit)\b[\s\S]{0,80}\b(web|website|app|aplikasi|platform|marketplace|e-?commerce|toko online|dashboard|portal)\b/i
+const MULTI_ROLE_RE =
+  /\b(admin|seller|penjual|merchant|vendor|user|pengguna|buyer|pembeli|customer|pelanggan|kurir|driver|staff|owner|role|rbac)\b/i
 const SMALL_PATCH_RE =
   /\b(fix bug|bug|small edit|minor edit|patch|typo|ganti teks|ubah teks|ganti warna|style kecil|styling kecil|perbaiki kecil)\b/i
 
@@ -73,8 +77,8 @@ export function buildPartialEditPlan(input: BuildEditPlanInput): PartialEditPlan
     new Set((input.previewContext?.protectedPaths || []).map(normalizePath).filter((path) => fileExists(path, existingPaths)))
   )
   const forceFullGeneration = isFullReplacementPrompt(prompt)
-  const broadFrontendGeneration = BROAD_FRONTEND_RE.test(prompt)
-  const smallPatch = mode === "edit" || mode === "fix" || SMALL_PATCH_RE.test(prompt)
+  const broadFrontendGeneration = isBroadGenerationPrompt(prompt)
+  const smallPatch = (mode === "edit" || mode === "fix" || SMALL_PATCH_RE.test(prompt)) && !broadFrontendGeneration
   const intent = forceFullGeneration && !hasExistingProject ? "full_generation" : classifyEditIntent(normalizedPrompt, mode)
   const promptMentionedPaths = findPromptMentionedPaths(prompt, existingPaths)
   const singleFileOnly = promptMentionedPaths.length === 1 && /\b(only|hanya|saja)\b/i.test(prompt)
@@ -297,6 +301,15 @@ function classifyEditIntent(prompt: string, mode: string): EditIntent {
   }
 
   return mode === "edit" ? "file_scoped_edit" : "full_generation"
+}
+
+function isBroadGenerationPrompt(prompt: string) {
+  const text = String(prompt || "")
+  return (
+    BROAD_FRONTEND_RE.test(text) ||
+    BROAD_BUILD_RE.test(text) ||
+    (MULTI_ROLE_RE.test(text) && /\b(web|website|app|aplikasi|platform|marketplace|e-?commerce|toko|store|dashboard)\b/i.test(text))
+  )
 }
 
 function addIntentPaths(input: {

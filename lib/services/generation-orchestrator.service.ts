@@ -3339,11 +3339,19 @@ function formatObservedTaskContext(prompt: string, observation?: AgentWorkflowOb
 }
 
 function maxChangedFilesForGenerationSlice(plan: GenerationPlan, targetCount: number) {
-  if (plan.generationMode === "PATCH" || plan.editPlan.mode === "partial") {
+  if (plan.generationMode === "PATCH") {
     return MAX_CHANGED_FILES_PER_REQUEST
   }
 
-  return Math.max(MAX_CHANGED_FILES_PER_REQUEST, targetCount)
+  if (plan.generationMode === "FULLSTACK" || plan.generationMode === "FULL_FRONTEND" || plan.generationMode === "REBUILD") {
+    return Math.max(MAX_CHANGED_FILES_PER_REQUEST, targetCount, plan.maxFilesThisPass)
+  }
+
+  if (plan.editPlan.mode === "partial") {
+    return MAX_CHANGED_FILES_PER_REQUEST
+  }
+
+  return Math.max(MAX_CHANGED_FILES_PER_REQUEST, targetCount, plan.maxFilesThisPass)
 }
 
 function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, compileError: string) {

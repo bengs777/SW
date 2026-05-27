@@ -1,5 +1,5 @@
 import Link from "next/link"
-import { AlertTriangle, CheckCircle2, Clock3, Database, ListChecks, Server, Workflow, XCircle } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Clock3, Database, ListChecks, Server, Target, Workflow, XCircle } from "lucide-react"
 import { getCurrentDeveloperActor } from "@/lib/admin"
 import { AdminMonitoringService } from "@/lib/services/admin-monitoring.service"
 import { validateEnv } from "@/lib/env"
@@ -80,6 +80,47 @@ function MiniBars({
   )
 }
 
+function ReliabilityCard({
+  label,
+  metric,
+  inverse = false,
+}: {
+  label: string
+  metric: {
+    percent: number
+    numerator: number
+    denominator: number
+    target?: number
+    targetMax?: number
+    status: string
+    definition: string
+  }
+  inverse?: boolean
+}) {
+  const targetLabel = inverse ? `max ${metric.targetMax}%` : `min ${metric.target}%`
+  const status = metric.status === "pass" ? "healthy" : metric.status === "no_data" ? "degraded" : "unhealthy"
+
+  return (
+    <div className="rounded-lg border bg-card px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
+          <div className="mt-2 text-2xl font-semibold tabular-nums">{metric.percent}%</div>
+        </div>
+        <Badge variant="outline" className={statusTone(status)}>
+          <StatusIcon status={status} />
+          <span className="ml-1">{metric.status.replace("_", " ")}</span>
+        </Badge>
+      </div>
+      <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
+        <span>{metric.numerator}/{metric.denominator} sample</span>
+        <span>{targetLabel}</span>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">{metric.definition}</p>
+    </div>
+  )
+}
+
 export default async function SystemDashboardPage() {
   const actor = await getCurrentDeveloperActor()
   if (!actor) {
@@ -114,6 +155,7 @@ export default async function SystemDashboardPage() {
   const attemptsByStatus = generation.attemptsByStatus || {}
   const alerts = overview.alerts || []
   const queueCounts = queue.counts || {}
+  const reliability = generation.reliability
   const totalJobs =
     (queueCounts.completed || 0) +
     (queueCounts.failed || 0) +
@@ -159,6 +201,23 @@ export default async function SystemDashboardPage() {
             </div>
           ))}
         </div>
+      ) : null}
+
+      {reliability ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Target className="h-4 w-4" />
+              Production Reliability
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <ReliabilityCard label="First generation success" metric={reliability.firstGenerationSuccess} />
+            <ReliabilityCard label="Deploy success" metric={reliability.deploySuccess} />
+            <ReliabilityCard label="Repair recovery success" metric={reliability.repairRecoverySuccess} />
+            <ReliabilityCard label="Fatal/stuck/corruption" metric={reliability.fatalCorruptionStuckJob} inverse />
+          </CardContent>
+        </Card>
       ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">

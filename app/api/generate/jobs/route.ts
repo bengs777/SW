@@ -25,12 +25,14 @@ export const maxDuration = 300
 const routeRuntime: string = runtime
 const requestedGenerationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
 const isVercelProductionRuntime = process.env.VERCEL === "1" && process.env.NODE_ENV === "production"
-const generationExecutionMode = requestedGenerationExecutionMode
+const isProductionRuntime = process.env.NODE_ENV === "production"
+const generationExecutionMode = requestedGenerationExecutionMode === "serverless" ? "serverless" : "queue"
 const serverlessFallbackDisabled = process.env.SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK === "true"
+const explicitServerlessFallbackAllowed = process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true"
 const allowServerlessGenerationFallback =
-  generationExecutionMode === "serverless" ||
-  process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true" ||
-  (isVercelProductionRuntime && !serverlessFallbackDisabled)
+  !isProductionRuntime &&
+  !serverlessFallbackDisabled &&
+  (generationExecutionMode === "serverless" || explicitServerlessFallbackAllowed)
 
 const CreateJobSchema = z.object({
   projectId: z.string().min(1),
@@ -643,7 +645,11 @@ export async function POST(request: NextRequest) {
       requestHash,
     })
 
-    const preferServerlessExecution = generationExecutionMode === "serverless"
+    if (isProductionRuntime && requestedGenerationExecutionMode === "serverless") {
+      throw new Error("Production generation must run in queue mode with a dedicated worker.")
+    }
+
+    const preferServerlessExecution = !isProductionRuntime && generationExecutionMode === "serverless"
     const queueHealth = preferServerlessExecution
       ? null
       : await getGenerationQueueHealth().catch((error) => {
@@ -670,6 +676,8 @@ export async function POST(request: NextRequest) {
       fallbackAllowed: allowServerlessGenerationFallback,
       SWIFT_GENERATION_EXECUTION_MODE: process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue",
       effectiveGenerationExecutionMode: generationExecutionMode,
+      requestedGenerationExecutionMode,
+      explicitServerlessFallbackAllowed,
       vercelProductionRuntime: isVercelProductionRuntime,
     })
     if (shouldUseServerlessFallback) {
@@ -686,7 +694,7 @@ export async function POST(request: NextRequest) {
     }
     if (!preferServerlessExecution && queueUnavailable && !allowServerlessGenerationFallback) {
       throw new Error(
-        `Generation worker unavailable; queue status is ${queueHealth?.status || "unknown"}. Start the dedicated worker or enable serverless fallback.`
+        `Generation worker unavailable; queue status is ${queueHealth?.status || "unknown"}. Start the dedicated worker and wait for a fresh heartbeat.`
       )
     }
 

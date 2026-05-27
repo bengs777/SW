@@ -534,6 +534,8 @@ export async function getGenerationQueueHealth() {
     status:
       redisError
         ? "degraded"
+        : !memory.evictionPolicyOk
+          ? "degraded"
         : heartbeatAgeMs === null
           ? "degraded"
           : heartbeatAgeMs > 90_000
