@@ -130,6 +130,16 @@ assert(
 )
 
 assert(
+  "full generation batch limit is mode aware",
+  /function maxChangedFilesForGenerationSlice/.test(generationOrchestrator) &&
+    /plan\.generationMode === "PATCH" \|\| plan\.editPlan\.mode === "partial"/.test(generationOrchestrator) &&
+    /Math\.max\(MAX_CHANGED_FILES_PER_REQUEST, targetCount\)/.test(generationOrchestrator) &&
+    /maxChangedFilesForGenerationSlice\(plan, targets\.length\)/.test(generationOrchestrator) &&
+    /defaultMaxChangedFilesPerRequest/.test(generationOrchestrator),
+  "initial full-stack or full-frontend generation batches must not be blocked by the PATCH-only 5 file cap"
+)
+
+assert(
   "repair retry is bounded and revalidated",
   /while \(!validation\.ok && repairAttempt < MAX_REPAIR_ATTEMPTS\)/.test(generationOrchestrator) &&
     /Revalidating repaired artifacts/.test(generationOrchestrator) &&

@@ -3137,6 +3137,7 @@ function buildSlicePrompt(input: {
   const batchedFoundation = targets.length > 1
   const productionFullStack = input.plan.productionMode === "production_fullstack"
   const fullFrontend = input.plan.productionMode === "full_frontend"
+  const maxChangedFilesForProviderCall = maxChangedFilesForGenerationSlice(input.plan, targets.length)
   const intentTemplate = selectIntentTemplate(input.prompt)
 
   return [
@@ -3245,7 +3246,7 @@ function buildSlicePrompt(input: {
     '- For tiny deterministic edits, use patchFile: {"operation":"patchFile","file":"components/Navbar.tsx","changes":[{"line":35,"replace":"Dashboard"}]}.',
     '- STRICT_ARTIFACT_CONTRACT: the entire response must be exactly one JSON object whose top-level key includes "taskGraph" and whose taskGraph.operations is an array.',
     "- STRICT_ARTIFACT_CONTRACT: markdown, prose, explanations, code fences, and mixed text plus JSON are invalid.",
-    "- The root object must contain taskGraph.operations. Do not rewrite the full project. Do not return more than 5 changed files.",
+    `- The root object must contain taskGraph.operations. Do not rewrite the full project. Do not return more than ${maxChangedFilesForProviderCall} changed files.`,
     "- Framework labels such as Next.js, React, and TypeScript belong in framework/metadata, never in files[].path or taskGraph.operations[].path.",
     "- Never ask to run shell commands or mutate files outside the files array.",
     "- TSX_PARSE_LOCK: every returned .tsx/.ts/.jsx/.js file must parse with @babel/parser using jsx + typescript plugins.",
@@ -3335,6 +3336,14 @@ function formatObservedTaskContext(prompt: string, observation?: AgentWorkflowOb
     ),
     fileContext ? `\n### RELEVANT_FILES\n${fileContext}` : "",
   ].filter(Boolean).join("\n")
+}
+
+function maxChangedFilesForGenerationSlice(plan: GenerationPlan, targetCount: number) {
+  if (plan.generationMode === "PATCH" || plan.editPlan.mode === "partial") {
+    return MAX_CHANGED_FILES_PER_REQUEST
+  }
+
+  return Math.max(MAX_CHANGED_FILES_PER_REQUEST, targetCount)
 }
 
 function pickFailingFiles(files: GeneratedFile[], dependencyMap: DependencyMap, compileError: string) {
@@ -7849,7 +7858,7 @@ export async function executeGenerationJob(
                 "- Return ONLY valid JSON. No Markdown fences, no prose, no comments.",
                 '- Use exactly this PATCH envelope: {"taskGraph":{"operations":[{"operation":"modifyFile","file":"app/page.tsx","content":"full updated file content"}]}}.',
                 "- Use createFile, modifyFile, deleteFile, or patchFile operations only.",
-                `- Do not return more than ${MAX_CHANGED_FILES_PER_REQUEST} changed files.`,
+                `- Do not return more than ${maxChangedFilesForGenerationSlice(plan, targets.length)} changed files.`,
                 `- Create or modify only exact paths in APPROVED_FILE_SCOPE: ${plan.allowedFileScope.allowedPaths.join(", ")}.`,
                 "- Do not create helper/shell files such as components/app-shell.tsx unless that exact path is in APPROVED_FILE_SCOPE.",
                 "- Paths must start with src/, app/, components/, sections/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
@@ -8496,24 +8505,30 @@ export async function executeGenerationJob(
         status: "pending",
       })))
       const operationPaths = new Set(patchOperations.map((operation) => normalizePath(operation.file)))
+      const maxChangedFilesForSlice = maxChangedFilesForGenerationSlice(plan, targets.length)
       await markLifecycle("operation_validation_completed", "parsing", {
         sliceIndex,
         sliceTotal,
         target: target.path,
         operationCount: patchOperations.length,
         operationPaths: Array.from(operationPaths),
+        maxChangedFilesForSlice,
       })
-      if (operationPaths.size > MAX_CHANGED_FILES_PER_REQUEST) {
+      if (operationPaths.size > maxChangedFilesForSlice) {
         metrics.fullRewriteDetected = Number(metrics.fullRewriteDetected || 0) + 1
         await persistTaskGraphFailure({
           reason: "operation_invalid",
-          message: `Diff/Patch request changed ${operationPaths.size} files; maximum is ${MAX_CHANGED_FILES_PER_REQUEST}.`,
+          message: `Diff/Patch request changed ${operationPaths.size} files; maximum is ${maxChangedFilesForSlice}.`,
           executorState: {
             operationPaths: Array.from(operationPaths),
-            maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
+            maxChangedFilesPerRequest: maxChangedFilesForSlice,
+            defaultMaxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
+            generationMode: plan.generationMode,
+            productionMode: plan.productionMode,
+            targetCount: targets.length,
           },
         })
-        throw new Error(`Diff/Patch request changed ${operationPaths.size} files; maximum is ${MAX_CHANGED_FILES_PER_REQUEST}.`)
+        throw new Error(`Diff/Patch request changed ${operationPaths.size} files; maximum is ${maxChangedFilesForSlice}.`)
       }
       if (hasAcceptedScopedArtifact && patchOperations.length === 0) {
         await persistTaskGraphFailure({
@@ -8661,7 +8676,8 @@ export async function executeGenerationJob(
         modifyOperations: metrics.modifyOperations,
         deleteOperations: metrics.deleteOperations,
         fullRewriteDetected: metrics.fullRewriteDetected,
-        maxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
+        maxChangedFilesPerRequest: maxChangedFilesForSlice,
+        defaultMaxChangedFilesPerRequest: MAX_CHANGED_FILES_PER_REQUEST,
       }
       if (patchResult) {
         await markLifecycle("patch_completed", "parsing", {
