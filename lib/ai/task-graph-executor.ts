@@ -1,7 +1,11 @@
 import type { GeneratedFile } from "@/lib/types"
 import type { GeneratedTaskGraph, GeneratedTaskOperation } from "@/lib/ai/generated-artifact"
 import { normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
-import { PACKAGE_DEV_DEPENDENCIES, PACKAGE_VERSION_ALLOWLIST } from "@/lib/ai/generation-pipeline"
+import {
+  collectInstallableDependencies,
+  PACKAGE_DEV_DEPENDENCIES,
+  PACKAGE_VERSION_ALLOWLIST,
+} from "@/lib/ai/generation-pipeline"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
 type TaskGraphExecutionResult = {
@@ -76,9 +80,13 @@ export function executeGeneratedTaskGraph(
     assertResourceLimits(Array.from(byPath.values()), operations.length)
   }
 
+  const dependencySources = collectInstallableDependencies({
+    files: Array.from(byPath.values()),
+    taskGraph,
+    explicitDependencies: fallbackDependencies,
+  })
   const dependencies = normalizeDependencies([
-    ...(taskGraph?.dependencies || []),
-    ...fallbackDependencies,
+    ...dependencySources.sources.map((source) => source.packageName),
   ])
   if (dependencies.length > 0) {
     const packageFile = installDependencies(byPath.get(PACKAGE_JSON_PATH), dependencies)

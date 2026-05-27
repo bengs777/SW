@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises"
 import type { GeneratedFile } from "@/lib/types"
 import {
   buildDependencyMap,
+  collectInstallableDependencies,
   buildStaticValidationPrompt,
   classifyPrompt,
   normalizeGeneratedDependencies,
@@ -4874,8 +4875,43 @@ async function runValidationLifecycle(input: {
   await GenerationJobService.assertNotCancelled(input.jobId)
   stepStartedAt = performance.now()
   await input.emit("validating", "Normalizing generated artifacts", 63)
-  const normalized = normalizeGeneratedDependencies(files)
+  let normalized = normalizeGeneratedDependencies(files)
   files = ensureComponentRegistryFiles(normalized.files)
+  normalized = normalizeGeneratedDependencies(files)
+  files = normalized.files
+  const normalizedManifest = parsePackageJsonFile(files)
+  const dependencyScan = collectInstallableDependencies({ files })
+  for (const source of dependencyScan.sources) {
+    log("info", "dependency_detected", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      packageName: source.packageName,
+      specifier: source.specifier,
+      sourceFile: source.sourceFile,
+      sourceKind: source.kind,
+    })
+    log("info", "dependency_source_file", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      packageName: source.packageName,
+      sourceFile: source.sourceFile,
+      specifier: source.specifier,
+    })
+  }
+  for (const rejected of [...normalized.rejectedPackages, ...dependencyScan.rejected]) {
+    log("warn", "dependency_rejected", {
+      jobId: input.jobId,
+      projectId: input.projectId,
+      ...rejected,
+    })
+  }
+  log("info", "final_dependency_manifest", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    dependencies: normalizedManifest.dependencies,
+    devDependencies: normalizedManifest.devDependencies,
+    detectedPackages: dependencyScan.sources.map((source) => source.packageName),
+  })
   const renderSafeRules = validateRenderSafeGenerationRules(files)
   if (!renderSafeRules.ok) {
     const message = `Render-safe generation rules failed: ${renderSafeRules.failures.join("; ")}`
@@ -4903,6 +4939,9 @@ async function runValidationLifecycle(input: {
     addedPackages: normalized.addedPackages,
     normalizedPackages: normalized.normalizedPackages,
     conflictsPrevented: normalized.conflictsPrevented,
+    detectedDependencies: normalized.detectedSources,
+    rejectedDependencies: normalized.rejectedPackages,
+    finalDependencyManifest: normalized.finalManifest,
     renderSafeRules,
   })
 
@@ -5186,6 +5225,19 @@ async function runValidationLifecycle(input: {
     }
     if (dependencyContract.missing.length > 0) {
       staticFailures.push(`Missing blueprint dependencies: ${dependencyContract.missing.join(", ")}`)
+      const diagnosticScan = collectInstallableDependencies({ files })
+      log("warn", "missing_dependency_diagnostic", {
+        jobId: input.jobId,
+        projectId: input.projectId,
+        missing: dependencyContract.missing,
+        required: dependencyContract.required,
+        detectedSources: diagnosticScan.sources.filter((source) => dependencyContract.missing.includes(source.packageName)),
+        finalManifest: {
+          dependencies: parsePackageJsonFile(files).dependencies,
+          devDependencies: parsePackageJsonFile(files).devDependencies,
+        },
+        externalPackages: dependencyMap.externalPackages,
+      })
     }
   }
 

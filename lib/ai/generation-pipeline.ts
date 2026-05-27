@@ -52,6 +52,15 @@ export type DependencyMap = {
   unsupportedPreviewImports: Array<{ file: string; specifier: string; reason: string }>
 }
 
+export type DependencySourceKind = "file_import" | "task_graph_operation" | "explicit_dependency" | "artifact_signal"
+
+export type DependencySource = {
+  packageName: string
+  sourceFile: string
+  specifier: string
+  kind: DependencySourceKind
+}
+
 export type TrimmedContext = {
   files: GeneratedFile[]
   dependencyMap: DependencyMap
@@ -186,6 +195,9 @@ const UNSUPPORTED_PREVIEW_IMPORTS = new Map<string, string>([
   ["next/server", "Route handler helpers are server-only."],
   ["@prisma/client", "Prisma must stay on the server."],
 ])
+
+const IMPORT_SPECIFIER_RE =
+  /(?:import\s+(?:type\s+)?[\s\S]*?\s+from\s+["']([^"']+)["']|import\s*["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)|require\s*\(\s*["']([^"']+)["']\s*\)|export\s+[\s\S]*?\s+from\s+["']([^"']+)["'])/g
 
 export function classifyPrompt(
   prompt: string,
@@ -413,14 +425,25 @@ export function normalizeGeneratedDependencies(files: GeneratedFile[]): {
   addedPackages: string[]
   normalizedPackages: string[]
   conflictsPrevented: string[]
+  detectedSources: DependencySource[]
+  rejectedPackages: Array<{ packageName: string; sourceFile: string; specifier: string; reason: string }>
+  finalManifest: {
+    dependencies: Record<string, string>
+    devDependencies: Record<string, string>
+  }
 } {
   const dependencyMap = buildDependencyMap(files)
+  const scannedDependencies = collectInstallableDependencies({
+    files,
+    explicitDependencies: dependencyMap.externalPackages,
+  })
   const packagePath = findPackageJsonPath(files)
   const packageFile = packagePath ? files.find((file) => normalizePath(file.path) === packagePath) || null : null
   const packageJson = parsePackageJson(packageFile?.content)
   const addedPackages: string[] = []
   const normalizedPackages: string[] = []
   const conflictsPrevented: string[] = []
+  const rejectedPackages: Array<{ packageName: string; sourceFile: string; specifier: string; reason: string }> = []
 
   packageJson.dependencies = filterAllowedPackageRecord(packageJson.dependencies)
   packageJson.devDependencies = filterAllowedPackageRecord(packageJson.devDependencies)
@@ -430,31 +453,29 @@ export function normalizeGeneratedDependencies(files: GeneratedFile[]): {
     start: "next start",
   }
 
-  for (const packageName of dependencyMap.externalPackages) {
-    if (BUILTIN_PACKAGES.has(packageName) || packageName.startsWith("@/") || packageName.startsWith(".")) {
-      continue
-    }
+  for (const source of scannedDependencies.sources) {
+    const packageName = source.packageName
+    if (BUILTIN_PACKAGES.has(packageName) || packageName.startsWith("@/") || packageName.startsWith(".")) continue
 
     const version = PACKAGE_VERSION_ALLOWLIST[packageName]
     if (!version) {
+      rejectedPackages.push({
+        packageName,
+        sourceFile: source.sourceFile,
+        specifier: source.specifier,
+        reason: "not_in_package_allowlist",
+      })
       continue
     }
 
-    const target = PACKAGE_DEV_DEPENDENCIES.has(packageName) ? packageJson.devDependencies : packageJson.dependencies
-    const otherTarget = PACKAGE_DEV_DEPENDENCIES.has(packageName) ? packageJson.dependencies : packageJson.devDependencies
-
-    if (otherTarget?.[packageName]) {
-      delete otherTarget[packageName]
-      conflictsPrevented.push(packageName)
-    }
-
-    if (!target[packageName]) {
-      target[packageName] = version
-      addedPackages.push(packageName)
-    } else if (target[packageName] !== version && shouldNormalizeVersion(packageName, target[packageName])) {
-      target[packageName] = version
-      normalizedPackages.push(packageName)
-    }
+    installPackage({
+      packageJson,
+      packageName,
+      version,
+      addedPackages,
+      normalizedPackages,
+      conflictsPrevented,
+    })
   }
 
   for (const [packageName, version] of Object.entries(PACKAGE_VERSION_ALLOWLIST)) {
@@ -477,6 +498,129 @@ export function normalizeGeneratedDependencies(files: GeneratedFile[]): {
     addedPackages: Array.from(new Set(addedPackages)).sort(),
     normalizedPackages: Array.from(new Set(normalizedPackages)).sort(),
     conflictsPrevented: Array.from(new Set(conflictsPrevented)).sort(),
+    detectedSources: scannedDependencies.sources,
+    rejectedPackages,
+    finalManifest: {
+      dependencies: { ...packageJson.dependencies },
+      devDependencies: { ...packageJson.devDependencies },
+    },
+  }
+}
+
+export function collectInstallableDependencies(input: {
+  files: GeneratedFile[]
+  taskGraph?: {
+    dependencies?: string[]
+    operations?: Array<{ action: string; path: string; content?: string | null }>
+  } | null
+  explicitDependencies?: string[]
+  expandedPaths?: string[]
+}): {
+  sources: DependencySource[]
+  rejected: Array<{ packageName: string; sourceFile: string; specifier: string; reason: string }>
+} {
+  const sources: DependencySource[] = []
+  const rejected: Array<{ packageName: string; sourceFile: string; specifier: string; reason: string }> = []
+  const seen = new Set<string>()
+  const expandedPaths = new Set((input.expandedPaths || []).map(normalizePath))
+
+  const addSource = (source: DependencySource) => {
+    const packageName = packageRoot(source.packageName || source.specifier)
+    if (!packageName || BUILTIN_PACKAGES.has(packageName) || isLocalSpecifier(packageName)) return
+    const normalizedSource = {
+      ...source,
+      packageName,
+      sourceFile: normalizePath(source.sourceFile || "unknown"),
+    }
+    if (expandedPaths.size > 0 && normalizedSource.kind === "file_import" && !expandedPaths.has(normalizedSource.sourceFile)) {
+      return
+    }
+    if (!PACKAGE_VERSION_ALLOWLIST[packageName]) {
+      rejected.push({
+        packageName,
+        sourceFile: normalizedSource.sourceFile,
+        specifier: normalizedSource.specifier,
+        reason: "not_in_package_allowlist",
+      })
+      return
+    }
+    const key = `${normalizedSource.kind}:${normalizedSource.sourceFile}:${packageName}:${normalizedSource.specifier}`
+    if (seen.has(key)) return
+    seen.add(key)
+    sources.push(normalizedSource)
+  }
+
+  const graph = buildImportGraph(input.files)
+  for (const node of graph.nodes) {
+    for (const edge of node.imports) {
+      if (edge.kind !== "external") continue
+      addSource({
+        packageName: edge.packageName || packageRoot(edge.specifier),
+        sourceFile: node.file,
+        specifier: edge.specifier,
+        kind: "file_import",
+      })
+    }
+  }
+
+  for (const file of input.files) {
+    for (const specifier of extractImportSpecifiers(String(file.content || ""))) {
+      if (isLocalSpecifier(specifier)) continue
+      addSource({
+        packageName: packageRoot(specifier),
+        sourceFile: file.path,
+        specifier,
+        kind: "file_import",
+      })
+    }
+  }
+
+  for (const operation of input.taskGraph?.operations || []) {
+    if (operation.action === "delete" || typeof operation.content !== "string") continue
+    for (const specifier of extractImportSpecifiers(operation.content)) {
+      if (isLocalSpecifier(specifier)) continue
+      addSource({
+        packageName: packageRoot(specifier),
+        sourceFile: operation.path,
+        specifier,
+        kind: "task_graph_operation",
+      })
+    }
+  }
+
+  for (const dependency of [
+    ...(input.explicitDependencies || []),
+    ...(input.taskGraph?.dependencies || []),
+  ]) {
+    const packageName = parseDependencyName(dependency)
+    addSource({
+      packageName,
+      sourceFile: "artifact.dependencies",
+      specifier: dependency,
+      kind: "explicit_dependency",
+    })
+  }
+
+  if (input.files.some((file) => normalizePath(file.path) === "prisma/schema.prisma")) {
+    addSource({
+      packageName: "prisma",
+      sourceFile: "prisma/schema.prisma",
+      specifier: "prisma/schema.prisma",
+      kind: "artifact_signal",
+    })
+    addSource({
+      packageName: "@prisma/client",
+      sourceFile: "prisma/schema.prisma",
+      specifier: "prisma/schema.prisma",
+      kind: "artifact_signal",
+    })
+  }
+
+  return {
+    sources: sources.sort((left, right) =>
+      `${left.packageName}:${left.sourceFile}`.localeCompare(`${right.packageName}:${right.sourceFile}`)
+    ),
+    rejected,
   }
 }
 
@@ -634,6 +778,65 @@ function filterAllowedPackageRecord(value: unknown): Record<string, string> {
   return Object.fromEntries(
     Object.entries(record).filter(([packageName]) => Boolean(PACKAGE_VERSION_ALLOWLIST[packageName]))
   )
+}
+
+function installPackage(input: {
+  packageJson: {
+    dependencies: Record<string, string>
+    devDependencies: Record<string, string>
+  }
+  packageName: string
+  version: string
+  addedPackages: string[]
+  normalizedPackages: string[]
+  conflictsPrevented: string[]
+}) {
+  const target = PACKAGE_DEV_DEPENDENCIES.has(input.packageName)
+    ? input.packageJson.devDependencies
+    : input.packageJson.dependencies
+  const otherTarget = PACKAGE_DEV_DEPENDENCIES.has(input.packageName)
+    ? input.packageJson.dependencies
+    : input.packageJson.devDependencies
+
+  if (otherTarget?.[input.packageName]) {
+    delete otherTarget[input.packageName]
+    input.conflictsPrevented.push(input.packageName)
+  }
+
+  if (!target[input.packageName]) {
+    target[input.packageName] = input.version
+    input.addedPackages.push(input.packageName)
+  } else if (target[input.packageName] !== input.version && shouldNormalizeVersion(input.packageName, target[input.packageName])) {
+    target[input.packageName] = input.version
+    input.normalizedPackages.push(input.packageName)
+  }
+}
+
+function extractImportSpecifiers(content: string) {
+  const specifiers = new Set<string>()
+  IMPORT_SPECIFIER_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = IMPORT_SPECIFIER_RE.exec(content))) {
+    const specifier = match[1] || match[2] || match[3] || match[4] || match[5] || ""
+    if (specifier.trim()) specifiers.add(specifier.trim())
+  }
+
+  return Array.from(specifiers).sort()
+}
+
+function parseDependencyName(value: string) {
+  const trimmed = String(value || "").trim()
+  if (!trimmed) return ""
+  if (trimmed.startsWith("@")) {
+    const parts = trimmed.split("@")
+    return `@${parts[1] || ""}`
+  }
+  return trimmed.split("@")[0] || ""
+}
+
+function isLocalSpecifier(specifier: string) {
+  return specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("@/") || specifier.startsWith("~/")
 }
 
 function shouldNormalizeVersion(packageName: string, currentVersion: string) {

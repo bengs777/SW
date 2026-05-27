@@ -39,6 +39,8 @@ const generationWorker = read("lib/workers/generation-worker.ts")
 const productionReadiness = read("lib/production/readiness.ts")
 const deployReadiness = read("scripts/deploy-readiness.js")
 const instrumentation = read("instrumentation.ts")
+const generationPipeline = read("lib/ai/generation-pipeline.ts")
+const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
 
 assert(
   "runtime repair uses virtual boundary import",
@@ -200,6 +202,37 @@ assert(
     /schema_parsing_failure/.test(vercelBuild) &&
     /schema compatibility check skipped in local fallback mode/.test(vercelBuild),
   "builds must generate Prisma first, deploy pending migrations, diagnose deploy failures, and skip unavailable DB checks locally"
+)
+
+assert(
+  "final dependency scanner reconciles backend imports",
+  /collectInstallableDependencies/.test(generationPipeline) &&
+    /IMPORT_SPECIFIER_RE/.test(generationPipeline) &&
+    /artifact_signal/.test(generationPipeline) &&
+    /@prisma\/client/.test(generationPipeline) &&
+    /next-auth/.test(generationPipeline) &&
+    /prisma\/schema\.prisma/.test(generationPipeline) &&
+    /export function normalizeGeneratedDependencies\(files: GeneratedFile\[\]\)/.test(generationPipeline),
+  "dependency extraction must scan final files and artifact signals for Prisma and NextAuth packages"
+)
+
+assert(
+  "task graph dependency install scans operation content",
+  /collectInstallableDependencies/.test(taskGraphExecutor) &&
+    /taskGraph,/.test(taskGraphExecutor) &&
+    /explicitDependencies:\s*fallbackDependencies/.test(taskGraphExecutor) &&
+    /dependencySources\.sources\.map/.test(taskGraphExecutor),
+  "task graph dependency installation must read create/modify operation content, not only declared dependency arrays"
+)
+
+assert(
+  "dependency observability is emitted",
+  /dependency_detected/.test(generationOrchestrator) &&
+    /dependency_source_file/.test(generationOrchestrator) &&
+    /dependency_rejected/.test(generationOrchestrator) &&
+    /final_dependency_manifest/.test(generationOrchestrator) &&
+    /missing_dependency_diagnostic/.test(generationOrchestrator),
+  "generation validation must log detected, rejected, final, and missing dependency diagnostics"
 )
 
 assert(
