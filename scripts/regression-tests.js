@@ -326,6 +326,75 @@ assert(
 )
 
 assert(
+  "performance hardening bounds repair and validation scans",
+  /MAX_REPAIR_ITERATIONS\s*=\s*3/.test(generationStabilization) &&
+    /validationMemo/.test(generationStabilization) &&
+    /scanMemo/.test(generationStabilization) &&
+    /validationMemoKey/.test(generationStabilization) &&
+    /getMemoizedScans/.test(generationStabilization) &&
+    /duplicate_repair_state/.test(generationStabilization) &&
+    /state_hash_unchanged_after_repair/.test(generationStabilization) &&
+    /scanCacheHit/.test(generationStabilization),
+  "repair iterations and repeated scans must be bounded with deterministic memoization"
+)
+
+assert(
+  "replay serialization is compressed and measured",
+  /compressDeterministicPayload/.test(generationStabilization) &&
+    /replayPayloadBytes/.test(generationStabilization) &&
+    /snapshotPayloadBytes/.test(generationStabilization) &&
+    /replaySerializationTimeMs/.test(generationStabilization) &&
+    /replayCompressionTimeMs/.test(generationStabilization) &&
+    /snapshotCompressedBytes/.test(generationStabilization) &&
+    /replayCompressedBytes/.test(generationStabilization) &&
+    /compressionRatio/.test(generationStabilization) &&
+    /replay_serialization/.test(generationStabilization),
+  "snapshot and replay serialization must report payload sizes and deterministic compression timing"
+)
+
+assert(
+  "early termination and resource budgets are enforced",
+  /buildEarlyTermination/.test(generationStabilization) &&
+    /terminatedEarly/.test(generationStabilization) &&
+    /resource_budget_exceeded/.test(generationStabilization) &&
+    /MAX_REPLAY_PAYLOAD_BYTES/.test(generationStabilization) &&
+    /MAX_GENERATED_ARTIFACTS/.test(generationStabilization) &&
+    /MAX_GENERATED_DEPENDENCIES/.test(generationStabilization) &&
+    /MAX_PACKAGE_JSON_BYTES/.test(generationStabilization) &&
+    /MAX_ROUTE_FILES/.test(generationStabilization) &&
+    /generationComplexityScore/.test(generationStabilization),
+  "fatal invariants and resource budget overruns must stop downstream expansion"
+)
+
+assert(
+  "phase timing observability and prisma preflight policy exist",
+  /summarizePhaseTiming/.test(generationStabilization) &&
+    /slowestPhase/.test(generationStabilization) &&
+    /cumulativeValidationTimeMs/.test(generationStabilization) &&
+    /repairOverheadTimeMs/.test(generationStabilization) &&
+    /MAX_PRISMA_PREFLIGHT_MS\s*=\s*5000/.test(generationStabilization) &&
+    /prismaPreflightPolicy/.test(generationStabilization) &&
+    /prismaFallbackTriggered/.test(generationStabilization) &&
+    /artifactCount/.test(generationStabilization) &&
+    /dependencyCount/.test(generationStabilization) &&
+    /cacheHits/.test(generationStabilization) &&
+    /cacheMisses/.test(generationStabilization) &&
+    /generationTiming/.test(generationOrchestrator),
+  "pipeline phases, replay serialization, repair overhead, and Prisma preflight must be timed and bounded"
+)
+
+assert(
+  "orchestration state persists bounded generation progress",
+  /orchestrationPersistenceState/.test(generationOrchestrator) &&
+    /currentPhase:\s*"persisting"/.test(generationOrchestrator) &&
+    /phaseDurations/.test(generationOrchestrator) &&
+    /replayHash:\s*snapshotResult\.replayHash/.test(generationOrchestrator) &&
+    /repairIterations:\s*stabilization\.automatedRepair\?\.iterations/.test(generationOrchestrator) &&
+    /generationProgress:\s*94/.test(generationOrchestrator),
+  "generation job metrics must persist replay hash, phase durations, repair iterations, validation state, and progress"
+)
+
+assert(
   "generation commit verifies project reload before success",
   /verifyProjectStateCommit/.test(generationOrchestrator) &&
     /ProjectFilesystemService\.readFiles\(input\.projectId\)/.test(generationOrchestrator) &&

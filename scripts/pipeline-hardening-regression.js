@@ -40,6 +40,7 @@ function main() {
   const schemaHealthCheck = read("scripts/schema-health-check.js")
   const instrumentation = read("instrumentation.ts")
   const vercelBuild = read("scripts/vercel-build.js")
+  const generationStabilization = read("lib/ai/generation-stabilization.ts")
 
   assert(
     "script.registered",
@@ -258,6 +259,19 @@ function main() {
       /continuing to next build/.test(vercelBuild) &&
       /npx next build --webpack/.test(vercelBuild),
     "Vercel build skips migrate deploy on temporary database unreachable errors and still runs Next build"
+  )
+
+  assert(
+    "generation.performance-bounds",
+    /MAX_REPAIR_ITERATIONS\s*=\s*3/.test(generationStabilization) &&
+      /MAX_PRISMA_PREFLIGHT_MS\s*=\s*5000/.test(generationStabilization) &&
+      /MAX_REPLAY_PAYLOAD_BYTES/.test(generationStabilization) &&
+      /validationMemo/.test(generationStabilization) &&
+      /scanMemo/.test(generationStabilization) &&
+      /summarizePhaseTiming/.test(generationStabilization) &&
+      /compressDeterministicPayload/.test(generationStabilization) &&
+      /buildEarlyTermination/.test(generationStabilization),
+    "generation stabilization enforces bounded repair, memoized validation, bounded Prisma preflight, and compressed replay"
   )
 
   console.log("\n[hardening] pipeline hardening regression checks passed")

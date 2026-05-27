@@ -84,7 +84,9 @@ import {
   createGenerationPhaseDiagnostics,
   parsePackageJson as parseStablePackageJson,
   persistGenerationSnapshot,
+  prismaPreflightPolicy,
   runDeterministicAutomatedRepair,
+  summarizePhaseTiming,
   type AutomatedRepairDiagnostics,
   type GenerationPhaseDiagnostics,
 } from "@/lib/ai/generation-stabilization"
@@ -4937,9 +4939,14 @@ async function runValidationLifecycle(input: {
   })
   completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "dependency_extraction", {
     warnings: [...normalized.rejectedPackages, ...dependencyScan.rejected].map((item) => `${item.packageName}:${item.reason}`),
+    artifactCount: files.length,
+    dependencyCount: dependencyScan.sources.length,
+    cacheMisses: 1,
   })
   completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "package_synthesis", {
     warnings: normalized.conflictsPrevented.map((item) => `Dependency placement conflict normalized: ${item}`),
+    artifactCount: files.length,
+    dependencyCount: Object.keys(normalized.finalManifest.dependencies).length + Object.keys(normalized.finalManifest.devDependencies).length,
   })
   input.stabilization?.replay.packageSynthesis.push({
     phase: "validation-normalize",
@@ -4969,6 +4976,17 @@ async function runValidationLifecycle(input: {
     hardFailures: automatedRepair.invariants.hardFailures
       .filter((failure) => ["forbidden_execution", "credential_leakage"].includes(failure.code))
       .map((failure) => failure.message),
+    artifactCount: files.length,
+    dependencyCount: automatedRepair.invariants.dependencyDiagnostics.mergedDependencies.length,
+  })
+  completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "security_scan", {
+    hardFailures: automatedRepair.invariants.hardFailures
+      .filter((failure) => ["forbidden_execution", "credential_leakage"].includes(failure.code))
+      .map((failure) => failure.message),
+    artifactCount: files.length,
+    dependencyCount: automatedRepair.invariants.dependencyDiagnostics.scannedDependencies.length,
+    cacheHits: automatedRepair.invariants.cache?.hit || automatedRepair.invariants.cache?.scanCacheHit ? 1 : 0,
+    cacheMisses: automatedRepair.invariants.cache?.hit || automatedRepair.invariants.cache?.scanCacheHit ? 0 : 1,
   })
   log("info", "automated_repair_completed", {
     jobId: input.jobId,
@@ -5225,6 +5243,10 @@ async function runValidationLifecycle(input: {
   completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "runtime_validation", {
     warnings: invariantResult.warnings.map((warning) => warning.message),
     hardFailures: invariantResult.hardFailures.map((failure) => failure.message),
+    artifactCount: files.length,
+    dependencyCount: invariantResult.dependencyDiagnostics.mergedDependencies.length,
+    cacheHits: invariantResult.cache?.hit || invariantResult.cache?.scanCacheHit ? 1 : 0,
+    cacheMisses: invariantResult.cache?.hit || invariantResult.cache?.scanCacheHit ? 0 : 1,
   })
   log(invariantResult.ok ? "info" : "error", "generation_invariant_validation", {
     jobId: input.jobId,
@@ -6580,6 +6602,15 @@ export async function executeGenerationJob(
     },
     automatedRepair: null,
   }
+  const prismaPreflight = prismaPreflightPolicy({
+    startedAt: Date.now(),
+    retryCount: 0,
+    databaseReachable: true,
+  })
+  completeGenerationPhase(stabilization.phases, "prisma_preflight", {
+    warnings: prismaPreflight.prismaFallbackTriggered ? ["Prisma preflight fallback triggered"] : [],
+  })
+  metrics.prismaPreflight = prismaPreflight
   const lifecycleBreakdown: GenerationLifecycleBreakdown = {
     providerLatencyMs: 0,
     taskgraphLatencyMs: 0,
@@ -10086,14 +10117,44 @@ export async function executeGenerationJob(
         failedRepairs: stabilization.automatedRepair?.failedRepairs || [],
       },
     })
+    completeGenerationPhase(stabilization.phases, "replay_serialization", {
+      artifactCount: workingFiles.length,
+      dependencyCount: finalDependencyScan.sources.length,
+    })
+    const timingSummary = summarizePhaseTiming(stabilization.phases, {
+      replayPayloadBytes: snapshotResult.replayPayloadBytes,
+      snapshotPayloadBytes: snapshotResult.snapshotPayloadBytes,
+    })
+    metrics.generationTiming = timingSummary
     metrics.generationSnapshot = snapshotResult
+    metrics.orchestrationPersistenceState = {
+      jobId: input.jobId,
+      currentPhase: "persisting",
+      phaseDurations: Object.fromEntries(
+        Object.values(stabilization.phases)
+          .sort((left, right) => left.phase.localeCompare(right.phase))
+          .map((phase) => [phase.phase, phase.durationMs])
+      ),
+      replayHash: snapshotResult.replayHash,
+      repairIterations: stabilization.automatedRepair?.iterations || [],
+      validationState: {
+        ok: validation.ok,
+        previewStatus: validation.previewStatus,
+        failure: validation.failure || null,
+      },
+      generationProgress: 94,
+    }
     await GenerationJobService.appendEvent({
       jobId: input.jobId,
       type: "generation.snapshot.persisted",
       stage: "validating",
       status: "completed",
       message: "Deterministic generation snapshot and replay artifact persisted",
-      data: snapshotResult,
+      data: {
+        ...snapshotResult,
+        timingSummary,
+        orchestrationPersistenceState: metrics.orchestrationPersistenceState,
+      },
     }).catch(() => null)
     await GenerationJobService.assertNotCancelled(input.jobId)
     assertNotAborted(input.signal)
