@@ -13,6 +13,7 @@ export type GenerationPhaseName =
   | "artifact_filtering"
   | "dependency_extraction"
   | "package_synthesis"
+  | "automated_repair"
   | "runtime_validation"
 
 export type GenerationPhaseDiagnostic = {
@@ -40,6 +41,21 @@ export type GenerationSnapshotInput = {
   runtimeFlags: Record<string, unknown>
   diagnostics: Record<string, unknown>
   replay: Record<string, unknown>
+}
+
+export type AutomatedRepairDiagnostics = {
+  repairAttempts: number
+  repairSuccesses: number
+  repairFailures: number
+  repairedArtifacts: Array<Record<string, unknown>>
+  repairedDependencies: string[]
+  downgradedCapabilities: string[]
+  blockedRepairs: Array<Record<string, unknown>>
+  invariantRechecks: Array<Record<string, unknown>>
+  repairActions: Array<Record<string, unknown>>
+  beforeStateHash: string
+  afterStateHash: string
+  failedRepairs: Array<Record<string, unknown>>
 }
 
 export type GenerationInvariantFailure = {
@@ -70,10 +86,14 @@ const PHASES: GenerationPhaseName[] = [
   "artifact_filtering",
   "dependency_extraction",
   "package_synthesis",
+  "automated_repair",
   "runtime_validation",
 ]
 
 const FORBIDDEN_PATH_RE = /(^|\/)(node_modules|\.git|\.next|dist|build|coverage)(\/|$)|(^|\/)\.env($|\.)|(^|\/)package-lock\.json$/i
+const FORBIDDEN_RUNTIME_WRITE_RE = /(?:writeFile(?:Sync)?|appendFile(?:Sync)?|mkdir(?:Sync)?|createWriteStream)\s*\([^)]*["'](?:\/var\/task|\.swift-reports|\.next|node_modules|package-lock\.json)/i
+const UNSAFE_EXECUTION_RE = /\b(?:eval|new\s+Function|child_process|execSync|spawnSync|execFileSync|spawn\s*\(|exec\s*\(|curl\s+|wget\s+|postinstall|coinhive|xmrig)\b/i
+const CREDENTIAL_LEAK_RE = /\b(?:OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|DATABASE_URL|NEXTAUTH_SECRET|process\.env\.[A-Z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD))\b/
 
 // Dependency source of truth, in precedence order:
 // 1. Blueprint-required runtime files and capabilities.
@@ -162,6 +182,31 @@ export function assertGenerationInvariants(input: {
         file: normalized,
       })
     }
+    const content = String(file.content || "")
+    if (FORBIDDEN_RUNTIME_WRITE_RE.test(content)) {
+      hardFailures.push({
+        category: "hard",
+        code: "invalid_runtime_assumption",
+        message: `${normalized} writes to a forbidden runtime filesystem path.`,
+        file: normalized,
+      })
+    }
+    if (UNSAFE_EXECUTION_RE.test(content)) {
+      hardFailures.push({
+        category: "hard",
+        code: "forbidden_execution",
+        message: `${normalized} contains forbidden dynamic execution or shell access.`,
+        file: normalized,
+      })
+    }
+    if (CREDENTIAL_LEAK_RE.test(content)) {
+      hardFailures.push({
+        category: "hard",
+        code: "credential_leakage",
+        message: `${normalized} references sensitive runtime credentials directly.`,
+        file: normalized,
+      })
+    }
   }
 
   const dependencyMap = buildDependencyMap(files)
@@ -233,6 +278,153 @@ export function assertGenerationInvariants(input: {
   } satisfies GenerationInvariantResult
 }
 
+export function runDeterministicAutomatedRepair(input: {
+  files: GeneratedFile[]
+  blueprint: ControlledAppBlueprint
+  allowedScope: string[]
+  expandedScope?: string[]
+  authActive?: boolean
+  prismaActive?: boolean
+}): {
+  files: GeneratedFile[]
+  diagnostics: AutomatedRepairDiagnostics
+  invariants: GenerationInvariantResult
+} {
+  let files = stableFiles(input.files)
+  const beforeStateHash = stableHash(summarizeFiles(files))
+  const diagnostics: AutomatedRepairDiagnostics = {
+    repairAttempts: 0,
+    repairSuccesses: 0,
+    repairFailures: 0,
+    repairedArtifacts: [],
+    repairedDependencies: [],
+    downgradedCapabilities: [],
+    blockedRepairs: [],
+    invariantRechecks: [],
+    repairActions: [],
+    beforeStateHash,
+    afterStateHash: beforeStateHash,
+    failedRepairs: [],
+  }
+
+  let invariants = assertGenerationInvariants({
+    files,
+    blueprint: input.blueprint,
+    allowedScope: input.allowedScope,
+    expandedScope: input.expandedScope,
+    authActive: input.authActive,
+    prismaActive: input.prismaActive,
+  })
+  diagnostics.invariantRechecks.push(summarizeInvariantRecheck("before", invariants))
+
+  const missingAllowedDependencies = invariants.dependencyDiagnostics.missingDependencies
+    .filter((dependency) => PACKAGE_VERSION_ALLOWLIST[dependency])
+    .sort()
+  if (missingAllowedDependencies.length > 0) {
+    diagnostics.repairAttempts += 1
+    const repaired = synthesizePackageJson(files, {
+      injectDependencies: missingAllowedDependencies,
+      reason: "required_by_blueprint",
+    })
+    files = repaired.files
+    diagnostics.repairSuccesses += repaired.changed ? 1 : 0
+    diagnostics.repairedDependencies.push(...repaired.injected)
+    diagnostics.repairActions.push(
+      ...repaired.injected.map((dependency) => ({
+        type: "dependency_injection",
+        dependency,
+        reason: "required_by_blueprint",
+      }))
+    )
+  }
+
+  const runtimeNormalization = normalizeRuntimeFilesystem(files)
+  if (runtimeNormalization.changed) {
+    diagnostics.repairAttempts += 1
+    files = runtimeNormalization.files
+    diagnostics.repairSuccesses += 1
+    diagnostics.repairedArtifacts.push(...runtimeNormalization.changedFiles.map((filePath) => ({
+      type: "runtime_filesystem_normalization",
+      file: filePath,
+      reason: "forbidden_runtime_path",
+    })))
+    diagnostics.repairActions.push(...runtimeNormalization.changedFiles.map((filePath) => ({
+      type: "runtime_filesystem_normalization",
+      file: filePath,
+      reason: "forbidden_runtime_path",
+    })))
+  }
+
+  const prismaDowngrade = maybeDowngradePrisma(files, input.blueprint)
+  if (prismaDowngrade.changed) {
+    diagnostics.repairAttempts += 1
+    files = prismaDowngrade.files
+    diagnostics.repairSuccesses += 1
+    diagnostics.downgradedCapabilities.push("prisma")
+    diagnostics.repairActions.push({
+      type: "prisma_capability_downgrade",
+      reason: prismaDowngrade.reason,
+      removedDependencies: prismaDowngrade.removedDependencies,
+    })
+  } else if (prismaDowngrade.blocked) {
+    diagnostics.blockedRepairs.push({
+      type: "prisma_capability_downgrade",
+      reason: prismaDowngrade.reason,
+    })
+  }
+
+  const authRepair = reconcileNextAuth(files)
+  if (authRepair.changed) {
+    diagnostics.repairAttempts += 1
+    files = authRepair.files
+    diagnostics.repairSuccesses += 1
+    diagnostics.repairedDependencies.push(...authRepair.injected)
+    diagnostics.repairActions.push(...authRepair.injected.map((dependency) => ({
+      type: "auth_dependency_reconciliation",
+      dependency,
+      reason: "next_auth_artifact_detected",
+    })))
+  }
+
+  files = synthesizePackageJson(files, { injectDependencies: [], reason: "stable_sort" }).files
+  invariants = assertGenerationInvariants({
+    files,
+    blueprint: input.blueprint,
+    allowedScope: input.allowedScope,
+    expandedScope: input.expandedScope,
+    authActive: input.authActive,
+    prismaActive: input.prismaActive,
+  })
+  diagnostics.invariantRechecks.push(summarizeInvariantRecheck("after", invariants))
+
+  const unrepairable = invariants.hardFailures.filter((failure) =>
+    ["forbidden_execution", "credential_leakage", "unresolved_import", "invalid_auth_configuration"].includes(failure.code)
+  )
+  if (unrepairable.length > 0) {
+    diagnostics.repairFailures += unrepairable.length
+    diagnostics.failedRepairs.push(...unrepairable.map((failure) => ({
+      type: failure.code,
+      file: failure.file || null,
+      reason: failure.message,
+    })))
+    diagnostics.blockedRepairs.push(...unrepairable.map((failure) => ({
+      type: failure.code,
+      file: failure.file || null,
+      reason: "unsafe_or_ambiguous_repair",
+    })))
+  }
+
+  diagnostics.repairedDependencies = stableUnique(diagnostics.repairedDependencies)
+  diagnostics.downgradedCapabilities = stableUnique(diagnostics.downgradedCapabilities)
+  diagnostics.afterStateHash = stableHash(summarizeFiles(files))
+
+  return {
+    files,
+    diagnostics,
+    invariants,
+  }
+}
+
 export async function persistGenerationSnapshot(input: GenerationSnapshotInput) {
   const dir = await ensureReportDirectory("generation-snapshots", input.jobId)
   const replayDir = await ensureReportDirectory("generation-replay", input.jobId)
@@ -256,6 +448,13 @@ export async function persistGenerationSnapshot(input: GenerationSnapshotInput) 
     taskGraph: input.replay.taskGraph || null,
     scopeReconciliation: input.replay.scopeReconciliation || null,
     packageSynthesis: input.replay.packageSynthesis || null,
+    repairActions: input.replay.repairActions || [],
+    beforeStateHash: input.replay.beforeStateHash || "",
+    afterStateHash: input.replay.afterStateHash || "",
+    downgradedCapabilities: input.replay.downgradedCapabilities || [],
+    invariantRechecks: input.replay.invariantRechecks || [],
+    blockedRepairs: input.replay.blockedRepairs || [],
+    failedRepairs: input.replay.failedRepairs || [],
   })
   const snapshotHash = stableHash(snapshotPayload)
   const replayHash = stableHash(replayPayload)
@@ -328,6 +527,179 @@ export function stableFiles(files: GeneratedFile[]) {
 
 export function stableHash(value: unknown) {
   return createHash("sha256").update(stableStringify(value)).digest("hex")
+}
+
+function synthesizePackageJson(
+  files: GeneratedFile[],
+  input: {
+    injectDependencies: string[]
+    reason: string
+  }
+) {
+  const packageJson = parsePackageJson(files)
+  const raw = packageJson.raw || {
+    name: "swift-generated-app",
+    version: "0.1.0",
+    private: true,
+    scripts: {
+      dev: "next dev",
+      build: "next build",
+      start: "next start",
+    },
+  }
+  const dependencies = stableStringRecord((raw as Record<string, unknown>).dependencies)
+  const devDependencies = stableStringRecord((raw as Record<string, unknown>).devDependencies)
+  const peerDependencies = stableStringRecord((raw as Record<string, unknown>).peerDependencies)
+  const optionalDependencies = stableStringRecord((raw as Record<string, unknown>).optionalDependencies)
+  const injected: string[] = []
+
+  for (const dependency of input.injectDependencies.slice().sort()) {
+    const version = PACKAGE_VERSION_ALLOWLIST[dependency]
+    if (!version) continue
+    const target = isDevDependency(dependency) ? devDependencies : dependencies
+    const otherTarget = isDevDependency(dependency) ? dependencies : devDependencies
+    delete otherTarget[dependency]
+    if (!target[dependency]) {
+      target[dependency] = version
+      injected.push(dependency)
+    }
+  }
+
+  const nextPackageJson = stableRecord({
+    ...raw,
+    scripts: stableStringRecord((raw as Record<string, unknown>).scripts),
+    dependencies: sortPackageRecord(dependencies),
+    devDependencies: sortPackageRecord(devDependencies),
+    peerDependencies: sortPackageRecord(peerDependencies),
+    optionalDependencies: sortPackageRecord(optionalDependencies),
+  }) as Record<string, unknown>
+  for (const section of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+    if (Object.keys((nextPackageJson[section] as Record<string, string>) || {}).length === 0) {
+      delete nextPackageJson[section]
+    }
+  }
+
+  const packageFile: GeneratedFile = {
+    path: "package.json",
+    language: "json",
+    content: `${JSON.stringify(nextPackageJson, null, 2)}\n`,
+  }
+  const output = stableFiles(files).filter((file) => normalizePath(file.path) !== "package.json")
+
+  return {
+    files: [...output, packageFile].sort((left, right) => normalizePath(left.path).localeCompare(normalizePath(right.path))),
+    injected: injected.sort(),
+    changed: injected.length > 0 || packageJson.raw ? stableHash(packageJson.raw) !== stableHash(nextPackageJson) : true,
+    reason: input.reason,
+  }
+}
+
+function normalizeRuntimeFilesystem(files: GeneratedFile[]) {
+  const changedFiles: string[] = []
+  const nextFiles = stableFiles(files).map((file) => {
+    const normalizedPath = normalizePath(file.path)
+    let content = String(file.content || "")
+    const original = content
+    content = content
+      .replace(/["']\/var\/task\/swift-reports["']/g, "getReportStoragePath()")
+      .replace(/["']\.swift-reports["']/g, "getReportStoragePath()")
+      .replace(/process\.cwd\(\)\s*,\s*["']\.swift-reports["']/g, "getReportStoragePath()")
+    if (content !== original) {
+      changedFiles.push(normalizedPath)
+    }
+    return { ...file, content }
+  })
+
+  return {
+    files: nextFiles,
+    changed: changedFiles.length > 0,
+    changedFiles: changedFiles.sort(),
+  }
+}
+
+function maybeDowngradePrisma(files: GeneratedFile[], blueprint: ControlledAppBlueprint) {
+  const paths = new Set(files.map((file) => normalizePath(file.path)))
+  const packageJson = parsePackageJson(files)
+  const hasPrismaDependency = Boolean(packageJson.dependencies["@prisma/client"] || packageJson.devDependencies.prisma)
+  const blueprintRequiresSchema = blueprint.requiredFiles.map(normalizePath).includes("prisma/schema.prisma")
+  const hasSchema = paths.has("prisma/schema.prisma")
+
+  if (!hasPrismaDependency || hasSchema) {
+    return { files, changed: false, blocked: false, reason: "not_applicable", removedDependencies: [] as string[] }
+  }
+  if (blueprintRequiresSchema) {
+    return { files, changed: false, blocked: true, reason: "blueprint_requires_prisma_schema", removedDependencies: [] as string[] }
+  }
+
+  const raw = packageJson.raw || {}
+  const dependencies = stableStringRecord(raw.dependencies)
+  const devDependencies = stableStringRecord(raw.devDependencies)
+  const removedDependencies = ["@prisma/client", "prisma"].filter((dependency) => dependencies[dependency] || devDependencies[dependency])
+  delete dependencies["@prisma/client"]
+  delete devDependencies.prisma
+
+  const nextPackageJson = stableRecord({
+    ...raw,
+    dependencies: sortPackageRecord(dependencies),
+    devDependencies: sortPackageRecord(devDependencies),
+  }) as Record<string, unknown>
+  for (const section of ["dependencies", "devDependencies"]) {
+    if (Object.keys((nextPackageJson[section] as Record<string, string>) || {}).length === 0) delete nextPackageJson[section]
+  }
+
+  const nextFiles = stableFiles(files)
+    .filter((file) => !/\b@prisma\/client\b/.test(String(file.content || "")))
+    .filter((file) => normalizePath(file.path) !== "prisma/schema.prisma")
+    .filter((file) => normalizePath(file.path) !== "package.json")
+  nextFiles.push({
+    path: "package.json",
+    language: "json",
+    content: `${JSON.stringify(nextPackageJson, null, 2)}\n`,
+  })
+
+  return {
+    files: nextFiles.sort((left, right) => normalizePath(left.path).localeCompare(normalizePath(right.path))),
+    changed: removedDependencies.length > 0,
+    blocked: false,
+    reason: "prisma_dependency_without_schema",
+    removedDependencies: removedDependencies.sort(),
+  }
+}
+
+function reconcileNextAuth(files: GeneratedFile[]) {
+  const hasAuthArtifact = stableFiles(files).some((file) =>
+    /\bnext-auth\b|NextAuth\s*\(/.test(`${file.path}\n${file.content}`)
+  )
+  if (!hasAuthArtifact) {
+    return { files, changed: false, injected: [] as string[] }
+  }
+  const repaired = synthesizePackageJson(files, {
+    injectDependencies: ["next-auth"],
+    reason: "next_auth_artifact_detected",
+  })
+  return {
+    files: repaired.files,
+    changed: repaired.injected.length > 0,
+    injected: repaired.injected,
+  }
+}
+
+function summarizeInvariantRecheck(stage: "before" | "after", invariants: GenerationInvariantResult) {
+  return stableRecord({
+    stage,
+    ok: invariants.ok,
+    hardFailureCodes: invariants.hardFailures.map((failure) => failure.code).sort(),
+    warningCodes: invariants.warnings.map((warning) => warning.code).sort(),
+    missingDependencies: invariants.dependencyDiagnostics.missingDependencies,
+  })
+}
+
+function sortPackageRecord(record: Record<string, string>) {
+  return Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)))
+}
+
+function isDevDependency(dependency: string) {
+  return ["@tailwindcss/postcss", "@types/node", "@types/react", "@types/react-dom", "autoprefixer", "postcss", "prisma", "tailwindcss", "typescript"].includes(dependency)
 }
 
 function dependenciesForBlueprint(

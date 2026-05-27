@@ -254,6 +254,7 @@ assert(
     /artifact_filtering/.test(generationStabilization) &&
     /dependency_extraction/.test(generationStabilization) &&
     /package_synthesis/.test(generationStabilization) &&
+    /automated_repair/.test(generationStabilization) &&
     /runtime_validation/.test(generationStabilization) &&
     /completeGenerationPhase/.test(generationOrchestrator),
   "generation diagnostics must be phase-based with warnings and hard failures"
@@ -279,6 +280,49 @@ assert(
     /sort\(\(left, right\)/.test(generationPipeline) &&
     /mergedDependencies/.test(generationStabilization),
   "file traversal, dependency merge, and package synthesis must use stable ordering"
+)
+
+assert(
+  "automated repair is deterministic and replayable",
+  /runDeterministicAutomatedRepair/.test(generationStabilization) &&
+    /repairAttempts/.test(generationStabilization) &&
+    /repairActions/.test(generationStabilization) &&
+    /beforeStateHash/.test(generationStabilization) &&
+    /afterStateHash/.test(generationStabilization) &&
+    /generation\.automated_repair/.test(generationOrchestrator) &&
+    /stabilization\.replay\.repairActions/.test(generationOrchestrator),
+  "automated repair must emit stable diagnostics and replay actions"
+)
+
+assert(
+  "dependency repair preserves blueprint-required packages",
+  /dependency_injection/.test(generationStabilization) &&
+    /required_by_blueprint/.test(generationStabilization) &&
+    /PACKAGE_VERSION_ALLOWLIST\[dependency\]/.test(generationStabilization) &&
+    /blueprintDependencies/.test(generationStabilization) &&
+    /missingDependencies/.test(generationStabilization),
+  "missing blueprint dependencies must be repaired only through allowlisted dependency synthesis"
+)
+
+assert(
+  "runtime isolation and security scanning are enforced",
+  /FORBIDDEN_RUNTIME_WRITE_RE/.test(generationStabilization) &&
+    /UNSAFE_EXECUTION_RE/.test(generationStabilization) &&
+    /CREDENTIAL_LEAK_RE/.test(generationStabilization) &&
+    /forbidden_execution/.test(generationStabilization) &&
+    /credential_leakage/.test(generationStabilization) &&
+    /runtime_filesystem_normalization/.test(generationStabilization),
+  "generated code must reject unsafe execution, credential leakage, and forbidden runtime filesystem assumptions"
+)
+
+assert(
+  "repair replay artifact captures required repair fields",
+  /repairActions: input\.replay\.repairActions/.test(generationStabilization) &&
+    /downgradedCapabilities: input\.replay\.downgradedCapabilities/.test(generationStabilization) &&
+    /invariantRechecks: input\.replay\.invariantRechecks/.test(generationStabilization) &&
+    /blockedRepairs: input\.replay\.blockedRepairs/.test(generationStabilization) &&
+    /failedRepairs: input\.replay\.failedRepairs/.test(generationStabilization),
+  "replay artifacts must retain repair hashes, actions, downgraded capabilities, rechecks, blocked and failed repairs"
 )
 
 assert(

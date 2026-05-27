@@ -88,7 +88,7 @@ function main() {
 
   assert(
     "path.allowed-roots",
-    /ALLOWED_GENERATED_ROOTS\s*=\s*\["src",\s*"app",\s*"components",\s*"lib",\s*"prisma"\]/.test(filePolicy) &&
+    /ALLOWED_GENERATED_ROOTS\s*=\s*\["src",\s*"app",\s*"components",\s*"sections",\s*"component-registry",\s*"lib",\s*"prisma"\]/.test(filePolicy) &&
       /canonicalizeGeneratedPath/.test(canonicalPath) &&
       /normalizeGeneratedPath/.test(filePolicy) &&
       /resolveGeneratedPath/.test(filePolicy) &&
@@ -141,7 +141,7 @@ function main() {
       /\.strict\(\)/.test(artifactParser) &&
       /runtimeCommandSchema/.test(artifactParser) &&
       /runtime commands are metadata only and are not accepted as executable artifacts/.test(artifactParser) &&
-      /strict-json-schema-required/.test(artifactParser) &&
+      /strictJsonEnvelope/.test(artifactParser) &&
       !/extractJsonFragments/.test(artifactParser),
     "AI JSON parser rejects freeform text, executable command intents, and schema drift"
   )

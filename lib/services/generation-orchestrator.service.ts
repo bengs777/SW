@@ -84,6 +84,8 @@ import {
   createGenerationPhaseDiagnostics,
   parsePackageJson as parseStablePackageJson,
   persistGenerationSnapshot,
+  runDeterministicAutomatedRepair,
+  type AutomatedRepairDiagnostics,
   type GenerationPhaseDiagnostics,
 } from "@/lib/ai/generation-stabilization"
 import {
@@ -415,7 +417,9 @@ type GenerationStabilizationContext = {
     taskGraph: unknown[]
     scopeReconciliation: unknown[]
     packageSynthesis: unknown[]
+    repairActions: unknown[]
   }
+  automatedRepair: AutomatedRepairDiagnostics | null
 }
 
 class CompileGateError extends Error {
@@ -4944,6 +4948,45 @@ async function runValidationLifecycle(input: {
     conflictsPrevented: normalized.conflictsPrevented.slice().sort(),
     finalManifest: normalized.finalManifest,
   })
+  const automatedRepair = runDeterministicAutomatedRepair({
+    files,
+    blueprint: input.blueprint,
+    allowedScope: input.plan.allowedFileScope.allowedPaths,
+    expandedScope: input.plan.orchestration.allowedScope,
+    authActive: input.plan.structuredIntent.auth.provider !== null,
+    prismaActive: Boolean(input.plan.structuredIntent.database.provider) || files.some((file) => normalizePath(file.path) === "prisma/schema.prisma"),
+  })
+  files = automatedRepair.files
+  if (input.stabilization) {
+    input.stabilization.automatedRepair = automatedRepair.diagnostics
+    input.stabilization.replay.repairActions.push(...automatedRepair.diagnostics.repairActions)
+  }
+  completeGenerationPhase(input.stabilization?.phases || createGenerationPhaseDiagnostics(), "automated_repair", {
+    warnings: [
+      ...automatedRepair.diagnostics.blockedRepairs.map((repair) => String(repair.reason || repair.type || "blocked_repair")),
+      ...automatedRepair.diagnostics.failedRepairs.map((repair) => String(repair.reason || repair.type || "failed_repair")),
+    ],
+    hardFailures: automatedRepair.invariants.hardFailures
+      .filter((failure) => ["forbidden_execution", "credential_leakage"].includes(failure.code))
+      .map((failure) => failure.message),
+  })
+  log("info", "automated_repair_completed", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    diagnostics: automatedRepair.diagnostics,
+    invariantRecheck: automatedRepair.invariants,
+  })
+  await GenerationJobService.appendEvent({
+    jobId: input.jobId,
+    type: "generation.automated_repair",
+    stage: "validating",
+    status: automatedRepair.invariants.ok ? "completed" : "running",
+    message: "Deterministic automated repair completed",
+    data: {
+      diagnostics: automatedRepair.diagnostics,
+      invariantRecheck: automatedRepair.invariants,
+    },
+  }).catch(() => null)
   const renderSafeRules = validateRenderSafeGenerationRules(files)
   if (!renderSafeRules.ok) {
     const message = `Render-safe generation rules failed: ${renderSafeRules.failures.join("; ")}`
@@ -6533,7 +6576,9 @@ export async function executeGenerationJob(
       taskGraph: [],
       scopeReconciliation: [],
       packageSynthesis: [],
+      repairActions: [],
     },
+    automatedRepair: null,
   }
   const lifecycleBreakdown: GenerationLifecycleBreakdown = {
     providerLatencyMs: 0,
@@ -10024,6 +10069,7 @@ export async function executeGenerationJob(
       diagnostics: {
         phases: stabilization.phases,
         invariants: finalInvariantResult,
+        automatedRepair: stabilization.automatedRepair,
         validationSteps: validation.steps,
         lifecycle: lifecycleBreakdown,
       },
@@ -10031,6 +10077,13 @@ export async function executeGenerationJob(
         taskGraph: stabilization.replay.taskGraph,
         scopeReconciliation: stabilization.replay.scopeReconciliation,
         packageSynthesis: stabilization.replay.packageSynthesis,
+        repairActions: stabilization.replay.repairActions,
+        beforeStateHash: stabilization.automatedRepair?.beforeStateHash || "",
+        afterStateHash: stabilization.automatedRepair?.afterStateHash || "",
+        downgradedCapabilities: stabilization.automatedRepair?.downgradedCapabilities || [],
+        invariantRechecks: stabilization.automatedRepair?.invariantRechecks || [],
+        blockedRepairs: stabilization.automatedRepair?.blockedRepairs || [],
+        failedRepairs: stabilization.automatedRepair?.failedRepairs || [],
       },
     })
     metrics.generationSnapshot = snapshotResult
