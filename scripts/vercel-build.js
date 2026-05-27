@@ -1,4 +1,4 @@
-const { execSync } = require("child_process")
+const { execSync, spawnSync } = require("child_process")
 const fs = require("fs")
 const path = require("path")
 const { loadEnvConfig } = require("@next/env")
@@ -109,6 +109,28 @@ function emitMigrationStatus(status, diagnostic = {}) {
     prismaMigrationStatus,
     ...diagnostic,
   })}`)
+}
+
+function runNextBuild() {
+  const command = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : "npx"
+  const args = process.platform === "win32"
+    ? ["/d", "/s", "/c", "npx next build --webpack"]
+    : ["next", "build", "--webpack"]
+  const result = spawnSync(command, args, {
+    cwd: process.cwd(),
+    env,
+    stdio: "inherit",
+    shell: false,
+  })
+
+  if (result.error) {
+    throw result.error
+  }
+
+  if (result.status !== 0) {
+    const status = result.status ?? result.signal ?? "unknown"
+    throw new Error(`[vercel-build] next build failed with status ${status}`)
+  }
 }
 
 async function runPrismaGenerateWithRetry() {
@@ -265,7 +287,7 @@ function runSchemaCompatibilityCheck(canReachDatabase) {
   runSchemaCompatibilityCheck(migrationsDeployed)
 
   console.log(`[vercel-build] final prismaMigrationStatus=${prismaMigrationStatus}`)
-  execSync("npx next build --webpack", { stdio: "inherit", env })
+  runNextBuild()
 })().catch((error) => {
   console.error(error)
   process.exitCode = 1
