@@ -28,6 +28,7 @@ function main() {
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
   const generateJobsRoute = read("app/api/generate/jobs/route.ts")
   const architecturePlanner = read("lib/ai/architecture-planner.ts")
+  const softwareOrchestration = read("lib/ai/software-orchestration.ts")
   const projectEditorPage = read("app/dashboard/project/[id]/page.tsx")
   const previewPanel = read("components/editor/preview-panel.tsx")
   const errorLogPanel = read("components/editor/error-log-panel.tsx")
@@ -119,6 +120,19 @@ function main() {
     /"frontend_generation"[\s\S]*"backend_generation"/.test(architecturePlanner) &&
       /Build scaffold and frontend pages before backend/.test(architecturePlanner),
     "architecture instructions keep frontend validation ahead of backend integration"
+  )
+
+  assert(
+    "ecommerce.conditional-auth-admin-routes",
+    /stagedEcommerceRouteRequirements/.test(orchestrator) &&
+      /plannerRequiresEcommerceLogin/.test(orchestrator) &&
+      /plannerRequiresEcommerceAdmin/.test(orchestrator) &&
+      /for \(const route of stagedEcommerceRouteRequirements\(input.plan\)\)/.test(orchestrator) &&
+      /shouldIncludeCommerceLogin/.test(architecturePlanner) &&
+      /shouldIncludeCommerceAdmin/.test(architecturePlanner) &&
+      /plannerRequestsCommerceLogin/.test(softwareOrchestration) &&
+      /plannerRequestsCommerceAdmin/.test(softwareOrchestration),
+    "ecommerce generation keeps storefront routes mandatory while login/admin are intent-driven"
   )
 
   assert(

@@ -45,6 +45,7 @@ function staticChecks() {
   const generateJobsRoute = exists("app/api/generate/jobs/route.ts") ? read("app/api/generate/jobs/route.ts") : ""
   const providerRouter = exists("lib/ai/provider-router.ts") ? read("lib/ai/provider-router.ts") : ""
   const swiftTiers = exists("lib/ai/swift-tiers.ts") ? read("lib/ai/swift-tiers.ts") : ""
+  const architecturePlanner = exists("lib/ai/architecture-planner.ts") ? read("lib/ai/architecture-planner.ts") : ""
   const generationPipeline = exists("lib/ai/generation-pipeline.ts") ? read("lib/ai/generation-pipeline.ts") : ""
   const softwareOrchestration = exists("lib/ai/software-orchestration.ts") ? read("lib/ai/software-orchestration.ts") : ""
   const productUxPlanner = exists("lib/ai/product-ux-planner.ts") ? read("lib/ai/product-ux-planner.ts") : ""
@@ -110,6 +111,17 @@ function staticChecks() {
         /buildFastClinicFullStackScaffold/.test(generationOrchestrator) &&
         /productionMode:\s*"preview"\s*\|\s*"full_frontend"\s*\|\s*"production_fullstack"/.test(generationOrchestrator),
       "Website prompts use full frontend mode and explicit full-stack/admin/API/payment prompts use production full-stack orchestration"
+    ),
+    check(
+      "ai.ecommerce-conditional-auth-admin",
+      /stagedEcommerceRouteRequirements/.test(generationOrchestrator) &&
+        /plannerRequiresEcommerceLogin/.test(generationOrchestrator) &&
+        /plannerRequiresEcommerceAdmin/.test(generationOrchestrator) &&
+        /shouldIncludeCommerceLogin/.test(architecturePlanner) &&
+        /shouldIncludeCommerceAdmin/.test(architecturePlanner) &&
+        /plannerRequestsCommerceLogin/.test(softwareOrchestration) &&
+        /plannerRequestsCommerceAdmin/.test(softwareOrchestration),
+      "Ecommerce checkpoint keeps storefront routes mandatory while auth/admin routes remain intent-driven"
     ),
     check(
       "ai.server-prisma-boundary",

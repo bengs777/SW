@@ -615,7 +615,7 @@ function unique(values: string[]) {
 
 function allowedFilesForPlanner(planner: PlannerOutput) {
   if (planner.appType === "ecommerce") {
-    return unique([
+    const allowed = [
       "app/layout.tsx",
       "app/page.tsx",
       "app/globals.css",
@@ -626,8 +626,6 @@ function allowedFilesForPlanner(planner: PlannerOutput) {
       "app/products/[id]/page.tsx",
       "app/cart/page.tsx",
       "app/checkout/page.tsx",
-      "app/login/page.tsx",
-      "app/admin/page.tsx",
       "components/Navbar.tsx",
       "components/ProductCard.tsx",
       "components/ProductGrid.tsx",
@@ -637,7 +635,10 @@ function allowedFilesForPlanner(planner: PlannerOutput) {
       "lib/supabase/server.ts",
       "lib/turso/client.ts",
       "app/api/transactions/route.ts",
-    ])
+    ]
+    if (plannerRequestsCommerceLogin(planner)) allowed.push("app/login/page.tsx")
+    if (plannerRequestsCommerceAdmin(planner)) allowed.push("app/admin/page.tsx", "app/login/page.tsx")
+    return unique(allowed)
   }
 
   return unique([
@@ -651,6 +652,20 @@ function allowedFilesForPlanner(planner: PlannerOutput) {
     "tsconfig.json",
     "tailwind.config.ts",
   ])
+}
+
+function plannerRequestsCommerceLogin(planner: PlannerOutput) {
+  const requiredRoutes = new Set(planner.requiredRoutes.map((route) => normalizePath(route)))
+  const requiredFiles = new Set(planner.requiredFiles.map((file) => normalizePath(file)))
+  if (requiredRoutes.has("app/login/page.tsx") || requiredFiles.has("app/login/page.tsx")) return true
+  return planner.features.some((feature) => /\bauth|authentication|login|session|account\b/i.test(feature))
+}
+
+function plannerRequestsCommerceAdmin(planner: PlannerOutput) {
+  const requiredRoutes = new Set(planner.requiredRoutes.map((route) => normalizePath(route)))
+  const requiredFiles = new Set(planner.requiredFiles.map((file) => normalizePath(file)))
+  if (requiredRoutes.has("app/admin/page.tsx") || requiredFiles.has("app/admin/page.tsx")) return true
+  return planner.features.some((feature) => /\brole_based_admin|rbac|admin|backoffice|staff\b/i.test(feature))
 }
 
 function normalizePath(value: string) {

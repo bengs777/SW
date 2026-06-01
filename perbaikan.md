@@ -1,493 +1,345 @@
-# Perbaikan Lengkap Error Dedicated Worker Swift
+# Perbaikan Error Checkpoint E-Commerce Swift
 
-Dokumen ini dibuat untuk memperbaiki error seperti:
+Dokumen ini dibuat untuk menangani error seperti:
 
-- `Production generation must run in queue mode with a dedicated worker.`
-- `Swift production sedang menunggu dedicated worker.`
-- `Generation queue unavailable`
-- `Redis/BullMQ generation queue is unavailable or rejected the job.`
+- `Tahap 2: ecommerce routes checkpoint failed`
+- `Missing ecommerce route: app/login/page.tsx`
+- `Missing ecommerce route: app/admin/page.tsx`
 
-Dokumen ini fokus ke akar masalah produksi Swift saat user membuat web, tetapi preview tidak jalan karena worker generasi, queue, atau sandbox belum sehat.
+Fokus dokumen ini adalah memperbaiki logika generator Swift supaya prompt e-commerce sederhana tidak gagal terlalu cepat hanya karena route `login` dan `admin` belum dibuat di tahap awal.
 
 ---
 
 ## 1. Ringkasan Masalah
 
-Saat user klik generate, app utama tidak langsung membangun web di proses Next.js biasa. Swift production menggunakan arsitektur:
+Saat user menulis prompt seperti:
 
-- App dashboard/API di Vercel
-- Queue BullMQ di Redis
-- Dedicated generation worker sebagai proses terpisah
-- Sandbox runtime di Railway untuk install, build, dan preview
+- `Buat web e-commerce`
+- `Buat toko online`
+- `Buat marketplace sederhana`
 
-Kalau salah satu bagian ini tidak sehat, UI akan berhenti di status:
+Swift saat ini terlalu cepat menganggap proyek tersebut sebagai `FULLSTACK_COMMERCE`.
 
-- menunggu worker,
-- queue unavailable,
-- preview kosong,
-- atau retry terus tanpa hasil.
+Akibatnya:
 
----
-
-## 2. Diagnosis Paling Mungkin Untuk Error Ini
-
-Berdasarkan struktur repo saat ini, akar error paling mungkin adalah kombinasi berikut:
-
-### A. Production masih berjalan di mode yang salah
-
-Swift production harus memakai:
-
-```env
-SWIFT_GENERATION_EXECUTION_MODE=queue
-```
-
-Kalau production masih memakai `serverless`, route generate akan menolak request dan memunculkan error dedicated worker.
-
-### B. Dedicated worker belum benar-benar hidup
-
-Repo ini memang sudah menyiapkan worker terpisah:
-
-- script: `npm run worker:generation`
-- entry: `workers/index.ts`
-- Dockerfile: `workers/Dockerfile`
-- Railway config: `railway.worker.json`
-
-Tetapi kalau worker belum dideploy, crash saat boot, atau tidak bisa connect ke Redis, app tetap akan menganggap worker tidak sehat.
-
-### C. Redis ada, tapi worker tidak bisa memakainya
-
-BullMQ hanya bisa memakai Redis native:
-
-```env
-REDIS_URL=redis://... atau rediss://...
-```
-
-REST Redis saja tidak cukup untuk worker BullMQ.
-
-### D. Sandbox Railway belum sehat atau belum tersambung
-
-Walau queue sehat, Swift tetap butuh sandbox runtime untuk compile gate, build, dan preview. Jika sandbox mati, generate bisa tersimpan tetapi preview tidak jadi.
-
-### E. App URL production masih belum benar
-
-Untuk production, nilai seperti ini tidak boleh dipakai:
-
-```env
-NEXTAUTH_URL=http://localhost:3000
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-```
-
-Kalau masih localhost, auth dan callback production bisa bermasalah walau bukan akar utama error worker.
+- planner menambahkan route `login` dan `admin` sejak awal,
+- checkpoint fase `routes` mewajibkan route tersebut langsung ada,
+- generator gagal sebelum preview storefront dasar sempat lolos,
+- user melihat `No preview yet` walau penyebab utamanya adalah validator internal yang terlalu keras.
 
 ---
 
-## 3. Fakta Penting Dari Repo Saat Ini
+## 2. Hasil Audit
 
-Repo ini sebenarnya sudah siap untuk arsitektur yang benar:
+Audit menemukan beberapa sumber masalah yang saling mengunci.
 
-- `app/api/generate/jobs/route.ts` sudah memaksa production memakai queue mode.
-- `lib/queue/generation-queue.ts` sudah membaca health Redis, heartbeat worker, dan saturation queue.
-- `workers/index.ts` sudah membuka endpoint health di `/health`.
-- `workers/Dockerfile` memang dibuat khusus untuk worker queue.
-- `railway.worker.json` sudah ada untuk deploy worker ke Railway.
-- `services/sandbox-runtime/server.mjs` sudah punya endpoint `/health`.
-- `app/api/worker/health/route.ts` sudah bisa membaca status queue dan heartbeat worker dari app utama.
+### A. Klasifikasi archetype terlalu agresif
 
-Artinya, masalah ini bukan karena repo belum punya fondasi. Masalahnya lebih ke deploy dan konfigurasi runtime production.
+File:
+
+- `lib/ai/architecture-intent.ts`
+
+Masalah:
+
+- domain `commerce_storefront` dan `simple_marketplace` langsung diarahkan ke `FULLSTACK_COMMERCE`
+- tidak ada jalur aman untuk storefront e-commerce sederhana yang frontend-first
+
+Efek:
+
+- generator langsung masuk ekspektasi full stack
+- route admin dan auth dianggap kebutuhan inti, bukan fitur lanjutan
+
+### B. Planner selalu menambahkan `login` dan `admin`
+
+File:
+
+- `lib/ai/architecture-planner.ts`
+
+Masalah:
+
+- untuk `FULLSTACK_COMMERCE`, planner selalu memasukkan:
+  - `app/login/page.tsx`
+  - `app/admin/page.tsx`
+
+Efek:
+
+- prompt yang hanya butuh toko online publik tetap dipaksa punya auth dan admin
+
+### C. Checkpoint fase `routes` terlalu keras
+
+File:
+
+- `lib/services/generation-orchestrator.service.ts`
+
+Masalah:
+
+- fase `routes` saat ini mewajibkan sekaligus:
+  - `app/products/page.tsx`
+  - `app/products/[id]/page.tsx`
+  - `app/cart/page.tsx`
+  - `app/checkout/page.tsx`
+  - `app/login/page.tsx`
+  - `app/admin/page.tsx`
+
+Efek:
+
+- generator gagal di Tahap 2 walau storefront inti sebenarnya sudah benar
+- frontend-first jadi tidak terasa bertahap
+
+### D. Recovery ikut mengunci constraint yang sama
+
+File:
+
+- `lib/services/generation-orchestrator.service.ts`
+- `lib/ai/software-orchestration.ts`
+
+Masalah:
+
+- `ecommerceRequiredFiles()` masih menganggap `login` dan `admin` sebagai file wajib inti
+- planner scope e-commerce juga masih memutlakkan route tersebut
+
+Efek:
+
+- retry dan repair akan cenderung mengulang constraint yang sama
+- generator sulit turun ke versi storefront minimal yang valid
+
+### E. Ada masalah terpisah pada infra worker production
+
+Audit readiness juga menunjukkan:
+
+- `GENERATION_WORKER_HEARTBEAT` masih gagal
+
+Ini bukan penyebab error checkpoint e-commerce di screenshot, tetapi tetap harus dibereskan karena akan mengganggu generate production setelah bug checkpoint selesai.
 
 ---
 
-## 4. Target Arsitektur Production Yang Benar
+## 3. Tujuan Perbaikan
 
-Swift production yang stabil harus dibagi seperti ini:
+Perbaikan dianggap benar jika:
 
-### Service 1 - App utama
-
-- Platform: Vercel
-- Fungsi: dashboard, auth, API, orchestration request
-
-### Service 2 - Generation worker
-
-- Platform: Railway atau VPS
-- Fungsi: mengambil job BullMQ dari Redis dan menjalankan proses generasi
-
-### Service 3 - Sandbox runtime
-
-- Platform: Railway atau VPS
-- Fungsi: install dependency, build, runtime smoke, dan preview app hasil generate
-
-### Service 4 - Redis
-
-- Platform: Redis Cloud, Upstash native Redis, atau provider Redis native lain
-- Fungsi: queue BullMQ dan heartbeat worker
-
-### Service 5 - Database
-
-- Platform: Neon PostgreSQL
-- Fungsi: persistence job, file, billing, dan history
+- prompt e-commerce sederhana bisa lolos fase awal tanpa `login` dan `admin`,
+- preview storefront bisa muncul lebih cepat,
+- route auth/admin hanya diwajibkan jika memang diminta user atau dibutuhkan archetype,
+- generator tetap bisa naik ke mode full stack bila prompt memang meminta admin, role, auth, atau backoffice,
+- worker heartbeat production tetap dipantau sebagai isu terpisah.
 
 ---
 
-## 5. Langkah Fix Lengkap
+## 4. Strategi Perbaikan
 
-## Langkah 1 - Pastikan App Production Memakai Queue Mode
+## Tahap 1 - Pisahkan E-Commerce Dasar dan Full Commerce
 
-Di environment production app utama, set:
+Yang harus diubah:
 
-```env
-NODE_ENV=production
-SWIFT_GENERATION_EXECUTION_MODE=queue
-SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=false
-SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK=true
-```
+- jangan semua `commerce_storefront` otomatis dianggap `FULLSTACK_COMMERCE`
+- tambahkan jalur yang lebih ringan untuk e-commerce dasar
 
-Catatan:
+Opsi implementasi:
 
-- `SWIFT_GENERATION_EXECUTION_MODE=queue` adalah wajib.
-- `SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK=true` hanya berfungsi sebagai jaring pengaman, bukan mode utama.
-- Jangan mengandalkan `SWIFT_ENABLE_GENERATION_WORKER=true` di Vercel. Repo ini sudah memberi warning bahwa worker BullMQ harus hidup sebagai proses terpisah, bukan di serverless runtime.
+1. Tambah archetype baru seperti `COMMERCE_STOREFRONT`
+2. Atau tetap pakai `FULLSTACK_COMMERCE`, tetapi jadikan auth/admin kondisional berdasarkan intent
 
-## Langkah 2 - Deploy Dedicated Worker Terpisah
+Target:
 
-Worker harus dijalankan sebagai service sendiri.
+- prompt seperti `buat web e-commerce` cukup menghasilkan storefront + cart + checkout dulu
+- auth/admin baru masuk jika prompt menyebut:
+  - admin
+  - dashboard admin
+  - role
+  - staff
+  - login
+  - autentikasi
+  - backoffice
 
-Pakai:
+## Tahap 2 - Longgarkan Checkpoint Fase Routes
 
-- `workers/Dockerfile`
-- `railway.worker.json`
-- command runtime: `npm run worker:generation`
+Yang harus diubah:
 
-Kalau deploy ke Railway:
+- `validateStagedCheckpoint()` untuk fase `routes`
 
-1. Buat service baru dari repo yang sama.
-2. Gunakan Dockerfile path `workers/Dockerfile`.
-3. Gunakan health check `/health`.
-4. Pastikan service restart otomatis saat gagal.
+Aturan baru yang direkomendasikan:
 
-Environment minimum untuk worker:
+Route minimum fase `routes` untuk e-commerce dasar:
 
-```env
-NODE_ENV=production
-REDIS_URL=rediss://REPLACE_WITH_NATIVE_REDIS
-DATABASE_URL=postgresql://REPLACE_WITH_POOLED_DB
-DIRECT_DATABASE_URL=postgresql://REPLACE_WITH_DIRECT_DB
-OPENROUTER_API_KEY=REPLACE_WITH_KEY
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_SITE_URL=https://your-domain.com
-OPENROUTER_APP_NAME=Swift AI
-SANDBOX_SERVICE_URL=https://your-sandbox-service.up.railway.app
-SANDBOX_SERVICE_TOKEN=REPLACE_WITH_TOKEN
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=REPLACE_WITH_KEY
-SUPABASE_SERVICE_ROLE_KEY=REPLACE_WITH_KEY
-SUPABASE_STORAGE_BUCKET=REPLACE_WITH_BUCKET
-SWIFT_GENERATION_EXECUTION_MODE=queue
-SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true
-PORT=4000
-```
+- `app/products/page.tsx`
+- `app/products/[id]/page.tsx`
+- `app/cart/page.tsx`
+- `app/checkout/page.tsx`
 
-Catatan:
+Route yang hanya wajib jika intent mendukung:
 
-- Worker tidak perlu jalan di Vercel.
-- Worker harus bisa baca Redis, database, OpenRouter, dan sandbox service.
-- Worker Dockerfile saat ini memang sudah memaksa `SWIFT_GENERATION_EXECUTION_MODE=queue`.
+- `app/login/page.tsx`
+- `app/admin/page.tsx`
 
-## Langkah 3 - Pastikan Redis Yang Dipakai Adalah Native Redis
+Target:
 
-Nilai yang benar:
+- Tahap 2 tidak lagi gagal hanya karena auth/admin belum ada
+- preview storefront bisa lanjut ke tahap berikutnya
 
-```env
-REDIS_URL=redis://... atau rediss://...
-```
+## Tahap 3 - Samakan Scope Planner dengan Checkpoint
 
-Yang salah untuk BullMQ:
+Yang harus diubah:
 
-```env
-UPSTASH_REDIS_REST_URL=https://...
-```
+- `ecommerceRequiredFiles()`
+- `allowedFilesForPlanner()`
+- aturan file plan e-commerce di orchestrator
 
-REST Redis boleh dipakai sebagai pelengkap, tetapi worker BullMQ tetap butuh `REDIS_URL` native.
+Prinsip:
 
-Checklist Redis:
+- daftar file wajib harus selaras dengan fase
+- file inti storefront dan file opsional auth/admin jangan dicampur di level requirement yang sama
 
-- URL pakai `redis://` atau `rediss://`
-- bisa diakses dari Vercel app
-- bisa diakses dari Railway worker
-- tidak diblok firewall
-- tidak memakai kredensial yang sudah lama atau salah
+Target:
 
-## Langkah 4 - Pastikan Sandbox Railway Hidup dan Bisa Diakses
+- repair tidak mengulang false requirement
+- file yang dikejar AI sesuai tahap aktual
 
-App generate dan worker perlu sandbox service yang sehat.
+## Tahap 4 - Buat Auth/Admin Menjadi Kondisional
 
-Environment minimum sandbox:
+Yang harus diubah:
 
-```env
-NODE_ENV=production
-SANDBOX_SERVICE_TOKEN=REPLACE_WITH_TOKEN
-SANDBOX_PUBLIC_BASE_URL=https://your-sandbox-service.up.railway.app
-SWIFT_SANDBOX_ROOT=/tmp/swift-sandbox
-SWIFT_SANDBOX_BASE_PORT=4300
-SWIFT_SANDBOX_MAX_PROJECTS=12
-SWIFT_SANDBOX_MAX_FILES=240
-SWIFT_SANDBOX_MAX_TOTAL_BYTES=6291456
-SWIFT_SANDBOX_MAX_FILE_BYTES=524288
-SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS=1800000
-SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS=1200000
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=REPLACE_WITH_KEY
-SUPABASE_SERVICE_ROLE_KEY=REPLACE_WITH_KEY
-SUPABASE_STORAGE_BUCKET=REPLACE_WITH_BUCKET
-```
+- `pagesForIntent()` di planner
+- logic text matching di orchestrator
+- blueprint e-commerce jika perlu
 
-Checklist sandbox:
+Aturan yang direkomendasikan:
 
-- endpoint `/health` harus bisa diakses
-- token sandbox cocok dengan app dan worker
-- root sandbox bisa ditulis
-- process build dan preview tidak crash saat install dependency
+- `app/login/page.tsx` wajib hanya jika:
+  - prompt eksplisit minta login/auth
+  - atau app memang butuh user account flow
 
-## Langkah 5 - Betulkan URL Production App
+- `app/admin/page.tsx` wajib hanya jika:
+  - prompt minta dashboard admin/backoffice
+  - atau appType yang dipilih memang admin-heavy
 
-Untuk production, jangan biarkan:
+Target:
 
-```env
-NEXTAUTH_URL=http://localhost:3000
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-```
+- e-commerce publik bisa lolos tanpa beban admin panel dari awal
 
-Harus diganti ke domain production, contoh:
+## Tahap 5 - Tambahkan Regression Guard
 
-```env
-NEXTAUTH_URL=https://ai-swift.biz.id
-NEXT_PUBLIC_APP_URL=https://ai-swift.biz.id
-```
+Yang harus diuji:
 
-Ini penting untuk:
+1. Prompt e-commerce sederhana
+2. Prompt e-commerce + login
+3. Prompt e-commerce + admin dashboard
+4. Prompt marketplace full stack
+
+Test yang wajib lolos:
+
+- prompt e-commerce sederhana tidak gagal di Tahap 2 hanya karena `login/admin`
+- prompt dengan auth memang tetap mewajibkan `login`
+- prompt dengan backoffice memang tetap mewajibkan `admin`
+- audit dan regression tetap hijau
+
+---
+
+## 5. Perubahan Kode yang Disarankan
+
+Area paling penting:
+
+- `lib/ai/architecture-intent.ts`
+- `lib/ai/architecture-planner.ts`
+- `lib/services/generation-orchestrator.service.ts`
+- `lib/ai/software-orchestration.ts`
+
+Area test/guard:
+
+- `scripts/regression-tests.js`
+- `scripts/generation-runtime-contracts.js`
+- `scripts/production-audit.js`
+
+---
+
+## 6. Contoh Aturan Yang Benar
+
+### Prompt: `Buat web e-commerce`
+
+Minimal yang boleh lolos:
+
+- home
+- product listing
+- product detail
+- cart
+- checkout
+
+Tidak wajib di tahap awal:
 
 - login
-- callback auth
-- link preview
-- health readiness production
+- admin
+- role management
+- API admin
 
-## Langkah 6 - Bersihkan Env Yang Berpotensi Membingungkan
+### Prompt: `Buat web e-commerce dengan login user`
 
-Pastikan tidak ada env yang saling bertentangan.
+Minimal yang wajib:
 
-Yang harus dicek:
+- semua route storefront dasar
+- `app/login/page.tsx`
 
-- `SWIFT_GENERATION_EXECUTION_MODE` jangan `serverless`
-- `SANDBOX_SERVICE_URL` jangan kosong
-- `SANDBOX_SERVICE_TOKEN` harus cocok di app dan sandbox
-- `REDIS_URL` jangan placeholder
-- hapus baris sampah atau typo di file env
+Masih bisa opsional di tahap lebih belakang:
 
-Kalau satu env salah, app bisa tetap boot tetapi generate akan gagal di tengah jalan.
+- admin dashboard
 
----
+### Prompt: `Buat e-commerce full stack dengan admin panel`
 
-## 6. Langkah Verifikasi Setelah Fix
+Minimal yang wajib:
 
-Setelah env dan service dibetulkan, jalankan verifikasi ini.
-
-### A. Verifikasi app utama
-
-Jalankan:
-
-```bash
-npm run deploy:readiness
-npm run audit:production
-```
-
-Target hasil:
-
-- readiness tidak blokir env penting
-- build, lint, typecheck hijau
-
-### B. Verifikasi worker
-
-Jalankan:
-
-```bash
-npm run worker:health
-```
-
-Atau akses endpoint:
-
-```text
-https://your-worker-service/health
-```
-
-Target hasil:
-
-- status `healthy`
-- mode `queue`
-- endpoint merespons HTTP `200`
-
-### C. Verifikasi dari app utama
-
-Akses:
-
-```text
-https://your-app-domain/api/worker/health
-https://your-app-domain/api/health?refreshProvider=true
-```
-
-Target hasil:
-
-- worker tidak `missing`
-- queue tidak `unhealthy`
-- redis tidak error
-- heartbeat worker masih fresh
-
-### D. Verifikasi sandbox
-
-Akses:
-
-```text
-https://your-sandbox-service/health
-```
-
-Target hasil:
-
-- status `healthy` atau minimal `degraded` tanpa root error
-- root sandbox ready
-- service token dan runtime info valid
-
-### E. Verifikasi generate end-to-end
-
-Tes dengan prompt sederhana:
-
-- landing page
-- dashboard sederhana
-- e-commerce sederhana
-
-Target hasil:
-
-- job masuk queue
-- worker mengambil job
-- preview tidak blank
-- status pindah dari `queued` ke `preview_ready`
+- storefront dasar
+- `app/login/page.tsx`
+- `app/admin/page.tsx`
+- endpoint/API/admin support sesuai orchestration
 
 ---
 
-## 7. Matriks Error dan Tindakan
+## 7. Risiko Jika Tidak Diperbaiki
 
-### Error: `Production generation must run in queue mode with a dedicated worker.`
-
-Arti:
-
-- production masih salah mode, atau
-- sandbox/fallback tidak dianggap siap
-
-Tindakan:
-
-1. set `SWIFT_GENERATION_EXECUTION_MODE=queue`
-2. redeploy app utama
-3. pastikan dedicated worker hidup
-4. pastikan `SANDBOX_SERVICE_URL` dan token terisi
-
-### Error: `Generation queue unavailable`
-
-Arti:
-
-- Redis mati,
-- kredensial Redis salah,
-- atau queue tidak bisa enqueue
-
-Tindakan:
-
-1. cek `REDIS_URL`
-2. cek koneksi worker ke Redis
-3. cek health `api/worker/health`
-4. restart worker setelah Redis sehat
-
-### Error: `menunggu dedicated worker`
-
-Arti:
-
-- queue mode aktif,
-- tetapi heartbeat worker belum sehat
-
-Tindakan:
-
-1. cek worker service Railway
-2. cek log boot worker
-3. cek endpoint `/health`
-4. cek apakah worker crash saat load env, Prisma, atau Redis
-
-### Error: preview kosong tetapi queue sukses
-
-Arti:
-
-- worker sudah memproses,
-- tetapi sandbox build atau preview gagal
-
-Tindakan:
-
-1. cek sandbox `/health`
-2. cek `SANDBOX_SERVICE_TOKEN`
-3. cek build log sandbox
-4. cek batas file, port, dan timeout sandbox
+- user akan terus melihat generate gagal walau storefront inti sudah hampir jadi
+- frontend-first terasa bohong karena validator mendorong full stack terlalu cepat
+- retry prompt hanya mengulang gagal yang sama
+- AI terlihat buruk padahal problem utamanya ada di aturan checkpoint
+- conversion user bisa turun karena preview pertama tidak pernah muncul
 
 ---
 
-## 8. Urutan Deploy Yang Direkomendasikan
+## 8. Isu Terpisah yang Tetap Harus Dipantau
 
-Supaya tidak bolak-balik error, deploy dengan urutan ini:
+Selain bug checkpoint di atas, repo juga masih menunjukkan:
 
-1. betulkan env app production
-2. deploy sandbox Railway
-3. deploy worker Railway
-4. verifikasi worker health
-5. verifikasi app health
-6. verifikasi sandbox health
-7. lakukan test generate end-to-end
+- `GENERATION_WORKER_HEARTBEAT` belum sehat
 
-Kalau app dideploy duluan tetapi worker belum hidup, UI akan tetap menunjukkan error dedicated worker walau kode sudah benar.
+Arti praktisnya:
+
+- setelah bug checkpoint dibetulkan, generate production masih tetap perlu dedicated worker yang aktif
+- masalah worker ini bukan penyebab langsung screenshot checkpoint e-commerce, tetapi tetap blocker untuk stabilitas production
 
 ---
 
-## 9. Checklist Selesai
+## 9. Definisi Selesai
 
-Perbaikan dianggap selesai jika semua poin ini terpenuhi:
+Perbaikan ini dianggap selesai jika:
 
-- `SWIFT_GENERATION_EXECUTION_MODE=queue` di production app
-- dedicated worker hidup sebagai service terpisah
-- `REDIS_URL` native Redis aktif
-- sandbox Railway hidup dan sehat
-- `SANDBOX_SERVICE_URL` dan token benar
-- `NEXTAUTH_URL` dan `NEXT_PUBLIC_APP_URL` sudah domain production
-- `/api/worker/health` tidak lagi menunjukkan worker missing
-- generate prompt menghasilkan preview, bukan `No preview yet`
+- prompt `buat web e-commerce` tidak lagi gagal karena `app/login/page.tsx` dan `app/admin/page.tsx`
+- preview storefront dasar bisa muncul sebelum fitur admin/auth lengkap
+- auth/admin hanya diwajibkan bila intent benar-benar membutuhkan
+- regression test menjaga perilaku baru ini
+- worker heartbeat production tetap dipantau lewat readiness terpisah
 
 ---
 
-## 10. Catatan Penting Keamanan
+## 10. Kesimpulan
 
-Kalau credential production pernah tersebar di screenshot, chat, commit, atau file yang tidak aman, lakukan rotasi untuk:
+Masalah utama saat ini bukan generator tidak bisa membuat web, tetapi validator e-commerce terlalu cepat memaksa mode full stack.
 
-- database
-- Redis
-- OpenRouter
-- Supabase
-- sandbox token
-- Vercel deploy token
-- auth secret
+Fix yang benar bukan sekadar menambah file `login` dan `admin` secara paksa, melainkan:
 
-Ini tidak langsung memperbaiki error worker, tetapi wajib untuk production yang aman.
+1. melonggarkan archetype e-commerce dasar
+2. membuat checkpoint fase `routes` lebih bertahap
+3. menjadikan auth/admin kondisional
+4. menyelaraskan planner, checkpoint, dan repair scope
 
----
+Setelah itu, pengalaman generate akan jauh lebih masuk akal:
 
-## 11. Kesimpulan Praktis
-
-Error ini bukan berarti Swift tidak bisa generate web. Error ini berarti arsitektur production belum lengkap atau belum sinkron.
-
-Fix utamanya adalah:
-
-1. paksa production ke `queue mode`
-2. hidupkan dedicated worker di Railway atau VPS
-3. pastikan Redis native dan sandbox Railway sehat
-4. verifikasi health endpoint sampai worker heartbeat kembali normal
-
-Kalau empat hal ini benar, error dedicated worker akan hilang dan generate bisa kembali jalan normal.
+- storefront dulu,
+- preview muncul dulu,
+- full stack menyusul bila memang diminta.

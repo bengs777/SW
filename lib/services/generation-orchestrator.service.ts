@@ -848,7 +848,15 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
     required.add(filePath)
   }
 
-  if (/\b(admin|pengelola|staff|role|rbac|user|login|auth)\b/i.test(text)) {
+  const adminRequested = /\b(admin|pengelola|staff|role|rbac|back office|backoffice)\b/i.test(text)
+  const authRequested = /\b(user|login|auth|register|session|nextauth|akun|account)\b/i.test(text)
+
+  if (authRequested) {
+    required.add("app/login/page.tsx")
+    required.add("app/api/auth/route.ts")
+  }
+
+  if (adminRequested) {
     required.add("app/admin/page.tsx")
     required.add("app/api/admin/users/route.ts")
     required.add("app/api/auth/route.ts")
@@ -3612,14 +3620,7 @@ function validateStagedCheckpoint(input: {
   }
 
   if (input.phase === "routes") {
-    for (const route of [
-      "app/products/page.tsx",
-      "app/products/[id]/page.tsx",
-      "app/cart/page.tsx",
-      "app/checkout/page.tsx",
-      "app/login/page.tsx",
-      "app/admin/page.tsx",
-    ]) {
+    for (const route of stagedEcommerceRouteRequirements(input.plan)) {
       if (!paths.has(route)) failures.push(`Missing ecommerce route: ${route}`)
     }
   }
@@ -3661,7 +3662,7 @@ function auditPostGeneration(input: {
   }
 
   if (input.plan.orchestration.plannerOutput.appType === "ecommerce") {
-    for (const requiredFile of ecommerceRequiredFiles()) {
+    for (const requiredFile of ecommerceRequiredFiles(input.plan)) {
       if (!persistedPaths.has(requiredFile)) failures.push(`Missing ecommerce required file after persistence: ${requiredFile}`)
     }
   }
@@ -3687,7 +3688,7 @@ function auditPostGeneration(input: {
     ok: failures.length === 0,
     failures,
     fileCount: input.persistedFiles.length,
-    requiredFiles: input.plan.orchestration.plannerOutput.appType === "ecommerce" ? ecommerceRequiredFiles() : [],
+    requiredFiles: input.plan.orchestration.plannerOutput.appType === "ecommerce" ? ecommerceRequiredFiles(input.plan) : [],
     previewMode: input.previewUrl
       ? "runtime-sandbox"
       : /browser-preview-only/i.test(previewStatus) || acceptsBrowserPreviewOnly
@@ -3988,22 +3989,58 @@ function scopeAllowsPath(allowedPaths: string[], path: string) {
   })
 }
 
-function ecommerceRequiredFiles() {
-  return [
+function stagedEcommerceRouteRequirements(plan: GenerationPlan) {
+  const required = [
+    "app/products/page.tsx",
+    "app/products/[id]/page.tsx",
+    "app/cart/page.tsx",
+    "app/checkout/page.tsx",
+  ]
+  if (plannerRequiresEcommerceLogin(plan)) required.push("app/login/page.tsx")
+  if (plannerRequiresEcommerceAdmin(plan)) {
+    required.push("app/admin/page.tsx")
+    if (!required.includes("app/login/page.tsx")) required.push("app/login/page.tsx")
+  }
+  return required
+}
+
+function plannerRequiresEcommerceLogin(plan: GenerationPlan) {
+  const planner = plan.orchestration.plannerOutput
+  const requiredRoutes = new Set(planner.requiredRoutes.map((route) => normalizePath(route)))
+  const requiredFiles = new Set(planner.requiredFiles.map((file) => normalizePath(file)))
+  if (requiredRoutes.has("app/login/page.tsx") || requiredFiles.has("app/login/page.tsx")) return true
+  if (plan.structuredIntent.auth.provider) return true
+  return planner.features.some((feature) => /\bauth|authentication|login|session|account\b/i.test(feature))
+}
+
+function plannerRequiresEcommerceAdmin(plan: GenerationPlan) {
+  const planner = plan.orchestration.plannerOutput
+  const requiredRoutes = new Set(planner.requiredRoutes.map((route) => normalizePath(route)))
+  const requiredFiles = new Set(planner.requiredFiles.map((file) => normalizePath(file)))
+  if (requiredRoutes.has("app/admin/page.tsx") || requiredFiles.has("app/admin/page.tsx")) return true
+  return planner.features.some((feature) => /\brole_based_admin|rbac|admin|backoffice|staff\b/i.test(feature))
+}
+
+function ecommerceRequiredFiles(plan: GenerationPlan) {
+  const required = [
     "app/layout.tsx",
     "app/page.tsx",
     "app/products/page.tsx",
     "app/products/[id]/page.tsx",
     "app/cart/page.tsx",
     "app/checkout/page.tsx",
-    "app/login/page.tsx",
-    "app/admin/page.tsx",
     "components/Navbar.tsx",
     "components/ProductCard.tsx",
     "components/ProductGrid.tsx",
     "components/CartDrawer.tsx",
     "components/CheckoutForm.tsx",
   ]
+  if (plannerRequiresEcommerceLogin(plan)) required.push("app/login/page.tsx")
+  if (plannerRequiresEcommerceAdmin(plan)) {
+    required.push("app/admin/page.tsx")
+    if (!required.includes("app/login/page.tsx")) required.push("app/login/page.tsx")
+  }
+  return required
 }
 
 function buildMissingScaffoldFiles(missingFiles: string[]): GeneratedFile[] {

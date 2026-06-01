@@ -141,6 +141,18 @@ export function buildArchitectureInstructionBlock(plan: SwiftArchitecturePlan) {
 
 function pagesForIntent(intent: SwiftStructuredIntent) {
   const pages = new Set<string>(["app/page.tsx"])
+  if (intent.type === "frontend_only" && intent.archetype === "FULLSTACK_COMMERCE") {
+    pages.add("app/products/page.tsx")
+    pages.add("app/products/[id]/page.tsx")
+    pages.add("app/cart/page.tsx")
+    pages.add("app/checkout/page.tsx")
+    if (shouldIncludeCommerceLogin(intent)) pages.add("app/login/page.tsx")
+    if (shouldIncludeCommerceAdmin(intent)) {
+      pages.add("app/admin/page.tsx")
+      pages.add("app/login/page.tsx")
+    }
+    return Array.from(pages)
+  }
   if (intent.type === "frontend_only" && (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL")) {
     pages.add("app/dashboard/page.tsx")
   }
@@ -152,15 +164,30 @@ function pagesForIntent(intent: SwiftStructuredIntent) {
     pages.add("app/products/[id]/page.tsx")
     pages.add("app/cart/page.tsx")
     pages.add("app/checkout/page.tsx")
-    pages.add("app/login/page.tsx")
-    pages.add("app/admin/page.tsx")
     pages.add("app/orders/page.tsx")
+    if (shouldIncludeCommerceLogin(intent)) pages.add("app/login/page.tsx")
+    if (shouldIncludeCommerceAdmin(intent)) {
+      pages.add("app/admin/page.tsx")
+      pages.add("app/login/page.tsx")
+    }
   }
   if (intent.archetype === "DASHBOARD_SAAS" || intent.archetype === "ADMIN_PANEL") pages.add("app/dashboard/page.tsx")
   if (intent.archetype === "BOOKING_APP") pages.add("app/booking/page.tsx")
   if (intent.archetype === "CONTENT_PLATFORM") pages.add("app/posts/[slug]/page.tsx")
   if (intent.auth.provider) pages.add("app/login/page.tsx")
   return Array.from(pages)
+}
+
+function shouldIncludeCommerceLogin(intent: SwiftStructuredIntent) {
+  return Boolean(
+    intent.auth.provider ||
+    intent.backend.services.includes("auth") ||
+    intent.businessRequirements.some((item) => /authentication|auth|login|session|role_based_admin/i.test(item))
+  )
+}
+
+function shouldIncludeCommerceAdmin(intent: SwiftStructuredIntent) {
+  return intent.businessRequirements.some((item) => /role_based_admin|admin|rbac|backoffice|staff/i.test(item))
 }
 
 function dependenciesForIntent(intent: SwiftStructuredIntent) {

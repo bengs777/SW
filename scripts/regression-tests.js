@@ -32,6 +32,8 @@ const authConfig = read("auth.ts")
 const adminGuard = read("lib/admin.ts")
 const healthApi = read("app/api/health/route.ts")
 const workerHealthApi = read("app/api/worker/health/route.ts")
+const architecturePlanner = read("lib/ai/architecture-planner.ts")
+const softwareOrchestration = read("lib/ai/software-orchestration.ts")
 const proxy = read("proxy.ts")
 const semanticEdit = read("lib/ai/semantic-edit.ts")
 const incrementalEdit = read("lib/ai/incremental-edit.ts")
@@ -540,6 +542,20 @@ assert(
     /AUTH_PROVIDER_HEALTH/.test(productionReadiness) &&
     /deployment_readiness/.test(instrumentation),
   "runtime startup and health must fail closed on critical envs while keeping optional services degraded"
+)
+
+assert(
+  "ecommerce checkpoint and planner routes are conditional",
+  /stagedEcommerceRouteRequirements/.test(generationOrchestrator) &&
+    /plannerRequiresEcommerceLogin/.test(generationOrchestrator) &&
+    /plannerRequiresEcommerceAdmin/.test(generationOrchestrator) &&
+    /for \(const route of stagedEcommerceRouteRequirements\(input.plan\)\)/.test(generationOrchestrator) &&
+    /shouldIncludeCommerceLogin/.test(architecturePlanner) &&
+    /shouldIncludeCommerceAdmin/.test(architecturePlanner) &&
+    /intent.type === "frontend_only" && intent.archetype === "FULLSTACK_COMMERCE"/.test(architecturePlanner) &&
+    /plannerRequestsCommerceLogin/.test(softwareOrchestration) &&
+    /plannerRequestsCommerceAdmin/.test(softwareOrchestration),
+  "ecommerce storefront flow must require product/cart/checkout first while login/admin stay intent-driven"
 )
 
 assert(
