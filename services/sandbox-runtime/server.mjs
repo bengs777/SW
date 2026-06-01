@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, stat, statfs, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import express from "express"
@@ -20,6 +20,9 @@ const MAX_PROJECTS = Number(process.env.SWIFT_SANDBOX_MAX_PROJECTS || 12)
 const MAX_FILES = Number(process.env.SWIFT_SANDBOX_MAX_FILES || 240)
 const MAX_TOTAL_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_TOTAL_BYTES || 6 * 1024 * 1024)
 const MAX_FILE_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_FILE_BYTES || 512 * 1024)
+const MIN_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_MIN_FREE_BYTES", 256 * 1024 * 1024)
+const MIN_INSTALL_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_INSTALL_MIN_FREE_BYTES", MIN_FREE_BYTES)
+const MIN_BUILD_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_BUILD_MIN_FREE_BYTES", MIN_FREE_BYTES)
 const PROJECT_IDLE_TTL_MS = Number(process.env.SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS || 30 * 60 * 1000)
 const PROCESS_MAX_UPTIME_MS = Number(process.env.SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS || 20 * 60 * 1000)
 const CLEANUP_INTERVAL_MS = Number(process.env.SWIFT_SANDBOX_CLEANUP_INTERVAL_MS || 60 * 1000)
@@ -48,6 +51,75 @@ console.log({
 
 if (IS_PRODUCTION && !SERVICE_TOKEN) {
   throw new Error("SANDBOX_SERVICE_TOKEN is required in production")
+}
+
+function envByteLimit(name, fallback) {
+  const parsed = Number(process.env[name])
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "unknown"
+  if (bytes >= 1024 * 1024 * 1024) return `${Math.round((bytes / (1024 * 1024 * 1024)) * 10) / 10}GB`
+  if (bytes >= 1024 * 1024) return `${Math.round((bytes / (1024 * 1024)) * 10) / 10}MB`
+  if (bytes >= 1024) return `${Math.round((bytes / 1024) * 10) / 10}KB`
+  return `${bytes}B`
+}
+
+function isNoSpaceError(error) {
+  const code = error && typeof error === "object" ? String(error.code || "") : ""
+  const message = error instanceof Error ? error.message : String(error || "")
+  return code === "ENOSPC" || /no space left on device|ENOSPC|Sandbox storage exhausted/i.test(message)
+}
+
+function normalizeSandboxError(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/Sandbox storage exhausted/i.test(message)) {
+    return message
+  }
+  if (!isNoSpaceError(error)) {
+    return message
+  }
+
+  return [
+    "Sandbox storage exhausted: no space left on device while preparing runtime files or dependencies.",
+    "Free space on SWIFT_SANDBOX_ROOT or move it to a larger volume.",
+  ].join(" ")
+}
+
+function sourceBytes(files) {
+  return files.reduce((sum, file) => sum + Buffer.byteLength(String(file.content || ""), "utf8"), 0)
+}
+
+async function readStorageHealth(rootDir = ROOT_DIR) {
+  await mkdir(rootDir, { recursive: true })
+  const storage = await statfs(rootDir)
+  const availableBytes = Number(storage.bavail) * Number(storage.bsize)
+  const totalBytes = Number(storage.blocks) * Number(storage.bsize)
+
+  return {
+    availableBytes,
+    totalBytes,
+    minFreeBytes: MIN_FREE_BYTES,
+    ok: availableBytes >= MIN_FREE_BYTES,
+  }
+}
+
+async function assertStorageAvailable(rootDir, requiredBytes, phase) {
+  if (!Number.isFinite(requiredBytes) || requiredBytes <= 0) return
+
+  try {
+    const storage = await readStorageHealth(rootDir)
+    if (storage.availableBytes >= requiredBytes) return
+
+    throw new Error(
+      `Sandbox storage exhausted before ${phase}: available ${formatBytes(storage.availableBytes)}, required ${formatBytes(requiredBytes)}.`
+    )
+  } catch (error) {
+    const code = error && typeof error === "object" ? String(error.code || "") : ""
+    if (code === "ENOSYS" || code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") return
+    throw error
+  }
 }
 
 const DEFAULT_ALLOWED_PACKAGES = [
@@ -345,6 +417,11 @@ function mergePackageJson(content) {
 
 async function ensureFiles(state, files) {
   await mkdir(state.rootDir, { recursive: true })
+  await assertStorageAvailable(
+    state.rootDir,
+    Math.max(MIN_FREE_BYTES, sourceBytes(files) * 2),
+    "writing generated files"
+  )
 
   const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
   const packageJson = mergePackageJson(packageFile?.content || null)
@@ -556,12 +633,14 @@ async function startSandbox(projectId, files, req) {
     const packageHash = createHash("sha256").update(packageContent).digest("hex")
     if (state.packageHash !== packageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
+      await assertStorageAvailable(state.rootDir, MIN_INSTALL_FREE_BYTES, "installing dependencies")
       const install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
       if (install.code !== 0) throw new Error("npm ci failed")
       state.packageHash = packageHash
     }
 
     state.status = "building"
+    await assertStorageAvailable(state.rootDir, MIN_BUILD_FREE_BYTES, "building preview")
     const build = await runCommand(state, "npm", ["run", "build"], Number(process.env.SWIFT_SANDBOX_BUILD_TIMEOUT_MS || 150000))
     if (build.code !== 0) throw new Error("npm run build failed")
 
@@ -569,7 +648,7 @@ async function startSandbox(projectId, files, req) {
     return state
   } catch (error) {
     state.status = "error"
-    state.lastError = error instanceof Error ? error.message : String(error)
+    state.lastError = normalizeSandboxError(error)
     appendLog(state, `Sandbox error: ${state.lastError}`)
     return state
   }
@@ -587,9 +666,13 @@ function serialize(state) {
 app.get("/health", async (_req, res) => {
   let storageOk = true
   let storageError = null
+  let storage = null
   try {
-    await mkdir(ROOT_DIR, { recursive: true })
-    await stat(ROOT_DIR)
+    storage = await readStorageHealth(ROOT_DIR)
+    storageOk = storage.ok
+    storageError = storage.ok
+      ? null
+      : `Sandbox storage low: available ${formatBytes(storage.availableBytes)}, required ${formatBytes(storage.minFreeBytes)}.`
   } catch (error) {
     storageOk = false
     storageError = error.message || String(error)
@@ -611,6 +694,7 @@ app.get("/health", async (_req, res) => {
       maxProjects: MAX_PROJECTS,
       rootReady: storageOk,
       rootError: storageError,
+      storage,
       basePort: BASE_PORT,
       maxFiles: MAX_FILES,
       maxTotalBytes: MAX_TOTAL_BYTES,

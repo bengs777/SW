@@ -34,6 +34,7 @@ function main() {
   const previewPanel = read("components/editor/preview-panel.tsx")
   const errorLogPanel = read("components/editor/error-log-panel.tsx")
   const sandboxRuntimeServer = read("services/sandbox-runtime/server.mjs")
+  const runtimeSandbox = read("lib/sandbox/runtime.ts")
   const sandboxRoute = read("app/api/projects/[id]/sandbox/route.ts")
   const qualityService = read("lib/services/generation-quality.service.ts")
   const schema = read("prisma/schema.prisma")
@@ -169,10 +170,24 @@ function main() {
     "sandbox.health-detail",
     /activeProjects/.test(sandboxRuntimeServer) &&
       /rootReady/.test(sandboxRuntimeServer) &&
+      /storage/.test(sandboxRuntimeServer) &&
       /railway/.test(sandboxRuntimeServer) &&
       /sandbox_service_unavailable/.test(sandboxRoute) &&
       /service:\s*\{[\s\S]*tokenConfigured/.test(sandboxRoute),
     "sandbox runtime and proxy expose safe health details for Railway troubleshooting"
+  )
+
+  assert(
+    "sandbox.storage-preflight",
+    /statfs/.test(sandboxRuntimeServer) &&
+      /MIN_FREE_BYTES/.test(sandboxRuntimeServer) &&
+      /assertStorageAvailable/.test(sandboxRuntimeServer) &&
+      /Sandbox storage exhausted/.test(sandboxRuntimeServer) &&
+      /statfs/.test(runtimeSandbox) &&
+      /MIN_SANDBOX_FREE_BYTES/.test(runtimeSandbox) &&
+      /assertSandboxStorageAvailable/.test(runtimeSandbox) &&
+      /normalizeSandboxError/.test(runtimeSandbox),
+    "sandbox runtime checks available storage before writes, install, and build"
   )
 
   assert(

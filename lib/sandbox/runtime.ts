@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process"
 import { createHash } from "crypto"
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "fs/promises"
+import { mkdir, readFile, readdir, rm, stat, statfs, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import path from "path"
 import { validateGeneratedPath } from "@/lib/ai/file-policy"
@@ -64,6 +64,9 @@ const VALIDATION_INSTALL_POLICY_VERSION = "include-dev-dependencies-v1"
 const SANDBOX_MEMORY_MB = Math.max(128, Number(process.env.SWIFT_SANDBOX_MEMORY_MB || 768))
 const MAX_SANDBOX_SOURCE_BYTES = Number(process.env.SWIFT_SANDBOX_SOURCE_BYTES || 8 * 1024 * 1024)
 const MAX_SANDBOX_WORKSPACE_BYTES = Number(process.env.SWIFT_SANDBOX_WORKSPACE_BYTES || 160 * 1024 * 1024)
+const MIN_SANDBOX_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_MIN_FREE_BYTES", 256 * 1024 * 1024)
+const MIN_SANDBOX_INSTALL_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_INSTALL_MIN_FREE_BYTES", MIN_SANDBOX_FREE_BYTES)
+const MIN_SANDBOX_BUILD_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_BUILD_MIN_FREE_BYTES", MIN_SANDBOX_FREE_BYTES)
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL || ""
 
@@ -186,6 +189,79 @@ function appendLog(state: SandboxState, message: string) {
   if (lines.length === 0) return
   state.logs.push(...lines.map((line) => `[${new Date().toISOString()}] ${line}`))
   state.logs = state.logs.slice(-MAX_LOG_LINES)
+}
+
+function envByteLimit(name: string, fallback: number) {
+  const parsed = Number(process.env[name])
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes)) return "unknown"
+  if (bytes >= 1024 * 1024 * 1024) return `${Math.round((bytes / (1024 * 1024 * 1024)) * 10) / 10}GB`
+  if (bytes >= 1024 * 1024) return `${Math.round((bytes / (1024 * 1024)) * 10) / 10}MB`
+  if (bytes >= 1024) return `${Math.round((bytes / 1024) * 10) / 10}KB`
+  return `${bytes}B`
+}
+
+function isNoSpaceError(error: unknown) {
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code || "")
+    : ""
+  const message = error instanceof Error ? error.message : String(error || "")
+  return code === "ENOSPC" || /no space left on device|ENOSPC|Sandbox storage exhausted/i.test(message)
+}
+
+function normalizeSandboxError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/Sandbox storage exhausted/i.test(message)) {
+    return message
+  }
+  if (!isNoSpaceError(error)) {
+    return message
+  }
+
+  return [
+    "Sandbox storage exhausted: no space left on device while preparing runtime files or dependencies.",
+    "Free space on SWIFT_SANDBOX_ROOT or move it to a larger volume.",
+  ].join(" ")
+}
+
+function estimateRuntimeSourceBytes(files: GeneratedFile[]) {
+  return files.reduce((sum, file) => sum + Buffer.byteLength(String(file.content || ""), "utf8"), 0)
+}
+
+async function readSandboxStorage(rootDir: string) {
+  await mkdir(rootDir, { recursive: true })
+  const storage = await statfs(rootDir)
+  const availableBytes = Number(storage.bavail) * Number(storage.bsize)
+  const totalBytes = Number(storage.blocks) * Number(storage.bsize)
+
+  return {
+    availableBytes,
+    totalBytes,
+  }
+}
+
+async function assertSandboxStorageAvailable(rootDir: string, requiredBytes: number, phase: string) {
+  if (!Number.isFinite(requiredBytes) || requiredBytes <= 0) return
+
+  try {
+    const storage = await readSandboxStorage(rootDir)
+    if (storage.availableBytes >= requiredBytes) return
+
+    throw new Error(
+      `Sandbox storage exhausted before ${phase}: available ${formatBytes(storage.availableBytes)}, required ${formatBytes(requiredBytes)}.`
+    )
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code || "")
+      : ""
+    if (code === "ENOSYS" || code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") {
+      return
+    }
+    throw error
+  }
 }
 
 function hashFiles(files: GeneratedFile[]) {
@@ -467,6 +543,11 @@ async function fileExists(filePath: string) {
 async function ensureRuntimeFiles(state: SandboxState, files: GeneratedFile[]) {
   await mkdir(state.rootDir, { recursive: true })
   assertFilesystemQuota(files)
+  await assertSandboxStorageAvailable(
+    state.rootDir,
+    Math.max(MIN_SANDBOX_FREE_BYTES, estimateRuntimeSourceBytes(files) * 2),
+    "writing generated files"
+  )
 
   const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
   const packageJson = mergePackageJson(packageFile?.content || null)
@@ -700,6 +781,7 @@ async function prepareRuntimeCommandSandbox(state: SandboxState, files: Generate
 
   if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
     state.status = "installing"
+    await assertSandboxStorageAvailable(state.rootDir, MIN_SANDBOX_INSTALL_FREE_BYTES, "installing dependencies")
     const install = await runCommand(state, "npm", ["install", "--ignore-scripts", "--include=dev"], 120_000, signal)
     if (install.code !== 0) {
       return {
@@ -753,6 +835,9 @@ export async function runRuntimeCommand(
 
     const spec = commandSpec(command)
     state.status = command === "lint" ? "linting" : command === "typecheck" ? "typechecking" : "building"
+    if (command === "build" || command === "preview validation") {
+      await assertSandboxStorageAvailable(state.rootDir, MIN_SANDBOX_BUILD_FREE_BYTES, "building runtime project")
+    }
     const result = await runCommand(state, spec.command, spec.args, spec.timeoutMs, options?.signal)
     const tailed = tailRuntimeCommandResult(result)
     return {
@@ -800,6 +885,7 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
       .digest("hex")
     if (state.packageHash !== nextPackageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
       state.status = "installing"
+      await assertSandboxStorageAvailable(state.rootDir, MIN_SANDBOX_INSTALL_FREE_BYTES, "installing dependencies")
       const install = await runCommand(state, "npm", ["install", "--ignore-scripts", "--include=dev"], 120_000, options?.signal)
       validation.push({
         name: "install",
@@ -903,6 +989,7 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
     }
 
     state.status = "building"
+    await assertSandboxStorageAvailable(state.rootDir, MIN_SANDBOX_BUILD_FREE_BYTES, "building preview")
     const build = await runCommand(state, "npm", ["run", "build"], 150_000, options?.signal)
     validation.push({
       name: "build",
@@ -951,7 +1038,7 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
     }
   } catch (error) {
     state.status = "error"
-    state.lastError = error instanceof Error ? error.message : String(error)
+    state.lastError = normalizeSandboxError(error)
     appendLog(state, `Sandbox error: ${state.lastError}`)
     return {
       status: state.status,

@@ -150,9 +150,11 @@ function createPrismaClient(): PrismaClient {
   })
 
   client.$on('error', (event) => {
-    log('error', 'prisma_error', {
+    const transientConnectionError = isConnectionErrorMessage(event.message)
+    log(transientConnectionError ? 'warn' : 'error', transientConnectionError ? 'prisma_connection_warning' : 'prisma_error', {
       message: event.message,
       target: event.target,
+      transientConnectionError,
     })
   })
 
@@ -161,6 +163,10 @@ function createPrismaClient(): PrismaClient {
 
 function isConnectionError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "")
+  return isConnectionErrorMessage(message)
+}
+
+function isConnectionErrorMessage(message: string) {
   return /can't reach database|connection|connect|pool|timeout|timed out|closed|ECONNRESET|ETIMEDOUT|P1001|P1002|P2024/i.test(message)
 }
 

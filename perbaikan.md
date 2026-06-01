@@ -1,237 +1,201 @@
 # Perbaikan Production Readiness Swift AI
 
-Tanggal audit awal: 2026-06-01, timezone Asia/Jakarta.
+Tanggal audit utama: 2026-06-01, timezone Asia/Jakarta.
 
-Status implementasi terakhir: 2026-06-01.
+Dokumen ini adalah gabungan status production readiness, hasil investigasi error `ENOSPC`, dan temuan live logs dari Vercel.
 
 ## Status Singkat
 
 Web belum siap production.
 
-Local source code sudah cukup sehat untuk build dan regression, tetapi runtime production masih blocked oleh konfigurasi dan service worker.
+Local source code sudah cukup sehat untuk build dan regression, tetapi runtime production masih blocked oleh konfigurasi worker, status queue, dan beberapa sinyal health yang belum hijau.
 
-## Status Implementasi
+Update implementasi repo: 2026-06-01.
 
-Sudah diimplementasikan di repo:
+Perubahan terbaru sudah menambahkan guard storage sandbox untuk mencegah error `ENOSPC` muncul terlambat saat write/install/build, memperkaya `/health` sandbox dengan detail free space, dan menurunkan sinyal Prisma connection closed transient menjadi warning agar log worker health tidak menyesatkan.
+
+## Ringkasan Temuan
+
+- Error `ENOSPC: no space left on device, write` paling mungkin berasal dari filesystem sandbox/runtime saat menulis file atau saat install dependency.
+- Local disk Windows masih longgar, jadi sumber `ENOSPC` bukan drive `C:` di mesin ini.
+- Sandbox service health endpoint masih `ok:true`, jadi root storage service hidup.
+- Live production worker health masih `degraded` karena worker service belum dikonfigurasi dan heartbeat worker belum ada.
+- Live logs Vercel menunjukkan error Prisma pada request `/api/worker/health`: `Error in PostgreSQL connection: Error { kind: Closed, cause: None }`.
+- Redis production sudah `noeviction` dan memory masih sangat longgar, jadi Redis bukan penyebab utama error ini.
+- Local `npm run deploy:readiness` sekarang PASS untuk Redis dan sandbox runtime. Sisa blocker adalah dedicated worker heartbeat dan `SWIFT_WORKER_HEALTH_URL`.
+
+## Status Implementasi Yang Sudah Ada Di Repo
+
+Sudah diimplementasikan sebelumnya:
 
 - `scripts/post-deploy-health.js` sekarang gagal untuk redirect, non-2xx, non-JSON, `unhealthy`, `degraded`, worker missing/disabled, dan punya retry config.
 - `package.json` menambah `postdeploy:health:prod` untuk canonical domain `https://www.ai-swift.biz.id`.
 - `.github/workflows/ci.yml` menambah production health gate setelah push ke `main`.
-- `scripts/deploy-readiness.js` sekarang memvalidasi fallback serverless disabled, Supabase service role non-placeholder, Redis `noeviction`, worker heartbeat, dan worker health URL.
+- `scripts/deploy-readiness.js` memvalidasi fallback serverless disabled, Supabase service role non-placeholder, Redis `noeviction`, worker heartbeat, dan worker health URL.
 - `lib/env.ts` tidak lagi salah menolak Supabase secret key format `sb_secret...`.
-- `workers/Dockerfile` sekarang menyalin source runtime yang dibutuhkan worker (`scripts`, `workers`, `lib`, `components`, `auth.ts`, dan pendukung lain).
-- `scripts/run-ts-script.js` bisa memuat dependency `.tsx`, bukan hanya `.ts`.
+- `workers/Dockerfile` menyalin source runtime yang dibutuhkan worker.
+- `scripts/run-ts-script.js` bisa memuat dependency `.tsx`.
 - `scripts/generation-runtime-contracts.js` menambah guard untuk Docker runtime source dan loader `.tsx`.
 
-Masih harus dilakukan di provider:
+Sudah diimplementasikan pada update ini:
 
-- Deploy dedicated worker dan set `SWIFT_WORKER_HEALTH_URL`.
-- Ubah Redis `maxmemory-policy` ke `noeviction`.
-- Redeploy Vercel production dengan source terbaru dan env `SWIFT_GENERATION_EXECUTION_MODE=queue`.
+- `lib/sandbox/runtime.ts` mengecek free space sandbox sebelum menulis file generated, sebelum install dependency, dan sebelum build preview.
+- `services/sandbox-runtime/server.mjs` mengecek free space sebelum write/install/build dan mengembalikan error `Sandbox storage exhausted...` yang lebih jelas.
+- `/health` sandbox runtime sekarang mengembalikan detail `storage`, termasuk `availableBytes`, `totalBytes`, `minFreeBytes`, dan `ok`.
+- `lib/db/client.ts` mengklasifikasikan Prisma connection closed transient sebagai `prisma_connection_warning`, bukan `prisma_error`.
+- `scripts/generation-runtime-contracts.js` menambah regression guard `sandbox.storage-preflight`.
 
-Status utama:
+## Investigasi Error `ENOSPC`
 
-- Local `npm run typecheck`: PASS
-- Local `npm run lint`: PASS
-- Local `npm run build`: PASS
-- Local `npm run test:regression`: PASS
-- Local `npm run test:workspace-builder`: PASS
-- Local `npm run runtime-smoke`: PASS
-- Local `npm run test:generation-runtime-contracts`: PASS
-- Local `npm run deploy:readiness`: FAIL, blocker `REDIS_EVICTION_POLICY`, `GENERATION_WORKER_HEARTBEAT`, `SWIFT_WORKER_HEALTH_URL`
-- Live `https://www.ai-swift.biz.id/api/health?refreshProvider=true`: HTTP 503, status `unhealthy`
-- Live `https://www.ai-swift.biz.id/api/worker/health`: worker `missing`, heartbeat `null`
+### Gejala
 
-## Temuan Paling Penting
+Di dashboard muncul:
 
-### 1. Production masih mode serverless, padahal readiness mewajibkan queue worker
+- `ENOSPC: no space left on device, write`
+- preview tetap kosong
+- file count masih `0 files`
+- sandbox/generation berhenti sebelum preview terbentuk
 
-Live health menunjukkan:
+### Bukti Lokasi Write Yang Paling Relevan
 
-- `generationExecutionMode`: `serverless`
-- `blockingFailures`: `SWIFT_GENERATION_EXECUTION_MODE`
-- pesan readiness: production harus memakai queue mode dengan dedicated worker
+Write file sandbox terjadi di:
 
-Kode yang mengunci aturan ini ada di:
+- [services/sandbox-runtime/server.mjs](services/sandbox-runtime/server.mjs)
+- [lib/sandbox/runtime.ts](lib/sandbox/runtime.ts)
 
-- `lib/production/readiness.ts`
+Alur pentingnya:
 
-Kesimpulan:
+- buat root sandbox
+- tulis `package.json`
+- tulis file runtime lain
+- loop semua file generated dan tulis ke disk
+- lanjut `npm ci` atau `npm install`
+- build project
 
-- Di Vercel production, set `SWIFT_GENERATION_EXECUTION_MODE=queue`.
-- Pastikan `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`.
-- Jangan anggap production ready selama live health masih melaporkan `serverless`.
+### Titik Write Yang Paling Mungkin Memicu ENOSPC
 
-### 2. Dedicated generation worker belum hidup
+Di `services/sandbox-runtime/server.mjs`:
 
-Local deploy readiness gagal di:
+- `ensureFiles(...)`
+- `npm ci --ignore-scripts`
+- `npm run build`
 
-- `GENERATION_WORKER_HEARTBEAT`
-- detail: `Worker heartbeat key is missing in Redis. Start the dedicated worker service.`
+Di `lib/sandbox/runtime.ts`:
 
-Live worker health juga menunjukkan:
+- `ensureRuntimeFiles(...)`
+- `npm install --ignore-scripts --include=dev`
+- `npm run typecheck`
+- `npm run lint`
+- `npm run build`
 
-- `worker`: `missing`
-- `heartbeat`: `null`
-- queue `degraded`
-- dead-letter queue punya 3 job waiting
+### Kenapa Ini Bukan Error UI Saja
 
-Kode worker dan deployment sudah tersedia:
+Kode menunjukkan error ini memang muncul saat proses menulis file ke filesystem sandbox, bukan karena tampilan dashboard atau React runtime semata.
 
-- `workers/Dockerfile`
-- `railway.worker.json`
-- `workers/index.ts`
-- `lib/queue/generation-queue.ts`
+### Kenapa Bukan Disk Lokal Windows
 
-Yang perlu dilakukan:
+Hasil cek lokal:
 
-1. Deploy worker terpisah, misalnya Railway, memakai `railway.worker.json`.
-2. Worker command harus menjalankan `npm run worker:generation`.
-3. Worker env minimal harus sama dengan production untuk:
-   - `DATABASE_URL`
-   - `DIRECT_DATABASE_URL`
-   - `REDIS_URL`
-   - `OPENROUTER_API_KEY`
-   - `NEXTAUTH_SECRET`
-   - `SANDBOX_SERVICE_URL`
-   - `SANDBOX_SERVICE_TOKEN`
-   - Supabase env yang dipakai runtime
-4. Pastikan worker expose `/health`.
-5. Set Vercel env `SWIFT_WORKER_HEALTH_URL=https://<worker-domain>/health`.
+- drive `C:` masih punya sekitar `27.6 GB` free
+- folder `.swift-sandboxes` lokal kecil
+- `.swift-reports` lokal sekitar `94 MB`
 
-Target:
+Artinya, ruang disk lokal masih aman.
 
-- `/api/worker/health` mengembalikan HTTP 200
-- `worker` menjadi `healthy`
-- `heartbeat.ageMs` ada dan kurang dari 90 detik
-- `npm run deploy:readiness` menjadi `READY_FOR_DEPLOY`
+### Kesimpulan ENOSPC
 
-### 3. Redis policy belum aman untuk BullMQ production
+`ENOSPC` paling masuk akal berasal dari storage sandbox/runtime yang dipakai proses generate, bukan dari disk lokal Windows.
 
-Live worker health menunjukkan Redis:
+Kemungkinan penyebabnya:
 
-- `ping`: `PONG`
-- `maxmemory-policy`: `volatile-lru`
-- target app: `noeviction`
-- `evictionPolicyOk`: `false`
+- volume sandbox terlalu kecil
+- dependency install menulis terlalu banyak file
+- cleanup sandbox tidak cukup agresif
+- ada akumulasi state runtime di storage yang sama
 
-Risiko:
+Status implementasi:
 
-- Job BullMQ bisa terhapus oleh Redis eviction.
-- Queue bisa terlihat kosong atau gagal secara acak saat tekanan memory naik.
+- Sudah ada preflight storage sebelum sandbox menulis file generated.
+- Sudah ada preflight storage sebelum dependency install.
+- Sudah ada preflight storage sebelum build.
+- Health endpoint sandbox sudah melaporkan storage low sebagai `503 degraded`.
 
-Yang perlu dilakukan:
+## Investigasi Live Logs Vercel
 
-1. Ubah Redis `maxmemory-policy` ke `noeviction` di provider Redis.
-2. Atau aktifkan `SWIFT_REDIS_AUTO_SET_NOEVICTION=true` jika provider mengizinkan `CONFIG SET`.
-3. Verifikasi ulang lewat `/api/worker/health`.
+### Bukti Log Paling Penting
 
-Target:
+Dari log Vercel yang dicopas ke file lampiran:
 
-- `redis.memory.evictionPolicyOk=true`
-- `evictionPolicy=noeviction`
+- request `GET /api/worker/health` menghasilkan log Prisma error
+- pesan error: `Error in PostgreSQL connection: Error { kind: Closed, cause: None }`
+- source log: `serverless-middleware`
+- response status: `503`
 
-### 4. Production env Supabase service role invalid menurut validator
+### Apa Artinya
 
-Live cold-start health menunjukkan:
+Ini bukan error frontend.
 
-- `SUPABASE_SERVICE_ROLE_KEY` severity `error`
-- pesan: harus non-placeholder dan minimal 32 karakter
+Ini menunjukkan ada jalur backend yang menyentuh Prisma/PostgreSQL lalu koneksinya tertutup saat request diproses atau saat cold start/schema check.
 
-Catatan:
+### Jalur Kode Yang Relevan
 
-- Local `.env` memiliki key terisi, tetapi live production validator tetap menganggap production value bermasalah.
-- Jangan pakai anon key sebagai service role key.
+- [app/api/worker/health/route.ts](app/api/worker/health/route.ts)
+- [lib/queue/generation-queue.ts](lib/queue/generation-queue.ts)
+- [lib/observability/external-runtime-health.ts](lib/observability/external-runtime-health.ts)
+- [lib/db/client.ts](lib/db/client.ts)
+- [instrumentation.node.ts](instrumentation.node.ts)
+- [lib/db/schema-health.ts](lib/db/schema-health.ts)
 
-Yang perlu dilakukan:
+### Interpretasi Teknis
 
-1. Ambil Supabase `service_role` key dari dashboard Supabase.
-2. Set di Vercel production sebagai `SUPABASE_SERVICE_ROLE_KEY`.
-3. Pastikan nilainya berbeda dari `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY` atau `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-4. Redeploy dan cek `/api/health?coldStart=true`.
+`/api/worker/health` sendiri tidak memanggil Prisma secara langsung, tetapi request itu tetap memicu lapisan instrumentation dan database guard yang bisa memanggil schema health check.
 
-Target:
+`instrumentation.node.ts` menjalankan:
 
-- `checks.environment.audit.ok=true`
-- tidak ada issue severity `error`
+- deployment readiness check
+- database schema guard
+- generation worker bootstrap
+- orchestration cleanup
 
-### 5. Token deploy generated app belum lengkap
+Schema guard di `lib/db/schema-health.ts` melakukan query raw ke `_prisma_migrations`, `information_schema.tables`, dan `information_schema.columns`.
 
-Live readiness menunjukkan:
+Jadi, error Prisma kemungkinan muncul dari init/guard database yang ikut tereksekusi saat request ini masuk, bukan dari handler health route itu sendiri.
 
-- `VERPRO_ACCES_TOKEN` missing/invalid, status optional
+## Status Live Worker Health
 
-Walau optional di readiness, fitur deploy generated app bisa terganggu jika token ini diperlukan route deploy.
+Live `/api/worker/health` saat ini mengembalikan:
 
-Yang perlu dilakukan:
+- `status: degraded`
+- `worker: missing`
+- `queue: degraded`
+- `deadLetter.waiting: 3`
+- `heartbeat: null`
+- `redis.status: ready`
+- `redis.memory.evictionPolicy: noeviction`
+- `workerService.status: missing`
+- `workerService.configured: false`
 
-1. Pastikan nama env sesuai kode saat ini: `VERPRO_ACCES_TOKEN`.
-2. Isi dengan Vercel access token yang benar untuk deploy generated project.
-3. Pastikan `VERDI_TEAM` tetap terisi.
-4. Uji flow Deploy Vercel dari dashboard project.
+### Arti Praktisnya
 
-### 6. Script postdeploy health bisa false positive pada redirect
+- Redis sehat.
+- Worker dedicated belum terhubung.
+- URL health worker belum diset.
+- Ada dead-letter backlog yang belum dibereskan.
 
-Command:
+Hasil `npm run deploy:readiness` terbaru:
 
-```bash
-npm run postdeploy:health -- https://ai-swift.biz.id
-```
+- PASS `REDIS_EVICTION_POLICY`
+- PASS `SANDBOX_RUNTIME_HEALTH`
+- FAIL `GENERATION_WORKER_HEARTBEAT`
+- FAIL `SWIFT_WORKER_HEALTH_URL`
 
-Hasilnya mencetak `POST_DEPLOY_HEALTH_OK`, padahal response awal adalah HTTP 307 redirect ke `https://www.ai-swift.biz.id`, dan target canonical health sebenarnya HTTP 503.
+## Hal Yang Sudah Terkonfirmasi Bukan Penyebab Utama
 
-Kode terkait:
+- Redis bukan penyebab utama saat ini.
+- Mesin lokal Windows bukan penyebab `ENOSPC`.
+- Sandbox service health endpoint bukan sumber masalah, karena `/health` masih `ok:true`.
 
-- `scripts/post-deploy-health.js`
-
-Masalah:
-
-- Script hanya fail untuk HTTP `>=500`.
-- HTTP 3xx tidak dianggap gagal.
-- Node request script tidak follow redirect.
-
-Yang perlu diperbaiki sebelum CI production:
-
-1. Gunakan URL canonical `https://www.ai-swift.biz.id`.
-2. Ubah script agar fail jika status code bukan 2xx.
-3. Atau implement follow redirect lalu validasi final response.
-
-Target:
-
-- Health gate gagal bila endpoint redirect, non-JSON, 401/403, 404, 5xx, `unhealthy`, atau `degraded` tanpa override.
-
-### 7. Error ecommerce checkpoint di screenshot kemungkinan belum memakai source lokal terbaru
-
-Screenshot dan live runtime failure menunjukkan error:
-
-- `Tahap 2: ecommerce routes checkpoint failed`
-- `Missing ecommerce route: app/login/page.tsx`
-- `Missing ecommerce route: app/admin/page.tsx`
-
-Tetapi local source sekarang sudah punya guard kondisional:
-
-- `stagedEcommerceRouteRequirements()`
-- `plannerRequiresEcommerceLogin()`
-- `plannerRequiresEcommerceAdmin()`
-- `ecommerceRequiredFiles()`
-
-Regression juga sudah PASS:
-
-- `ecommerce checkpoint and planner routes are conditional`
-- `ecommerce.conditional-auth-admin-routes`
-
-Kesimpulan paling mungkin:
-
-- Production belum berjalan dengan source fix terbaru, atau failure live berasal dari job sebelum deploy fix.
-
-Yang perlu dilakukan:
-
-1. Deploy commit lokal terbaru ke production.
-2. Pastikan deployment memakai commit `99c8a6c fix: make ecommerce route checkpoints intent-driven` atau commit setelahnya.
-3. Setelah worker hidup, ulangi prompt `Buat web e-commerce`.
-4. Verifikasi Tahap 2 tidak lagi meminta `app/login/page.tsx` dan `app/admin/page.tsx` kecuali prompt memang minta login/admin.
-
-## Urutan Perbaikan Wajib
+## Yang Masih Harus Dilakukan Di Provider
 
 ### P0 - Blocker Production
 
@@ -239,98 +203,56 @@ Yang perlu dilakukan:
 2. Set Vercel production env `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`.
 3. Deploy dedicated worker dari `workers/Dockerfile` memakai `railway.worker.json`.
 4. Set `SWIFT_WORKER_HEALTH_URL` ke endpoint worker `/health`.
-5. Ganti Redis `maxmemory-policy` ke `noeviction`.
-6. Perbaiki `SUPABASE_SERVICE_ROLE_KEY` production.
+5. Ganti Redis `maxmemory-policy` ke `noeviction` kalau belum permanen.
+6. Pastikan production `SUPABASE_SERVICE_ROLE_KEY` benar.
 7. Redeploy Vercel production dengan commit terbaru.
 
-### P1 - Stabilitas Queue dan Recovery
+### P1 - Stabilitas Queue Dan Recovery
 
-1. Setelah worker healthy, inspeksi 3 job di dead-letter queue.
-2. Replay job yang masih valid lewat admin endpoint atau tooling yang sudah ada.
-3. Bersihkan dead-letter job yang sudah tidak relevan setelah root cause teratasi.
+1. Setelah worker hidup, inspeksi dead-letter queue.
+2. Replay job yang masih valid.
+3. Bersihkan job dead-letter yang sudah tidak relevan.
 4. Jalankan ulang `npm run deploy:readiness`.
-5. Jalankan ulang live health:
+5. Jalankan ulang:
 
 ```bash
 curl -L https://www.ai-swift.biz.id/api/health?refreshProvider=true
 curl -L https://www.ai-swift.biz.id/api/worker/health
 ```
 
-### P2 - Health Gate dan CI
+## Status Implementasi Lokal
 
-1. Perbaiki `scripts/post-deploy-health.js` agar redirect/non-2xx tidak false positive.
-2. Tambahkan gate post-deploy memakai canonical domain `https://www.ai-swift.biz.id`.
-3. Pastikan CI/CD gagal bila health `unhealthy` atau `degraded`.
+Lulus lokal:
 
-### P3 - Functional Production Validation
+- `npm run typecheck`
+- `npm run lint`
+- `npm run build`
+- `npm run test:hardening`
+- `npm run test:regression`
+- `npm run test:workspace-builder`
+- `npm run runtime-smoke`
+- `npm run test:generation-runtime-contracts`
 
-Setelah P0 sampai P2 selesai, uji manual:
+Masih gagal:
 
-1. Login Google.
-2. Buka dashboard.
-3. Buat project baru.
-4. Prompt: `Buat web e-commerce`.
-5. Pastikan preview muncul.
-6. Pastikan error `Missing ecommerce route: app/login/page.tsx` tidak muncul.
-7. Uji prompt: `Buat web e-commerce dengan login user`.
-8. Pastikan `app/login/page.tsx` baru wajib pada prompt ini.
-9. Uji prompt: `Buat e-commerce full stack dengan admin panel`.
-10. Pastikan `app/admin/page.tsx` wajib pada prompt ini.
-11. Uji deploy generated app ke Vercel.
+- `npm run deploy:readiness`
+- live production health
 
-## Command Audit Yang Sudah Dijalankan
+Catatan readiness terbaru:
 
-```bash
-npm run typecheck
-npm run lint
-npm run build
-npm run deploy:readiness
-npm run test:regression
-npm run test:workspace-builder
-npm run runtime-smoke
-npm run test:generation-runtime-contracts
-npm run postdeploy:health -- https://ai-swift.biz.id
-curl -i https://ai-swift.biz.id/api/health?refreshProvider=true
-curl -L -i https://ai-swift.biz.id/api/health?refreshProvider=true
-curl -L https://www.ai-swift.biz.id/api/worker/health
-curl -L https://www.ai-swift.biz.id/api/health?coldStart=true
-```
+- `npm run deploy:readiness` gagal hanya karena dedicated worker belum heartbeat dan `SWIFT_WORKER_HEALTH_URL` belum diset.
 
-Catatan penting:
+## Kesimpulan Akhir
 
-- `npm run build` menjalankan `prisma migrate deploy` lewat `scripts/vercel-build.js`.
-- Tidak ada pending migration, jadi tidak ada perubahan schema database.
+Masalah yang terlihat saat ini terdiri dari dua lapis:
 
-## Definisi Siap Production
+1. Error `ENOSPC` saat generate project, yang paling mungkin berasal dari filesystem sandbox/runtime saat menulis file atau dependency.
+2. Production worker health yang belum hijau, ditambah sinyal Prisma/PostgreSQL closed connection di live logs.
 
-Web baru boleh dianggap siap production jika semua ini terpenuhi:
+Jadi, web belum production-ready sampai:
 
-- `npm run typecheck` PASS
-- `npm run lint` PASS
-- `npm run build` PASS
-- `npm run test:regression` PASS
-- `npm run test:generation-runtime-contracts` PASS
-- `npm run deploy:readiness` mencetak `READY_FOR_DEPLOY`
-- `https://www.ai-swift.biz.id/api/health?refreshProvider=true` HTTP 200 dan `status=healthy`
-- `https://www.ai-swift.biz.id/api/worker/health` HTTP 200 dan `worker=healthy`
-- `SWIFT_GENERATION_EXECUTION_MODE=queue` di production
-- worker heartbeat fresh kurang dari 90 detik
-- Redis eviction policy `noeviction`
-- Supabase service role env valid
-- Dead-letter queue tidak menyimpan job lama yang belum ditangani
-- Prompt ecommerce sederhana menghasilkan preview tanpa wajib login/admin
-
-## Kesimpulan
-
-Masalah source code ecommerce checkpoint tampaknya sudah diperbaiki di local repo dan regression sudah menjaga perilaku itu.
-
-Blocker production saat ini adalah runtime dan deployment:
-
-1. production masih `serverless`, bukan `queue`
-2. dedicated worker belum heartbeat
-3. Redis eviction policy belum aman
-4. Supabase service role production tidak valid menurut validator
-5. postdeploy health script bisa false positive pada redirect
-6. production perlu redeploy commit fix terbaru dan diuji ulang
-
-Fokus pertama: hidupkan queue worker production sampai `/api/worker/health` sehat, lalu redeploy source terbaru.
+- sandbox storage aman,
+- worker dedicated hidup,
+- `SWIFT_WORKER_HEALTH_URL` terisi,
+- Redis benar-benar stabil,
+- dan live health kembali hijau.
