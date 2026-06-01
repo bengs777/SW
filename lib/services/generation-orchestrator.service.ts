@@ -311,7 +311,7 @@ const MAX_REPAIR_ATTEMPTS = 3
 const EXECUTOR_HARD_TIMEOUT_MS = 30_000
 const EXECUTOR_STUCK_OPERATION_MS = 15_000
 const PREVIEW_FOUNDATION_FILE_LIMIT = 3
-const FULL_FRONTEND_FILE_LIMIT = 15
+const FULL_FRONTEND_FILE_LIMIT = 18
 const FULL_FRONTEND_BATCH_SIZE = 5
 const PRODUCTION_FULLSTACK_FILE_LIMIT = 16
 const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
@@ -790,6 +790,25 @@ function shouldUseProductionFullStackMode(prompt: string, input?: { collaboratio
   return explicitFullStack && explicitBuild
 }
 
+function shouldStartWithFrontendPass(input: {
+  prompt: string
+  existingFiles: GeneratedFile[]
+  generationMode: GenerationMode
+  editMode: PartialEditPlan["mode"]
+}) {
+  if (process.env.SWIFT_FRONTEND_FIRST_GENERATION === "false") return false
+  if (input.editMode !== "full") return false
+  if (input.generationMode === "PREVIEW") return false
+  if (input.existingFiles.length > 0) return false
+
+  const text = input.prompt.toLowerCase()
+  if (/\b(langsung\s+full\s*stack|full\s*stack\s+sekaligus|backend\s+dulu|api\s+dulu|database\s+dulu)\b/i.test(text)) {
+    return false
+  }
+
+  return true
+}
+
 function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: string) {
   const text = prompt.toLowerCase()
   const coreFiles = [
@@ -885,6 +904,55 @@ function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: stri
 
 function fullFrontendRequiredFiles(blueprint: ControlledAppBlueprint, prompt: string) {
   const text = prompt.toLowerCase()
+  const dashboardRequested = /\b(dashboard|analytics|admin|panel|workspace)\b/i.test(text)
+  const ecommerceRequested = /\b(ecommerce|e-commerce|web toko|toko|shop|store|produk|product|marketplace)\b/i.test(text)
+
+  if (dashboardRequested) {
+    return [
+      "package.json",
+      "tsconfig.json",
+      "app/globals.css",
+      "app/layout.tsx",
+      "lib/data.ts",
+      "components/dashboard-shell.tsx",
+      "components/dashboard-nav.tsx",
+      "components/metric-card.tsx",
+      "components/loading-skeleton.tsx",
+      "sections/analytics-overview.tsx",
+      "sections/activity-table.tsx",
+      "app/page.tsx",
+      "app/dashboard/page.tsx",
+      "app/projects/page.tsx",
+      "app/projects/[id]/page.tsx",
+      "app/builder/page.tsx",
+      "app/preview/page.tsx",
+      "app/settings/page.tsx",
+    ].slice(0, FULL_FRONTEND_FILE_LIMIT)
+  }
+
+  if (ecommerceRequested || blueprint.appType === "simple_marketplace") {
+    return [
+      "package.json",
+      "tsconfig.json",
+      "app/globals.css",
+      "app/layout.tsx",
+      "lib/data.ts",
+      "components/site-header.tsx",
+      "components/site-footer.tsx",
+      "components/product-card.tsx",
+      "components/cart-summary.tsx",
+      "components/loading-skeleton.tsx",
+      "sections/product-grid.tsx",
+      "sections/category-showcase.tsx",
+      "app/page.tsx",
+      "app/products/page.tsx",
+      "app/products/[id]/page.tsx",
+      "app/cart/page.tsx",
+      "app/checkout/page.tsx",
+      "sections/faq-section.tsx",
+    ].slice(0, FULL_FRONTEND_FILE_LIMIT)
+  }
+
   const required = new Set<string>([
     "app/layout.tsx",
     "app/page.tsx",
@@ -1814,14 +1882,22 @@ function buildGenerationPlan(input: {
     : intent.appType || classifyControlledAppType(input.prompt)
   const blueprint = getControlledAppBlueprint(appType)
   const generationMode = incrementalEdit.generationMode
-  const productionMode =
+  const wantsProductionFullStack =
     generationMode === "FULLSTACK" ||
     (generationMode !== "PATCH" && generationMode !== "PREVIEW" && (shouldUseProductionFullStackMode(input.prompt, {
       collaborationMode: input.collaborationMode,
     }) || structuredIntent.type === "fullstack_app"))
-      ? "production_fullstack"
-      : generationMode === "PREVIEW"
-        ? "preview"
+  const frontendFirstPass = shouldStartWithFrontendPass({
+    prompt: input.prompt,
+    existingFiles: input.existingFiles,
+    generationMode,
+    editMode: editPlan.mode,
+  })
+  const productionMode =
+    generationMode === "PREVIEW"
+      ? "preview"
+      : wantsProductionFullStack && !frontendFirstPass
+        ? "production_fullstack"
         : "full_frontend"
   const architecture = buildArchitecturePlan({
     intent: structuredIntent,
@@ -1872,7 +1948,7 @@ function buildGenerationPlan(input: {
   const plannedByPath = new Map<string, GenerationPlannerFile>()
   const explicitlyRequestedPaths = extractRequestedFilePaths(input.prompt).map(normalizePath)
   const singleFileOnly = explicitlyRequestedPaths.length === 1 && /\b(only|saja|hanya)\b/i.test(input.prompt)
-  const frontendOnly = structuredIntent.type === "frontend_only"
+  const frontendOnly = structuredIntent.type === "frontend_only" || productionMode === "full_frontend"
 
   if (editPlan.mode === "partial") {
     for (const filePath of [...editPlan.targetPaths, ...editPlan.allowedNewPaths]) {
@@ -1890,13 +1966,13 @@ function buildGenerationPlan(input: {
       ? explicitlyRequestedPaths
       : [
       ...architecture.frontend.pages,
-      ...architecture.backend.apiRoutes,
-      ...architecture.backend.services,
-      architecture.database.schema,
-      ...architecture.storage.adapters,
-      ...architecture.payments.routes,
-      ...architecture.payments.services,
-      ".env.example",
+      ...(productionMode === "production_fullstack" ? architecture.backend.apiRoutes : []),
+      ...(productionMode === "production_fullstack" ? architecture.backend.services : []),
+      ...(productionMode === "production_fullstack" ? [architecture.database.schema] : []),
+      ...(productionMode === "production_fullstack" ? architecture.storage.adapters : []),
+      ...(productionMode === "production_fullstack" ? architecture.payments.routes : []),
+      ...(productionMode === "production_fullstack" ? architecture.payments.services : []),
+      ...(productionMode === "production_fullstack" ? [".env.example"] : []),
     ]
     for (const filePath of architecturePaths.filter((filePath) => filePath && filePath !== "none").slice(0, maxFilesThisPass)) {
       if (plannedByPath.size >= maxFilesThisPass) break
@@ -3468,11 +3544,30 @@ function generationDependencyOrder(path: string, productionMode: GenerationPlan[
   if (productionMode !== "full_frontend" && productionMode !== "production_fullstack") {
     return 50
   }
-  if (normalized === "package.json" || normalized === "tsconfig.json" || normalized.startsWith("lib/")) return 0
-  if (normalized.startsWith("components/") || normalized.startsWith("sections/")) return 10
-  if (normalized === "app/globals.css") return 20
-  if (normalized === "app/layout.tsx") return 30
-  if (normalized.startsWith("app/")) return 40
+  const pageOrder = new Map<string, number>([
+    ["app/page.tsx", 50],
+    ["app/dashboard/page.tsx", 60],
+    ["app/projects/page.tsx", 70],
+    ["app/projects/[id]/page.tsx", 80],
+    ["app/builder/page.tsx", 90],
+    ["app/preview/page.tsx", 100],
+    ["app/settings/page.tsx", 110],
+    ["app/products/page.tsx", 120],
+    ["app/products/[id]/page.tsx", 130],
+    ["app/cart/page.tsx", 140],
+    ["app/checkout/page.tsx", 150],
+  ])
+  if (normalized === "package.json" || normalized === "tsconfig.json") return 0
+  if (normalized === "lib/data.ts") return 5
+  if (normalized.startsWith("components/")) return 10
+  if (normalized.startsWith("sections/")) return 20
+  if (normalized.startsWith("lib/")) return productionMode === "production_fullstack" ? 160 : 25
+  if (normalized === "app/globals.css") return 30
+  if (normalized === "app/layout.tsx") return 40
+  if (pageOrder.has(normalized)) return pageOrder.get(normalized)!
+  if (normalized.startsWith("app/api/")) return 170
+  if (normalized === "prisma/schema.prisma") return 180
+  if (normalized.startsWith("app/")) return 155
   return 50
 }
 

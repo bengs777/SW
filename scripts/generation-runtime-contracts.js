@@ -26,6 +26,8 @@ function main() {
   const generationPipeline = read("lib/ai/generation-pipeline.ts")
   const importGraph = read("lib/ai/import-graph.ts")
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
+  const generateJobsRoute = read("app/api/generate/jobs/route.ts")
+  const architecturePlanner = read("lib/ai/architecture-planner.ts")
   const qualityService = read("lib/services/generation-quality.service.ts")
   const schema = read("prisma/schema.prisma")
   const diagnostics = read("lib/ai/developer-diagnostics.ts")
@@ -80,6 +82,36 @@ function main() {
       /GENERATION_WORKER_HEARTBEAT_KEY/.test(generationQueue) &&
       /recordGenerationWorkerHeartbeat\(workerId/.test(generationWorker),
     "worker heartbeat is recorded by the dedicated worker"
+  )
+
+  assert(
+    "queue.enqueue-degraded-worker",
+    /function canQueueAcceptJobs/.test(generateJobsRoute) &&
+      /queueWorkerDegraded/.test(generateJobsRoute) &&
+      /generation_queue_worker_degraded_enqueue_anyway/.test(generateJobsRoute) &&
+      /queue\.fallback_scheduled/.test(generateJobsRoute) &&
+      /hasDedicatedSandboxService/.test(generateJobsRoute) &&
+      /isRailwayRuntime/.test(generateJobsRoute),
+    "queue enqueue separates Redis availability from worker heartbeat and supports Railway sandbox fallback"
+  )
+
+  assert(
+    "frontend.first-page-order",
+    /function shouldStartWithFrontendPass/.test(orchestrator) &&
+      /SWIFT_FRONTEND_FIRST_GENERATION/.test(orchestrator) &&
+      /wantsProductionFullStack && !frontendFirstPass/.test(orchestrator) &&
+      /app\/dashboard\/page\.tsx/.test(orchestrator) &&
+      /app\/projects\/\[id\]\/page\.tsx/.test(orchestrator) &&
+      /app\/checkout\/page\.tsx/.test(orchestrator) &&
+      /pageOrder = new Map/.test(orchestrator),
+    "new projects start with frontend pages and dashboard/e-commerce routes are generated in a stable order"
+  )
+
+  assert(
+    "architecture.frontend-before-backend",
+    /"frontend_generation"[\s\S]*"backend_generation"/.test(architecturePlanner) &&
+      /Build scaffold and frontend pages before backend/.test(architecturePlanner),
+    "architecture instructions keep frontend validation ahead of backend integration"
   )
 
   assert(

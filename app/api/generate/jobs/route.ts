@@ -27,15 +27,46 @@ const routeRuntime: string = runtime
 const requestedGenerationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
 const isVercelProductionRuntime = process.env.VERCEL === "1" && process.env.NODE_ENV === "production"
 const isProductionRuntime = process.env.NODE_ENV === "production"
+const hasDedicatedSandboxService = Boolean(process.env.SANDBOX_SERVICE_URL)
+const isRailwayRuntime = Boolean(
+  process.env.RAILWAY_ENVIRONMENT ||
+  process.env.RAILWAY_PROJECT_ID ||
+  process.env.RAILWAY_SERVICE_ID
+)
 const generationExecutionMode = requestedGenerationExecutionMode === "serverless" ? "serverless" : "queue"
 const serverlessFallbackDisabled = process.env.SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK === "true"
 const explicitServerlessFallbackAllowed = process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true"
 const allowServerlessGenerationFallback =
-  !isProductionRuntime &&
   !serverlessFallbackDisabled &&
-  (generationExecutionMode === "serverless" || explicitServerlessFallbackAllowed)
+  (
+    generationExecutionMode === "serverless" ||
+    explicitServerlessFallbackAllowed ||
+    isRailwayRuntime ||
+    (!isVercelProductionRuntime && !isProductionRuntime) ||
+    (isVercelProductionRuntime && hasDedicatedSandboxService)
+  )
 const MAX_QUEUED_JOBS_PER_USER = Math.max(1, Number(process.env.SWIFT_MAX_QUEUED_GENERATION_JOBS_PER_USER || 5))
 const GENERATION_COOLDOWN_MS = Math.max(0, Number(process.env.SWIFT_GENERATION_COOLDOWN_MS || 750))
+
+type GenerationQueueHealth = Awaited<ReturnType<typeof getGenerationQueueHealth>>
+
+function canQueueAcceptJobs(health: GenerationQueueHealth | null) {
+  if (!health?.enabled) return false
+  if (health.redis?.error) return false
+  if (health.redis?.ping && String(health.redis.ping).toUpperCase() !== "PONG") return false
+
+  const redisStatus = String(health.redis?.status || "unavailable").toLowerCase()
+  return redisStatus !== "unavailable" && redisStatus !== "end"
+}
+
+function queueDecisionReason(health: GenerationQueueHealth | null) {
+  if (!health) return "queue_health_unknown"
+  if (!health.enabled) return health.redis?.configured ? "queue_disabled" : "redis_not_configured"
+  if (health.redis?.error) return "redis_error"
+  if (health.redis?.ping && String(health.redis.ping).toUpperCase() !== "PONG") return "redis_ping_failed"
+  if (health.status !== "healthy") return `worker_${health.status}`
+  return "queue_healthy"
+}
 
 class SystemSaturatedError extends Error {
   code = "SYSTEM_SATURATED" as const
@@ -715,11 +746,11 @@ export async function POST(request: NextRequest) {
       requestHash,
     })
 
-    if (isProductionRuntime && requestedGenerationExecutionMode === "serverless") {
+    if (isProductionRuntime && requestedGenerationExecutionMode === "serverless" && !allowServerlessGenerationFallback) {
       throw new Error("Production generation must run in queue mode with a dedicated worker.")
     }
 
-    const preferServerlessExecution = !isProductionRuntime && generationExecutionMode === "serverless"
+    const preferServerlessExecution = generationExecutionMode === "serverless" && allowServerlessGenerationFallback
     const queueHealth = preferServerlessExecution
       ? null
       : await getGenerationQueueHealth().catch((error) => {
@@ -730,8 +761,13 @@ export async function POST(request: NextRequest) {
           })
           return null
         })
-    const queueUnavailable = !queueHealth || queueHealth.status !== "healthy"
-    const shouldUseServerlessFallback = preferServerlessExecution || (allowServerlessGenerationFallback && queueUnavailable)
+    const queueAcceptsJobs = canQueueAcceptJobs(queueHealth)
+    const queueWorkerHealthy = queueHealth?.status === "healthy"
+    const queueWorkerDegraded = queueAcceptsJobs && !queueWorkerHealthy
+    const queueUnavailable = !queueAcceptsJobs
+    const shouldUseServerlessFallback =
+      preferServerlessExecution ||
+      (allowServerlessGenerationFallback && (queueUnavailable || queueWorkerDegraded))
     log("info", "generation_runtime_decision", {
       requestId,
       correlationId,
@@ -739,6 +775,8 @@ export async function POST(request: NextRequest) {
       executionChainId,
       jobId: job.id,
       queueHealthy: Boolean(queueHealth && queueHealth.status === "healthy"),
+      queueAcceptsJobs,
+      queueDecisionReason: queueDecisionReason(queueHealth),
       queueStatus: queueHealth?.status || "unknown",
       queueEnabled: queueHealth?.enabled ?? false,
       queueSaturation: queueHealth?.saturation || null,
@@ -750,6 +788,8 @@ export async function POST(request: NextRequest) {
       requestedGenerationExecutionMode,
       explicitServerlessFallbackAllowed,
       vercelProductionRuntime: isVercelProductionRuntime,
+      railwayRuntime: isRailwayRuntime,
+      hasDedicatedSandboxService,
     })
     if (shouldUseServerlessFallback) {
       log("warn", "generation_queue_worker_unavailable", {
@@ -764,6 +804,34 @@ export async function POST(request: NextRequest) {
         workerHeartbeat: queueHealth?.workerHeartbeat || null,
       })
     }
+    if (queueWorkerDegraded && !shouldUseServerlessFallback) {
+      log("warn", "generation_queue_worker_degraded_enqueue_anyway", {
+        requestId,
+        correlationId,
+        traceId,
+        executionChainId,
+        jobId: job.id,
+        queueStatus: queueHealth?.status || "unknown",
+        queueDecisionReason: queueDecisionReason(queueHealth),
+        workerHeartbeat: queueHealth?.workerHeartbeat || null,
+        redis: queueHealth?.redis || null,
+      })
+      await GenerationJobService.transition(job.id, {
+        type: "queue.worker_degraded",
+        status: "queued",
+        orchestrationState: "queued",
+        stage: "queued",
+        label: "Job tersimpan, menunggu worker",
+        progress: 1,
+        message: "Generation job saved while the worker heartbeat recovers.",
+        traceId,
+        data: {
+          queueStatus: queueHealth?.status || "unknown",
+          queueDecisionReason: queueDecisionReason(queueHealth),
+          workerHeartbeatAgeMs: queueHealth?.workerHeartbeat?.ageMs ?? null,
+        },
+      }).catch(() => null)
+    }
     if (!preferServerlessExecution && queueHealth?.saturation?.saturated && !allowServerlessGenerationFallback) {
       throw new SystemSaturatedError({
         saturationPct: queueHealth.saturation.saturationPct,
@@ -776,7 +844,7 @@ export async function POST(request: NextRequest) {
     }
     if (!preferServerlessExecution && queueUnavailable && !allowServerlessGenerationFallback) {
       throw new Error(
-        `Generation worker unavailable; queue status is ${queueHealth?.status || "unknown"}. Start the dedicated worker and wait for a fresh heartbeat.`
+        `Generation queue unavailable; reason is ${queueDecisionReason(queueHealth)}. Start Redis/BullMQ or enable SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK with a dedicated sandbox service.`
       )
     }
 
@@ -808,10 +876,29 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (!queueJob && !shouldUseServerlessFallback && !allowServerlessGenerationFallback) {
+      throw new Error(`Generation queue did not accept the job; reason is ${queueDecisionReason(queueHealth)}.`)
+    }
+
     if (!queueJob) {
       fallbackScheduled = true
       const fallbackQueueJobId = `serverless:${job.id}`
-      void GenerationJobService.attachQueueJob(job.id, fallbackQueueJobId).catch((error) => {
+      await GenerationJobService.transition(job.id, {
+        type: "queue.fallback_scheduled",
+        status: "queued",
+        orchestrationState: "queued",
+        stage: "queued",
+        label: "Fallback generator dijadwalkan",
+        progress: 1,
+        queueJobId: fallbackQueueJobId,
+        message: "Queue unavailable; Swift scheduled an in-process fallback.",
+        traceId,
+        data: {
+          queueStatus: queueHealth?.status || "unknown",
+          queueDecisionReason: queueDecisionReason(queueHealth),
+          fallback: "serverless",
+        },
+      }).catch((error) => {
         log("warn", "generation_serverless_fallback_attach_failed", {
           requestId,
           jobId: job.id,
