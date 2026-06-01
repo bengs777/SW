@@ -584,11 +584,38 @@ function serialize(state) {
   }
 }
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    status: "healthy",
-    ok: true,
+app.get("/health", async (_req, res) => {
+  let storageOk = true
+  let storageError = null
+  try {
+    await mkdir(ROOT_DIR, { recursive: true })
+    await stat(ROOT_DIR)
+  } catch (error) {
+    storageOk = false
+    storageError = error.message || String(error)
+  }
+
+  res.status(storageOk ? 200 : 503).json({
+    status: storageOk ? "healthy" : "degraded",
+    ok: storageOk,
     service: "swift-sandbox-runtime",
+    checkedAt: new Date().toISOString(),
+    runtime: {
+      host: HOST,
+      port: PORT,
+      railway: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID),
+      nodeEnv: process.env.NODE_ENV || "development",
+    },
+    sandbox: {
+      activeProjects: states.size,
+      maxProjects: MAX_PROJECTS,
+      rootReady: storageOk,
+      rootError: storageError,
+      basePort: BASE_PORT,
+      maxFiles: MAX_FILES,
+      maxTotalBytes: MAX_TOTAL_BYTES,
+      hasDatabaseUrl: Boolean(sandboxDatabaseUrl()),
+    },
   })
 })
 

@@ -114,7 +114,7 @@ assert(
 assert(
   "explicit fullstack and full frontend modes exist",
     /productionMode:\s*"preview"\s*\|\s*"full_frontend"\s*\|\s*"production_fullstack"/.test(generationOrchestrator) &&
-    /FULL_FRONTEND_FILE_LIMIT\s*=\s*15/.test(generationOrchestrator) &&
+    /FULL_FRONTEND_FILE_LIMIT\s*=\s*18/.test(generationOrchestrator) &&
     /validateFrontendCompleteness/.test(generationOrchestrator) &&
     /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
     /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*16/.test(generationOrchestrator) &&

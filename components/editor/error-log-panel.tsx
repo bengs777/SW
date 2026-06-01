@@ -33,6 +33,22 @@ const sourceLabel: Record<ErrorLogSource, string> = {
   github: "GitHub",
 }
 
+function errorAdvice(message: string) {
+  if (/dedicated worker|waiting worker|menunggu worker|worker generation/i.test(message)) {
+    return "Cek worker generation dan heartbeat, lalu retry prompt setelah worker sehat."
+  }
+  if (/queue|Redis|BullMQ|queue_enqueue/i.test(message)) {
+    return "Cek Redis/BullMQ dan queue health. Job aman diulang setelah queue menerima request."
+  }
+  if (/sandbox|runtime|build failed|preview/i.test(message)) {
+    return "Cek sandbox logs untuk membedakan gagal install, build, atau runtime preview."
+  }
+  if (/saturated|penuh sementara/i.test(message)) {
+    return "Tunggu backlog turun sebentar, lalu coba ulang prompt."
+  }
+  return null
+}
+
 export function ErrorLogPanel({ logs, onClear, onRetry, onRetryWithRepair, isRetrying = false }: ErrorLogPanelProps) {
   const hasGenerateError = logs.some((log) => log.source === "generate")
 
@@ -97,6 +113,14 @@ export function ErrorLogPanel({ logs, onClear, onRetry, onRetryWithRepair, isRet
           <div className="space-y-2 p-3">
             {logs.map((log) => (
               <article key={log.id} className="rounded-md border border-border bg-muted/40 p-2">
+                {(() => {
+                  const advice = errorAdvice(log.message)
+                  return advice ? (
+                    <p className="mb-2 rounded border border-border bg-background/70 px-2 py-1 text-[11px] text-muted-foreground">
+                      {advice}
+                    </p>
+                  ) : null
+                })()}
                 <div className="mb-1 flex items-center justify-between gap-2">
                   <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
                     {sourceLabel[log.source]}

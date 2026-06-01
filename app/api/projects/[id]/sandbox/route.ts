@@ -115,12 +115,32 @@ async function proxySandboxRequest(input: {
     headers.Authorization = `Bearer ${SANDBOX_SERVICE_TOKEN}`
   }
 
-  const response = await fetch(`${SANDBOX_SERVICE_URL}/sandbox/${encodeURIComponent(input.projectId)}`, {
-    method: input.method,
-    headers,
-    body,
-    cache: "no-store",
-  })
+  let response: Response
+  try {
+    response = await fetch(`${SANDBOX_SERVICE_URL}/sandbox/${encodeURIComponent(input.projectId)}`, {
+      method: input.method,
+      headers,
+      body,
+      cache: "no-store",
+    })
+  } catch (error) {
+    return NextResponse.json(
+      {
+        status: "error",
+        previewUrl: null,
+        logs: [],
+        error: `Sandbox service unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        code: "sandbox_service_unavailable",
+        service: {
+          configured: Boolean(SANDBOX_SERVICE_URL),
+          tokenConfigured: Boolean(SANDBOX_SERVICE_TOKEN),
+          runtime: IS_PRODUCTION ? "production" : "development",
+          vercel: IS_VERCEL,
+        },
+      },
+      { status: 503 }
+    )
+  }
 
   const data = await response.json().catch(() => ({
     status: "error",
@@ -129,7 +149,15 @@ async function proxySandboxRequest(input: {
     error: `Sandbox service returned non-JSON response (${response.status})`,
   }))
 
-  return NextResponse.json(data, { status: response.status })
+  return NextResponse.json({
+    ...data,
+    service: {
+      configured: Boolean(SANDBOX_SERVICE_URL),
+      tokenConfigured: Boolean(SANDBOX_SERVICE_TOKEN),
+      runtime: IS_PRODUCTION ? "production" : "development",
+      vercel: IS_VERCEL,
+    },
+  }, { status: response.status })
 }
 
 export async function GET(

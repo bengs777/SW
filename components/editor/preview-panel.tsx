@@ -394,9 +394,14 @@ function GeneratingPreview({
       <p className="mt-1 max-w-sm text-sm text-muted-foreground">
         {progress?.label || "Menyiapkan request generate..."}
       </p>
+      {progress?.statusHint && (
+        <p className="mt-2 max-w-sm text-xs leading-relaxed text-muted-foreground">
+          {progress.statusHint}
+        </p>
+      )}
       <div className="mt-5 w-full max-w-sm">
         <div className="mb-2 flex justify-between text-xs text-muted-foreground">
-          <span>{progress?.modelKey || "Swift AI"}</span>
+          <span>{progress?.queueState ? progress.queueState.replace(/_/g, " ") : progress?.modelKey || "Swift AI"}</span>
           <span>{elapsedSeconds}s / {timeoutSeconds}s</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -420,6 +425,11 @@ function GeneratingPreview({
             ))}
           </div>
         </div>
+      )}
+      {progress?.retryHint && progress.stage === "error" && (
+        <p className="mt-4 max-w-sm text-xs text-muted-foreground">
+          {progress.retryHint}
+        </p>
       )}
       {onCancelGeneration && progress?.stage !== "cancelled" && (
         <Button

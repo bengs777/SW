@@ -28,6 +28,11 @@ function main() {
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
   const generateJobsRoute = read("app/api/generate/jobs/route.ts")
   const architecturePlanner = read("lib/ai/architecture-planner.ts")
+  const projectEditorPage = read("app/dashboard/project/[id]/page.tsx")
+  const previewPanel = read("components/editor/preview-panel.tsx")
+  const errorLogPanel = read("components/editor/error-log-panel.tsx")
+  const sandboxRuntimeServer = read("services/sandbox-runtime/server.mjs")
+  const sandboxRoute = read("app/api/projects/[id]/sandbox/route.ts")
   const qualityService = read("lib/services/generation-quality.service.ts")
   const schema = read("prisma/schema.prisma")
   const diagnostics = read("lib/ai/developer-diagnostics.ts")
@@ -112,6 +117,28 @@ function main() {
     /"frontend_generation"[\s\S]*"backend_generation"/.test(architecturePlanner) &&
       /Build scaffold and frontend pages before backend/.test(architecturePlanner),
     "architecture instructions keep frontend validation ahead of backend integration"
+  )
+
+  assert(
+    "generation.status-ux",
+    /type GenerationQueueState/.test(projectEditorPage) &&
+      /queueStateCopy/.test(projectEditorPage) &&
+      /applyRuntimeStatusEvent/.test(projectEditorPage) &&
+      /queue\.fallback_scheduled/.test(projectEditorPage) &&
+      /queue\.worker_degraded/.test(projectEditorPage) &&
+      /statusHint/.test(previewPanel) &&
+      /errorAdvice/.test(errorLogPanel),
+    "dashboard surfaces queue, worker, fallback, sandbox, and retry guidance to users"
+  )
+
+  assert(
+    "sandbox.health-detail",
+    /activeProjects/.test(sandboxRuntimeServer) &&
+      /rootReady/.test(sandboxRuntimeServer) &&
+      /railway/.test(sandboxRuntimeServer) &&
+      /sandbox_service_unavailable/.test(sandboxRoute) &&
+      /service:\s*\{[\s\S]*tokenConfigured/.test(sandboxRoute),
+    "sandbox runtime and proxy expose safe health details for Railway troubleshooting"
   )
 
   assert(

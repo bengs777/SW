@@ -101,7 +101,7 @@ function staticChecks() {
     check(
       "ai.full-frontend-and-production-fullstack-mode",
       /shouldUseProductionFullStackMode/.test(generationOrchestrator) &&
-        /FULL_FRONTEND_FILE_LIMIT\s*=\s*15/.test(generationOrchestrator) &&
+        /FULL_FRONTEND_FILE_LIMIT\s*=\s*18/.test(generationOrchestrator) &&
         /validateFrontendCompleteness/.test(generationOrchestrator) &&
         /PRODUCTION_FULLSTACK_FILE_LIMIT\s*=\s*16/.test(generationOrchestrator) &&
         /PRODUCTION_FULLSTACK_BATCH_SIZE\s*=\s*8/.test(generationOrchestrator) &&

@@ -257,12 +257,48 @@ export type ProviderStatus = {
 }
 
 function publicGenerationErrorMessage(message: string) {
+  if (/Production generation must run in queue mode with a dedicated worker/i.test(message)) {
+    return "Swift production sedang menunggu dedicated worker. Pastikan worker generation aktif, lalu jalankan ulang prompt."
+  }
+  if (/Generation queue unavailable|Redis\/BullMQ|queue.*unavailable|queue_enqueue/i.test(message)) {
+    return "Swift queue belum siap menerima job. Sistem akan aman jika Redis dan worker sudah sehat, lalu prompt bisa dijalankan ulang."
+  }
+  if (/SYSTEM_SATURATED|temporarily saturated/i.test(message)) {
+    return "Swift sedang penuh sementara. Tunggu sebentar lalu coba ulang prompt."
+  }
   if (
     /MALFORMED_GENERATED_ARTIFACT|Unrecognized key\(s\)|strict-json-schema|required|PATH_ERROR|diagnostic payload/i.test(message)
   ) {
     return "AI generated invalid project structure. Repair loop attempting automatic correction..."
   }
   return message
+}
+
+type GenerationQueueState =
+  | "queued"
+  | "waiting_worker"
+  | "fallback_scheduled"
+  | "sandbox_running"
+  | "preview_ready"
+  | "failed"
+
+function queueStateCopy(state: GenerationQueueState | null | undefined) {
+  switch (state) {
+    case "waiting_worker":
+      return "Job tersimpan. Swift sedang menunggu worker generation kembali sehat."
+    case "fallback_scheduled":
+      return "Queue utama belum ideal. Swift menjalankan fallback yang tetap bisa dilacak."
+    case "sandbox_running":
+      return "Sandbox runtime sedang menyiapkan build dan preview."
+    case "preview_ready":
+      return "Preview sudah siap dibuka."
+    case "failed":
+      return "Generation berhenti. Buka Logs untuk detail dan pilihan retry."
+    case "queued":
+      return "Prompt sudah masuk queue dan menunggu giliran worker."
+    default:
+      return null
+  }
 }
 
 export type GenerationProgress = {
@@ -285,6 +321,9 @@ export type GenerationProgress = {
   workPlan?: string[]
   jobId?: string
   progressPercent?: number
+  queueState?: GenerationQueueState
+  statusHint?: string | null
+  retryHint?: string | null
 }
 
 type ErrorLogEntry = {
@@ -579,8 +618,24 @@ export default function EditorPage() {
     model?: string
     plan?: string[]
     createdAt?: string
+    queueJobId?: string | null
+    orchestrationState?: string | null
   }) => {
     const mappedStage = mapJobStageToProgressStage(job.stage, job.status)
+    const fallbackJob = typeof job.queueJobId === "string" && job.queueJobId.startsWith("serverless:")
+    const queueState: GenerationQueueState =
+      job.status === "failed"
+        ? "failed"
+        : job.status === "completed"
+          ? "preview_ready"
+          : fallbackJob
+            ? "fallback_scheduled"
+            : job.stage === "building" || job.stage === "compiling"
+              ? "sandbox_running"
+              : /worker|heartbeat|recover/i.test(`${job.label} ${job.orchestrationState || ""}`)
+                ? "waiting_worker"
+                : "queued"
+    const statusHint = queueStateCopy(queueState)
     setGenerationProgress((current) => ({
       stage: mappedStage,
       label: job.label || current?.label || "Swift sedang bekerja",
@@ -591,7 +646,69 @@ export default function EditorPage() {
       workPlan: Array.isArray(job.plan) && job.plan.length > 0 ? job.plan : current?.workPlan,
       jobId: job.id,
       progressPercent: job.progress,
+      queueState,
+      statusHint,
+      retryHint: job.status === "failed" ? "Retry prompt aman dilakukan setelah queue dan worker sehat." : current?.retryHint || null,
     }))
+  }, [])
+
+  const applyRuntimeStatusEvent = useCallback((eventName: string, rawData: string) => {
+    const payload = JSON.parse(rawData) as {
+      message?: string
+      data?: {
+        queueStatus?: string
+        queueDecisionReason?: string
+        sandbox?: string
+        sandboxStatus?: string
+        previewUrl?: string | null
+      }
+    }
+    const queueState: GenerationQueueState =
+      eventName === "queue.fallback_scheduled"
+        ? "fallback_scheduled"
+        : eventName === "queue.worker_degraded"
+          ? "waiting_worker"
+          : eventName === "preview_started"
+            ? "sandbox_running"
+            : eventName === "preview_ready"
+              ? "preview_ready"
+              : eventName === "preview_failed"
+                ? "failed"
+                : "queued"
+    const label =
+      queueState === "fallback_scheduled"
+        ? "Fallback generator dijadwalkan"
+        : queueState === "waiting_worker"
+          ? "Menunggu worker generation"
+          : queueState === "sandbox_running"
+            ? "Sandbox runtime berjalan"
+            : queueState === "preview_ready"
+              ? "Preview siap"
+              : queueState === "failed"
+                ? "Preview gagal"
+                : payload.message || "Generation queued"
+    const statusHint = queueStateCopy(queueState)
+
+    setGenerationProgress((current) =>
+      current
+        ? {
+            ...current,
+            stage: queueState === "failed" ? "error" : queueState === "sandbox_running" || queueState === "preview_ready" ? "preview" : "request",
+            label,
+            queueState,
+            statusHint,
+            retryHint: queueState === "failed" ? "Retry prompt aman dilakukan setelah queue, worker, atau sandbox sehat." : current.retryHint || null,
+            progressPercent: Math.max(
+              current.progressPercent || 0,
+              queueState === "preview_ready" ? 96 : queueState === "sandbox_running" ? 84 : queueState === "fallback_scheduled" ? 12 : 8
+            ),
+          }
+        : current
+    )
+
+    if (payload.data?.previewUrl) {
+      setRuntimePreviewUrl(payload.data.previewUrl)
+    }
   }, [])
 
   const startGenerationStream = useCallback((jobId: string, reconnectAttempt = 0) => {
@@ -767,6 +884,7 @@ export default function EditorPage() {
     stream.addEventListener("preview_ready", (event) => {
       try {
         recordEventId(event as MessageEvent)
+        applyRuntimeStatusEvent("preview_ready", (event as MessageEvent).data)
         const payload = JSON.parse((event as MessageEvent).data)
         applyPreviewReady(payload)
       } catch (error) {
@@ -774,6 +892,18 @@ export default function EditorPage() {
         pushErrorLog("project", message)
       }
     })
+
+    for (const eventName of ["queue.fallback_scheduled", "queue.worker_degraded", "preview_started", "preview_failed"]) {
+      stream.addEventListener(eventName, (event) => {
+        try {
+          recordEventId(event as MessageEvent)
+          applyRuntimeStatusEvent(eventName, (event as MessageEvent).data)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : `Gagal membaca event ${eventName}.`
+          pushErrorLog("project", message)
+        }
+      })
+    }
 
     stream.onerror = () => {
       console.log("sse_closed")
@@ -803,7 +933,7 @@ export default function EditorPage() {
         startGenerationStream(jobId, nextAttempt)
       }, delay)
     }
-  }, [applyJobProgress, applyPreviewReady, applyStreamedGeneratedFiles, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
+  }, [applyJobProgress, applyPreviewReady, applyRuntimeStatusEvent, applyStreamedGeneratedFiles, clearGenerateDeadline, closeGenerationStream, pushErrorLog, refreshProjectState])
 
   useEffect(() => {
     return () => {
