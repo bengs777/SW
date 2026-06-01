@@ -58,7 +58,11 @@ function main() {
   const packageJson = JSON.parse(read("package.json"))
   const orchestrator = read("lib/services/generation-orchestrator.service.ts")
   const projectPage = read("app/dashboard/project/[id]/page.tsx")
-  const { parseGeneratedArtifact } = loadModule("lib/ai/generated-artifact.ts")
+  const {
+    buildArtifactContractRepairInstructions,
+    parseGeneratedArtifact,
+    summarizeArtifactContractError,
+  } = loadModule("lib/ai/generated-artifact.ts")
   const { parseRuntimeMessage, publicGenerationStructureErrorMessage } = loadModule("lib/ai/runtime-contracts.ts")
   const { SAFE_GENERATED_ROOT_FILES, validateGeneratedPath, formatGeneratedPathValidationError } =
     loadModule("lib/ai/file-policy.ts")
@@ -184,6 +188,89 @@ function main() {
     "validator diagnostics are identified before strict artifact parsing"
   )
 
+  let blockedEnvArtifactError = null
+  try {
+    parseGeneratedArtifact(JSON.stringify({
+      files: [{ path: ".env.production", content: "SECRET=value" }],
+      dependencies: [],
+      commands: [],
+      summary: "blocked env",
+      diagnostics: [],
+      metadata: {},
+      repairs: [],
+    }))
+  } catch (error) {
+    blockedEnvArtifactError = error
+  }
+  const blockedEnvDiagnostic = summarizeArtifactContractError(blockedEnvArtifactError, {
+    rawLength: 128,
+    rawHash: "blocked-env-hash",
+    requiredFiles: ["app/page.tsx"],
+  })
+  assert(
+    "contract-diagnostics.path-error",
+    blockedEnvDiagnostic.code === "PATH_ERROR" &&
+      blockedEnvDiagnostic.category === "path_policy" &&
+      blockedEnvDiagnostic.received === ".env.production" &&
+      /Blocked path pattern not allowed/.test(blockedEnvDiagnostic.reason),
+    "path policy failures keep safe structured diagnostics for repair"
+  )
+
+  let emptyFilesError = null
+  try {
+    parseGeneratedArtifact(JSON.stringify({
+      files: [],
+      dependencies: [],
+      commands: [],
+      summary: "empty",
+      diagnostics: [],
+      metadata: {},
+      repairs: [],
+    }))
+  } catch (error) {
+    emptyFilesError = error
+  }
+  const emptyFilesDiagnostic = summarizeArtifactContractError(emptyFilesError)
+  assert(
+    "contract-diagnostics.empty-files",
+    emptyFilesDiagnostic.code === "MALFORMED_GENERATED_ARTIFACT" &&
+      emptyFilesDiagnostic.category === "empty_files",
+    "empty files arrays are classified for targeted repair"
+  )
+
+  let missingRequiredError = null
+  try {
+    parseGeneratedArtifact(JSON.stringify({
+      files: [{ path: "app/page.tsx", content: "export default function Page(){return null}" }],
+      dependencies: [],
+      commands: [],
+      summary: "missing admin",
+      diagnostics: [],
+      metadata: {},
+      repairs: [],
+    }), { requiredFiles: ["app/page.tsx", "app/admin/page.tsx"] })
+  } catch (error) {
+    missingRequiredError = error
+  }
+  const missingRequiredDiagnostic = summarizeArtifactContractError(missingRequiredError)
+  const repairInstructionBlock = buildArtifactContractRepairInstructions(missingRequiredDiagnostic, {
+    outputMode: "taskGraph",
+    target: "app/admin/page.tsx",
+    requiredFiles: ["app/admin/page.tsx"],
+    allowedPaths: ["app/admin/page.tsx"],
+    maxChangedFiles: 1,
+  })
+  assert(
+    "contract-repair.instructions",
+    missingRequiredDiagnostic.category === "missing_required_file" &&
+      missingRequiredDiagnostic.missingFiles.includes("app/admin/page.tsx") &&
+      /ARTIFACT_CONTRACT_REPAIR/.test(repairInstructionBlock) &&
+      /taskGraph envelope/.test(repairInstructionBlock) &&
+      /Allowed generated roots/.test(repairInstructionBlock) &&
+      /Required files for this slice: app\/admin\/page\.tsx/.test(repairInstructionBlock),
+    "repair prompt receives actionable validator details"
+  )
+
   let strictUnknownError = null
   try {
     parseGeneratedArtifact(JSON.stringify({
@@ -247,8 +334,21 @@ function main() {
     "repair-loop.diagnostic-routing",
     /publicGenerationStructureErrorMessage/.test(orchestrator) &&
       /generation_slice_parse_retry/.test(orchestrator) &&
-      /Repairing validation failure/.test(orchestrator),
+      /Repairing validation failure/.test(orchestrator) &&
+      /artifact_parse_failed/.test(orchestrator) &&
+      /artifact_path_validation_failed/.test(orchestrator) &&
+      /artifact_contract_repair_started/.test(orchestrator),
     "orchestrator routes parser diagnostics to retry/repair flow"
+  )
+
+  assert(
+    "repair-loop.stream-events",
+    /type:\s*"artifact_validating"/.test(orchestrator) &&
+      /type:\s*"artifact_invalid"/.test(orchestrator) &&
+      /type:\s*"artifact_repairing"/.test(orchestrator) &&
+      /type:\s*"artifact_repaired"/.test(orchestrator) &&
+      /type:\s*"artifact_repair_failed"/.test(orchestrator),
+    "job stream exposes artifact contract repair lifecycle"
   )
 
   assert(

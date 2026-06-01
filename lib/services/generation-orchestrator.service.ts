@@ -15,7 +15,13 @@ import {
 } from "@/lib/ai/generation-pipeline"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 import { validateFrontendCompleteness } from "@/lib/ai/frontend-completeness-validator"
-import { auditGeneratedArtifactEnvelope, parseGeneratedArtifact } from "@/lib/ai/generated-artifact"
+import {
+  auditGeneratedArtifactEnvelope,
+  buildArtifactContractRepairInstructions,
+  parseGeneratedArtifact,
+  summarizeArtifactContractError,
+  type GeneratedArtifactContractDiagnostic,
+} from "@/lib/ai/generated-artifact"
 import {
   createDeveloperGenerationDiagnostics,
   persistFailedGenerationArtifacts,
@@ -7973,6 +7979,8 @@ export async function executeGenerationJob(
       let response: Awaited<ReturnType<typeof runProviderAttempt>> | null = null
       let parsed: ReturnType<typeof parseGeneratedArtifact> | null = null
       let parseError: unknown = null
+      let previousArtifactDiagnostic: GeneratedArtifactContractDiagnostic | null = null
+      const requiredTargetPaths = targets.map((item) => normalizePath(item.path))
 
       for (let parseAttempt = 1; parseAttempt <= 2; parseAttempt += 1) {
         recordDeveloperDiagnostic(developerDiagnostics, {
@@ -7994,16 +8002,16 @@ export async function executeGenerationJob(
                 baseSlicePrompt,
                 "",
                 "RETRY_DUE_TO_MALFORMED_ARTIFACT:",
-                "- Your previous response could not be parsed as a GeneratedArtifact.",
-                "- Return ONLY valid JSON. No Markdown fences, no prose, no comments.",
-                '- Use exactly this PATCH envelope: {"taskGraph":{"operations":[{"operation":"modifyFile","file":"app/page.tsx","content":"full updated file content"}]}}.',
-                "- Use createFile, modifyFile, deleteFile, or patchFile operations only.",
-                `- Do not return more than ${maxChangedFilesForGenerationSlice(plan, targets.length)} changed files.`,
-                `- Create or modify only exact paths in APPROVED_FILE_SCOPE: ${plan.allowedFileScope.allowedPaths.join(", ")}.`,
-                "- Do not create helper/shell files such as components/app-shell.tsx unless that exact path is in APPROVED_FILE_SCOPE.",
-                "- Paths must start with src/, app/, components/, sections/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Paths must not contain .., ~, node_modules, .env, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
-                "- files must be non-empty and every listed target file must be present.",
-                `- Cover exactly this slice target: ${target.path}.`,
+                buildArtifactContractRepairInstructions(previousArtifactDiagnostic, {
+                  target: target.path,
+                  requiredFiles: requiredTargetPaths,
+                  allowedPaths: plan.allowedFileScope.allowedPaths,
+                  maxChangedFiles: maxChangedFilesForGenerationSlice(plan, targets.length),
+                  outputMode: "taskGraph",
+                }),
+                "- For this generation slice, return taskGraph.operations using createFile, modifyFile, deleteFile, or patchFile operations only.",
+                "- Use app/page.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json as canonical workspace-relative path examples.",
+                "- taskGraph.operations must be non-empty and every listed target file must be present.",
               ].join("\n"),
           purpose: "generate",
           orchestrationRole: "builder",
@@ -8053,6 +8061,26 @@ export async function executeGenerationJob(
             sliceTotal,
             target: target.path,
             rawHash: hashText(response.message),
+          })
+          await appendOrchestrationEvent({
+            jobId: input.jobId,
+            trace: {
+              traceId: correlation.traceId,
+              workerId: null,
+            },
+            type: "artifact_validating",
+            stage: "parsing",
+            status: "running",
+            message: `Validating artifact contract for slice ${sliceIndex}/${sliceTotal}`,
+            data: {
+              sliceIndex,
+              sliceTotal,
+              parseAttempt,
+              target: target.path,
+              requiredFiles: requiredTargetPaths,
+              rawHash: hashText(response.message),
+              rawLength: response.message.length,
+            },
           })
           await markLifecycle("artifact_validation_completed", "parsing", {
             sliceIndex,
@@ -8106,10 +8134,43 @@ export async function executeGenerationJob(
             parseAttempt,
             parsedFileCount: parsed.files.length,
             parsedFiles: filePathList(parsed.files),
-            requiredFiles: targets.map((item) => normalizePath(item.path)),
+            requiredFiles: requiredTargetPaths,
             missingFiles: missingRequiredTargets,
             rawHash: hashText(response.message),
           })
+          if (parseAttempt > 1) {
+            log("info", "artifact_contract_repair_succeeded", {
+              jobId: input.jobId,
+              projectId: input.projectId,
+              sliceIndex,
+              sliceTotal,
+              parseAttempt,
+              target: target.path,
+              parsedFileCount: parsed.files.length,
+              taskOperationCount: parsed.taskGraph?.operations.length || 0,
+              previousDiagnostic: previousArtifactDiagnostic,
+            })
+            await appendOrchestrationEvent({
+              jobId: input.jobId,
+              trace: {
+                traceId: correlation.traceId,
+                workerId: null,
+              },
+              type: "artifact_repaired",
+              stage: "parsing",
+              status: "running",
+              message: `Artifact contract repaired for slice ${sliceIndex}/${sliceTotal}`,
+              data: {
+                sliceIndex,
+                sliceTotal,
+                parseAttempt,
+                target: target.path,
+                parsedFileCount: parsed.files.length,
+                taskOperationCount: parsed.taskGraph?.operations.length || 0,
+                previousDiagnostic: previousArtifactDiagnostic,
+              },
+            })
+          }
           developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({
             files: parsed.files,
             dependencies: parsed.dependencies,
@@ -8127,6 +8188,40 @@ export async function executeGenerationJob(
         } catch (error) {
           parseError = error
           const parseFailure = error instanceof Error ? error.message : String(error)
+          const artifactDiagnostic = summarizeArtifactContractError(error, {
+            rawLength: response.message.length,
+            rawHash: hashText(response.message),
+            artifactAudit,
+            requiredFiles: requiredTargetPaths,
+          })
+          previousArtifactDiagnostic = artifactDiagnostic
+          log("warn", artifactDiagnostic.code === "PATH_ERROR" ? "artifact_path_validation_failed" : "artifact_parse_failed", {
+            jobId: input.jobId,
+            projectId: input.projectId,
+            sliceIndex,
+            sliceTotal,
+            parseAttempt,
+            target: target.path,
+            diagnostic: artifactDiagnostic,
+          })
+          await appendOrchestrationEvent({
+            jobId: input.jobId,
+            trace: {
+              traceId: correlation.traceId,
+              workerId: null,
+            },
+            type: "artifact_invalid",
+            stage: "parsing",
+            status: "running",
+            message: artifactDiagnostic.reason,
+            data: {
+              sliceIndex,
+              sliceTotal,
+              parseAttempt,
+              target: target.path,
+              diagnostic: artifactDiagnostic,
+            },
+          })
           log("warn", "generator_output_contract_violation", {
             jobId: input.jobId,
             projectId: input.projectId,
@@ -8134,8 +8229,9 @@ export async function executeGenerationJob(
             sliceTotal,
             parseAttempt,
             target: target.path,
-            requiredFiles: targets.map((item) => normalizePath(item.path)),
+            requiredFiles: requiredTargetPaths,
             parseFailure,
+            diagnostic: artifactDiagnostic,
             rawHash: hashText(response.message),
             RAW_AI_OUTPUT: runtimeLogText(response.message),
           })
@@ -8154,7 +8250,7 @@ export async function executeGenerationJob(
                 rawHash: hashText(response.message),
                 rawLength: response.message.length,
                 artifactAudit,
-                requiredFiles: targets.map((item) => normalizePath(item.path)),
+                requiredFiles: requiredTargetPaths,
               },
               dependencyGraph: buildProjectDependencyGraph(workingFiles),
               executorState: {
@@ -8214,6 +8310,7 @@ export async function executeGenerationJob(
               parseAttempt,
               target: target.path,
               reportPath: invalidArtifactPath,
+              diagnostic: artifactDiagnostic,
             })
             developerDiagnostics.reports.lastInvalidArtifactPath = invalidArtifactPath
             developerDiagnostics.generatedArtifactSummary = summarizeArtifactPayload({ files: parsed.files })
@@ -8226,6 +8323,7 @@ export async function executeGenerationJob(
                 target: target.path,
                 reportPath: invalidArtifactPath,
                 parserDiagnostic: publicArtifactParseError(error),
+                artifactDiagnostic,
                 fallbackInjectedPaths: fallback.injectedPaths,
                 parsedFiles: filePathList(parsed.files),
               },
@@ -8243,9 +8341,40 @@ export async function executeGenerationJob(
               message: "Minimal runnable fallback project injected after invalid AI output",
               data: {
                 reason: parseFailure,
+                diagnostic: artifactDiagnostic,
                 reportPath: invalidArtifactPath,
                 injectedPaths: fallback.injectedPaths,
                 parsedFileCount: parsed.files.length,
+              },
+            })
+            log("warn", "artifact_contract_repair_failed", {
+              jobId: input.jobId,
+              projectId: input.projectId,
+              sliceIndex,
+              sliceTotal,
+              parseAttempt,
+              target: target.path,
+              diagnostic: artifactDiagnostic,
+              fallbackInjected: true,
+            })
+            await appendOrchestrationEvent({
+              jobId: input.jobId,
+              trace: {
+                traceId: correlation.traceId,
+                workerId: null,
+              },
+              type: "artifact_repair_failed",
+              stage: "parsing",
+              status: "running",
+              message: "Artifact contract repair failed; fallback project injected",
+              data: {
+                sliceIndex,
+                sliceTotal,
+                parseAttempt,
+                target: target.path,
+                diagnostic: artifactDiagnostic,
+                reportPath: invalidArtifactPath,
+                fallbackInjectedPaths: fallback.injectedPaths,
               },
             })
             log("warn", "minimal_runnable_fallback_injected", {
@@ -8276,6 +8405,7 @@ export async function executeGenerationJob(
               parseAttempt,
               target: target.path,
               reportPath: invalidArtifactPath,
+              diagnostic: artifactDiagnostic,
             })
             developerDiagnostics.reports.lastInvalidArtifactPath = invalidArtifactPath
             recordDeveloperDiagnostic(developerDiagnostics, {
@@ -8287,9 +8417,38 @@ export async function executeGenerationJob(
                 target: target.path,
                 reportPath: invalidArtifactPath,
                 parserDiagnostic: publicArtifactParseError(error),
+                artifactDiagnostic,
               },
             })
             await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
+            log("warn", "artifact_contract_repair_failed", {
+              jobId: input.jobId,
+              projectId: input.projectId,
+              sliceIndex,
+              sliceTotal,
+              parseAttempt,
+              target: target.path,
+              diagnostic: artifactDiagnostic,
+            })
+            await appendOrchestrationEvent({
+              jobId: input.jobId,
+              trace: {
+                traceId: correlation.traceId,
+                workerId: null,
+              },
+              type: "artifact_repair_failed",
+              stage: "parsing",
+              status: "failed",
+              message: artifactDiagnostic.reason,
+              data: {
+                sliceIndex,
+                sliceTotal,
+                parseAttempt,
+                target: target.path,
+                diagnostic: artifactDiagnostic,
+                reportPath: invalidArtifactPath,
+              },
+            })
             throw error
           }
           const publicMessage = publicArtifactParseError(error)
@@ -8307,6 +8466,7 @@ export async function executeGenerationJob(
             parseAttempt,
             target: target.path,
             reportPath: invalidArtifactPath,
+            diagnostic: artifactDiagnostic,
           })
           developerDiagnostics.reports.lastInvalidArtifactPath = invalidArtifactPath
           recordDeveloperDiagnostic(developerDiagnostics, {
@@ -8318,6 +8478,7 @@ export async function executeGenerationJob(
               target: target.path,
               reportPath: invalidArtifactPath,
               parserDiagnostic: publicArtifactParseError(error),
+              artifactDiagnostic,
             },
           })
           await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
@@ -8329,6 +8490,35 @@ export async function executeGenerationJob(
             target: target.path,
             error: error.message,
             publicMessage,
+            diagnostic: artifactDiagnostic,
+          })
+          log("info", "artifact_contract_repair_started", {
+            jobId: input.jobId,
+            projectId: input.projectId,
+            sliceIndex,
+            sliceTotal,
+            nextParseAttempt: parseAttempt + 1,
+            target: target.path,
+            diagnostic: artifactDiagnostic,
+          })
+          await appendOrchestrationEvent({
+            jobId: input.jobId,
+            trace: {
+              traceId: correlation.traceId,
+              workerId: null,
+            },
+            type: "artifact_repairing",
+            stage: "parsing",
+            status: "running",
+            message: `Repairing artifact contract for slice ${sliceIndex}/${sliceTotal}`,
+            data: {
+              sliceIndex,
+              sliceTotal,
+              parseAttempt,
+              nextParseAttempt: parseAttempt + 1,
+              target: target.path,
+              diagnostic: artifactDiagnostic,
+            },
           })
           await transition(
             input.jobId,
@@ -8340,6 +8530,7 @@ export async function executeGenerationJob(
               parseAttempt,
               error: error.message,
               publicMessage,
+              diagnostic: artifactDiagnostic,
             }
           )
         }

@@ -1,6 +1,13 @@
 import { z } from "zod"
 import type { GeneratedFile } from "@/lib/types"
-import { formatGeneratedPathValidationError, normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
+import {
+  ALLOWED_GENERATED_ROOTS,
+  SAFE_GENERATED_ROOT_FILES,
+  formatGeneratedPathValidationError,
+  normalizeGeneratedPath,
+  validateGeneratedPath,
+  type GeneratedPathValidationDiagnostic,
+} from "@/lib/ai/file-policy"
 import { isValidatorDiagnosticPayload, parseRuntimeMessage } from "@/lib/ai/runtime-contracts"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
 
@@ -210,6 +217,133 @@ export type GeneratedArtifactEnvelopeAudit = {
   issues: string[]
 }
 
+export type GeneratedArtifactContractErrorCode =
+  | "MALFORMED_GENERATED_ARTIFACT"
+  | "PATH_ERROR"
+  | "UNKNOWN_ARTIFACT_ERROR"
+
+export type GeneratedArtifactContractCategory =
+  | "json_envelope"
+  | "path_policy"
+  | "schema"
+  | "diagnostic_payload"
+  | "runtime_message"
+  | "missing_required_file"
+  | "empty_files"
+  | "unsupported_structure"
+  | "unknown"
+
+export type GeneratedArtifactContractDiagnostic = {
+  code: GeneratedArtifactContractErrorCode
+  category: GeneratedArtifactContractCategory
+  reason: string
+  rawMessage: string
+  path?: string | null
+  received?: string | null
+  expected?: string | null
+  missingFiles: string[]
+  allowedRoots: readonly string[]
+  allowedRootFiles: readonly string[]
+  rawLength?: number
+  rawHash?: string
+  issueCount: number
+  artifactAudit?: Record<string, unknown> | null
+  requiredFiles?: string[]
+}
+
+export function summarizeArtifactContractError(
+  error: unknown,
+  input: {
+    rawLength?: number
+    rawHash?: string
+    artifactAudit?: Record<string, unknown> | null
+    requiredFiles?: string[]
+  } = {}
+): GeneratedArtifactContractDiagnostic {
+  const rawMessage = error instanceof Error ? error.message : String(error || "")
+  const message = rawMessage || "Unknown artifact contract error"
+  const pathDiagnostic = parsePathDiagnosticMessage(message)
+  const code = pathDiagnostic || /PATH_ERROR|Invalid file path|Root file not allowlisted|Blocked path/i.test(message)
+    ? "PATH_ERROR"
+    : /^MALFORMED_GENERATED_ARTIFACT/i.test(message) ||
+      /Unrecognized key\(s\)|strict-json-schema|required|diagnostic payload|Missing required|Empty files array|Unsupported artifact structure/i.test(message)
+      ? "MALFORMED_GENERATED_ARTIFACT"
+      : "UNKNOWN_ARTIFACT_ERROR"
+  const category = classifyArtifactContractFailure(message, code)
+  const missingFiles = extractMissingRequiredFiles(message)
+  const cleanedReason = compactArtifactErrorReason(message, pathDiagnostic)
+
+  return {
+    code,
+    category,
+    reason: cleanedReason,
+    rawMessage: truncateDiagnosticText(message, 1800),
+    path: pathDiagnostic?.expected || null,
+    received: pathDiagnostic?.received || null,
+    expected: pathDiagnostic?.expected || null,
+    missingFiles,
+    allowedRoots: ALLOWED_GENERATED_ROOTS,
+    allowedRootFiles: pathDiagnostic?.allowedRootFiles || SAFE_GENERATED_ROOT_FILES,
+    ...(typeof input.rawLength === "number" ? { rawLength: input.rawLength } : {}),
+    ...(input.rawHash ? { rawHash: input.rawHash } : {}),
+    issueCount: countContractIssues(message),
+    artifactAudit: input.artifactAudit || null,
+    requiredFiles: input.requiredFiles?.map(normalizeGeneratedPath).filter(Boolean).slice(0, 80),
+  }
+}
+
+export function buildArtifactContractRepairInstructions(
+  diagnostic: GeneratedArtifactContractDiagnostic | null | undefined,
+  input: {
+    target?: string
+    requiredFiles?: string[]
+    allowedPaths?: string[]
+    maxChangedFiles?: number
+    outputMode?: "files" | "taskGraph"
+  } = {}
+) {
+  const requiredFiles = Array.from(new Set((input.requiredFiles || diagnostic?.requiredFiles || []).map(normalizeGeneratedPath).filter(Boolean)))
+  const allowedPaths = Array.from(new Set((input.allowedPaths || []).map(normalizeGeneratedPath).filter(Boolean))).slice(0, 120)
+  const outputMode = input.outputMode || "files"
+  const lines = [
+    "ARTIFACT_CONTRACT_REPAIR:",
+    `- Previous artifact error code: ${diagnostic?.code || "UNKNOWN_ARTIFACT_ERROR"}.`,
+    `- Previous artifact error category: ${diagnostic?.category || "unknown"}.`,
+    `- Previous artifact failure reason: ${diagnostic?.reason || "Unknown artifact contract failure"}.`,
+    "- Return ONLY strict JSON. No Markdown fences, no prose, no comments.",
+    outputMode === "taskGraph"
+      ? '- Return a taskGraph envelope: {"taskGraph":{"operations":[{"operation":"modifyFile","file":"app/page.tsx","content":"full file content"}]},"dependencies":[],"commands":[],"summary":"","diagnostics":[],"metadata":{}}.'
+      : '- BUILD output must use {"files":[{"path":"app/page.tsx","language":"tsx","content":"full file content"}],"dependencies":[],"commands":[],"summary":"","diagnostics":[],"metadata":{},"repairs":[]}.',
+    outputMode === "taskGraph"
+      ? "- taskGraph.operations must be non-empty and every listed target file must appear as createFile or modifyFile."
+      : "- taskGraph is not allowed when strict files-only output is requested.",
+    `- Allowed generated roots: ${ALLOWED_GENERATED_ROOTS.join(", ")}.`,
+    `- Allowed root files: ${SAFE_GENERATED_ROOT_FILES.join(", ")}.`,
+    "- Never write .env, .env.production, .git, node_modules, package-lock.json, pnpm-lock.yaml, yarn.lock, absolute paths, or traversal paths.",
+  ]
+
+  if (diagnostic?.received) {
+    lines.push(`- Fix rejected path: ${diagnostic.received}.`)
+  }
+  if (diagnostic?.missingFiles.length) {
+    lines.push(`- Include missing files: ${diagnostic.missingFiles.join(", ")}.`)
+  }
+  if (requiredFiles.length > 0) {
+    lines.push(`- Required files for this slice: ${requiredFiles.join(", ")}.`)
+  }
+  if (allowedPaths.length > 0) {
+    lines.push(`- Approved file scope: ${allowedPaths.join(", ")}.`)
+  }
+  if (typeof input.maxChangedFiles === "number") {
+    lines.push(`- Do not return more than ${input.maxChangedFiles} changed files.`)
+  }
+  if (input.target) {
+    lines.push(`- Cover exactly this slice target: ${input.target}.`)
+  }
+
+  return lines.join("\n")
+}
+
 export function auditGeneratedArtifactEnvelope(providerMessage: string): GeneratedArtifactEnvelopeAudit {
   const raw = String(providerMessage || "").trim()
   const balance = inspectJsonBalance(raw)
@@ -409,9 +543,95 @@ function formatArtifactIssues(issues: z.ZodIssue[]) {
     if (path.match(/^files\.\d+\.content$/)) return "File content missing"
     if (path === "files" && issue.message.includes("requires filesystem writes")) return "Empty files array"
     if (issue.message.includes("Required")) return `${path}: missing required value`
-    if (issue.message.startsWith("{")) return `Invalid file path at ${path}`
+    const pathDiagnostic = parsePathDiagnosticMessage(issue.message)
+    if (pathDiagnostic) {
+      return `PATH_ERROR at ${path}: ${pathDiagnostic.reason}${pathDiagnostic.received ? ` (received: ${pathDiagnostic.received})` : ""}`
+    }
     return `${path}: ${issue.message}`
   }).join("; ")
+}
+
+function classifyArtifactContractFailure(
+  message: string,
+  code: GeneratedArtifactContractErrorCode
+): GeneratedArtifactContractCategory {
+  if (code === "PATH_ERROR") return "path_policy"
+  if (/diagnostic-payload|runtime-message:diagnostic|diagnostic payload/i.test(message)) return "diagnostic_payload"
+  if (/runtime-message:/i.test(message)) return "runtime_message"
+  if (/Missing required (operation\/file|file)/i.test(message)) return "missing_required_file"
+  if (/Empty files array|requires filesystem writes/i.test(message)) return "empty_files"
+  if (/Unsupported artifact structure|taskGraph/i.test(message)) return "unsupported_structure"
+  if (/Invalid artifact JSON|Markdown wrapper|response must start with \{|response is empty/i.test(message)) return "json_envelope"
+  if (/Unrecognized key\(s\)|strict-json-schema|missing required value|required|schema/i.test(message)) return "schema"
+  return "unknown"
+}
+
+function parsePathDiagnosticMessage(message: string): GeneratedPathValidationDiagnostic | null {
+  const jsonMatches = String(message || "").match(/\{[^{}]*"PATH_ERROR"[^{}]*\}/g) || []
+  for (const json of jsonMatches) {
+    try {
+      const parsed = JSON.parse(json) as GeneratedPathValidationDiagnostic
+      if (parsed?.error === "PATH_ERROR") return parsed
+    } catch {
+      // Keep scanning; Zod may wrap several issue messages.
+    }
+  }
+
+  const formatted = String(message || "").match(/PATH_ERROR at [^:;]+:\s*([^;(]+)(?:\s*\(received:\s*([^)]+)\))?/i)
+  if (formatted) {
+    return {
+      error: "PATH_ERROR",
+      reason: formatted[1].trim(),
+      received: formatted[2]?.trim() || "",
+    }
+  }
+
+  return null
+}
+
+function compactArtifactErrorReason(message: string, pathDiagnostic: GeneratedPathValidationDiagnostic | null) {
+  if (pathDiagnostic) {
+    return truncateDiagnosticText(
+      `${pathDiagnostic.reason}${pathDiagnostic.received ? `: ${pathDiagnostic.received}` : ""}`,
+      600
+    )
+  }
+
+  return truncateDiagnosticText(
+    String(message || "")
+      .replace(/^MALFORMED_GENERATED_ARTIFACT:/, "")
+      .replace(/^schema:/, "")
+      .trim() || "Invalid artifact structure",
+    600
+  )
+}
+
+function extractMissingRequiredFiles(message: string) {
+  const missing = new Set<string>()
+  const operationMatch = String(message || "").match(/Missing required operation\/file:\s*([^;]+)/i)
+  if (operationMatch) {
+    for (const item of operationMatch[1].split(",")) {
+      const normalized = normalizeGeneratedPath(item.trim())
+      if (normalized) missing.add(normalized)
+    }
+  }
+
+  for (const match of String(message || "").matchAll(/Missing required file:\s*([^;]+)/gi)) {
+    const normalized = normalizeGeneratedPath(match[1].trim())
+    if (normalized) missing.add(normalized)
+  }
+
+  return Array.from(missing).slice(0, 80)
+}
+
+function countContractIssues(message: string) {
+  const compact = String(message || "").replace(/^MALFORMED_GENERATED_ARTIFACT:/, "")
+  return compact.split(";").map((item) => item.trim()).filter(Boolean).length || 1
+}
+
+function truncateDiagnosticText(value: string, maxLength: number) {
+  const text = String(value || "")
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...<truncated:${text.length - maxLength}>` : text
 }
 
 function diagnoseJsonEnvelope(value: string) {

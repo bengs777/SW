@@ -194,6 +194,7 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "PAKAI DATA PREVIEW hanya untuk PREVIEW_MODE eksplisit. Dalam FULL_FRONTEND_MODE, buat data realistis di lib/data.ts, reusable components, sections, responsive navigation, footer, CTA, dan loading/empty states. Dalam PRODUCTION_FULLSTACK_MODE, buat Prisma schema, API routes, service layer, env placeholder, auth/payment/API boundaries sesuai permintaan prompt.",
   "MAX 4000 TOKEN PER FILE dan jangan bikin file lebih dari 150 baris bila bisa dibuat ringkas.",
   "PATH POLICY: every generated path must be canonical workspace-relative POSIX form, and must start with src/, app/, components/, sections/, component-registry/, lib/, prisma/, or an allowlisted root file such as package.json, tsconfig.json, next.config.ts, tailwind.config.ts, postcss.config.js, README.md, or .env.example. Use app/page.tsx, component-registry/hero.tsx, sections/hero-section.tsx, components/Button.tsx, lib/utils.ts, or package.json; never use /app/page.tsx, ./components/Button.tsx, or ../lib/utils.ts.",
+  "Canonical path examples: Use app/page.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json.",
   "BLOCKED PATHS: never use .., ~, absolute paths, node_modules, .env files, .git, package-lock.json, pnpm-lock.yaml, or yarn.lock.",
   "PATH HARUS BENAR: root Next.js adalah /app. Jangan buat /src/app kecuali user secara eksplisit meminta src/ layout.",
   "Jangan pernah generate next-auth.d.ts. Untuk jalur NextAuth gunakan file allowed di lib/ dan app/ saja.",
