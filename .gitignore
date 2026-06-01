@@ -12,6 +12,7 @@ local-dev.*.log
 .DS_Store.env
 .env.local
 .env.production
+.env.worker.production
 .env.sandbox.production
 node_modules
 .next

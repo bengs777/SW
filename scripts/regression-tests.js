@@ -31,6 +31,7 @@ const authRuntime = read("lib/auth/runtime.ts")
 const authConfig = read("auth.ts")
 const adminGuard = read("lib/admin.ts")
 const healthApi = read("app/api/health/route.ts")
+const workerHealthApi = read("app/api/worker/health/route.ts")
 const proxy = read("proxy.ts")
 const semanticEdit = read("lib/ai/semantic-edit.ts")
 const incrementalEdit = read("lib/ai/incremental-edit.ts")
@@ -533,21 +534,34 @@ assert(
     /invalidSecrets/.test(productionReadiness) &&
     /dbConnectivity/.test(productionReadiness) &&
     /migrationMismatch/.test(productionReadiness) &&
+    /GENERATION_WORKER_HEARTBEAT/.test(productionReadiness) &&
+    /SANDBOX_RUNTIME_HEALTH/.test(productionReadiness) &&
+    /workerHeartbeatFresh/.test(productionReadiness) &&
     /AUTH_PROVIDER_HEALTH/.test(productionReadiness) &&
     /deployment_readiness/.test(instrumentation),
   "runtime startup and health must fail closed on critical envs while keeping optional services degraded"
 )
 
 assert(
-  "deploy readiness cli validates migrations db and auth",
+  "deploy readiness cli validates migrations db worker and sandbox",
   /MIGRATION_STATUS/.test(deployReadiness) &&
     /SCHEMA_HEALTH/.test(deployReadiness) &&
     /DB_CONNECTIVITY/.test(deployReadiness) &&
+    /GENERATION_WORKER_HEARTBEAT/.test(deployReadiness) &&
+    /SANDBOX_RUNTIME_HEALTH/.test(deployReadiness) &&
     /AUTH_PROVIDER_HEALTH/.test(deployReadiness) &&
     /missing env vars/.test(deployReadiness) &&
     /invalid secrets/.test(deployReadiness) &&
     /migration mismatch/.test(deployReadiness),
-  "deployment readiness script must expose missing env, invalid secret, migration, DB, and auth diagnostics"
+  "deployment readiness script must expose missing env, invalid secret, migration, DB, worker, sandbox, and auth diagnostics"
+)
+
+assert(
+  "worker health api exposes runtime service detail",
+  /getExternalWorkerRuntimeHealth/.test(workerHealthApi) &&
+    /workerService/.test(workerHealthApi) &&
+    /workerHeartbeatHealthy/.test(workerHealthApi),
+  "worker health route must include both Redis heartbeat and external worker runtime detail"
 )
 
 console.log("[regression] all checks passed")

@@ -58,6 +58,8 @@ function staticChecks() {
   const editPlanner = exists("lib/ai/edit-planner.ts") ? read("lib/ai/edit-planner.ts") : ""
   const importGraph = exists("lib/ai/import-graph.ts") ? read("lib/ai/import-graph.ts") : ""
   const healthRoute = exists("app/api/health/route.ts") ? read("app/api/health/route.ts") : ""
+  const workerHealthRoute = exists("app/api/worker/health/route.ts") ? read("app/api/worker/health/route.ts") : ""
+  const productionReadiness = exists("lib/production/readiness.ts") ? read("lib/production/readiness.ts") : ""
   const generationQueue = exists("lib/queue/generation-queue.ts") ? read("lib/queue/generation-queue.ts") : ""
   const generationWorker = exists("lib/workers/generation-worker.ts") ? read("lib/workers/generation-worker.ts") : ""
   const billingService = exists("lib/services/billing.service.ts") ? read("lib/services/billing.service.ts") : ""
@@ -161,6 +163,15 @@ function staticChecks() {
     check("sandbox.build-before-preview", /npm["'], \["run", "db:generate"/.test(sandboxRuntime) && /npm["'], \["run", "build"/.test(sandboxRuntime), "Runtime sandbox runs Prisma generate and build before preview"),
     check("ops.health-route", /getGenerationQueueHealth/.test(healthRoute) && /ProviderRouter/.test(healthRoute), "Health endpoint reports database, queue, env, and provider status"),
     check("ops.worker-heartbeat", /recordGenerationWorkerHeartbeat/.test(generationQueue) && /recordGenerationWorkerHeartbeat/.test(generationWorker), "Queue health includes worker heartbeat reporting"),
+    check(
+      "ops.runtime-readiness-gates-worker-and-sandbox",
+      /GENERATION_WORKER_HEARTBEAT/.test(productionReadiness) &&
+        /SANDBOX_RUNTIME_HEALTH/.test(productionReadiness) &&
+        /workerHeartbeatFresh/.test(productionReadiness) &&
+        /getExternalSandboxRuntimeHealth/.test(productionReadiness) &&
+        /getExternalWorkerRuntimeHealth/.test(workerHealthRoute),
+      "Readiness blocks production when the dedicated worker heartbeat or sandbox runtime is unhealthy"
+    ),
     check("ops.sentry-config", exists("instrumentation.ts") && exists("instrumentation-client.ts") && exists("sentry.server.config.ts"), "Sentry instrumentation exists for client and server runtimes"),
     check("ops.chaos-script", packageJson.scripts && packageJson.scripts["test:chaos"] && exists("scripts/chaos-concurrency.js"), "Concurrency chaos test script is available"),
     check("ops.resilience-script", packageJson.scripts && packageJson.scripts["test:resilience"] && exists("scripts/pipeline-resilience-smoke.js"), "Pipeline resilience smoke test script is available"),

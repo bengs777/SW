@@ -69,6 +69,7 @@ const supabaseServiceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY")
 const supabaseStorageBucket = getEnv("SUPABASE_STORAGE_BUCKET")
 const sandboxServiceUrl = normalizeUrl(getEnv("SANDBOX_SERVICE_URL"))
 const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
+const workerHealthUrl = normalizeUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
 const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
 const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
@@ -141,6 +142,7 @@ export const env = {
   hasRedisConfig,
   sandboxServiceUrl,
   sandboxServiceToken,
+  workerHealthUrl,
   sandboxPublicBaseUrl: normalizeUrl(getEnv("SANDBOX_PUBLIC_BASE_URL")),
   sandboxRoot: getEnv("SWIFT_SANDBOX_ROOT"),
   sandboxBasePort: getEnvNumber(4300, "SWIFT_SANDBOX_BASE_PORT"),
@@ -380,6 +382,7 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
   validateOptionalUrl(issues, "NEXT_PUBLIC_SUPABASE_URL", env.supabaseUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_SERVICE_URL", env.sandboxServiceUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_PUBLIC_BASE_URL", env.sandboxPublicBaseUrl, isProduction)
+  validateOptionalUrl(issues, "SWIFT_WORKER_HEALTH_URL / WORKER_HEALTH_URL", env.workerHealthUrl, isProduction)
   validateOptionalRedisUrl(issues, "REDIS_URL / UPSTASH_REDIS_URL", env.redisUrl, isProduction)
 
   validateOptionalNumber(issues, "AI_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })

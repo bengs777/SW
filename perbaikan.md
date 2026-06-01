@@ -1,345 +1,493 @@
-# Perbaikan Swift AI Web Builder
+# Perbaikan Lengkap Error Dedicated Worker Swift
 
-Dokumen ini adalah panduan perbaikan untuk mencegah error saat user membuat web di Swift. Fokus utamanya:
+Dokumen ini dibuat untuk memperbaiki error seperti:
 
-1. Generator harus membuat dashboard page-by-page secara berurutan.
-2. Frontend harus selesai dulu sebelum backend dihubungkan.
-3. Sandbox runtime harus stabil, termasuk integrasi ke Railway.
-4. Error queue, preview, build, dan deploy harus punya fallback yang aman.
+- `Production generation must run in queue mode with a dedicated worker.`
+- `Swift production sedang menunggu dedicated worker.`
+- `Generation queue unavailable`
+- `Redis/BullMQ generation queue is unavailable or rejected the job.`
 
----
-
-## Tujuan Utama
-
-- Mengurangi kegagalan generasi seperti `queue_enqueue`.
-- Membuat proses pembuatan web lebih teratur, bertahap, dan mudah dilanjutkan.
-- Menyediakan alur kerja yang jelas dari `prompt -> frontend -> preview -> backend -> sandbox -> deploy`.
-- Menjaga user tetap bisa bekerja walau salah satu layanan sementara bermasalah.
+Dokumen ini fokus ke akar masalah produksi Swift saat user membuat web, tetapi preview tidak jalan karena worker generasi, queue, atau sandbox belum sehat.
 
 ---
 
-## Prinsip Wajib
+## 1. Ringkasan Masalah
 
-### 1. Frontend-first
+Saat user klik generate, app utama tidak langsung membangun web di proses Next.js biasa. Swift production menggunakan arsitektur:
 
-- Semua proyek baru harus dimulai dari struktur UI.
-- Buat layout, navigasi, halaman, dan state visual terlebih dahulu.
-- Jangan sambungkan backend sebelum halaman utama bisa dirender dengan benar.
-- Gunakan mock data sementara untuk memastikan UI berjalan.
+- App dashboard/API di Vercel
+- Queue BullMQ di Redis
+- Dedicated generation worker sebagai proses terpisah
+- Sandbox runtime di Railway untuk install, build, dan preview
 
-### 2. Page-by-page
+Kalau salah satu bagian ini tidak sehat, UI akan berhenti di status:
 
-- Generator tidak boleh langsung membuat semua halaman secara acak.
-- Halaman harus dibuat berurutan:
-  1. Shell / layout utama
-  2. Sidebar / header / navigasi
-  3. Dashboard utama
-  4. Halaman detail berikutnya
-  5. Form, tabel, chart, atau komponen tambahan
-  6. Integrasi data
-  7. Validasi preview
-  8. Handoff ke backend / deploy
-
-### 3. Bertahap dan aman
-
-- Setiap tahap harus punya status yang jelas.
-- Jika tahap sebelumnya gagal, jangan lanjut ke tahap berikutnya.
-- Semua langkah harus bisa diulang tanpa merusak hasil sebelumnya.
-
-### 4. Sandbox-ready
-
-- Setiap proyek harus bisa dijalankan di sandbox environment.
-- Runtime sandbox harus memiliki konfigurasi minimal yang konsisten.
-- Jika Railway dipakai, pastikan ada health check, port binding, dan log yang mudah dibaca.
+- menunggu worker,
+- queue unavailable,
+- preview kosong,
+- atau retry terus tanpa hasil.
 
 ---
 
-## Alur Ideal Pembuatan Web
+## 2. Diagnosis Paling Mungkin Untuk Error Ini
 
-### Tahap 1. Inisialisasi proyek
+Berdasarkan struktur repo saat ini, akar error paling mungkin adalah kombinasi berikut:
 
-- Terima prompt user.
-- Normalisasi prompt menjadi tujuan proyek.
-- Tentukan jenis aplikasi:
-  - Landing page
-  - Dashboard
-  - E-commerce
-  - Admin panel
-  - Company profile
-  - Custom app
-- Buat `project manifest` berisi:
-  - nama proyek
-  - tipe proyek
-  - daftar halaman
-  - komponen utama
-  - data mock
-  - status tahap
+### A. Production masih berjalan di mode yang salah
 
-### Tahap 2. Generate frontend dulu
+Swift production harus memakai:
 
-- Buat struktur layout utama.
-- Buat routing / page tree.
-- Buat komponen visual dasar.
-- Gunakan data dummy jika backend belum siap.
-- Pastikan responsif di desktop dan mobile.
-
-### Tahap 3. Preview dan validasi
-
-- Jalankan preview setelah frontend jadi.
-- Validasi:
-  - halaman bisa dibuka
-  - tidak ada error render
-  - navigasi berjalan
-  - komponen inti tampil
-  - tidak ada crash di console
-
-### Tahap 4. Integrasi backend
-
-- Backend hanya dihubungkan setelah frontend stabil.
-- Hubungkan API satu per satu.
-- Tambahkan error handling di setiap request.
-- Gunakan fallback ke mock data jika API gagal.
-
-### Tahap 5. Sandbox Railway
-
-- Proyek bisa dijalankan di sandbox Railway untuk testing.
-- Pastikan:
-  - `PORT` dibaca dari environment
-  - health endpoint tersedia
-  - start command jelas
-  - log runtime mudah dilacak
-  - restart tidak merusak state proyek
-
-### Tahap 6. Deploy / handoff
-
-- Hanya lakukan deploy jika preview lulus validasi.
-- Simpan versi build yang sudah lolos.
-- Catat semua perubahan penting.
-
----
-
-## Urutan Dashboard yang Disarankan
-
-Untuk dashboard Swift, gunakan urutan page seperti ini:
-
-1. Dashboard overview
-2. Projects list
-3. Project detail
-4. Builder / prompt page
-5. Preview page
-6. Code explorer
-7. Version history
-8. Error log
-9. Deploy page
-10. Settings page
-11. Sandbox / runtime page
-12. Billing / usage page jika diperlukan
-
-Urutan ini penting supaya user melihat progres yang logis dan tidak langsung masuk ke area kompleks sebelum fondasi UI selesai.
-
----
-
-## Pencegahan Error Wajib
-
-### A. Error queue / enqueue
-
-Masalah seperti `queue_enqueue` dan kegagalan Redis/BullMQ harus dicegah dengan cara:
-
-- Cek kesehatan queue sebelum job dikirim.
-- Jika queue tidak tersedia, tampilkan fallback yang aman.
-- Jika Redis/BullMQ unavailable, jangan gagal diam-diam.
-- Beri status jelas: queue down, job ditahan, atau fallback aktif.
-- Jangan membiarkan request user hilang tanpa status.
-- Simpan status job: `pending`, `running`, `failed`, `done`.
-- Gunakan retry dengan batas yang jelas.
-- Pakai idempotency key agar job tidak dobel.
-
-### B. Error preview
-
-- Preview harus punya state kosong, loading, error, dan ready.
-- Jika preview gagal, tampilkan pesan singkat yang bisa dipahami user.
-- Sediakan tombol retry.
-- Jangan menampilkan stack trace mentah ke user akhir.
-
-### C. Error build
-
-- Build harus divalidasi sebelum deploy.
-- Jika build gagal:
-  - simpan log
-  - tandai versi gagal
-  - jangan menimpa versi yang sudah berhasil
-
-### D. Error runtime sandbox
-
-- Jika sandbox gagal start:
-  - cek environment variable
-  - cek port
-  - cek dependency install
-  - cek perintah start
-  - cek health endpoint
-- Jangan lanjut ke deploy bila sandbox belum sehat.
-
-### E. Error data / state
-
-- Setiap proyek harus punya schema data yang jelas.
-- Gunakan default value untuk field wajib.
-- Hindari null / undefined yang tidak di-handle.
-- Validasi input user sebelum diproses.
-
----
-
-## Fallback Strategy
-
-Kalau layanan utama bermasalah, sistem harus pindah ke mode aman:
-
-1. Queue gagal -> tampilkan mode fallback dan simpan request.
-2. Preview gagal -> tetap simpan file hasil generate.
-3. Backend gagal -> tampilkan frontend mock mode.
-4. Sandbox Railway gagal -> gunakan run mode alternatif jika tersedia.
-5. Deploy gagal -> tetap simpan versi terakhir yang sehat.
-
-Fallback ini penting supaya user tidak kehilangan progres.
-
----
-
-## Struktur Status yang Disarankan
-
-Gunakan status yang sederhana dan konsisten:
-
-- `draft`
-- `queued`
-- `building_frontend`
-- `preview_ready`
-- `integrating_backend`
-- `sandbox_running`
-- `deploy_ready`
-- `deployed`
-- `failed`
-
-Setiap status harus punya:
-
-- timestamp
-- message singkat
-- step aktif
-- error terakhir jika ada
-
----
-
-## Aturan Generasi
-
-- Jangan generate backend sebelum frontend lulus preview.
-- Jangan generate banyak page sekaligus tanpa urutan.
-- Jangan menimpa file yang sudah valid tanpa backup versi.
-- Jangan menganggap job sukses kalau queue hanya menerima request.
-- Jangan menunggu tanpa progress update.
-- Jangan sembunyikan error teknis dari log internal.
-
----
-
-## Railway Sandbox Integration
-
-Kalau Railway dipakai sebagai sandbox environment, pastikan:
-
-- Proyek dapat dijalankan dari `start command`.
-- Proyek membaca `PORT` dari environment.
-- Health endpoint tersedia, misalnya `/health`.
-- File system dipakai secara aman, jangan tulis ke lokasi yang tidak stabil.
-- Dependency install harus deterministic.
-- Log harus bisa dibaca untuk debugging.
-- Timeout harus jelas agar job tidak menggantung.
-
-Rekomendasi flow:
-
-1. Generate frontend.
-2. Jalankan sandbox Railway.
-3. Buka preview URL.
-4. Validasi render.
-5. Lanjutkan backend.
-6. Jalankan ulang sandbox.
-7. Final check.
-
----
-
-## Checklist Validasi Sebelum User Melihat Hasil
-
-- [ ] Layout utama tampil
-- [ ] Sidebar / navbar tampil
-- [ ] Minimal satu halaman dashboard sukses dibuka
-- [ ] Responsif desktop dan mobile
-- [ ] Tidak ada error fatal di console
-- [ ] Preview tidak blank
-- [ ] Retry action tersedia jika gagal
-- [ ] Queue status tercatat
-- [ ] Sandbox bisa start
-- [ ] Health check lolos
-- [ ] Backend belum dihubungkan sebelum frontend stabil
-
----
-
-## Format Prompt Internal yang Disarankan
-
-Saat Swift menerima prompt user, ubah jadi format internal seperti ini:
-
-```text
-Tujuan proyek:
-- ...
-
-Tipe proyek:
-- ...
-
-Urutan halaman:
-1. ...
-2. ...
-3. ...
-
-Frontend plan:
-- layout
-- navigasi
-- komponen utama
-- state
-- mock data
-
-Backend plan:
-- endpoint
-- schema
-- integrasi bertahap
-
-Sandbox plan:
-- start command
-- health check
-- log
-- fallback
+```env
+SWIFT_GENERATION_EXECUTION_MODE=queue
 ```
 
-Format ini membantu generator tetap fokus dan tidak lompat ke tahap yang belum siap.
+Kalau production masih memakai `serverless`, route generate akan menolak request dan memunculkan error dedicated worker.
+
+### B. Dedicated worker belum benar-benar hidup
+
+Repo ini memang sudah menyiapkan worker terpisah:
+
+- script: `npm run worker:generation`
+- entry: `workers/index.ts`
+- Dockerfile: `workers/Dockerfile`
+- Railway config: `railway.worker.json`
+
+Tetapi kalau worker belum dideploy, crash saat boot, atau tidak bisa connect ke Redis, app tetap akan menganggap worker tidak sehat.
+
+### C. Redis ada, tapi worker tidak bisa memakainya
+
+BullMQ hanya bisa memakai Redis native:
+
+```env
+REDIS_URL=redis://... atau rediss://...
+```
+
+REST Redis saja tidak cukup untuk worker BullMQ.
+
+### D. Sandbox Railway belum sehat atau belum tersambung
+
+Walau queue sehat, Swift tetap butuh sandbox runtime untuk compile gate, build, dan preview. Jika sandbox mati, generate bisa tersimpan tetapi preview tidak jadi.
+
+### E. App URL production masih belum benar
+
+Untuk production, nilai seperti ini tidak boleh dipakai:
+
+```env
+NEXTAUTH_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+Kalau masih localhost, auth dan callback production bisa bermasalah walau bukan akar utama error worker.
 
 ---
 
-## Definisi Sukses
+## 3. Fakta Penting Dari Repo Saat Ini
 
-Sebuah project dianggap berhasil kalau:
+Repo ini sebenarnya sudah siap untuk arsitektur yang benar:
 
-- frontend sudah terbentuk dengan urutan halaman yang jelas,
-- preview bisa dibuka tanpa error fatal,
-- backend terhubung secara bertahap,
-- sandbox Railway bisa menjalankan aplikasi,
-- user tetap bisa lanjut walau ada error sementara,
-- log error bisa dipakai untuk perbaikan berikutnya.
+- `app/api/generate/jobs/route.ts` sudah memaksa production memakai queue mode.
+- `lib/queue/generation-queue.ts` sudah membaca health Redis, heartbeat worker, dan saturation queue.
+- `workers/index.ts` sudah membuka endpoint health di `/health`.
+- `workers/Dockerfile` memang dibuat khusus untuk worker queue.
+- `railway.worker.json` sudah ada untuk deploy worker ke Railway.
+- `services/sandbox-runtime/server.mjs` sudah punya endpoint `/health`.
+- `app/api/worker/health/route.ts` sudah bisa membaca status queue dan heartbeat worker dari app utama.
 
----
-
-## Prioritas Perbaikan
-
-1. Stabilkan queue dan fallback.
-2. Paksa frontend-first.
-3. Tambahkan status per tahap.
-4. Validasi preview sebelum backend.
-5. Integrasikan Railway sandbox.
-6. Tambahkan logging dan retry.
-7. Baru optimalkan deploy.
+Artinya, masalah ini bukan karena repo belum punya fondasi. Masalahnya lebih ke deploy dan konfigurasi runtime production.
 
 ---
 
-## Catatan Penting
+## 4. Target Arsitektur Production Yang Benar
 
-Dokumen ini sengaja dibuat sebagai aturan operasional. Jika ada bagian sistem yang masih langsung membuat error, maka yang diperbaiki dulu adalah alur kerja dan fallback-nya, bukan hanya tampilan error-nya.
+Swift production yang stabil harus dibagi seperti ini:
+
+### Service 1 - App utama
+
+- Platform: Vercel
+- Fungsi: dashboard, auth, API, orchestration request
+
+### Service 2 - Generation worker
+
+- Platform: Railway atau VPS
+- Fungsi: mengambil job BullMQ dari Redis dan menjalankan proses generasi
+
+### Service 3 - Sandbox runtime
+
+- Platform: Railway atau VPS
+- Fungsi: install dependency, build, runtime smoke, dan preview app hasil generate
+
+### Service 4 - Redis
+
+- Platform: Redis Cloud, Upstash native Redis, atau provider Redis native lain
+- Fungsi: queue BullMQ dan heartbeat worker
+
+### Service 5 - Database
+
+- Platform: Neon PostgreSQL
+- Fungsi: persistence job, file, billing, dan history
+
+---
+
+## 5. Langkah Fix Lengkap
+
+## Langkah 1 - Pastikan App Production Memakai Queue Mode
+
+Di environment production app utama, set:
+
+```env
+NODE_ENV=production
+SWIFT_GENERATION_EXECUTION_MODE=queue
+SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=false
+SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK=true
+```
+
+Catatan:
+
+- `SWIFT_GENERATION_EXECUTION_MODE=queue` adalah wajib.
+- `SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK=true` hanya berfungsi sebagai jaring pengaman, bukan mode utama.
+- Jangan mengandalkan `SWIFT_ENABLE_GENERATION_WORKER=true` di Vercel. Repo ini sudah memberi warning bahwa worker BullMQ harus hidup sebagai proses terpisah, bukan di serverless runtime.
+
+## Langkah 2 - Deploy Dedicated Worker Terpisah
+
+Worker harus dijalankan sebagai service sendiri.
+
+Pakai:
+
+- `workers/Dockerfile`
+- `railway.worker.json`
+- command runtime: `npm run worker:generation`
+
+Kalau deploy ke Railway:
+
+1. Buat service baru dari repo yang sama.
+2. Gunakan Dockerfile path `workers/Dockerfile`.
+3. Gunakan health check `/health`.
+4. Pastikan service restart otomatis saat gagal.
+
+Environment minimum untuk worker:
+
+```env
+NODE_ENV=production
+REDIS_URL=rediss://REPLACE_WITH_NATIVE_REDIS
+DATABASE_URL=postgresql://REPLACE_WITH_POOLED_DB
+DIRECT_DATABASE_URL=postgresql://REPLACE_WITH_DIRECT_DB
+OPENROUTER_API_KEY=REPLACE_WITH_KEY
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_SITE_URL=https://your-domain.com
+OPENROUTER_APP_NAME=Swift AI
+SANDBOX_SERVICE_URL=https://your-sandbox-service.up.railway.app
+SANDBOX_SERVICE_TOKEN=REPLACE_WITH_TOKEN
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=REPLACE_WITH_KEY
+SUPABASE_SERVICE_ROLE_KEY=REPLACE_WITH_KEY
+SUPABASE_STORAGE_BUCKET=REPLACE_WITH_BUCKET
+SWIFT_GENERATION_EXECUTION_MODE=queue
+SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true
+PORT=4000
+```
+
+Catatan:
+
+- Worker tidak perlu jalan di Vercel.
+- Worker harus bisa baca Redis, database, OpenRouter, dan sandbox service.
+- Worker Dockerfile saat ini memang sudah memaksa `SWIFT_GENERATION_EXECUTION_MODE=queue`.
+
+## Langkah 3 - Pastikan Redis Yang Dipakai Adalah Native Redis
+
+Nilai yang benar:
+
+```env
+REDIS_URL=redis://... atau rediss://...
+```
+
+Yang salah untuk BullMQ:
+
+```env
+UPSTASH_REDIS_REST_URL=https://...
+```
+
+REST Redis boleh dipakai sebagai pelengkap, tetapi worker BullMQ tetap butuh `REDIS_URL` native.
+
+Checklist Redis:
+
+- URL pakai `redis://` atau `rediss://`
+- bisa diakses dari Vercel app
+- bisa diakses dari Railway worker
+- tidak diblok firewall
+- tidak memakai kredensial yang sudah lama atau salah
+
+## Langkah 4 - Pastikan Sandbox Railway Hidup dan Bisa Diakses
+
+App generate dan worker perlu sandbox service yang sehat.
+
+Environment minimum sandbox:
+
+```env
+NODE_ENV=production
+SANDBOX_SERVICE_TOKEN=REPLACE_WITH_TOKEN
+SANDBOX_PUBLIC_BASE_URL=https://your-sandbox-service.up.railway.app
+SWIFT_SANDBOX_ROOT=/tmp/swift-sandbox
+SWIFT_SANDBOX_BASE_PORT=4300
+SWIFT_SANDBOX_MAX_PROJECTS=12
+SWIFT_SANDBOX_MAX_FILES=240
+SWIFT_SANDBOX_MAX_TOTAL_BYTES=6291456
+SWIFT_SANDBOX_MAX_FILE_BYTES=524288
+SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS=1800000
+SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS=1200000
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=REPLACE_WITH_KEY
+SUPABASE_SERVICE_ROLE_KEY=REPLACE_WITH_KEY
+SUPABASE_STORAGE_BUCKET=REPLACE_WITH_BUCKET
+```
+
+Checklist sandbox:
+
+- endpoint `/health` harus bisa diakses
+- token sandbox cocok dengan app dan worker
+- root sandbox bisa ditulis
+- process build dan preview tidak crash saat install dependency
+
+## Langkah 5 - Betulkan URL Production App
+
+Untuk production, jangan biarkan:
+
+```env
+NEXTAUTH_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+Harus diganti ke domain production, contoh:
+
+```env
+NEXTAUTH_URL=https://ai-swift.biz.id
+NEXT_PUBLIC_APP_URL=https://ai-swift.biz.id
+```
+
+Ini penting untuk:
+
+- login
+- callback auth
+- link preview
+- health readiness production
+
+## Langkah 6 - Bersihkan Env Yang Berpotensi Membingungkan
+
+Pastikan tidak ada env yang saling bertentangan.
+
+Yang harus dicek:
+
+- `SWIFT_GENERATION_EXECUTION_MODE` jangan `serverless`
+- `SANDBOX_SERVICE_URL` jangan kosong
+- `SANDBOX_SERVICE_TOKEN` harus cocok di app dan sandbox
+- `REDIS_URL` jangan placeholder
+- hapus baris sampah atau typo di file env
+
+Kalau satu env salah, app bisa tetap boot tetapi generate akan gagal di tengah jalan.
+
+---
+
+## 6. Langkah Verifikasi Setelah Fix
+
+Setelah env dan service dibetulkan, jalankan verifikasi ini.
+
+### A. Verifikasi app utama
+
+Jalankan:
+
+```bash
+npm run deploy:readiness
+npm run audit:production
+```
+
+Target hasil:
+
+- readiness tidak blokir env penting
+- build, lint, typecheck hijau
+
+### B. Verifikasi worker
+
+Jalankan:
+
+```bash
+npm run worker:health
+```
+
+Atau akses endpoint:
+
+```text
+https://your-worker-service/health
+```
+
+Target hasil:
+
+- status `healthy`
+- mode `queue`
+- endpoint merespons HTTP `200`
+
+### C. Verifikasi dari app utama
+
+Akses:
+
+```text
+https://your-app-domain/api/worker/health
+https://your-app-domain/api/health?refreshProvider=true
+```
+
+Target hasil:
+
+- worker tidak `missing`
+- queue tidak `unhealthy`
+- redis tidak error
+- heartbeat worker masih fresh
+
+### D. Verifikasi sandbox
+
+Akses:
+
+```text
+https://your-sandbox-service/health
+```
+
+Target hasil:
+
+- status `healthy` atau minimal `degraded` tanpa root error
+- root sandbox ready
+- service token dan runtime info valid
+
+### E. Verifikasi generate end-to-end
+
+Tes dengan prompt sederhana:
+
+- landing page
+- dashboard sederhana
+- e-commerce sederhana
+
+Target hasil:
+
+- job masuk queue
+- worker mengambil job
+- preview tidak blank
+- status pindah dari `queued` ke `preview_ready`
+
+---
+
+## 7. Matriks Error dan Tindakan
+
+### Error: `Production generation must run in queue mode with a dedicated worker.`
+
+Arti:
+
+- production masih salah mode, atau
+- sandbox/fallback tidak dianggap siap
+
+Tindakan:
+
+1. set `SWIFT_GENERATION_EXECUTION_MODE=queue`
+2. redeploy app utama
+3. pastikan dedicated worker hidup
+4. pastikan `SANDBOX_SERVICE_URL` dan token terisi
+
+### Error: `Generation queue unavailable`
+
+Arti:
+
+- Redis mati,
+- kredensial Redis salah,
+- atau queue tidak bisa enqueue
+
+Tindakan:
+
+1. cek `REDIS_URL`
+2. cek koneksi worker ke Redis
+3. cek health `api/worker/health`
+4. restart worker setelah Redis sehat
+
+### Error: `menunggu dedicated worker`
+
+Arti:
+
+- queue mode aktif,
+- tetapi heartbeat worker belum sehat
+
+Tindakan:
+
+1. cek worker service Railway
+2. cek log boot worker
+3. cek endpoint `/health`
+4. cek apakah worker crash saat load env, Prisma, atau Redis
+
+### Error: preview kosong tetapi queue sukses
+
+Arti:
+
+- worker sudah memproses,
+- tetapi sandbox build atau preview gagal
+
+Tindakan:
+
+1. cek sandbox `/health`
+2. cek `SANDBOX_SERVICE_TOKEN`
+3. cek build log sandbox
+4. cek batas file, port, dan timeout sandbox
+
+---
+
+## 8. Urutan Deploy Yang Direkomendasikan
+
+Supaya tidak bolak-balik error, deploy dengan urutan ini:
+
+1. betulkan env app production
+2. deploy sandbox Railway
+3. deploy worker Railway
+4. verifikasi worker health
+5. verifikasi app health
+6. verifikasi sandbox health
+7. lakukan test generate end-to-end
+
+Kalau app dideploy duluan tetapi worker belum hidup, UI akan tetap menunjukkan error dedicated worker walau kode sudah benar.
+
+---
+
+## 9. Checklist Selesai
+
+Perbaikan dianggap selesai jika semua poin ini terpenuhi:
+
+- `SWIFT_GENERATION_EXECUTION_MODE=queue` di production app
+- dedicated worker hidup sebagai service terpisah
+- `REDIS_URL` native Redis aktif
+- sandbox Railway hidup dan sehat
+- `SANDBOX_SERVICE_URL` dan token benar
+- `NEXTAUTH_URL` dan `NEXT_PUBLIC_APP_URL` sudah domain production
+- `/api/worker/health` tidak lagi menunjukkan worker missing
+- generate prompt menghasilkan preview, bukan `No preview yet`
+
+---
+
+## 10. Catatan Penting Keamanan
+
+Kalau credential production pernah tersebar di screenshot, chat, commit, atau file yang tidak aman, lakukan rotasi untuk:
+
+- database
+- Redis
+- OpenRouter
+- Supabase
+- sandbox token
+- Vercel deploy token
+- auth secret
+
+Ini tidak langsung memperbaiki error worker, tetapi wajib untuk production yang aman.
+
+---
+
+## 11. Kesimpulan Praktis
+
+Error ini bukan berarti Swift tidak bisa generate web. Error ini berarti arsitektur production belum lengkap atau belum sinkron.
+
+Fix utamanya adalah:
+
+1. paksa production ke `queue mode`
+2. hidupkan dedicated worker di Railway atau VPS
+3. pastikan Redis native dan sandbox Railway sehat
+4. verifikasi health endpoint sampai worker heartbeat kembali normal
+
+Kalau empat hal ini benar, error dedicated worker akan hilang dan generate bisa kembali jalan normal.

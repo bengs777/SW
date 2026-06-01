@@ -66,10 +66,12 @@ function main() {
   assert(
     "worker.health-route",
     /getGenerationQueueHealth/.test(workerHealthRoute) &&
+      /getExternalWorkerRuntimeHealth/.test(workerHealthRoute) &&
+      /workerService/.test(workerHealthRoute) &&
       /deadLetter/.test(workerHealthRoute) &&
       /heartbeat/.test(workerHealthRoute) &&
       /mode:\s*"queue"/.test(workerHealthRoute),
-    "app health endpoint reports queue, heartbeat, and DLQ status"
+    "app health endpoint reports queue heartbeat, DLQ status, and external worker runtime detail"
   )
 
   assert(

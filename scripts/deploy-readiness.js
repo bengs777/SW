@@ -2,6 +2,7 @@ const { loadEnvConfig } = require("@next/env")
 const fs = require("fs")
 const path = require("path")
 const { execSync } = require("child_process")
+const IORedis = require("ioredis")
 
 loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production")
 
@@ -76,6 +77,28 @@ function isStrongSecret(input, minLength = 32) {
   return current.length >= minLength && !/(change-me|changeme|secret|password|example|placeholder|development-auth-secret)/i.test(current)
 }
 
+async function requestJson(url, label) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    })
+    const text = await response.text()
+    const body = text ? JSON.parse(text) : null
+    return { ok: response.ok, statusCode: response.status, body }
+  } catch (error) {
+    return { ok: false, statusCode: 0, error: `${label} request failed: ${error instanceof Error ? error.message : String(error)}` }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 function commandDiagnostic(command, options = {}) {
   try {
     const output = execSync(command, {
@@ -114,11 +137,105 @@ async function databaseConnectivityDiagnostic() {
   }
 }
 
+async function generationWorkerHeartbeatDiagnostic() {
+  const redisUrl = value("REDIS_URL", "UPSTASH_REDIS_URL")
+  if (!isNativeRedisUrl(redisUrl)) {
+    return { ok: false, detail: "Native REDIS_URL is missing, so worker heartbeat cannot be verified." }
+  }
+
+  let redis = null
+  try {
+    redis = new IORedis(redisUrl, {
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: false,
+      lazyConnect: true,
+      connectTimeout: 5000,
+      ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
+    })
+    await redis.connect()
+    const ping = await redis.ping()
+    const rawHeartbeat = await redis.get("swift:generation:worker:heartbeat")
+    if (!rawHeartbeat) {
+      return { ok: false, detail: "Worker heartbeat key is missing in Redis. Start the dedicated worker service." }
+    }
+
+    const heartbeat = JSON.parse(rawHeartbeat)
+    const ageMs = Math.max(0, Date.now() - Date.parse(String(heartbeat.at || "")))
+    const ok = ping === "PONG" && Number.isFinite(ageMs) && ageMs <= 90_000
+
+    return {
+      ok,
+      detail: ok
+        ? `Heartbeat fresh at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}).`
+        : `Heartbeat is stale at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}).`,
+    }
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+  } finally {
+    if (redis) {
+      await redis.quit().catch(() => {
+        redis.disconnect()
+      })
+    }
+  }
+}
+
+async function sandboxRuntimeDiagnostic() {
+  const sandboxUrl = normalizeUrl(value("SANDBOX_SERVICE_URL"))
+  if (!sandboxUrl) {
+    return { ok: false, detail: "SANDBOX_SERVICE_URL is missing." }
+  }
+
+  const response = await requestJson(`${sandboxUrl}/health`, "Sandbox health")
+  if (!response.ok) {
+    return {
+      ok: false,
+      detail: response.error || `Sandbox runtime returned HTTP ${response.statusCode}.`,
+    }
+  }
+
+  const body = response.body && typeof response.body === "object" ? response.body : {}
+  const healthy = response.statusCode === 200 && body.ok !== false && (body.status === "healthy" || body.ok === true)
+
+  return {
+    ok: healthy,
+    detail: healthy
+      ? "Sandbox runtime health endpoint is healthy."
+      : `Sandbox runtime returned status ${body.status || "unknown"}.`,
+  }
+}
+
+async function workerRuntimeDiagnostic() {
+  const workerHealthUrl = normalizeUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
+  if (!workerHealthUrl) {
+    return { ok: false, detail: "SWIFT_WORKER_HEALTH_URL is not configured. Redis heartbeat will be used as the primary worker signal." }
+  }
+
+  const response = await requestJson(workerHealthUrl, "Worker health")
+  if (!response.ok) {
+    return {
+      ok: false,
+      detail: response.error || `Worker runtime returned HTTP ${response.statusCode}.`,
+    }
+  }
+
+  const body = response.body && typeof response.body === "object" ? response.body : {}
+  const healthy = response.statusCode === 200 && body.status === "healthy" && body.mode === "queue"
+
+  return {
+    ok: healthy,
+    detail: healthy
+      ? "Dedicated worker runtime health endpoint is healthy."
+      : `Worker runtime returned status ${body.status || "unknown"} in mode ${body.mode || "unknown"}.`,
+  }
+}
+
 const nextAuthUrl = value("NEXTAUTH_URL")
 const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
 const databaseUrl = value("DATABASE_URL")
 const directDatabaseUrl = value("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
 const generationExecutionMode = value("SWIFT_GENERATION_EXECUTION_MODE").toLowerCase()
+const queueMode = !generationExecutionMode || generationExecutionMode === "queue"
 const authProviderConfigured = Boolean(value("GOOGLE_CLIENT_ID") && value("GOOGLE_CLIENT_SECRET") && isStrongSecret(value("NEXTAUTH_SECRET")))
 const migrationStatus = commandDiagnostic("npx prisma migrate status", { timeoutMs: 30_000 })
 const schemaHealth = commandDiagnostic("node scripts/schema-health-check.js", { timeoutMs: 30_000 })
@@ -176,7 +293,20 @@ const checks = [
 
 async function main() {
   const dbConnectivity = await databaseConnectivityDiagnostic()
+  const workerHeartbeat = queueMode
+    ? await generationWorkerHeartbeatDiagnostic()
+    : { ok: true, detail: "Queue mode disabled; worker heartbeat check skipped." }
+  const workerRuntime = queueMode
+    ? await workerRuntimeDiagnostic()
+    : { ok: true, detail: "Queue mode disabled; worker runtime check skipped." }
+  const sandboxRuntime = await sandboxRuntimeDiagnostic()
   checks.push(required("DB_CONNECTIVITY", "Database connectivity", dbConnectivity.ok, dbConnectivity.detail))
+  checks.push(required("GENERATION_WORKER_HEARTBEAT", "Dedicated worker heartbeat in Redis", workerHeartbeat.ok, workerHeartbeat.detail))
+  checks.push(required("SANDBOX_RUNTIME_HEALTH", "Sandbox runtime /health endpoint", sandboxRuntime.ok, sandboxRuntime.detail))
+  checks.push(recommended("SWIFT_WORKER_HEALTH_URL", "Dedicated worker runtime health endpoint", value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"), "Recommended for direct worker runtime probes."))
+  if (value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL")) {
+    checks.push(required("GENERATION_WORKER_RUNTIME", "Dedicated worker /health endpoint", workerRuntime.ok, workerRuntime.detail))
+  }
 
   const requiredMissing = checks.filter((check) => check.severity === "required" && !check.ok)
   const recommendedMissing = checks.filter((check) => check.severity === "recommended" && !check.ok)

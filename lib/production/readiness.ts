@@ -3,6 +3,10 @@ import { aiRateLimitConfig } from "@/lib/security/rate-limit"
 import { getAuthRuntimeDiagnostic } from "@/lib/auth/runtime"
 import { getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
 import { getDatabaseSchemaHealth, type DatabaseSchemaHealth } from "@/lib/db/schema-health"
+import {
+  getExternalSandboxRuntimeHealth,
+  getExternalWorkerRuntimeHealth,
+} from "@/lib/observability/external-runtime-health"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 
 type ReadinessCheck = {
@@ -105,6 +109,17 @@ export function getProductionReadiness() {
     ),
     check("SANDBOX_SERVICE_URL", "External sandbox runtime service URL", env.sandboxServiceUrl, "required", "preview"),
     check("SANDBOX_SERVICE_TOKEN", "External sandbox runtime bearer token", env.sandboxServiceToken, "required", "preview"),
+    check(
+      "SWIFT_WORKER_HEALTH_URL",
+      "Dedicated worker runtime health URL",
+      env.workerHealthUrl,
+      "optional",
+      "service",
+      env.workerHealthUrl
+        ? "Direct worker runtime probe configured."
+        : "Recommended so deploy readiness can verify the dedicated worker service directly.",
+      true
+    ),
     check("PREVIEW_DEPLOYMENT_URL", "Preview deployment URL is HTTPS", !isPreviewDeployment || isProductionUrl(env.appUrl) || Boolean(process.env.VERCEL_URL), "required", "preview", "Preview deployments need an HTTPS Vercel URL or explicit app URL."),
     check("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", env.supabaseUrl, "required", "service"),
     check("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "Supabase publishable key", env.supabasePublicAnonKey, "required", "service"),
@@ -159,7 +174,28 @@ export async function getDeploymentRuntimeReadiness() {
   const base = getProductionReadiness()
   let dbConnectivity: { ok: boolean; latencyMs?: number; error?: string } = { ok: false }
   let migration: DatabaseSchemaHealth | { compatible: false; error: string } | null = null
+  let queueHealth: Awaited<ReturnType<typeof getGenerationQueueHealth>> | null = null
   let queueSaturation: Awaited<ReturnType<typeof getGenerationQueueHealth>>["saturation"] | null = null
+  const workerRuntime = await getExternalWorkerRuntimeHealth().catch((error) => ({
+    configured: Boolean(env.workerHealthUrl),
+    endpoint: env.workerHealthUrl || null,
+    status: "unhealthy" as const,
+    ok: false,
+    httpStatus: null,
+    latencyMs: null,
+    checkedAt: new Date().toISOString(),
+    error: error instanceof Error ? error.message : String(error),
+  }))
+  const sandboxRuntime = await getExternalSandboxRuntimeHealth().catch((error) => ({
+    configured: Boolean(env.sandboxServiceUrl),
+    endpoint: env.sandboxServiceUrl ? `${env.sandboxServiceUrl}/health` : null,
+    status: "unhealthy" as const,
+    ok: false,
+    httpStatus: null,
+    latencyMs: null,
+    checkedAt: new Date().toISOString(),
+    error: error instanceof Error ? error.message : String(error),
+  }))
 
   if (base.database.ok) {
     try {
@@ -178,18 +214,36 @@ export async function getDeploymentRuntimeReadiness() {
   }
 
   try {
-    const queueHealth = await getGenerationQueueHealth()
+    queueHealth = await getGenerationQueueHealth()
     queueSaturation = queueHealth.saturation
   } catch {
     queueSaturation = null
   }
 
+  const generationExecutionMode = String(process.env.SWIFT_GENERATION_EXECUTION_MODE || "queue").toLowerCase()
+  const queueMode = !generationExecutionMode || generationExecutionMode === "queue"
+  const enforceDedicatedWorker = env.nodeEnv === "production" && queueMode
+  const enforceSandboxRuntime = env.nodeEnv === "production"
+  const queueRedisHealthy = Boolean(
+    queueHealth?.enabled &&
+    !queueHealth.redis?.error &&
+    String(queueHealth.redis?.ping || "").toUpperCase() === "PONG"
+  )
+  const workerHeartbeatFresh = Boolean(
+    queueHealth?.workerHeartbeat &&
+    typeof queueHealth.workerHeartbeat.ageMs === "number" &&
+    queueHealth.workerHeartbeat.ageMs <= 90_000
+  )
   const migrationReady = migration ? migration.compatible : false
   const saturationDegraded = Boolean(queueSaturation?.heavy)
   const runtimeBlocking = [
     ...base.blockingFailures,
     ...(dbConnectivity.ok ? [] : ["DB_CONNECTIVITY"]),
     ...(migrationReady ? [] : ["MIGRATION_READINESS"]),
+    ...(enforceDedicatedWorker && queueRedisHealthy ? [] : enforceDedicatedWorker ? ["QUEUE_RUNTIME_HEALTH"] : []),
+    ...(enforceDedicatedWorker && workerHeartbeatFresh ? [] : enforceDedicatedWorker ? ["GENERATION_WORKER_HEARTBEAT"] : []),
+    ...(enforceDedicatedWorker && workerRuntime.configured && !workerRuntime.ok ? ["GENERATION_WORKER_RUNTIME"] : []),
+    ...(enforceSandboxRuntime && sandboxRuntime.configured && !sandboxRuntime.ok ? ["SANDBOX_RUNTIME_HEALTH"] : []),
   ]
 
   return {
@@ -200,10 +254,16 @@ export async function getDeploymentRuntimeReadiness() {
     degradedServices: Array.from(new Set([
       ...base.degradedServices,
       ...(saturationDegraded ? ["QUEUE_SATURATION"] : []),
+      ...(workerRuntime.configured && !workerRuntime.ok ? ["GENERATION_WORKER_RUNTIME"] : []),
+      ...(sandboxRuntime.configured && !sandboxRuntime.ok ? ["SANDBOX_RUNTIME_HEALTH"] : []),
     ])),
     dbConnectivity,
     migration,
+    queueHealth,
     queueSaturation,
+    workerHeartbeatFresh,
+    workerRuntime,
+    sandboxRuntime,
     migrationMismatch: migration && !migration.compatible ? migration : null,
   }
 }
