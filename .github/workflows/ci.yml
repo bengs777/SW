@@ -34,3 +34,27 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DEPLOY_GATE_WORKER_FAILED_WINDOW_MINUTES: "60"
+
+  production-health:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Wait for Vercel Git deployment
+        run: sleep 120
+
+      - name: Production health gate
+        run: npm run postdeploy:health:prod
+        env:
+          SWIFT_POST_DEPLOY_HEALTH_RETRIES: "12"
+          SWIFT_POST_DEPLOY_HEALTH_RETRY_DELAY_MS: "10000"

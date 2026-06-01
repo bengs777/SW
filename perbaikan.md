@@ -1,345 +1,336 @@
-# Perbaikan Error Checkpoint E-Commerce Swift
+# Perbaikan Production Readiness Swift AI
 
-Dokumen ini dibuat untuk menangani error seperti:
+Tanggal audit awal: 2026-06-01, timezone Asia/Jakarta.
+
+Status implementasi terakhir: 2026-06-01.
+
+## Status Singkat
+
+Web belum siap production.
+
+Local source code sudah cukup sehat untuk build dan regression, tetapi runtime production masih blocked oleh konfigurasi dan service worker.
+
+## Status Implementasi
+
+Sudah diimplementasikan di repo:
+
+- `scripts/post-deploy-health.js` sekarang gagal untuk redirect, non-2xx, non-JSON, `unhealthy`, `degraded`, worker missing/disabled, dan punya retry config.
+- `package.json` menambah `postdeploy:health:prod` untuk canonical domain `https://www.ai-swift.biz.id`.
+- `.github/workflows/ci.yml` menambah production health gate setelah push ke `main`.
+- `scripts/deploy-readiness.js` sekarang memvalidasi fallback serverless disabled, Supabase service role non-placeholder, Redis `noeviction`, worker heartbeat, dan worker health URL.
+- `lib/env.ts` tidak lagi salah menolak Supabase secret key format `sb_secret...`.
+- `workers/Dockerfile` sekarang menyalin source runtime yang dibutuhkan worker (`scripts`, `workers`, `lib`, `components`, `auth.ts`, dan pendukung lain).
+- `scripts/run-ts-script.js` bisa memuat dependency `.tsx`, bukan hanya `.ts`.
+- `scripts/generation-runtime-contracts.js` menambah guard untuk Docker runtime source dan loader `.tsx`.
+
+Masih harus dilakukan di provider:
+
+- Deploy dedicated worker dan set `SWIFT_WORKER_HEALTH_URL`.
+- Ubah Redis `maxmemory-policy` ke `noeviction`.
+- Redeploy Vercel production dengan source terbaru dan env `SWIFT_GENERATION_EXECUTION_MODE=queue`.
+
+Status utama:
+
+- Local `npm run typecheck`: PASS
+- Local `npm run lint`: PASS
+- Local `npm run build`: PASS
+- Local `npm run test:regression`: PASS
+- Local `npm run test:workspace-builder`: PASS
+- Local `npm run runtime-smoke`: PASS
+- Local `npm run test:generation-runtime-contracts`: PASS
+- Local `npm run deploy:readiness`: FAIL, blocker `REDIS_EVICTION_POLICY`, `GENERATION_WORKER_HEARTBEAT`, `SWIFT_WORKER_HEALTH_URL`
+- Live `https://www.ai-swift.biz.id/api/health?refreshProvider=true`: HTTP 503, status `unhealthy`
+- Live `https://www.ai-swift.biz.id/api/worker/health`: worker `missing`, heartbeat `null`
+
+## Temuan Paling Penting
+
+### 1. Production masih mode serverless, padahal readiness mewajibkan queue worker
+
+Live health menunjukkan:
+
+- `generationExecutionMode`: `serverless`
+- `blockingFailures`: `SWIFT_GENERATION_EXECUTION_MODE`
+- pesan readiness: production harus memakai queue mode dengan dedicated worker
+
+Kode yang mengunci aturan ini ada di:
+
+- `lib/production/readiness.ts`
+
+Kesimpulan:
+
+- Di Vercel production, set `SWIFT_GENERATION_EXECUTION_MODE=queue`.
+- Pastikan `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`.
+- Jangan anggap production ready selama live health masih melaporkan `serverless`.
+
+### 2. Dedicated generation worker belum hidup
+
+Local deploy readiness gagal di:
+
+- `GENERATION_WORKER_HEARTBEAT`
+- detail: `Worker heartbeat key is missing in Redis. Start the dedicated worker service.`
+
+Live worker health juga menunjukkan:
+
+- `worker`: `missing`
+- `heartbeat`: `null`
+- queue `degraded`
+- dead-letter queue punya 3 job waiting
+
+Kode worker dan deployment sudah tersedia:
+
+- `workers/Dockerfile`
+- `railway.worker.json`
+- `workers/index.ts`
+- `lib/queue/generation-queue.ts`
+
+Yang perlu dilakukan:
+
+1. Deploy worker terpisah, misalnya Railway, memakai `railway.worker.json`.
+2. Worker command harus menjalankan `npm run worker:generation`.
+3. Worker env minimal harus sama dengan production untuk:
+   - `DATABASE_URL`
+   - `DIRECT_DATABASE_URL`
+   - `REDIS_URL`
+   - `OPENROUTER_API_KEY`
+   - `NEXTAUTH_SECRET`
+   - `SANDBOX_SERVICE_URL`
+   - `SANDBOX_SERVICE_TOKEN`
+   - Supabase env yang dipakai runtime
+4. Pastikan worker expose `/health`.
+5. Set Vercel env `SWIFT_WORKER_HEALTH_URL=https://<worker-domain>/health`.
+
+Target:
+
+- `/api/worker/health` mengembalikan HTTP 200
+- `worker` menjadi `healthy`
+- `heartbeat.ageMs` ada dan kurang dari 90 detik
+- `npm run deploy:readiness` menjadi `READY_FOR_DEPLOY`
+
+### 3. Redis policy belum aman untuk BullMQ production
+
+Live worker health menunjukkan Redis:
+
+- `ping`: `PONG`
+- `maxmemory-policy`: `volatile-lru`
+- target app: `noeviction`
+- `evictionPolicyOk`: `false`
+
+Risiko:
+
+- Job BullMQ bisa terhapus oleh Redis eviction.
+- Queue bisa terlihat kosong atau gagal secara acak saat tekanan memory naik.
+
+Yang perlu dilakukan:
+
+1. Ubah Redis `maxmemory-policy` ke `noeviction` di provider Redis.
+2. Atau aktifkan `SWIFT_REDIS_AUTO_SET_NOEVICTION=true` jika provider mengizinkan `CONFIG SET`.
+3. Verifikasi ulang lewat `/api/worker/health`.
+
+Target:
+
+- `redis.memory.evictionPolicyOk=true`
+- `evictionPolicy=noeviction`
+
+### 4. Production env Supabase service role invalid menurut validator
+
+Live cold-start health menunjukkan:
+
+- `SUPABASE_SERVICE_ROLE_KEY` severity `error`
+- pesan: harus non-placeholder dan minimal 32 karakter
+
+Catatan:
+
+- Local `.env` memiliki key terisi, tetapi live production validator tetap menganggap production value bermasalah.
+- Jangan pakai anon key sebagai service role key.
+
+Yang perlu dilakukan:
+
+1. Ambil Supabase `service_role` key dari dashboard Supabase.
+2. Set di Vercel production sebagai `SUPABASE_SERVICE_ROLE_KEY`.
+3. Pastikan nilainya berbeda dari `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY` atau `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+4. Redeploy dan cek `/api/health?coldStart=true`.
+
+Target:
+
+- `checks.environment.audit.ok=true`
+- tidak ada issue severity `error`
+
+### 5. Token deploy generated app belum lengkap
+
+Live readiness menunjukkan:
+
+- `VERPRO_ACCES_TOKEN` missing/invalid, status optional
+
+Walau optional di readiness, fitur deploy generated app bisa terganggu jika token ini diperlukan route deploy.
+
+Yang perlu dilakukan:
+
+1. Pastikan nama env sesuai kode saat ini: `VERPRO_ACCES_TOKEN`.
+2. Isi dengan Vercel access token yang benar untuk deploy generated project.
+3. Pastikan `VERDI_TEAM` tetap terisi.
+4. Uji flow Deploy Vercel dari dashboard project.
+
+### 6. Script postdeploy health bisa false positive pada redirect
+
+Command:
+
+```bash
+npm run postdeploy:health -- https://ai-swift.biz.id
+```
+
+Hasilnya mencetak `POST_DEPLOY_HEALTH_OK`, padahal response awal adalah HTTP 307 redirect ke `https://www.ai-swift.biz.id`, dan target canonical health sebenarnya HTTP 503.
+
+Kode terkait:
+
+- `scripts/post-deploy-health.js`
+
+Masalah:
+
+- Script hanya fail untuk HTTP `>=500`.
+- HTTP 3xx tidak dianggap gagal.
+- Node request script tidak follow redirect.
+
+Yang perlu diperbaiki sebelum CI production:
+
+1. Gunakan URL canonical `https://www.ai-swift.biz.id`.
+2. Ubah script agar fail jika status code bukan 2xx.
+3. Atau implement follow redirect lalu validasi final response.
+
+Target:
+
+- Health gate gagal bila endpoint redirect, non-JSON, 401/403, 404, 5xx, `unhealthy`, atau `degraded` tanpa override.
+
+### 7. Error ecommerce checkpoint di screenshot kemungkinan belum memakai source lokal terbaru
+
+Screenshot dan live runtime failure menunjukkan error:
 
 - `Tahap 2: ecommerce routes checkpoint failed`
 - `Missing ecommerce route: app/login/page.tsx`
 - `Missing ecommerce route: app/admin/page.tsx`
 
-Fokus dokumen ini adalah memperbaiki logika generator Swift supaya prompt e-commerce sederhana tidak gagal terlalu cepat hanya karena route `login` dan `admin` belum dibuat di tahap awal.
-
----
-
-## 1. Ringkasan Masalah
-
-Saat user menulis prompt seperti:
-
-- `Buat web e-commerce`
-- `Buat toko online`
-- `Buat marketplace sederhana`
-
-Swift saat ini terlalu cepat menganggap proyek tersebut sebagai `FULLSTACK_COMMERCE`.
-
-Akibatnya:
-
-- planner menambahkan route `login` dan `admin` sejak awal,
-- checkpoint fase `routes` mewajibkan route tersebut langsung ada,
-- generator gagal sebelum preview storefront dasar sempat lolos,
-- user melihat `No preview yet` walau penyebab utamanya adalah validator internal yang terlalu keras.
-
----
-
-## 2. Hasil Audit
-
-Audit menemukan beberapa sumber masalah yang saling mengunci.
-
-### A. Klasifikasi archetype terlalu agresif
-
-File:
-
-- `lib/ai/architecture-intent.ts`
-
-Masalah:
-
-- domain `commerce_storefront` dan `simple_marketplace` langsung diarahkan ke `FULLSTACK_COMMERCE`
-- tidak ada jalur aman untuk storefront e-commerce sederhana yang frontend-first
-
-Efek:
-
-- generator langsung masuk ekspektasi full stack
-- route admin dan auth dianggap kebutuhan inti, bukan fitur lanjutan
-
-### B. Planner selalu menambahkan `login` dan `admin`
-
-File:
-
-- `lib/ai/architecture-planner.ts`
-
-Masalah:
-
-- untuk `FULLSTACK_COMMERCE`, planner selalu memasukkan:
-  - `app/login/page.tsx`
-  - `app/admin/page.tsx`
-
-Efek:
-
-- prompt yang hanya butuh toko online publik tetap dipaksa punya auth dan admin
-
-### C. Checkpoint fase `routes` terlalu keras
-
-File:
-
-- `lib/services/generation-orchestrator.service.ts`
-
-Masalah:
-
-- fase `routes` saat ini mewajibkan sekaligus:
-  - `app/products/page.tsx`
-  - `app/products/[id]/page.tsx`
-  - `app/cart/page.tsx`
-  - `app/checkout/page.tsx`
-  - `app/login/page.tsx`
-  - `app/admin/page.tsx`
-
-Efek:
-
-- generator gagal di Tahap 2 walau storefront inti sebenarnya sudah benar
-- frontend-first jadi tidak terasa bertahap
-
-### D. Recovery ikut mengunci constraint yang sama
-
-File:
-
-- `lib/services/generation-orchestrator.service.ts`
-- `lib/ai/software-orchestration.ts`
-
-Masalah:
-
-- `ecommerceRequiredFiles()` masih menganggap `login` dan `admin` sebagai file wajib inti
-- planner scope e-commerce juga masih memutlakkan route tersebut
-
-Efek:
-
-- retry dan repair akan cenderung mengulang constraint yang sama
-- generator sulit turun ke versi storefront minimal yang valid
-
-### E. Ada masalah terpisah pada infra worker production
-
-Audit readiness juga menunjukkan:
-
-- `GENERATION_WORKER_HEARTBEAT` masih gagal
-
-Ini bukan penyebab error checkpoint e-commerce di screenshot, tetapi tetap harus dibereskan karena akan mengganggu generate production setelah bug checkpoint selesai.
-
----
-
-## 3. Tujuan Perbaikan
-
-Perbaikan dianggap benar jika:
-
-- prompt e-commerce sederhana bisa lolos fase awal tanpa `login` dan `admin`,
-- preview storefront bisa muncul lebih cepat,
-- route auth/admin hanya diwajibkan jika memang diminta user atau dibutuhkan archetype,
-- generator tetap bisa naik ke mode full stack bila prompt memang meminta admin, role, auth, atau backoffice,
-- worker heartbeat production tetap dipantau sebagai isu terpisah.
-
----
-
-## 4. Strategi Perbaikan
-
-## Tahap 1 - Pisahkan E-Commerce Dasar dan Full Commerce
-
-Yang harus diubah:
-
-- jangan semua `commerce_storefront` otomatis dianggap `FULLSTACK_COMMERCE`
-- tambahkan jalur yang lebih ringan untuk e-commerce dasar
-
-Opsi implementasi:
-
-1. Tambah archetype baru seperti `COMMERCE_STOREFRONT`
-2. Atau tetap pakai `FULLSTACK_COMMERCE`, tetapi jadikan auth/admin kondisional berdasarkan intent
-
-Target:
-
-- prompt seperti `buat web e-commerce` cukup menghasilkan storefront + cart + checkout dulu
-- auth/admin baru masuk jika prompt menyebut:
-  - admin
-  - dashboard admin
-  - role
-  - staff
-  - login
-  - autentikasi
-  - backoffice
-
-## Tahap 2 - Longgarkan Checkpoint Fase Routes
-
-Yang harus diubah:
-
-- `validateStagedCheckpoint()` untuk fase `routes`
-
-Aturan baru yang direkomendasikan:
-
-Route minimum fase `routes` untuk e-commerce dasar:
-
-- `app/products/page.tsx`
-- `app/products/[id]/page.tsx`
-- `app/cart/page.tsx`
-- `app/checkout/page.tsx`
-
-Route yang hanya wajib jika intent mendukung:
-
-- `app/login/page.tsx`
-- `app/admin/page.tsx`
-
-Target:
-
-- Tahap 2 tidak lagi gagal hanya karena auth/admin belum ada
-- preview storefront bisa lanjut ke tahap berikutnya
-
-## Tahap 3 - Samakan Scope Planner dengan Checkpoint
-
-Yang harus diubah:
-
+Tetapi local source sekarang sudah punya guard kondisional:
+
+- `stagedEcommerceRouteRequirements()`
+- `plannerRequiresEcommerceLogin()`
+- `plannerRequiresEcommerceAdmin()`
 - `ecommerceRequiredFiles()`
-- `allowedFilesForPlanner()`
-- aturan file plan e-commerce di orchestrator
 
-Prinsip:
+Regression juga sudah PASS:
 
-- daftar file wajib harus selaras dengan fase
-- file inti storefront dan file opsional auth/admin jangan dicampur di level requirement yang sama
+- `ecommerce checkpoint and planner routes are conditional`
+- `ecommerce.conditional-auth-admin-routes`
 
-Target:
+Kesimpulan paling mungkin:
 
-- repair tidak mengulang false requirement
-- file yang dikejar AI sesuai tahap aktual
+- Production belum berjalan dengan source fix terbaru, atau failure live berasal dari job sebelum deploy fix.
 
-## Tahap 4 - Buat Auth/Admin Menjadi Kondisional
+Yang perlu dilakukan:
 
-Yang harus diubah:
+1. Deploy commit lokal terbaru ke production.
+2. Pastikan deployment memakai commit `99c8a6c fix: make ecommerce route checkpoints intent-driven` atau commit setelahnya.
+3. Setelah worker hidup, ulangi prompt `Buat web e-commerce`.
+4. Verifikasi Tahap 2 tidak lagi meminta `app/login/page.tsx` dan `app/admin/page.tsx` kecuali prompt memang minta login/admin.
 
-- `pagesForIntent()` di planner
-- logic text matching di orchestrator
-- blueprint e-commerce jika perlu
+## Urutan Perbaikan Wajib
 
-Aturan yang direkomendasikan:
+### P0 - Blocker Production
 
-- `app/login/page.tsx` wajib hanya jika:
-  - prompt eksplisit minta login/auth
-  - atau app memang butuh user account flow
+1. Set Vercel production env `SWIFT_GENERATION_EXECUTION_MODE=queue`.
+2. Set Vercel production env `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`.
+3. Deploy dedicated worker dari `workers/Dockerfile` memakai `railway.worker.json`.
+4. Set `SWIFT_WORKER_HEALTH_URL` ke endpoint worker `/health`.
+5. Ganti Redis `maxmemory-policy` ke `noeviction`.
+6. Perbaiki `SUPABASE_SERVICE_ROLE_KEY` production.
+7. Redeploy Vercel production dengan commit terbaru.
 
-- `app/admin/page.tsx` wajib hanya jika:
-  - prompt minta dashboard admin/backoffice
-  - atau appType yang dipilih memang admin-heavy
+### P1 - Stabilitas Queue dan Recovery
 
-Target:
+1. Setelah worker healthy, inspeksi 3 job di dead-letter queue.
+2. Replay job yang masih valid lewat admin endpoint atau tooling yang sudah ada.
+3. Bersihkan dead-letter job yang sudah tidak relevan setelah root cause teratasi.
+4. Jalankan ulang `npm run deploy:readiness`.
+5. Jalankan ulang live health:
 
-- e-commerce publik bisa lolos tanpa beban admin panel dari awal
+```bash
+curl -L https://www.ai-swift.biz.id/api/health?refreshProvider=true
+curl -L https://www.ai-swift.biz.id/api/worker/health
+```
 
-## Tahap 5 - Tambahkan Regression Guard
+### P2 - Health Gate dan CI
 
-Yang harus diuji:
+1. Perbaiki `scripts/post-deploy-health.js` agar redirect/non-2xx tidak false positive.
+2. Tambahkan gate post-deploy memakai canonical domain `https://www.ai-swift.biz.id`.
+3. Pastikan CI/CD gagal bila health `unhealthy` atau `degraded`.
 
-1. Prompt e-commerce sederhana
-2. Prompt e-commerce + login
-3. Prompt e-commerce + admin dashboard
-4. Prompt marketplace full stack
+### P3 - Functional Production Validation
 
-Test yang wajib lolos:
+Setelah P0 sampai P2 selesai, uji manual:
 
-- prompt e-commerce sederhana tidak gagal di Tahap 2 hanya karena `login/admin`
-- prompt dengan auth memang tetap mewajibkan `login`
-- prompt dengan backoffice memang tetap mewajibkan `admin`
-- audit dan regression tetap hijau
+1. Login Google.
+2. Buka dashboard.
+3. Buat project baru.
+4. Prompt: `Buat web e-commerce`.
+5. Pastikan preview muncul.
+6. Pastikan error `Missing ecommerce route: app/login/page.tsx` tidak muncul.
+7. Uji prompt: `Buat web e-commerce dengan login user`.
+8. Pastikan `app/login/page.tsx` baru wajib pada prompt ini.
+9. Uji prompt: `Buat e-commerce full stack dengan admin panel`.
+10. Pastikan `app/admin/page.tsx` wajib pada prompt ini.
+11. Uji deploy generated app ke Vercel.
 
----
+## Command Audit Yang Sudah Dijalankan
 
-## 5. Perubahan Kode yang Disarankan
+```bash
+npm run typecheck
+npm run lint
+npm run build
+npm run deploy:readiness
+npm run test:regression
+npm run test:workspace-builder
+npm run runtime-smoke
+npm run test:generation-runtime-contracts
+npm run postdeploy:health -- https://ai-swift.biz.id
+curl -i https://ai-swift.biz.id/api/health?refreshProvider=true
+curl -L -i https://ai-swift.biz.id/api/health?refreshProvider=true
+curl -L https://www.ai-swift.biz.id/api/worker/health
+curl -L https://www.ai-swift.biz.id/api/health?coldStart=true
+```
 
-Area paling penting:
+Catatan penting:
 
-- `lib/ai/architecture-intent.ts`
-- `lib/ai/architecture-planner.ts`
-- `lib/services/generation-orchestrator.service.ts`
-- `lib/ai/software-orchestration.ts`
+- `npm run build` menjalankan `prisma migrate deploy` lewat `scripts/vercel-build.js`.
+- Tidak ada pending migration, jadi tidak ada perubahan schema database.
 
-Area test/guard:
+## Definisi Siap Production
 
-- `scripts/regression-tests.js`
-- `scripts/generation-runtime-contracts.js`
-- `scripts/production-audit.js`
+Web baru boleh dianggap siap production jika semua ini terpenuhi:
 
----
+- `npm run typecheck` PASS
+- `npm run lint` PASS
+- `npm run build` PASS
+- `npm run test:regression` PASS
+- `npm run test:generation-runtime-contracts` PASS
+- `npm run deploy:readiness` mencetak `READY_FOR_DEPLOY`
+- `https://www.ai-swift.biz.id/api/health?refreshProvider=true` HTTP 200 dan `status=healthy`
+- `https://www.ai-swift.biz.id/api/worker/health` HTTP 200 dan `worker=healthy`
+- `SWIFT_GENERATION_EXECUTION_MODE=queue` di production
+- worker heartbeat fresh kurang dari 90 detik
+- Redis eviction policy `noeviction`
+- Supabase service role env valid
+- Dead-letter queue tidak menyimpan job lama yang belum ditangani
+- Prompt ecommerce sederhana menghasilkan preview tanpa wajib login/admin
 
-## 6. Contoh Aturan Yang Benar
+## Kesimpulan
 
-### Prompt: `Buat web e-commerce`
+Masalah source code ecommerce checkpoint tampaknya sudah diperbaiki di local repo dan regression sudah menjaga perilaku itu.
 
-Minimal yang boleh lolos:
+Blocker production saat ini adalah runtime dan deployment:
 
-- home
-- product listing
-- product detail
-- cart
-- checkout
+1. production masih `serverless`, bukan `queue`
+2. dedicated worker belum heartbeat
+3. Redis eviction policy belum aman
+4. Supabase service role production tidak valid menurut validator
+5. postdeploy health script bisa false positive pada redirect
+6. production perlu redeploy commit fix terbaru dan diuji ulang
 
-Tidak wajib di tahap awal:
-
-- login
-- admin
-- role management
-- API admin
-
-### Prompt: `Buat web e-commerce dengan login user`
-
-Minimal yang wajib:
-
-- semua route storefront dasar
-- `app/login/page.tsx`
-
-Masih bisa opsional di tahap lebih belakang:
-
-- admin dashboard
-
-### Prompt: `Buat e-commerce full stack dengan admin panel`
-
-Minimal yang wajib:
-
-- storefront dasar
-- `app/login/page.tsx`
-- `app/admin/page.tsx`
-- endpoint/API/admin support sesuai orchestration
-
----
-
-## 7. Risiko Jika Tidak Diperbaiki
-
-- user akan terus melihat generate gagal walau storefront inti sudah hampir jadi
-- frontend-first terasa bohong karena validator mendorong full stack terlalu cepat
-- retry prompt hanya mengulang gagal yang sama
-- AI terlihat buruk padahal problem utamanya ada di aturan checkpoint
-- conversion user bisa turun karena preview pertama tidak pernah muncul
-
----
-
-## 8. Isu Terpisah yang Tetap Harus Dipantau
-
-Selain bug checkpoint di atas, repo juga masih menunjukkan:
-
-- `GENERATION_WORKER_HEARTBEAT` belum sehat
-
-Arti praktisnya:
-
-- setelah bug checkpoint dibetulkan, generate production masih tetap perlu dedicated worker yang aktif
-- masalah worker ini bukan penyebab langsung screenshot checkpoint e-commerce, tetapi tetap blocker untuk stabilitas production
-
----
-
-## 9. Definisi Selesai
-
-Perbaikan ini dianggap selesai jika:
-
-- prompt `buat web e-commerce` tidak lagi gagal karena `app/login/page.tsx` dan `app/admin/page.tsx`
-- preview storefront dasar bisa muncul sebelum fitur admin/auth lengkap
-- auth/admin hanya diwajibkan bila intent benar-benar membutuhkan
-- regression test menjaga perilaku baru ini
-- worker heartbeat production tetap dipantau lewat readiness terpisah
-
----
-
-## 10. Kesimpulan
-
-Masalah utama saat ini bukan generator tidak bisa membuat web, tetapi validator e-commerce terlalu cepat memaksa mode full stack.
-
-Fix yang benar bukan sekadar menambah file `login` dan `admin` secara paksa, melainkan:
-
-1. melonggarkan archetype e-commerce dasar
-2. membuat checkpoint fase `routes` lebih bertahap
-3. menjadikan auth/admin kondisional
-4. menyelaraskan planner, checkpoint, dan repair scope
-
-Setelah itu, pengalaman generate akan jauh lebih masuk akal:
-
-- storefront dulu,
-- preview muncul dulu,
-- full stack menyusul bila memang diminta.
+Fokus pertama: hidupkan queue worker production sampai `/api/worker/health` sehat, lalu redeploy source terbaru.

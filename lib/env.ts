@@ -258,8 +258,15 @@ function validateSecret(
 ) {
   if (!value) return
 
-  const placeholderPattern = /(change-me|changeme|secret|password|example|placeholder|development-auth-secret)/i
-  if (value.length < options.minLength || placeholderPattern.test(value)) {
+  const normalized = value.trim().toLowerCase()
+  const placeholderPattern =
+    /^(change-me|changeme|development-auth-secret|password|secret|example|placeholder|replace-me|replace_me|todo|your-secret|your_secret|your-key|your_key)$/
+  const placeholderPrefixPattern = /^(your|replace|example|placeholder)[_-]/i
+  if (
+    value.length < options.minLength ||
+    placeholderPattern.test(normalized) ||
+    placeholderPrefixPattern.test(value)
+  ) {
     issues.push({
       key,
       severity: options.isProduction ? "error" : "warning",

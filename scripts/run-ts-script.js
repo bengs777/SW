@@ -10,7 +10,7 @@ if (!entry) {
   process.exit(1)
 }
 
-require.extensions[".ts"] = function compileTypeScript(module, filename) {
+function compileTypeScript(module, filename) {
   const source = fs.readFileSync(filename, "utf8")
   const output = ts.transpileModule(source, {
     compilerOptions: {
@@ -26,6 +26,9 @@ require.extensions[".ts"] = function compileTypeScript(module, filename) {
 
   module._compile(output, filename)
 }
+
+require.extensions[".ts"] = compileTypeScript
+require.extensions[".tsx"] = compileTypeScript
 
 const Module = require("node:module")
 const originalResolveFilename = Module._resolveFilename

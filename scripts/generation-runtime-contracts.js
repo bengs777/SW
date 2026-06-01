@@ -20,6 +20,7 @@ function main() {
   const packageJson = JSON.parse(read("package.json"))
   const workerEntry = read("workers/index.ts")
   const workerDockerfile = read("workers/Dockerfile")
+  const runTsScript = read("scripts/run-ts-script.js")
   const workerHealthRoute = read("app/api/worker/health/route.ts")
   const generationQueue = read("lib/queue/generation-queue.ts")
   const generationWorker = read("lib/workers/generation-worker.ts")
@@ -54,6 +55,23 @@ function main() {
     /CMD \["npm", "run", "worker:generation"\]/.test(workerDockerfile) &&
       /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerDockerfile),
     "worker image runs queue mode standalone"
+  )
+
+  assert(
+    "worker.docker-runtime-sources",
+    /COPY --from=builder \/app\/scripts \.\/scripts/.test(workerDockerfile) &&
+      /COPY --from=builder \/app\/workers \.\/workers/.test(workerDockerfile) &&
+      /COPY --from=builder \/app\/lib \.\/lib/.test(workerDockerfile) &&
+      /COPY --from=builder \/app\/components \.\/components/.test(workerDockerfile) &&
+      /COPY --from=builder \/app\/auth\.ts \.\/auth\.ts/.test(workerDockerfile),
+    "worker image includes source files required by run-ts-script and path aliases"
+  )
+
+  assert(
+    "worker.tsx-runtime-loader",
+    /require\.extensions\["\.ts"\] = compileTypeScript/.test(runTsScript) &&
+      /require\.extensions\["\.tsx"\] = compileTypeScript/.test(runTsScript),
+    "worker TypeScript runtime can load ts and tsx dependencies"
   )
 
   assert(

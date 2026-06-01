@@ -19,6 +19,7 @@
     "real-e2e": "node scripts/real-e2e.js",
     "deploy:gate": "npm run real-e2e",
     "postdeploy:health": "node scripts/post-deploy-health.js",
+    "postdeploy:health:prod": "node scripts/post-deploy-health.js https://www.ai-swift.biz.id",
     "audit:production": "node scripts/production-audit.js",
     "schema:health": "node scripts/schema-health-check.js",
     "deploy:preflight": "npx prisma migrate status && node scripts/schema-health-check.js && npm run typecheck && npm run lint",

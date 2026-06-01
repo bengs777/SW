@@ -74,7 +74,11 @@ function isNativeRedisUrl(input) {
 
 function isStrongSecret(input, minLength = 32) {
   const current = String(input || "")
-  return current.length >= minLength && !/(change-me|changeme|secret|password|example|placeholder|development-auth-secret)/i.test(current)
+  const normalized = current.trim().toLowerCase()
+  const placeholderPattern =
+    /^(change-me|changeme|development-auth-secret|password|secret|example|placeholder|replace-me|replace_me|todo|your-secret|your_secret|your-key|your_key)$/
+  const placeholderPrefixPattern = /^(your|replace|example|placeholder)[_-]/i
+  return current.length >= minLength && !placeholderPattern.test(normalized) && !placeholderPrefixPattern.test(current)
 }
 
 async function requestJson(url, label) {
@@ -180,6 +184,64 @@ async function generationWorkerHeartbeatDiagnostic() {
   }
 }
 
+async function getRedisEvictionPolicy(redis) {
+  try {
+    const config = await redis.config("GET", "maxmemory-policy")
+    const policy = Array.isArray(config) ? config[1] : ""
+    if (policy) return String(policy).trim()
+  } catch {
+    // Some managed Redis providers disable CONFIG; fall back to INFO memory.
+  }
+
+  const info = await redis.info("memory")
+  const line = info.split(/\r?\n/).find((item) => item.startsWith("maxmemory_policy:"))
+  return line ? line.split(":")[1].trim() : "unknown"
+}
+
+async function redisEvictionPolicyDiagnostic() {
+  const redisUrl = value("REDIS_URL", "UPSTASH_REDIS_URL")
+  if (!isNativeRedisUrl(redisUrl)) {
+    return { ok: false, detail: "Native REDIS_URL is missing, so Redis eviction policy cannot be verified." }
+  }
+
+  let redis = null
+  try {
+    redis = new IORedis(redisUrl, {
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: false,
+      lazyConnect: true,
+      connectTimeout: 5000,
+      ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
+    })
+    await redis.connect()
+    let policy = await getRedisEvictionPolicy(redis)
+
+    if (policy !== "noeviction" && value("SWIFT_REDIS_AUTO_SET_NOEVICTION") === "true") {
+      try {
+        await redis.config("SET", "maxmemory-policy", "noeviction")
+        policy = await getRedisEvictionPolicy(redis)
+      } catch {
+        // Keep the original policy in the diagnostic below.
+      }
+    }
+
+    return {
+      ok: policy === "noeviction",
+      detail: policy === "noeviction"
+        ? "Redis maxmemory-policy is noeviction."
+        : `Redis maxmemory-policy is ${policy}; set it to noeviction for BullMQ production safety.`,
+    }
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+  } finally {
+    if (redis) {
+      await redis.quit().catch(() => {
+        redis.disconnect()
+      })
+    }
+  }
+}
+
 async function sandboxRuntimeDiagnostic() {
   const sandboxUrl = normalizeUrl(value("SANDBOX_SERVICE_URL"))
   if (!sandboxUrl) {
@@ -236,6 +298,8 @@ const databaseUrl = value("DATABASE_URL")
 const directDatabaseUrl = value("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
 const generationExecutionMode = value("SWIFT_GENERATION_EXECUTION_MODE").toLowerCase()
 const queueMode = !generationExecutionMode || generationExecutionMode === "queue"
+const supabaseServiceRoleKey = value("SUPABASE_SERVICE_ROLE_KEY")
+const supabasePublicKey = value("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY")
 const authProviderConfigured = Boolean(value("GOOGLE_CLIENT_ID") && value("GOOGLE_CLIENT_SECRET") && isStrongSecret(value("NEXTAUTH_SECRET")))
 const migrationStatus = commandDiagnostic("npx prisma migrate status", { timeoutMs: 30_000 })
 const schemaHealth = commandDiagnostic("node scripts/schema-health-check.js", { timeoutMs: 30_000 })
@@ -271,6 +335,12 @@ const checks = [
       ? "Use queue mode in production; serverless generation can hit platform execution limits."
       : "Defaults to queue mode."
   ),
+  required(
+    "SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK",
+    "Serverless generation fallback disabled in production",
+    value("SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK") === "true",
+    "Set SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true so production cannot silently bypass the dedicated worker."
+  ),
   required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
   required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),
   required("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", value("NEXT_PUBLIC_SUPABASE_URL")),
@@ -279,7 +349,14 @@ const checks = [
     "Supabase public key",
     value("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY")
   ),
-  required("SUPABASE_SERVICE_ROLE_KEY", "Supabase service role key", value("SUPABASE_SERVICE_ROLE_KEY")),
+  required(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "Supabase service role key",
+    isStrongSecret(supabaseServiceRoleKey, 32) && supabaseServiceRoleKey !== supabasePublicKey,
+    supabaseServiceRoleKey === supabasePublicKey
+      ? "Must not equal the public Supabase key."
+      : "Must be present, non-placeholder, and at least 32 characters."
+  ),
   required("SUPABASE_STORAGE_BUCKET", "Supabase storage bucket", value("SUPABASE_STORAGE_BUCKET")),
   required("VERDI_TEAM", "Vercel team scope for generated deployments", value("VERDI_TEAM")),
   recommended("VERPRO_ACCES_TOKEN", "Generated-app deploy token", value("VERPRO_ACCES_TOKEN")),
@@ -293,6 +370,7 @@ const checks = [
 
 async function main() {
   const dbConnectivity = await databaseConnectivityDiagnostic()
+  const redisEvictionPolicy = await redisEvictionPolicyDiagnostic()
   const workerHeartbeat = queueMode
     ? await generationWorkerHeartbeatDiagnostic()
     : { ok: true, detail: "Queue mode disabled; worker heartbeat check skipped." }
@@ -301,9 +379,10 @@ async function main() {
     : { ok: true, detail: "Queue mode disabled; worker runtime check skipped." }
   const sandboxRuntime = await sandboxRuntimeDiagnostic()
   checks.push(required("DB_CONNECTIVITY", "Database connectivity", dbConnectivity.ok, dbConnectivity.detail))
+  checks.push(required("REDIS_EVICTION_POLICY", "Redis maxmemory policy for BullMQ", redisEvictionPolicy.ok, redisEvictionPolicy.detail))
   checks.push(required("GENERATION_WORKER_HEARTBEAT", "Dedicated worker heartbeat in Redis", workerHeartbeat.ok, workerHeartbeat.detail))
   checks.push(required("SANDBOX_RUNTIME_HEALTH", "Sandbox runtime /health endpoint", sandboxRuntime.ok, sandboxRuntime.detail))
-  checks.push(recommended("SWIFT_WORKER_HEALTH_URL", "Dedicated worker runtime health endpoint", value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"), "Recommended for direct worker runtime probes."))
+  checks.push(required("SWIFT_WORKER_HEALTH_URL", "Dedicated worker runtime health endpoint", value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"), "Set this to the dedicated worker /health URL so production can directly probe the worker runtime."))
   if (value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL")) {
     checks.push(required("GENERATION_WORKER_RUNTIME", "Dedicated worker /health endpoint", workerRuntime.ok, workerRuntime.detail))
   }
