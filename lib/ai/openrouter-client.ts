@@ -69,8 +69,22 @@ export type OpenRouterLifecycleEvent = {
   detail?: Record<string, unknown>
 }
 
-const PROVIDER_HARD_TIMEOUT_MS = 90_000
-const STREAM_TOKEN_WATCHDOG_MS = 15_000
+function positiveEnvMs(keys: string[], fallbackMs: number) {
+  for (const key of keys) {
+    const value = Number(process.env[key])
+    if (Number.isFinite(value) && value > 0) return Math.round(value)
+  }
+  return fallbackMs
+}
+
+const PROVIDER_HARD_TIMEOUT_MS = positiveEnvMs(
+  ["OPENROUTER_HARD_TIMEOUT_MS", "AI_PROVIDER_REQUEST_BUDGET_MS"],
+  180_000
+)
+const STREAM_TOKEN_WATCHDOG_MS = positiveEnvMs(
+  ["OPENROUTER_STREAM_IDLE_TIMEOUT_MS", "OPENROUTER_STREAM_TOKEN_WATCHDOG_MS"],
+  60_000
+)
 
 export function getOpenRouterBaseUrl() {
   return (env.openRouterBaseUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "")

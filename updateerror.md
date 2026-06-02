@@ -899,3 +899,97 @@ Checklist audit tambahan:
 - [ ] Runtime env Railway worker diturunkan sementara ke concurrency `1`
 - [ ] Runtime env Vercel/Railway terbukti punya `SWIFT_AI_MODEL_CHAIN`
 - [ ] Prompt kecil baru sukses sampai preview bukan scaffold
+
+## 13. Investigasi Prompt Production Tidak Membuat Web
+
+Waktu investigasi: 2026-06-02 sekitar 20:50 WIB.
+
+Gejala dari UI:
+
+```txt
+Prompt: buat web dashboard penjualan baju skena majalengka
+Termination reason: SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED
+Trace: sin1::g2jnm-1780407990151-a6fd8815b514
+Worker: generation:local:14
+Job: cmpwoy99g0003veytimeo70e1
+```
+
+Health production saat dicek:
+
+```txt
+Vercel /api/worker/health: healthy
+Railway /health: healthy
+Queue waiting: 0
+Queue active: 0
+Queue failed: 8
+Dead letter waiting: 20
+Worker currentStage: idle
+Redis ping: PONG
+```
+
+Monitoring production:
+
+```txt
+Generation window 24h:
+total: 12
+completed: 0
+failed: 12
+successRate: 0
+```
+
+Provider health probe:
+
+```txt
+/api/provider/health
+provider: openrouter
+status: healthy
+model: deepseek/deepseek-v4-pro
+circuitBreaker: closed
+```
+
+Artinya provider health kecil (`OK`, maxTokens 64) sehat, tetapi request generation besar gagal saat worker memproses slice file.
+
+Root cause dari database `GenerationAttempt` untuk job `cmpwoy99g0003veytimeo70e1`:
+
+```txt
+attempt 1: success, latency ~27.5s
+attempt 2: failed, failureReason=timeout, errorMessage="OpenRouter request timed out after 15 seconds"
+attempt 3: failed, failureReason=timeout, errorMessage="OpenRouter request timed out after 15 seconds"
+attempt 4: failed, failureReason=timeout, errorMessage="OpenRouter request timed out after 15 seconds"
+```
+
+Kesimpulan:
+
+- Ini bukan error auth/API key karena attempt pertama sukses.
+- Ini bukan queue macet karena worker sehat dan idle setelah gagal.
+- Ini bukan sandbox/preview karena gagal sebelum semua slice selesai.
+- Penyebab langsung adalah OpenRouter streaming timeout 15 detik antar token pada generation slice berikutnya.
+
+Kode penyebab:
+
+```txt
+lib/ai/openrouter-client.ts
+STREAM_TOKEN_WATCHDOG_MS = 15_000
+```
+
+Fix kode:
+
+```txt
+OPENROUTER_STREAM_IDLE_TIMEOUT_MS / OPENROUTER_STREAM_TOKEN_WATCHDOG_MS
+default dinaikkan ke 60_000 ms
+
+OPENROUTER_HARD_TIMEOUT_MS / AI_PROVIDER_REQUEST_BUDGET_MS
+default hard timeout diselaraskan ke 180_000 ms
+```
+
+Env runtime yang direkomendasikan setelah deploy:
+
+```env
+OPENROUTER_STREAM_IDLE_TIMEOUT_MS=60000
+OPENROUTER_HARD_TIMEOUT_MS=180000
+AI_PROVIDER_REQUEST_BUDGET_MS=180000
+AI_MAX_CONCURRENT_GENERATIONS=1
+SWIFT_GENERATION_WORKER_CONCURRENCY=1
+```
+
+Jika masih gagal setelah fix ini, ambil ulang `GenerationAttempt.metadataJson.providerAttempts`. Bila `failureReason` berubah menjadi `rate_limit` atau `server_error`, tindakan berikutnya adalah ganti model chain atau cek quota OpenRouter.
