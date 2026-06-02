@@ -265,7 +265,9 @@ export function WorkspaceCommandCenter({
           </div>
           <div className="mt-2 text-xs text-muted-foreground">
             {previewValidation.message ||
-              (previewValidation.checkedAt
+              (fileCount === 0
+                ? "No files available to validate yet."
+                : previewValidation.checkedAt
                 ? `${previewValidation.diagnosticsCount} diagnostics, ${previewValidation.warningCount} warnings`
                 : "Run validation before rollback or deploy.")}
           </div>
@@ -274,7 +276,7 @@ export function WorkspaceCommandCenter({
             variant={validationFailed ? "default" : "outline"}
             className="mt-3 w-full gap-2"
             onClick={onValidatePreview}
-            disabled={isValidatingPreview}
+            disabled={isValidatingPreview || fileCount === 0}
           >
             {isValidatingPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
             Validate preview

@@ -20,9 +20,12 @@ function main() {
   const packageJson = JSON.parse(read("package.json"))
   const workerEntry = read("workers/index.ts")
   const workerDockerfile = read("workers/Dockerfile")
+  const workerRailwayConfig = read("railway.worker.json")
+  const workerRailwayEnv = read(".env.railway.worker.production")
   const sandboxDockerfile = read("services/sandbox-runtime/Dockerfile")
   const runTsScript = read("scripts/run-ts-script.js")
   const workerHealthRoute = read("app/api/worker/health/route.ts")
+  const envConfig = read("lib/env.ts")
   const generationQueue = read("lib/queue/generation-queue.ts")
   const generationWorker = read("lib/workers/generation-worker.ts")
   const generationPipeline = read("lib/ai/generation-pipeline.ts")
@@ -70,6 +73,35 @@ function main() {
       /COPY --from=builder \/app\/components \.\/components/.test(workerDockerfile) &&
       /COPY --from=builder \/app\/auth\.ts \.\/auth\.ts/.test(workerDockerfile),
     "worker image includes source files required by run-ts-script and path aliases"
+  )
+
+  assert(
+    "worker.railway-config",
+    /"dockerfilePath":\s*"workers\/Dockerfile"/.test(workerRailwayConfig) &&
+      /"healthcheckPath":\s*"\/health"/.test(workerRailwayConfig),
+    "Railway worker config points at the standalone worker image and health endpoint"
+  )
+
+  assert(
+    "worker.railway-env-template",
+    /SWIFT_WORKER_TYPE=generation/.test(workerRailwayEnv) &&
+      /SWIFT_WORKER_HEALTH_PORT=4000/.test(workerRailwayEnv) &&
+      /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerRailwayEnv) &&
+      /REDIS_URL=REPLACE_WITH_NATIVE_REDIS_URL/.test(workerRailwayEnv) &&
+      /SANDBOX_SERVICE_TOKEN=REPLACE_WITH_RAILWAY_SANDBOX_TOKEN/.test(workerRailwayEnv) &&
+      !/postgres(?:ql)?:\/\//i.test(workerRailwayEnv) &&
+      !/sk-or-v1-|sb_secret_|GOCSPX-/i.test(workerRailwayEnv),
+    "Railway worker env template is queue-mode and safe to commit"
+  )
+
+  assert(
+    "worker.placeholder-url-normalization",
+    envConfig.includes("isPlaceholderEnvValue") &&
+      envConfig.includes("isPlaceholderEnvValue(trimmed)") &&
+      envConfig.includes('normalizeUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))') &&
+      deployReadiness.includes("isPlaceholderValue") &&
+      deployReadiness.includes('normalizeUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))'),
+    "placeholder worker URLs are treated as missing instead of probed"
   )
 
   assert(

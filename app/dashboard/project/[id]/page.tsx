@@ -2138,12 +2138,15 @@ export default function EditorPage() {
   const handleValidatePreview = useCallback(async () => {
     if (isValidatingPreview) return
     if (generatedFiles.length === 0) {
+      const message = isGenerating
+        ? "Masih menunggu file hasil generate sebelum preview bisa divalidasi."
+        : "No files available to validate."
       setPreviewValidation({
-        status: "failed",
-        diagnosticsCount: 1,
+        status: "idle",
+        diagnosticsCount: 0,
         warningCount: 0,
         checkedAt: new Date().toISOString(),
-        message: "No files available to validate.",
+        message,
       })
       return
     }
@@ -2205,7 +2208,7 @@ export default function EditorPage() {
     } finally {
       setIsValidatingPreview(false)
     }
-  }, [appendAssistantMessage, generatedFiles, isValidatingPreview, projectId, pushErrorLog, workspaceArtifactStatus])
+  }, [appendAssistantMessage, generatedFiles, isGenerating, isValidatingPreview, projectId, pushErrorLog, workspaceArtifactStatus])
 
   const handleRollbackVersion = useCallback(async (historyId: string) => {
     if (isRollingBackVersion) return
