@@ -20,7 +20,11 @@ const generationOrchestrator = read("lib/services/generation-orchestrator.servic
 const sandboxRuntime = read("lib/sandbox/runtime.ts")
 const generationJobService = read("lib/services/generation-job.service.ts")
 const generationJobStream = read("app/api/generate/jobs/[jobId]/stream/route.ts")
+const generationDraftService = read("lib/services/generation-draft-artifact.service.ts")
+const generationDraftRoute = read("app/api/generate/jobs/[jobId]/draft/route.ts")
 const projectPage = read("app/dashboard/project/[id]/page.tsx")
+const editorHeader = read("components/editor/header.tsx")
+const workspaceCommandCenter = read("components/editor/workspace-command-center.tsx")
 const projectApi = read("app/api/projects/[id]/route.ts")
 const developerDiagnostics = read("lib/ai/developer-diagnostics.ts")
 const vercelBuild = read("scripts/vercel-build.js")
@@ -112,6 +116,22 @@ assert(
     /ProjectFilePersistenceService\.saveBufferedArtifacts/.test(generationOrchestrator) &&
     generationOrchestrator.indexOf("if (!validation.ok)") < generationOrchestrator.indexOf("ProjectFilePersistenceService.saveBufferedArtifacts"),
   "invalid artifacts must fail before saveBufferedArtifacts"
+)
+
+assert(
+  "generation draft-first editor before sandbox",
+  /GenerationDraftArtifactService\.upsert/.test(generationOrchestrator) &&
+    /draftAvailable/.test(generationOrchestrator) &&
+    /status:\s*"draft"/.test(generationDraftService) &&
+    /artifact\.upsert/.test(generationDraftService) &&
+    /artifactFile\.createMany/.test(generationDraftService) &&
+    /GenerationDraftArtifactService\.readForJob/.test(generationDraftRoute) &&
+    /applyGenerationDraft/.test(projectPage) &&
+    /streamed_draft_fetch_requested/.test(projectPage) &&
+    /workspaceArtifactStatus === "draft"/.test(projectPage) &&
+    /Draft sudah bisa diedit/.test(workspaceCommandCenter) &&
+    /Verify first/.test(editorHeader),
+  "draft files must reach Monaco/Explorer before sandbox persistence and ship actions must remain blocked"
 )
 
 assert(

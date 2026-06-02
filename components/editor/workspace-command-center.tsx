@@ -53,6 +53,7 @@ type WorkspaceCommandCenterProps = {
   fileCount: number
   currentVersion: number
   isDirty: boolean
+  artifactStatus?: "empty" | "draft" | "persisted"
   history: ProjectHistoryEntry[]
   previewValidation: PreviewValidationState
   deployFlow: DeployFlowState
@@ -105,6 +106,7 @@ export function WorkspaceCommandCenter({
   fileCount,
   currentVersion,
   isDirty,
+  artifactStatus = "empty",
   history,
   previewValidation,
   deployFlow,
@@ -121,13 +123,14 @@ export function WorkspaceCommandCenter({
   const validationPassed = previewValidation.status === "passed"
   const validationFailed = previewValidation.status === "failed"
   const hasFiles = fileCount > 0
+  const isDraft = artifactStatus === "draft"
   const githubReady = deployFlow.githubStatus === "ready"
   const vercelReady = deployFlow.vercelStatus === "ready"
   const hasShipIssue = deployFlow.githubStatus === "failed" || deployFlow.githubStatus === "setup-required" || deployFlow.vercelStatus === "failed"
   const progressValue = Math.round(
     ([
       Boolean(latestHistory),
-      validationPassed || hasFiles,
+      validationPassed || (hasFiles && !isDraft),
       githubReady,
       vercelReady,
     ].filter(Boolean).length /
@@ -142,10 +145,12 @@ export function WorkspaceCommandCenter({
         ? "Ready to deploy"
         : deployFlow.githubStatus === "running"
           ? "Publishing"
-          : validationPassed
-            ? "Ready to ship"
-            : hasFiles
-              ? "Review preview"
+          : isDraft
+            ? "Drafting"
+            : validationPassed
+              ? "Ready to ship"
+              : hasFiles
+                ? "Review preview"
               : latestHistory
                 ? "Generating"
                 : "Prompting"
@@ -158,9 +163,9 @@ export function WorkspaceCommandCenter({
     },
     {
       label: "Preview",
-      detail: validationPassed ? "Validated" : hasFiles ? "Review running app" : "Waiting for files",
+      detail: validationPassed ? "Validated" : isDraft ? "Draft in editor" : hasFiles ? "Review running app" : "Waiting for files",
       icon: Eye,
-      state: validationPassed ? "done" : hasFiles ? "active" : "pending",
+      state: validationPassed && !isDraft ? "done" : hasFiles ? "active" : "pending",
     },
     {
       label: "GitHub",
@@ -188,8 +193,8 @@ export function WorkspaceCommandCenter({
               <Sparkles className="h-3.5 w-3.5" />
               AI Builder
             </Badge>
-            <Badge variant={isDirty ? "outline" : "secondary"} className="h-6 rounded-md">
-              {isDirty ? "Unsaved edits" : "Saved"}
+            <Badge variant={isDraft || isDirty ? "outline" : "secondary"} className="h-6 rounded-md">
+              {isDraft ? "Draft" : isDirty ? "Unsaved edits" : "Saved"}
             </Badge>
             <Badge variant="outline" className="h-6 rounded-md">v{currentVersion}</Badge>
             <Badge variant="outline" className="h-6 rounded-md">{fileCount} files</Badge>
@@ -329,11 +334,13 @@ export function WorkspaceCommandCenter({
               Vercel: {deployStatusLabel[deployFlow.vercelStatus]}
             </span>
           </div>
-          {(hasShipIssue || deployFlow.message) && (
+          {(isDraft || hasShipIssue || deployFlow.message) && (
             <div className="flex min-w-0 items-start gap-2 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 break-words">
-                {deployFlow.message || "Connect GitHub and Vercel tokens on the server to unlock one-click publish."}
+                {isDraft
+                  ? "Draft sudah bisa diedit, tapi Push/Deploy final menunggu sandbox verified."
+                  : deployFlow.message || "Connect GitHub and Vercel tokens on the server to unlock one-click publish."}
               </span>
             </div>
           )}
@@ -355,11 +362,11 @@ export function WorkspaceCommandCenter({
               </a>
             </Button>
           )}
-          <Button size="sm" variant="outline" className="gap-2" onClick={onPushGitHub} disabled={isPushingGitHub}>
+          <Button size="sm" variant="outline" className="gap-2" onClick={onPushGitHub} disabled={isPushingGitHub || isDraft}>
             {isPushingGitHub ? <Loader2 className="h-4 w-4 animate-spin" /> : <Github className="h-4 w-4" />}
             Push GitHub
           </Button>
-          <Button size="sm" className="gap-2" onClick={onDeployVercel} disabled={isDeploying}>
+          <Button size="sm" className="gap-2" onClick={onDeployVercel} disabled={isDeploying || isDraft}>
             {isDeploying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
             Deploy Vercel
           </Button>

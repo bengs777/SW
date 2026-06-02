@@ -34,6 +34,7 @@ interface EditorHeaderProps {
   isExporting?: boolean
   isDeploying?: boolean
   isPushingGitHub?: boolean
+  isDraft?: boolean
   deploymentUrl?: string | null
   customDomain?: string | null
   onDomainSaved?: (domain: string | null) => void
@@ -50,6 +51,7 @@ export function EditorHeader({
   isExporting = false,
   isDeploying = false,
   isPushingGitHub = false,
+  isDraft = false,
   deploymentUrl = null,
   customDomain = null,
   onDomainSaved,
@@ -84,6 +86,11 @@ export function EditorHeader({
               Launch mode
             </Badge>
           )}
+          {isDraft && (
+            <Badge variant="outline" className="text-xs">
+              Draft
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -108,9 +115,9 @@ export function EditorHeader({
                 <Download className="mr-2 h-4 w-4" />
                 Download ZIP
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={onPushGitHub} disabled={isPushingGitHub}>
+              <DropdownMenuItem onSelect={onPushGitHub} disabled={isPushingGitHub || isDraft}>
                 <Github className="mr-2 h-4 w-4" />
-                {isPushingGitHub ? "Pushing..." : "Push to GitHub"}
+                {isPushingGitHub ? "Pushing..." : isDraft ? "Waiting for verify" : "Push to GitHub"}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -125,9 +132,9 @@ export function EditorHeader({
 
         {canUsePremiumFeatures ? (
           <div className="flex items-center gap-2">
-            <Button size="sm" className="gap-2" onClick={onDeploy} disabled={isDeploying}>
+            <Button size="sm" className="gap-2" onClick={onDeploy} disabled={isDeploying || isDraft}>
               <Rocket className="h-4 w-4" />
-              {isDeploying ? "Deploying..." : "Deploy"}
+              {isDeploying ? "Deploying..." : isDraft ? "Verify first" : "Deploy"}
             </Button>
 
             <DomainDialog projectId={projectId} currentDomain={customDomain} onDomainSaved={onDomainSaved} />

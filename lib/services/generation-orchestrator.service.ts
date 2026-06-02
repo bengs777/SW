@@ -38,6 +38,7 @@ import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
 import { compileProject } from "@/lib/preview/module-resolution"
 import { runRuntimeCommand, startRuntimeSandbox, type RuntimeCommandName, type SandboxValidationStep } from "@/lib/sandbox/runtime"
+import { GenerationDraftArtifactService } from "@/lib/services/generation-draft-artifact.service"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { ProjectFilesystemService, type ProjectFileManifest } from "@/lib/services/project-filesystem.service"
 import { loadProjectState, buildProjectStatePromptBlock } from "@/lib/project-state/engine"
@@ -2632,6 +2633,37 @@ async function emitGeneratedFilesUpdate(input: {
 }) {
   const allFilesBytes = totalFileBytes(input.allFiles)
   const changedPaths = (input.changedFiles || []).map((file) => normalizePath(file.path)).slice(0, 120)
+  let draftArtifact: Awaited<ReturnType<typeof GenerationDraftArtifactService.upsert>> | null = null
+
+  if (input.allFiles.length > 0) {
+    try {
+      const job = await GenerationJobService.findById(input.jobId)
+      if (job?.projectId) {
+        draftArtifact = await GenerationDraftArtifactService.upsert({
+          jobId: input.jobId,
+          projectId: job.projectId,
+          prompt: job.prompt,
+          files: input.allFiles,
+          source: input.source,
+          metadata: {
+            stage: input.stage,
+            message: input.message,
+            changedPaths,
+            deletedPaths: input.deletedPaths || [],
+          },
+        })
+      }
+    } catch (error) {
+      log("warn", "generation_draft_artifact_persist_failed", {
+        event: "generation_draft_artifact_persist_failed",
+        jobId: input.jobId,
+        stage: input.stage,
+        source: input.source,
+        fileCount: input.allFiles.length,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
 
   await GenerationJobService.appendEvent({
     jobId: input.jobId,
@@ -2641,11 +2673,15 @@ async function emitGeneratedFilesUpdate(input: {
     message: input.message,
     data: {
       source: input.source,
+      artifactStatus: "draft",
+      draftAvailable: Boolean(draftArtifact),
+      draftArtifactId: draftArtifact?.artifactId || null,
       fileCount: input.allFiles.length,
       deletedPaths: input.deletedPaths || [],
       totalBytes: allFilesBytes,
       changedPaths,
-      paths: input.allFiles.map((file) => normalizePath(file.path)).slice(0, 120),
+      paths: draftArtifact?.manifest.paths.slice(0, 120) || input.allFiles.map((file) => normalizePath(file.path)).slice(0, 120),
+      manifest: draftArtifact?.manifest || null,
       ...(input.data || {}),
     },
   })
