@@ -1,9 +1,11 @@
 # Swift AI persistent generation worker host.
 # This intentionally runs the BullMQ worker as a dedicated non-Vercel process.
 
-FROM node:20-alpine AS base
+FROM node:20-bookworm-slim AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates openssl \
+  && rm -rf /var/lib/apt/lists/*
 
 FROM base AS deps
 COPY package*.json ./

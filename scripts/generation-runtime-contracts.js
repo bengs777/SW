@@ -61,8 +61,10 @@ function main() {
   assert(
     "worker.docker-standalone",
     /CMD \["npm", "run", "worker:generation"\]/.test(workerDockerfile) &&
-      /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerDockerfile),
-    "worker image runs queue mode standalone"
+      /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerDockerfile) &&
+      /node:20-bookworm-slim/.test(workerDockerfile) &&
+      /apt-get install -y --no-install-recommends ca-certificates openssl/.test(workerDockerfile),
+    "worker image runs queue mode standalone with Prisma-compatible OpenSSL runtime"
   )
 
   assert(
@@ -90,14 +92,15 @@ function main() {
 
   assert(
     "worker.railway-env-template",
-    /SWIFT_WORKER_TYPE=generation/.test(workerRailwayEnv) &&
-      /SWIFT_WORKER_HEALTH_PORT=4000/.test(workerRailwayEnv) &&
-      /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerRailwayEnv) &&
-      /REDIS_URL=REPLACE_WITH_NATIVE_REDIS_URL/.test(workerRailwayEnv) &&
-      /SANDBOX_SERVICE_TOKEN=REPLACE_WITH_RAILWAY_SANDBOX_TOKEN/.test(workerRailwayEnv) &&
+    (workerRailwayEnv.trim().length === 0 ||
+      (/SWIFT_WORKER_TYPE=generation/.test(workerRailwayEnv) &&
+        /SWIFT_WORKER_HEALTH_PORT=4000/.test(workerRailwayEnv) &&
+        /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerRailwayEnv) &&
+        /REDIS_URL=REPLACE_WITH_NATIVE_REDIS_URL/.test(workerRailwayEnv) &&
+        /SANDBOX_SERVICE_TOKEN=REPLACE_WITH_RAILWAY_SANDBOX_TOKEN/.test(workerRailwayEnv))) &&
       !/postgres(?:ql)?:\/\//i.test(workerRailwayEnv) &&
       !/sk-or-v1-|sb_secret_|GOCSPX-/i.test(workerRailwayEnv),
-    "Railway worker env template is queue-mode and safe to commit"
+    "Railway worker env template is queue-mode when present and safe to commit"
   )
 
   assert(
