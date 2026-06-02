@@ -2631,11 +2631,13 @@ async function emitGeneratedFilesUpdate(input: {
   source: "seed" | "slice" | "repair" | "fast_fullstack_scaffold" | "backend_blueprint_scaffold"
   data?: Record<string, unknown>
 }) {
-  const allFilesBytes = totalFileBytes(input.allFiles)
+  const draftFiles = ensureComponentRegistryFiles(input.allFiles)
+  const draftManifest = ProjectFilesystemService.buildManifest(draftFiles)
+  const allFilesBytes = totalFileBytes(draftFiles)
   const changedPaths = (input.changedFiles || []).map((file) => normalizePath(file.path)).slice(0, 120)
   let draftArtifact: Awaited<ReturnType<typeof GenerationDraftArtifactService.upsert>> | null = null
 
-  if (input.allFiles.length > 0) {
+  if (draftFiles.length > 0) {
     try {
       const job = await GenerationJobService.findById(input.jobId)
       if (job?.projectId) {
@@ -2643,7 +2645,7 @@ async function emitGeneratedFilesUpdate(input: {
           jobId: input.jobId,
           projectId: job.projectId,
           prompt: job.prompt,
-          files: input.allFiles,
+          files: draftFiles,
           source: input.source,
           metadata: {
             stage: input.stage,
@@ -2659,7 +2661,7 @@ async function emitGeneratedFilesUpdate(input: {
         jobId: input.jobId,
         stage: input.stage,
         source: input.source,
-        fileCount: input.allFiles.length,
+        fileCount: draftFiles.length,
         error: error instanceof Error ? error.message : String(error),
       })
     }
@@ -2672,17 +2674,17 @@ async function emitGeneratedFilesUpdate(input: {
     status: "running",
     message: input.message,
     data: {
+      ...(input.data || {}),
       source: input.source,
       artifactStatus: "draft",
       draftAvailable: Boolean(draftArtifact),
       draftArtifactId: draftArtifact?.artifactId || null,
-      fileCount: input.allFiles.length,
+      fileCount: draftFiles.length,
       deletedPaths: input.deletedPaths || [],
       totalBytes: allFilesBytes,
       changedPaths,
-      paths: draftArtifact?.manifest.paths.slice(0, 120) || input.allFiles.map((file) => normalizePath(file.path)).slice(0, 120),
-      manifest: draftArtifact?.manifest || null,
-      ...(input.data || {}),
+      paths: draftArtifact?.manifest.paths.slice(0, 120) || draftManifest.paths.slice(0, 120),
+      manifest: draftArtifact?.manifest || draftManifest,
     },
   })
 }

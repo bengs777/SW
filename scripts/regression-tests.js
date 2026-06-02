@@ -17,11 +17,15 @@ function assert(name, condition, detail) {
 
 const sandboxPreview = read("components/editor/sandbox-preview.tsx")
 const generationOrchestrator = read("lib/services/generation-orchestrator.service.ts")
+const emitGeneratedFilesUpdateSource =
+  generationOrchestrator.match(/async function emitGeneratedFilesUpdate[\s\S]*?\n}\n\nfunction createAgentWorkflowTools/)?.[0] || ""
 const sandboxRuntime = read("lib/sandbox/runtime.ts")
 const generationJobService = read("lib/services/generation-job.service.ts")
 const generationJobStream = read("app/api/generate/jobs/[jobId]/stream/route.ts")
 const generationDraftService = read("lib/services/generation-draft-artifact.service.ts")
 const generationDraftRoute = read("app/api/generate/jobs/[jobId]/draft/route.ts")
+const componentRegistry = read("lib/ai/component-registry.ts")
+const componentRegistrySamples = read("scripts/component-registry-generation-samples.ts")
 const projectPage = read("app/dashboard/project/[id]/page.tsx")
 const editorHeader = read("components/editor/header.tsx")
 const workspaceCommandCenter = read("components/editor/workspace-command-center.tsx")
@@ -132,6 +136,31 @@ assert(
     /Draft sudah bisa diedit/.test(workspaceCommandCenter) &&
     /Verify first/.test(editorHeader),
   "draft files must reach Monaco/Explorer before sandbox persistence and ship actions must remain blocked"
+)
+
+assert(
+  "draft-first closes component registry dependencies",
+  /const draftFiles = ensureComponentRegistryFiles\(input\.allFiles\)/.test(emitGeneratedFilesUpdateSource) &&
+    /const draftManifest = ProjectFilesystemService\.buildManifest\(draftFiles\)/.test(emitGeneratedFilesUpdateSource) &&
+    /const allFilesBytes = totalFileBytes\(draftFiles\)/.test(emitGeneratedFilesUpdateSource) &&
+    /GenerationDraftArtifactService\.upsert\(\{[\s\S]*files:\s*draftFiles/.test(emitGeneratedFilesUpdateSource) &&
+    !/GenerationDraftArtifactService\.upsert\(\{[\s\S]*files:\s*input\.allFiles/.test(emitGeneratedFilesUpdateSource) &&
+    /fileCount:\s*draftFiles\.length/.test(emitGeneratedFilesUpdateSource) &&
+    /paths:\s*draftArtifact\?\.manifest\.paths\.slice\(0,\s*120\)\s*\|\|\s*draftManifest\.paths\.slice\(0,\s*120\)/.test(emitGeneratedFilesUpdateSource) &&
+    /manifest:\s*draftArtifact\?\.manifest\s*\|\|\s*draftManifest/.test(emitGeneratedFilesUpdateSource),
+  "draft artifact and job.files.updated must be based on dependency-closed draftFiles before sandbox validation"
+)
+
+assert(
+  "draft preview covers navbar footer registry aliases",
+  /contract\("Navbar",\s*"navbar"/.test(componentRegistry) &&
+    /contract\("Footer",\s*"footer"/.test(componentRegistry) &&
+    /registryFile\("navbar\.tsx"/.test(componentRegistry) &&
+    /registryFile\("footer\.tsx"/.test(componentRegistry) &&
+    /@\/component-registry\/navbar/.test(componentRegistrySamples) &&
+    /@\/component-registry\/footer/.test(componentRegistrySamples) &&
+    /ensureComponentRegistryFiles\(input\.allFiles\)/.test(emitGeneratedFilesUpdateSource),
+  "app/page.tsx drafts that import navbar/footer must include those registry files in the preview path"
 )
 
 assert(
