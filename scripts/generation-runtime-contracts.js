@@ -121,7 +121,9 @@ function main() {
     "worker.health-server",
     /http\.createServer/.test(workerEntry) &&
       /\/api\/worker\/health/.test(workerEntry) &&
-      /mode:\s*"queue"/.test(workerEntry),
+      /mode:\s*"queue"/.test(workerEntry) &&
+      /function markRuntimeReady/.test(workerEntry) &&
+      /markRuntimeReady\(\)[\s\S]*worker\.on\("ready", markRuntimeReady\)/.test(workerEntry),
     "standalone worker exposes process health"
   )
 

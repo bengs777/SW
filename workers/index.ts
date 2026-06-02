@@ -25,6 +25,12 @@ const runtimeState: WorkerRuntimeState = {
   error: null,
 }
 
+function markRuntimeReady() {
+  runtimeState.ready = true
+  runtimeState.healthy = true
+  runtimeState.error = null
+}
+
 // Parse command line arguments
 function parseArgs(): SwiftWorkerType | undefined {
   const args = process.argv.slice(2)
@@ -86,11 +92,8 @@ async function startWorker(workerType: SwiftWorkerType) {
       const { createGenerationWorker } = require("./generation-worker")
       const worker = createGenerationWorker()
       registerWorker(worker)
-      worker.on("ready", () => {
-        runtimeState.ready = true
-        runtimeState.healthy = true
-        runtimeState.error = null
-      })
+      markRuntimeReady()
+      worker.on("ready", markRuntimeReady)
       worker.on("error", (error: Error) => {
         runtimeState.healthy = false
         runtimeState.error = error.message
