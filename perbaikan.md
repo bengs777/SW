@@ -1,462 +1,380 @@
-# Runbook Perbaikan Production Swift AI
+# Rencana Perbaikan Error Generate Swift AI
 
-Tanggal investigasi: 2026-06-02 15:19 WIB
+Tanggal audit: 2026-06-02 18:10 WIB
 
-Dokumen ini fokus pada sisa pekerjaan production yang harus dilakukan di Railway dan Vercel setelah perbaikan repo diterapkan.
+Dokumen ini fokus pada error UI terbaru:
 
-## Status Live Saat Ini
+```txt
+Swift AI sedang mengalami gangguan sementara. Saldo Rupiah kamu otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi.
+```
 
-Health production:
+Error internal yang terlihat:
+
+```txt
+SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED
+```
+
+## Kesimpulan Singkat
+
+Masalah sekarang bukan lagi Railway worker, Redis queue, sandbox runtime, database, auth, atau Vercel deploy.
+
+Masalah sekarang ada di bagian:
+
+```txt
+AI Provider / OpenRouter model chain
+```
+
+Flow yang terjadi:
+
+```txt
+UI submit prompt
+-> POST /api/generate/jobs sukses 202
+-> job masuk queue
+-> worker Railway mengambil job
+-> worker memanggil OpenRouter/model chain
+-> semua attempt provider gagal
+-> job masuk dead-letter
+-> UI menampilkan pesan gangguan sementara
+```
+
+## Status Infrastruktur
+
+Production health sudah hijau dari sisi infrastruktur:
 
 ```txt
 https://www.ai-swift.biz.id/api/health?refreshProvider=true
 ```
 
-Hasil penting:
+Target yang sudah tercapai:
 
-- `status`: `unhealthy`
-- `deployment`: `unhealthy`
-- `worker`: `degraded`
-- `queue`: `ok`
-- `database`: `ok`
-- `auth`: `ok`
-- `providers`: `healthy`
+- `status: healthy`
+- `deployment: ok`
+- `worker: ok`
+- `queue: ok`
+- `blockingFailures: []`
+- `workerRuntime.ok: true`
+- `workerHeartbeatFresh: true`
+- `sandboxRuntime.ok: true`
 
-Blocking failures:
-
-- `GENERATION_WORKER_HEARTBEAT`
-- `GENERATION_WORKER_RUNTIME`
-- `SANDBOX_RUNTIME_HEALTH`
-
-Detail worker:
-
-- Redis native sehat dan menjawab `PONG`
-- Queue tidak penuh
-- Dead-letter queue berisi 3 job
-- `workerHeartbeat` masih `null`
-- `SWIFT_WORKER_HEALTH_URL` di Vercel masih placeholder:
+Worker Railway sehat:
 
 ```txt
-https://<your-worker-service>.up.railway.app/health
+https://ingenious-appreciation-production.up.railway.app/health
 ```
 
-Detail sandbox:
-
-Endpoint sandbox:
+Sandbox Railway sehat:
 
 ```txt
-https://swift-sandbox-service-production.up.railway.app/health
+https://sanbox.ai-swift.biz.id/health
 ```
 
-Masih membalas:
+## Bukti Error Saat Ini
 
-```json
-{"ok":true,"service":"swift-sandbox-service"}
-```
-
-Payload ini belum valid untuk production karena belum berisi `runtime.storage`.
-
-## Kesimpulan Investigasi
-
-Masalah utama sekarang bukan database, auth, Redis, atau AI provider.
-
-Masalah utama ada di 3 titik:
-
-1. Worker dedicated belum aktif atau belum terhubung sebagai service production yang benar.
-2. Vercel production masih memakai `SWIFT_WORKER_HEALTH_URL` placeholder.
-3. Sandbox Railway masih deploy image lama atau service yang live masih bukan sandbox runtime versi terbaru.
-
-Gejala UI seperti `No files available to validate` muncul karena job generate belum maju sampai menghasilkan draft files. Jadi tombol preview validation bukan akar masalahnya.
-
-## File Pendukung Di Repo
-
-Worker Railway:
-
-- Config Railway: `railway.worker.json`
-- Dockerfile: `workers/Dockerfile`
-- Env template: `.env.railway.worker.production`
-- Command runtime: `npm run worker:generation`
-- Health path: `/health`
-
-Sandbox Railway:
-
-- Config Railway: `railway.json`
-- Dockerfile: `services/sandbox-runtime/Dockerfile`
-- Env template: `.env.railway.production`
-- Health path: `/health`
-- Root storage wajib: `/data/swift-sandbox`
-
-Dashboard Vercel:
-
-- Env utama production: `.env.production`
-- Health checker worker/sandbox:
-  - `lib/observability/external-runtime-health.ts`
-  - `lib/production/readiness.ts`
-  - `scripts/deploy-readiness.js`
-
-## Implementasi Repo Yang Sudah Dikerjakan
-
-Bagian ini sudah diterapkan di codebase lokal dan siap dipush/deploy:
-
-- [x] Guard placeholder `SWIFT_WORKER_HEALTH_URL` di `lib/env.ts`, supaya nilai seperti `https://<your-worker-service>.up.railway.app/health` dianggap missing.
-- [x] Guard placeholder worker URL di `scripts/deploy-readiness.js`, supaya readiness check tidak mencoba fetch URL palsu.
-- [x] Template env worker Railway `.env.railway.worker.production`.
-- [x] Validasi preview tidak lagi dianggap failed saat file hasil generate memang belum tersedia.
-- [x] Tombol `Validate preview` disabled sampai ada file nyata yang bisa divalidasi.
-- [x] Regression contract untuk config worker Railway, template env worker, dan normalisasi placeholder worker URL.
-
-Yang belum bisa diselesaikan dari repo lokal:
-
-- [ ] Membuat service Railway `swift-generation-worker`.
-- [ ] Mengisi secret Railway/Vercel dengan nilai production asli.
-- [ ] Mengambil URL publik worker Railway.
-- [ ] Redeploy Vercel production dan sandbox Railway dari dashboard/platform.
-
-## Urutan Perbaikan Yang Disarankan
-
-Jangan mulai dari replay dead-letter queue. Job akan gagal ulang kalau worker dan sandbox belum sehat.
-
-Urutan yang benar:
-
-1. Push dan deploy code terbaru ke Vercel production.
-2. Deploy dedicated worker di Railway.
-3. Ambil URL publik worker.
-4. Isi `SWIFT_WORKER_HEALTH_URL` di Vercel production.
-5. Redeploy Vercel production.
-6. Redeploy sandbox runtime Railway dari commit terbaru.
-7. Pastikan sandbox health punya `runtime.storage`.
-8. Cek production health sampai blocking failures hilang.
-9. Baru replay dead-letter queue dan jalankan ulang prompt.
-
-## Langkah 0: Deploy Code Terbaru Ke Vercel
-
-Health live masih menunjukkan Vercel production mencoba membaca placeholder ini sebagai URL aktif:
+Vercel logs menunjukkan request generate berhasil diterima:
 
 ```txt
-https://<your-worker-service>.up.railway.app/health
+POST /api/generate/jobs -> 202
+GET /api/generate/jobs/.../stream -> 200
+frontend_notified
 ```
 
-Di repo lokal sudah ada guard agar placeholder seperti itu dianggap missing. Jadi sebelum menguji ulang health production, pastikan perubahan repo terbaru sudah:
-
-- masuk GitHub
-- terdeploy ke Vercel production
-- tidak masih memakai deployment lama
-
-Target setelah deploy code terbaru:
-
-- `SWIFT_WORKER_HEALTH_URL` placeholder dilaporkan sebagai missing atau invalid env, bukan dicoba fetch sebagai endpoint
-- error `Failed to parse URL from https://<your-worker-service>...` hilang
-
-## Langkah 1: Deploy Dedicated Worker Di Railway
-
-Buat service baru di Railway untuk worker. Jangan gabungkan dengan sandbox runtime.
-
-Konfigurasi service:
+Runtime health menunjukkan job gagal di provider AI:
 
 ```txt
-Service name: swift-generation-worker
-Source: GitHub repo SW
-Config file: railway.worker.json
-Dockerfile: workers/Dockerfile
-Healthcheck path: /health
-Port: 4000
+eventType: generation_failed
+eventType: worker_failed
+eventType: dead_lettered
+reason: SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED
 ```
 
-Variables yang dimasukkan ke Railway worker memakai template:
+Provider health terakhir:
 
 ```txt
-.env.railway.worker.production
+deepseek/deepseek-v4-pro = healthy
+openai/gpt-oss-120b:free = degraded, 503 Provider returned error
 ```
 
-Wajib diganti dari placeholder:
+Artinya fallback gratis sedang tidak stabil atau tidak tersedia untuk request ini.
+
+## Area Yang Perlu Diperbaiki
+
+### 1. Samakan Model Chain Di Vercel Dan Railway Worker
+
+Karena generate berjalan di Railway worker, env AI harus benar di **dua tempat**:
 
 ```txt
-DATABASE_URL
-DIRECT_DATABASE_URL
-REDIS_URL
+Vercel Production
+Railway service ingenious-appreciation
+```
+
+Cek variable berikut di Vercel dan Railway worker:
+
+```txt
 OPENROUTER_API_KEY
-SANDBOX_SERVICE_TOKEN
-NEXT_PUBLIC_SUPABASE_URL
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY
-SUPABASE_SERVICE_ROLE_KEY
-SUPABASE_STORAGE_BUCKET
+OPENROUTER_BASE_URL
+SWIFT_AI_MODEL_CHAIN
+SWIFT_PRIMARY_MODEL
+SWIFT_FALLBACK_MODEL_1
+SWIFT_FALLBACK_MODEL_2
+SWIFT_FALLBACK_MODEL_3
+OPENROUTER_MAX_TOKENS
+AI_MAX_OUTPUT_TOKENS
+AI_TIMEOUT_MS
+AI_QUEUE_TIMEOUT_MS
+SWIFT_GENERATION_JOB_TIMEOUT_MS
 ```
 
-Nilai penting yang harus tetap seperti ini:
+Prioritas:
+
+- `OPENROUTER_API_KEY` harus aktif dan punya kuota.
+- Jangan jadikan model yang sedang `503` sebagai fallback utama.
+- Model chain di Vercel dan Railway worker harus sama.
+- Setelah env berubah, redeploy Vercel dan restart/redeploy Railway worker.
+
+### 2. Hapus Fallback Yang Sedang Bermasalah
+
+Saat audit, model ini terdeteksi degraded:
 
 ```txt
-NODE_ENV=production
-PORT=4000
-SWIFT_WORKER_HEALTH_PORT=4000
-SWIFT_WORKER_TYPE=generation
-SWIFT_GENERATION_EXECUTION_MODE=queue
-SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true
-SWIFT_ENABLE_GENERATION_WORKER=true
+openai/gpt-oss-120b:free
 ```
 
-Target hasil:
+Untuk stabilisasi awal, jangan pakai model itu sebagai fallback production.
+
+Opsi sementara:
 
 ```txt
-https://<worker-service>.up.railway.app/health
+SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
 ```
 
-harus mengembalikan HTTP `200` dengan:
+Atau gunakan beberapa model berbayar/stabil yang sudah kamu pastikan tersedia di OpenRouter dashboard.
 
-```json
-{
-  "status": "healthy",
-  "mode": "queue"
-}
-```
+Catatan:
 
-## Langkah 2: Isi Worker URL Di Vercel Production
+- Satu model sehat lebih baik untuk test daripada chain panjang yang berisi fallback rusak.
+- Setelah test berhasil, baru tambahkan fallback lain satu per satu.
 
-Set environment variable Vercel production:
+### 3. Cek OpenRouter Dashboard
+
+Masuk ke OpenRouter dashboard dan cek:
+
+- API key aktif
+- credit/limit masih cukup
+- tidak kena rate limit
+- model utama tersedia
+- fallback model tersedia
+- tidak ada pembatasan provider untuk model yang dipilih
+
+Jika ada error quota/rate limit/provider unavailable, perbaiki di OpenRouter dulu sebelum replay job.
+
+### 4. Cek Railway Worker Logs
+
+Di Railway service:
 
 ```txt
-SWIFT_WORKER_HEALTH_URL=https://<worker-service>.up.railway.app/health
+ingenious-appreciation
 ```
 
-Jangan isi dengan placeholder.
-
-Set di Vercel Dashboard:
+Buka:
 
 ```txt
-Project -> Settings -> Environment Variables -> Production
+Deployments -> Deploy Logs
 ```
 
-Atau lewat CLI:
-
-```bash
-echo "https://<worker-service>.up.railway.app/health" | vercel env add SWIFT_WORKER_HEALTH_URL production
-```
-
-Setelah env diubah, redeploy production Vercel. Perubahan env Vercel tidak berlaku ke deployment lama.
-
-Target hasil:
-
-- `GENERATION_WORKER_RUNTIME` hilang
-- `workerRuntime.ok === true`
-- health tidak lagi menampilkan URL placeholder
-
-## Langkah 3: Pastikan Worker Menulis Heartbeat Ke Redis
-
-Worker dianggap sehat kalau Redis punya heartbeat fresh.
-
-Health production sebelumnya menunjukkan:
+Cari log:
 
 ```txt
-workerHeartbeat: null
+provider_attempt
+provider_attempt_failed
+provider_failover_exhausted
+generation_provider_failover_exhausted
+OpenRouter API error
+rate_limit
+timeout
+server_error
+invalid_output
 ```
 
-Setelah worker hidup, production health harus berubah menjadi heartbeat berisi data worker.
+Yang perlu dicatat:
+
+- model mana yang gagal
+- status code berapa
+- alasan `failureReason`
+- apakah gagal karena `503`, `timeout`, `rate_limit`, `auth`, atau `invalid_output`
+
+### 5. Jangan Replay Dead-Letter Dulu
+
+Saat audit terakhir ada job lama di dead-letter.
+
+Jangan replay dulu selama provider/model chain belum stabil, karena job lama akan gagal ulang.
+
+Urutan aman:
+
+1. Benarkan model chain.
+2. Restart/redeploy Railway worker.
+3. Redeploy Vercel production.
+4. Cek health production.
+5. Jalankan prompt baru yang kecil.
+6. Kalau prompt baru sukses, baru pertimbangkan replay dead-letter.
+
+## Langkah Eksekusi Pelan-Pelan
+
+### Langkah 1: Update Railway Worker Env
+
+Buka Railway:
+
+```txt
+Project miraculous-caring -> service ingenious-appreciation -> Variables
+```
+
+Update atau tambahkan:
+
+```txt
+SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
+```
+
+Untuk sementara kosongkan/hapus fallback yang sedang bermasalah jika ada:
+
+```txt
+SWIFT_FALLBACK_MODEL_1
+SWIFT_FALLBACK_MODEL_2
+SWIFT_FALLBACK_MODEL_3
+```
+
+Pastikan tetap ada:
+
+```txt
+OPENROUTER_API_KEY
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+AI_TIMEOUT_MS=500000
+AI_QUEUE_TIMEOUT_MS=500000
+SWIFT_GENERATION_JOB_TIMEOUT_MS=500000
+OPENROUTER_MAX_TOKENS=16000
+AI_MAX_OUTPUT_TOKENS=16000
+```
+
+Lalu redeploy/restart worker.
+
+### Langkah 2: Update Vercel Env
+
+Buka Vercel:
+
+```txt
+Project sw -> Settings -> Environment Variables -> Production
+```
+
+Samakan:
+
+```txt
+SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
+```
+
+Pastikan:
+
+```txt
+SWIFT_WORKER_HEALTH_URL=https://ingenious-appreciation-production.up.railway.app/health
+SANDBOX_SERVICE_URL=https://sanbox.ai-swift.biz.id
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+```
+
+Lalu redeploy production.
+
+### Langkah 3: Cek Health
+
+Buka:
+
+```txt
+https://www.ai-swift.biz.id/api/health?refreshProvider=true
+```
 
 Target:
 
 ```txt
-workerHeartbeatFresh: true
-```
-
-Jika worker endpoint sudah HTTP `200` tetapi heartbeat masih `null`, cek Railway worker logs:
-
-- apakah `worker_boot` muncul
-- apakah `worker_alive` muncul
-- apakah ada error `REDIS_URL`
-- apakah ada error schema guard atau Prisma
-- apakah Redis yang dipakai worker sama dengan Redis yang dipakai Vercel
-
-## Langkah 4: Redeploy Sandbox Runtime Railway
-
-Sandbox yang live masih stale karena health endpoint masih:
-
-```json
-{"ok":true,"service":"swift-sandbox-service"}
-```
-
-Padahal kode terbaru harus mengembalikan:
-
-```json
-{
-  "ok": true,
-  "service": "swift-sandbox-runtime",
-  "runtime": {
-    "storage": {
-      "availableBytes": 123456789,
-      "minFreeBytes": 268435456,
-      "ok": true
-    }
-  }
-}
-```
-
-Periksa service sandbox di Railway:
-
-```txt
-Config file: railway.json
-Dockerfile: services/sandbox-runtime/Dockerfile
-Healthcheck path: /health
-Volume mount path: /data
-SWIFT_SANDBOX_ROOT=/data/swift-sandbox
-```
-
-Variables yang dimasukkan ke Railway sandbox memakai template:
-
-```txt
-.env.railway.production
-```
-
-Wajib diganti dari placeholder:
-
-```txt
-SANDBOX_SERVICE_TOKEN
-SWIFT_SANDBOX_DATABASE_URL
-SWIFT_SANDBOX_DIRECT_DATABASE_URL
-```
-
-Target hasil:
-
-```txt
-https://swift-sandbox-service-production.up.railway.app/health
-```
-
-harus mengandung:
-
-- `service: "swift-sandbox-runtime"`
-- `runtime.rootReady: true`
-- `runtime.storage.availableBytes`
-- `runtime.storage.minFreeBytes`
-- `runtime.storage.ok: true`
-
-## Langkah 5: Verifikasi Vercel Env Production
-
-Pastikan Vercel production punya env ini:
-
-```txt
-SANDBOX_SERVICE_URL=https://swift-sandbox-service-production.up.railway.app
-SANDBOX_SERVICE_TOKEN=<token yang sama dengan Railway sandbox>
-SWIFT_WORKER_HEALTH_URL=https://<worker-service>.up.railway.app/health
-REDIS_URL=<native redis:// atau rediss://>
-SWIFT_GENERATION_EXECUTION_MODE=queue
-SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true
-VERDI_TEAM=<vercel team id>
-VERPRO_ACCES_TOKEN=<vercel deploy token>
-```
-
-Jangan masukkan env internal sandbox seperti ini ke Vercel dashboard kecuali memang dipakai untuk fallback lokal:
-
-```txt
-SWIFT_SANDBOX_ROOT=/data/swift-sandbox
-SWIFT_SANDBOX_DATABASE_URL=...
-SWIFT_SANDBOX_DIRECT_DATABASE_URL=...
-```
-
-Nilai tersebut milik service sandbox Railway.
-
-## Langkah 6: Cek Health Setelah Redeploy
-
-Cek sandbox:
-
-```bash
-curl https://swift-sandbox-service-production.up.railway.app/health
-```
-
-Cek production:
-
-```bash
-curl "https://www.ai-swift.biz.id/api/health?refreshProvider=true"
-```
-
-Target production health:
-
-```txt
 status=healthy
-deployment.status=ready
-worker=healthy
 blockingFailures=[]
-workerHeartbeatFresh=true
+workerRuntime.ok=true
 sandboxRuntime.ok=true
+providers.status=healthy
 ```
 
-Target yang harus hilang:
+Jika provider masih degraded, jangan lanjut ke replay dead-letter.
+
+### Langkah 4: Test Prompt Baru
+
+Jangan pakai job lama. Buat prompt kecil:
 
 ```txt
-GENERATION_WORKER_HEARTBEAT
-GENERATION_WORKER_RUNTIME
-SANDBOX_RUNTIME_HEALTH
+Buat landing page toko sepatu dengan hero, produk unggulan, dan CTA checkout sederhana.
 ```
 
-## Langkah 7: Replay Dead-Letter Queue
+Target sukses:
 
-Saat ini dead-letter queue berisi 3 job.
-
-Replay hanya setelah:
-
-- worker heartbeat fresh
-- sandbox runtime healthy
-- production health tidak blocked
-
-Kalau replay dilakukan sebelum itu, job kemungkinan gagal ulang.
-
-## Langkah 8: Test Prompt End-To-End
-
-Setelah health hijau:
-
-1. Buka project kosong yang tadi gagal.
-2. Kirim ulang prompt.
-3. Pastikan job masuk queue.
-4. Pastikan draft files muncul di Monaco/Explorer.
-5. Pastikan preview validation bisa diklik dan tidak berhenti di `No files available to validate`.
-6. Pastikan preview runtime berjalan.
-7. Pastikan Push GitHub dan Deploy Vercel hanya aktif setelah sandbox verified.
-
-## Tabel Root Cause Dan Fix
-
-| Masalah | Bukti Live | Fix |
-| --- | --- | --- |
-| Worker runtime invalid | `endpoint=https://<your-worker-service>.up.railway.app/health` | Deploy worker Railway dan isi URL asli di Vercel |
-| Worker heartbeat missing | `workerHeartbeat=null` | Pastikan worker process hidup dan memakai Redis yang sama |
-| Sandbox stale | `service=swift-sandbox-service` | Redeploy sandbox dari commit terbaru dengan `railway.json` |
-| Sandbox storage contract missing | tidak ada `runtime.storage` | Pastikan Dockerfile dan `server.mjs` terbaru dipakai |
-| Preview validation kosong | `generatedFiles.length=0` | Selesaikan worker/sandbox supaya draft files dibuat |
-
-## Checklist Eksekusi
-
-- [x] Guard placeholder worker URL di repo
-- [x] Siapkan template `.env.railway.worker.production`
-- [x] Tambahkan regression contract untuk worker config/env/placeholder URL
-- [x] Perbaiki UX preview validation saat file belum tersedia
-- [ ] Buat service Railway `swift-generation-worker`
-- [ ] Pakai `railway.worker.json`
-- [ ] Isi variables dari `.env.railway.worker.production`
-- [ ] Deploy worker sampai `/health` HTTP `200`
-- [ ] Copy URL worker asli
-- [ ] Set `SWIFT_WORKER_HEALTH_URL` di Vercel production
-- [ ] Redeploy Vercel production
-- [ ] Redeploy sandbox Railway dari commit terbaru
-- [ ] Pastikan volume sandbox mount ke `/data`
-- [ ] Pastikan sandbox env `SWIFT_SANDBOX_ROOT=/data/swift-sandbox`
-- [ ] Pastikan sandbox `/health` mengandung `runtime.storage`
-- [ ] Cek `/api/health?refreshProvider=true`
-- [ ] Replay dead-letter queue
-- [ ] Jalankan ulang prompt
-
-## Kriteria Selesai
-
-Production dianggap siap kalau:
-
-- `/api/health?refreshProvider=true` HTTP `200`
-- `blockingFailures` kosong
-- `workerHeartbeatFresh=true`
-- `workerRuntime.ok=true`
-- `sandboxRuntime.ok=true`
-- `sandboxRuntime.detail.runtime.storage.ok=true`
 - draft files muncul di editor
-- preview validation berjalan terhadap file nyata
+- preview tidak hanya scaffold kosong
+- error log tidak menampilkan `SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED`
+- preview validation bisa jalan setelah file tersedia
 
-## Referensi Platform
+### Langkah 5: Jika Masih Gagal
 
-- Railway variables: https://docs.railway.com/variables
-- Railway volumes: https://docs.railway.com/deploy/volumes
-- Railway healthchecks: https://docs.railway.com/reference/healthchecks
-- Vercel environment variables: https://vercel.com/docs/environment-variables
-- Vercel CLI env: https://vercel.com/docs/cli/env
+Jika prompt baru masih gagal, ambil log dari Railway worker:
+
+```txt
+Deploy Logs -> cari provider_attempt_failed
+```
+
+Lalu catat:
+
+```txt
+model
+failureReason
+statusCode
+message
+```
+
+Kemungkinan perbaikan lanjutan:
+
+- jika `auth`: rotasi/perbaiki `OPENROUTER_API_KEY`
+- jika `rate_limit`: tambah credit/limit atau turunkan concurrency
+- jika `server_error` atau `503`: ganti model/fallback
+- jika `timeout`: kurangi ukuran output atau tambah timeout
+- jika `invalid_output`: perlu patch prompt/validator agar output model lebih mudah diparse
+
+## Checklist
+
+- [x] Worker Railway online
+- [x] Worker `/health` healthy
+- [x] Worker heartbeat fresh
+- [x] Queue Redis healthy
+- [x] Sandbox `/health` healthy
+- [x] Production health tidak blocked
+- [x] Template `.env.railway.worker.production` diisi dengan model chain stabil
+- [x] Template `.env.railway.production` diisi dengan custom domain sandbox sehat
+- [x] Template `.env.example` diisi sebagai checklist Vercel Production
+- [x] File env lokal ignored diselaraskan agar tidak memakai fallback gratis bermasalah
+- [ ] Set model chain stabil di Railway worker
+- [ ] Set model chain stabil di Vercel production
+- [ ] Redeploy/restart Railway worker
+- [ ] Redeploy Vercel production
+- [ ] Cek provider health
+- [ ] Test prompt baru
+- [ ] Audit Railway worker logs jika provider masih failover
+- [ ] Replay dead-letter hanya setelah prompt baru sukses
+
+## Catatan Keamanan
+
+Beberapa secret pernah terlihat di layar/chat. Setelah production stabil, rotasi:
+
+- OpenRouter API key
+- Redis password
+- Neon database password
+- Supabase service role key
+- Sandbox service token
+
+Jangan commit file lokal berisi secret:
+
+```txt
+.env
+.env.production
+.env.railway.production.local
+.env.railway.worker.production.local
+```

@@ -1,6 +1,7 @@
 # Swift Production Launch Checklist
 
 Swift is production-launchable only when the dashboard app and sandbox runtime are deployed as separate services.
+Production generation also requires a dedicated queue worker; do not rely on Vercel serverless fallback for live generation.
 
 ## Required Services
 
@@ -8,6 +9,7 @@ Swift is production-launchable only when the dashboard app and sandbox runtime a
 - Neon PostgreSQL: primary application database through Prisma.
 - Supabase Storage: uploaded assets and prompt attachments.
 - Redis: BullMQ generation queue and rate-limit scaling.
+- Railway or VPS: dedicated generation worker service.
 - Railway or VPS: external sandbox runtime service.
 
 ## Required Production Env
@@ -23,6 +25,8 @@ Dashboard app:
 - `GOOGLE_CLIENT_SECRET`
 - `OPENROUTER_API_KEY`
 - Optional OpenRouter gateway metadata: `OPENROUTER_BASE_URL`, `OPENROUTER_SITE_URL`, `OPENROUTER_APP_NAME`
+- `SWIFT_AI_MODEL_CHAIN`
+- `SWIFT_WORKER_HEALTH_URL`
 - `REDIS_URL`
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`
@@ -31,6 +35,19 @@ Dashboard app:
 - `SANDBOX_SERVICE_URL`
 - `SANDBOX_SERVICE_TOKEN`
 - `VERDI_TEAM`
+
+Generation worker:
+
+- `DATABASE_URL`
+- `DIRECT_DATABASE_URL`
+- `REDIS_URL`
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_BASE_URL`
+- `SWIFT_AI_MODEL_CHAIN`
+- `SWIFT_GENERATION_EXECUTION_MODE=queue`
+- `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`
+- `SANDBOX_SERVICE_URL`
+- `SANDBOX_SERVICE_TOKEN`
 
 Sandbox runtime:
 
@@ -63,7 +80,9 @@ Before marketing Swift publicly:
 
 1. Run `npm run build`.
 2. Run `npm run db:push:prod`.
-3. Deploy `services/sandbox-runtime` to Railway or a locked-down VPS.
-4. Set `SANDBOX_SERVICE_URL` and `SANDBOX_SERVICE_TOKEN` on Vercel.
-5. Verify a prompt can generate, build, preview, upload an attachment, and deploy.
-6. Verify production readiness reports no required missing env vars.
+3. Deploy the dedicated generation worker to Railway or a locked-down VPS.
+4. Deploy `services/sandbox-runtime` to Railway or a locked-down VPS.
+5. Set `SWIFT_WORKER_HEALTH_URL`, `SANDBOX_SERVICE_URL`, and `SANDBOX_SERVICE_TOKEN` on Vercel.
+6. Keep `SWIFT_AI_MODEL_CHAIN` identical in Vercel Production and the generation worker.
+7. Verify a prompt can generate, build, preview, upload an attachment, and deploy.
+8. Verify production readiness reports no required missing env vars.
