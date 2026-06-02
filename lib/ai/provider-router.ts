@@ -161,6 +161,26 @@ function recordAttempt(attempts: ProviderAttemptLog[], attempt: ProviderAttemptL
   recordProviderAttemptMetric(attempt)
 }
 
+function summarizeProviderAttempts(attempts: ProviderAttemptLog[]) {
+  return attempts.map((attempt) => ({
+    provider: attempt.provider,
+    internalModel: attempt.modelName,
+    status: attempt.status,
+    failureReason: attempt.failureReason || null,
+    statusCode: attempt.statusCode || null,
+    latencyMs: attempt.latencyMs,
+    requestId: attempt.requestId || null,
+    error: attempt.errorMessage ? redactAiSecret(attempt.errorMessage).slice(0, 500) : null,
+  }))
+}
+
+function lastProviderAttempt(attempts: ProviderAttemptLog[]) {
+  const [last] = attempts.slice(-1)
+  if (!last) return null
+
+  return summarizeProviderAttempts([last])[0]
+}
+
 export class SwiftProviderFailureError extends Error {
   attempts: ProviderAttemptLog[]
   selectedTier: SwiftTierKey
@@ -319,6 +339,15 @@ export class ProviderRouter {
         latencyMs: 0,
         errorMessage: "OpenRouter circuit breaker is cooling down after repeated failures.",
       })
+      log("error", "provider_failover_exhausted", {
+        provider: "openrouter",
+        tier: tier.key,
+        reason: "provider_circuit_open",
+        targetCount: targets.length,
+        totalAttempts: attempts.length,
+        attempts: summarizeProviderAttempts(attempts),
+        lastAttempt: lastProviderAttempt(attempts),
+      })
       throw new SwiftProviderFailureError(tier.key, attempts)
     }
 
@@ -413,7 +442,12 @@ export class ProviderRouter {
           log("error", "provider_failover_exhausted", {
             provider: "openrouter",
             tier: tier.key,
+            reason: "max_attempts_reached",
+            targetCount: targets.length,
+            maxAttemptsForChain,
             totalAttempts,
+            attempts: summarizeProviderAttempts(attempts),
+            lastAttempt: lastProviderAttempt(attempts),
           })
           throw new SwiftProviderFailureError(tier.key, attempts)
         }
@@ -557,22 +591,24 @@ export class ProviderRouter {
       }
     }
 
+      const summarizedAttempts = summarizeProviderAttempts(attempts)
+      const lastAttempt = lastProviderAttempt(attempts)
+
       log("warn", "Swift AI OpenRouter request exhausted", {
       selectedTier: tier.key,
-      attempts: attempts.map((attempt) => ({
-        provider: attempt.provider,
-        internalModel: attempt.modelName,
-        status: attempt.status,
-        failureReason: attempt.failureReason,
-        statusCode: attempt.statusCode,
-        latencyMs: attempt.latencyMs,
-      })),
+      attempts: summarizedAttempts,
+      lastAttempt,
     })
 
       log("error", "provider_failover_exhausted", {
       provider: "openrouter",
       tier: tier.key,
+      reason: "chain_exhausted",
+      targetCount: targets.length,
+      maxAttemptsForChain,
       totalAttempts,
+      attempts: summarizedAttempts,
+      lastAttempt,
     })
       throw new SwiftProviderFailureError(tier.key, attempts)
     } finally {

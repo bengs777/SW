@@ -7,6 +7,11 @@ function read(file) {
   return fs.readFileSync(path.join(root, file), "utf8")
 }
 
+function readOptional(file) {
+  const fullPath = path.join(root, file)
+  return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : ""
+}
+
 function assert(name, pass, detail) {
   if (!pass) {
     const error = new Error(`${name}: ${detail}`)
@@ -21,7 +26,8 @@ function main() {
   const workerEntry = read("workers/index.ts")
   const workerDockerfile = read("workers/Dockerfile")
   const workerRailwayConfig = read("railway.worker.json")
-  const workerRailwayEnv = read(".env.railway.worker.production")
+  const gitignore = read(".gitignore")
+  const workerRailwayEnv = readOptional(".env.railway.worker.production")
   const sandboxDockerfile = read("services/sandbox-runtime/Dockerfile")
   const runTsScript = read("scripts/run-ts-script.js")
   const workerHealthRoute = read("app/api/worker/health/route.ts")
@@ -92,15 +98,10 @@ function main() {
 
   assert(
     "worker.railway-env-template",
-    (workerRailwayEnv.trim().length === 0 ||
-      (/SWIFT_WORKER_TYPE=generation/.test(workerRailwayEnv) &&
-        /SWIFT_WORKER_HEALTH_PORT=4000/.test(workerRailwayEnv) &&
-        /SWIFT_GENERATION_EXECUTION_MODE=queue/.test(workerRailwayEnv) &&
-        /REDIS_URL=REPLACE_WITH_NATIVE_REDIS_URL/.test(workerRailwayEnv) &&
-        /SANDBOX_SERVICE_TOKEN=REPLACE_WITH_RAILWAY_SANDBOX_TOKEN/.test(workerRailwayEnv))) &&
-      !/postgres(?:ql)?:\/\//i.test(workerRailwayEnv) &&
-      !/sk-or-v1-|sb_secret_|GOCSPX-/i.test(workerRailwayEnv),
-    "Railway worker env template is queue-mode when present and safe to commit"
+    /\.env\*/.test(gitignore) &&
+      !/SWIFT_FALLBACK_MODEL_[123]=\S+/.test(workerRailwayEnv) &&
+      !/OPENROUTER_FREE_MODEL=\S+/.test(workerRailwayEnv),
+    "Railway worker env files are ignored, local-only, and do not reintroduce degraded free fallbacks"
   )
 
   assert(

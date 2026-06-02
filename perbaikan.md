@@ -1,190 +1,51 @@
-# Rencana Perbaikan Error Generate Swift AI
+# Rencana Perbaikan Swift AI Production
 
-Tanggal audit: 2026-06-02 18:10 WIB
+Tanggal audit: 2026-06-02
 
-Dokumen ini fokus pada error UI terbaru:
+Dokumen ini merangkum error yang terlihat di dashboard Swift, log yang sudah dikirim, dan langkah perbaikan sampai production siap dites ulang.
+
+## Ringkasan Kondisi
+
+Error utama di UI:
 
 ```txt
 Swift AI sedang mengalami gangguan sementara. Saldo Rupiah kamu otomatis dikembalikan jika generate gagal. Coba lagi sebentar lagi.
 ```
 
-Error internal yang terlihat:
+Pesan ini biasanya muncul ketika worker gagal menyelesaikan request AI sampai semua percobaan provider habis:
 
 ```txt
 SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED
 ```
 
-## Kesimpulan Singkat
-
-Masalah sekarang bukan lagi Railway worker, Redis queue, sandbox runtime, database, auth, atau Vercel deploy.
-
-Masalah sekarang ada di bagian:
-
-```txt
-AI Provider / OpenRouter model chain
-```
-
-Flow yang terjadi:
-
-```txt
-UI submit prompt
--> POST /api/generate/jobs sukses 202
--> job masuk queue
--> worker Railway mengambil job
--> worker memanggil OpenRouter/model chain
--> semua attempt provider gagal
--> job masuk dead-letter
--> UI menampilkan pesan gangguan sementara
-```
-
-## Status Infrastruktur
-
-Production health sudah hijau dari sisi infrastruktur:
-
-```txt
-https://www.ai-swift.biz.id/api/health?refreshProvider=true
-```
-
-Target yang sudah tercapai:
-
-- `status: healthy`
-- `deployment: ok`
-- `worker: ok`
-- `queue: ok`
-- `blockingFailures: []`
-- `workerRuntime.ok: true`
-- `workerHeartbeatFresh: true`
-- `sandboxRuntime.ok: true`
-
-Worker Railway sehat:
-
-```txt
-https://ingenious-appreciation-production.up.railway.app/health
-```
-
-Sandbox Railway sehat:
-
-```txt
-https://sanbox.ai-swift.biz.id/health
-```
-
-## Bukti Error Saat Ini
-
-Vercel logs menunjukkan request generate berhasil diterima:
+Log yang terakhir dikirim bukan log Railway, tetapi log Vercel. Dari log Vercel, sisi web/API terlihat sehat:
 
 ```txt
 POST /api/generate/jobs -> 202
 GET /api/generate/jobs/.../stream -> 200
-frontend_notified
+GET /api/generate/jobs/.../draft -> 200
+GET /api/models -> 200
+GET /api/projects/... -> 200
+GET /api/auth/session -> 200
 ```
 
-Runtime health menunjukkan job gagal di provider AI:
+Artinya tombol generate, API Vercel, session, stream, dan draft endpoint berjalan. Masalah tersisa paling mungkin ada di worker Railway saat memanggil OpenRouter/model AI.
+
+## Daftar Hal Yang Perlu Diperbaiki
+
+### 1. Ambil Log Railway Worker Yang Benar
+
+Status: belum selesai.
+
+Yang dibutuhkan sekarang adalah log dari service:
 
 ```txt
-eventType: generation_failed
-eventType: worker_failed
-eventType: dead_lettered
-reason: SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED
+Railway -> ingenious-appreciation -> Deployments -> Deploy Logs
 ```
 
-Provider health terakhir:
+Cari kata berikut:
 
 ```txt
-deepseek/deepseek-v4-pro = healthy
-openai/gpt-oss-120b:free = degraded, 503 Provider returned error
-```
-
-Artinya fallback gratis sedang tidak stabil atau tidak tersedia untuk request ini.
-
-## Area Yang Perlu Diperbaiki
-
-### 1. Samakan Model Chain Di Vercel Dan Railway Worker
-
-Karena generate berjalan di Railway worker, env AI harus benar di **dua tempat**:
-
-```txt
-Vercel Production
-Railway service ingenious-appreciation
-```
-
-Cek variable berikut di Vercel dan Railway worker:
-
-```txt
-OPENROUTER_API_KEY
-OPENROUTER_BASE_URL
-SWIFT_AI_MODEL_CHAIN
-SWIFT_PRIMARY_MODEL
-SWIFT_FALLBACK_MODEL_1
-SWIFT_FALLBACK_MODEL_2
-SWIFT_FALLBACK_MODEL_3
-OPENROUTER_MAX_TOKENS
-AI_MAX_OUTPUT_TOKENS
-AI_TIMEOUT_MS
-AI_QUEUE_TIMEOUT_MS
-SWIFT_GENERATION_JOB_TIMEOUT_MS
-```
-
-Prioritas:
-
-- `OPENROUTER_API_KEY` harus aktif dan punya kuota.
-- Jangan jadikan model yang sedang `503` sebagai fallback utama.
-- Model chain di Vercel dan Railway worker harus sama.
-- Setelah env berubah, redeploy Vercel dan restart/redeploy Railway worker.
-
-### 2. Hapus Fallback Yang Sedang Bermasalah
-
-Saat audit, model ini terdeteksi degraded:
-
-```txt
-openai/gpt-oss-120b:free
-```
-
-Untuk stabilisasi awal, jangan pakai model itu sebagai fallback production.
-
-Opsi sementara:
-
-```txt
-SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
-```
-
-Atau gunakan beberapa model berbayar/stabil yang sudah kamu pastikan tersedia di OpenRouter dashboard.
-
-Catatan:
-
-- Satu model sehat lebih baik untuk test daripada chain panjang yang berisi fallback rusak.
-- Setelah test berhasil, baru tambahkan fallback lain satu per satu.
-
-### 3. Cek OpenRouter Dashboard
-
-Masuk ke OpenRouter dashboard dan cek:
-
-- API key aktif
-- credit/limit masih cukup
-- tidak kena rate limit
-- model utama tersedia
-- fallback model tersedia
-- tidak ada pembatasan provider untuk model yang dipilih
-
-Jika ada error quota/rate limit/provider unavailable, perbaiki di OpenRouter dulu sebelum replay job.
-
-### 4. Cek Railway Worker Logs
-
-Di Railway service:
-
-```txt
-ingenious-appreciation
-```
-
-Buka:
-
-```txt
-Deployments -> Deploy Logs
-```
-
-Cari log:
-
-```txt
-provider_attempt
 provider_attempt_failed
 provider_failover_exhausted
 generation_provider_failover_exhausted
@@ -195,93 +56,117 @@ server_error
 invalid_output
 ```
 
-Yang perlu dicatat:
+Kemungkinan arti error:
 
-- model mana yang gagal
-- status code berapa
-- alasan `failureReason`
-- apakah gagal karena `503`, `timeout`, `rate_limit`, `auth`, atau `invalid_output`
+- `401` atau `403`: OpenRouter API key salah, expired, atau tidak punya akses.
+- `429`: rate limit atau credit OpenRouter habis.
+- `503`: model/provider OpenRouter sedang down.
+- `timeout`: model terlalu lama menjawab.
+- `invalid_output`: model menjawab, tetapi format output tidak valid untuk parser Swift.
 
-### 5. Jangan Replay Dead-Letter Dulu
+### 2. Pastikan Env Worker Railway Sudah Benar
 
-Saat audit terakhir ada job lama di dead-letter.
+Status: perlu dicek ulang di dashboard Railway.
 
-Jangan replay dulu selama provider/model chain belum stabil, karena job lama akan gagal ulang.
-
-Urutan aman:
-
-1. Benarkan model chain.
-2. Restart/redeploy Railway worker.
-3. Redeploy Vercel production.
-4. Cek health production.
-5. Jalankan prompt baru yang kecil.
-6. Kalau prompt baru sukses, baru pertimbangkan replay dead-letter.
-
-## Langkah Eksekusi Pelan-Pelan
-
-### Langkah 1: Update Railway Worker Env
-
-Buka Railway:
+Service:
 
 ```txt
-Project miraculous-caring -> service ingenious-appreciation -> Variables
+ingenious-appreciation
 ```
 
-Update atau tambahkan:
+File lokal acuan:
+
+```txt
+.env.railway.worker.production
+```
+
+Nilai penting yang harus ada:
 
 ```txt
 SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
+SWIFT_PRIMARY_MODEL=deepseek/deepseek-v4-pro
+SWIFT_AI_FREE_MODE=false
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+SANDBOX_SERVICE_URL=https://sanbox.ai-swift.biz.id
+SANDBOX_PUBLIC_BASE_URL=https://sanbox.ai-swift.biz.id
 ```
 
-Untuk sementara kosongkan/hapus fallback yang sedang bermasalah jika ada:
+Nilai yang jangan dipakai dulu:
 
 ```txt
 SWIFT_FALLBACK_MODEL_1
 SWIFT_FALLBACK_MODEL_2
 SWIFT_FALLBACK_MODEL_3
+OPENROUTER_FREE_MODEL
 ```
 
-Pastikan tetap ada:
+Kenapa:
+
+- Fallback free model sebelumnya pernah terdeteksi `503`.
+- Untuk stabilisasi, gunakan satu model yang sehat dulu.
+- Setelah prompt kecil sukses, fallback bisa ditambahkan satu per satu.
+
+### 3. Pastikan Env Sandbox Railway Sudah Benar
+
+Status: perlu dicek ulang di dashboard Railway.
+
+Service:
 
 ```txt
-OPENROUTER_API_KEY
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-AI_TIMEOUT_MS=500000
-AI_QUEUE_TIMEOUT_MS=500000
-SWIFT_GENERATION_JOB_TIMEOUT_MS=500000
-OPENROUTER_MAX_TOKENS=16000
-AI_MAX_OUTPUT_TOKENS=16000
+SW
 ```
 
-Lalu redeploy/restart worker.
-
-### Langkah 2: Update Vercel Env
-
-Buka Vercel:
+File lokal acuan:
 
 ```txt
-Project sw -> Settings -> Environment Variables -> Production
+.env.railway.production
 ```
 
-Samakan:
+Nilai penting:
 
 ```txt
-SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
+PORT=8080
+SANDBOX_PUBLIC_BASE_URL=https://sanbox.ai-swift.biz.id
+SWIFT_SANDBOX_ROOT=/data/swift-sandbox
+SWIFT_SANDBOX_BASE_PORT=4300
 ```
 
-Pastikan:
+Cek health:
 
 ```txt
+https://sanbox.ai-swift.biz.id/health
+```
+
+Target:
+
+```txt
+healthy
+storage ok
+rootReady true
+```
+
+### 4. Pastikan Env Vercel Production Sudah Benar
+
+Status: perlu dicek ulang di dashboard Vercel.
+
+File lokal acuan:
+
+```txt
+.env.production
+```
+
+Nilai penting:
+
+```txt
+SWIFT_GENERATION_EXECUTION_MODE=queue
+SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true
 SWIFT_WORKER_HEALTH_URL=https://ingenious-appreciation-production.up.railway.app/health
 SANDBOX_SERVICE_URL=https://sanbox.ai-swift.biz.id
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+SWIFT_AI_MODEL_CHAIN=openrouter:deepseek/deepseek-v4-pro
+SWIFT_AI_FREE_MODE=false
 ```
 
-Lalu redeploy production.
-
-### Langkah 3: Cek Health
-
-Buka:
+Cek health:
 
 ```txt
 https://www.ai-swift.biz.id/api/health?refreshProvider=true
@@ -290,18 +175,138 @@ https://www.ai-swift.biz.id/api/health?refreshProvider=true
 Target:
 
 ```txt
-status=healthy
-blockingFailures=[]
-workerRuntime.ok=true
-sandboxRuntime.ok=true
-providers.status=healthy
+status: healthy
+blockingFailures: []
+workerRuntime.ok: true
+sandboxRuntime.ok: true
 ```
 
-Jika provider masih degraded, jangan lanjut ke replay dead-letter.
+### 5. Investigasi Badge Warning Di Railway Worker
 
-### Langkah 4: Test Prompt Baru
+Status: perlu dicek.
 
-Jangan pakai job lama. Buat prompt kecil:
+Di screenshot Railway, service `ingenious-appreciation` online tetapi ada badge warning `1`.
+
+Yang harus dibuka:
+
+```txt
+Railway -> ingenious-appreciation -> Deployments / Metrics / Logs
+```
+
+Kemungkinan penyebab:
+
+- Healthcheck pernah gagal saat deploy.
+- Service punya failed job/dead-letter.
+- Env berubah tetapi belum redeploy.
+- Runtime warning dari worker.
+- Resource/plan warning.
+
+Catat isi warning sebelum melakukan replay job lama.
+
+### 6. Jangan Replay Dead-Letter Sebelum Prompt Baru Sukses
+
+Status: wajib diikuti.
+
+Jika ada job lama di dead-letter, jangan replay dulu.
+
+Urutan aman:
+
+1. Betulkan env.
+2. Redeploy worker.
+3. Redeploy sandbox jika env sandbox berubah.
+4. Redeploy Vercel.
+5. Test prompt baru kecil.
+6. Jika prompt baru sukses, baru urus dead-letter.
+
+Kenapa:
+
+- Job lama bisa gagal ulang karena memakai kondisi provider/env lama.
+- Replay sebelum provider stabil akan menambah noise di log.
+
+### 7. Cek OpenRouter Dashboard
+
+Status: perlu dicek jika worker log menunjukkan provider error.
+
+Cek:
+
+- API key aktif.
+- Credit cukup.
+- Tidak kena rate limit.
+- Model `deepseek/deepseek-v4-pro` tersedia.
+- Tidak ada pembatasan provider.
+
+Jika worker log menunjukkan:
+
+```txt
+rate_limit
+quota
+insufficient credits
+provider unavailable
+```
+
+Maka perbaikan dilakukan di OpenRouter, bukan di kode.
+
+### 8. Security Cleanup Setelah Stabil
+
+Status: setelah production sukses.
+
+Beberapa secret pernah terlihat di file/chat/screenshot. Setelah production stabil, rotasi:
+
+- OpenRouter API key
+- Redis password
+- Neon database password
+- Supabase service role key
+- Sandbox service token
+- Token deploy Vercel jika masih dipakai
+
+Pastikan file env tetap tidak masuk Git:
+
+```txt
+git ls-files -- .env*
+```
+
+Output harus kosong.
+
+## Rencana Eksekusi Berurutan
+
+### Langkah 1: Redeploy Dengan Env Terbaru
+
+Lakukan:
+
+1. Paste `.env.railway.worker.production` ke Railway `ingenious-appreciation`.
+2. Paste `.env.railway.production` ke Railway `SW`.
+3. Paste `.env.production` ke Vercel Production.
+4. Apply changes / redeploy semua service.
+
+Urutan redeploy:
+
+```txt
+Railway ingenious-appreciation
+Railway SW
+Vercel Production
+```
+
+### Langkah 2: Cek Health
+
+Buka:
+
+```txt
+https://ingenious-appreciation-production.up.railway.app/health
+https://sanbox.ai-swift.biz.id/health
+https://www.ai-swift.biz.id/api/health?refreshProvider=true
+```
+
+Target:
+
+```txt
+worker healthy
+sandbox healthy
+production blockingFailures kosong
+```
+
+### Langkah 3: Test Prompt Baru Kecil
+
+Gunakan prompt baru, jangan retry job lama:
 
 ```txt
 Buat landing page toko sepatu dengan hero, produk unggulan, dan CTA checkout sederhana.
@@ -309,72 +314,84 @@ Buat landing page toko sepatu dengan hero, produk unggulan, dan CTA checkout sed
 
 Target sukses:
 
-- draft files muncul di editor
-- preview tidak hanya scaffold kosong
-- error log tidak menampilkan `SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED`
-- preview validation bisa jalan setelah file tersedia
+- Error log tidak bertambah.
+- File hasil generate muncul.
+- Preview bukan hanya scaffold.
+- Sandbox validation bisa berjalan.
 
-### Langkah 5: Jika Masih Gagal
+### Langkah 4: Jika Masih Gagal, Ambil Log Worker
 
-Jika prompt baru masih gagal, ambil log dari Railway worker:
+Ambil dari:
 
 ```txt
-Deploy Logs -> cari provider_attempt_failed
+Railway -> ingenious-appreciation -> Deployments -> Deploy Logs
 ```
 
-Lalu catat:
+Kirim bagian yang mengandung:
+
+```txt
+provider_attempt_failed
+provider_failover_exhausted
+OpenRouter API error
+```
+
+Catat:
 
 ```txt
 model
-failureReason
 statusCode
+failureReason
 message
+jobId
+traceId
 ```
 
-Kemungkinan perbaikan lanjutan:
+### Langkah 5: Perbaiki Berdasarkan Kategori Error
 
-- jika `auth`: rotasi/perbaiki `OPENROUTER_API_KEY`
-- jika `rate_limit`: tambah credit/limit atau turunkan concurrency
-- jika `server_error` atau `503`: ganti model/fallback
-- jika `timeout`: kurangi ukuran output atau tambah timeout
-- jika `invalid_output`: perlu patch prompt/validator agar output model lebih mudah diparse
+Jika `auth` / `401` / `403`:
+
+- Rotasi OpenRouter key.
+- Update key di Vercel dan Railway worker.
+- Redeploy worker.
+
+Jika `rate_limit` / `429`:
+
+- Tambah credit/limit OpenRouter.
+- Turunkan `SWIFT_GENERATION_WORKER_CONCURRENCY` ke `1` sementara.
+
+Jika `server_error` / `503`:
+
+- Model sedang bermasalah.
+- Tunggu atau ganti model chain ke model OpenRouter yang sehat.
+- Jangan pakai fallback free yang sedang degraded.
+
+Jika `timeout`:
+
+- Kurangi output request.
+- Turunkan concurrency.
+- Pertahankan timeout besar.
+
+Jika `invalid_output`:
+
+- Perlu patch prompt/parser/validator.
+- Simpan raw output dan failure artifact untuk audit.
 
 ## Checklist
 
-- [x] Worker Railway online
-- [x] Worker `/health` healthy
-- [x] Worker heartbeat fresh
-- [x] Queue Redis healthy
-- [x] Sandbox `/health` healthy
-- [x] Production health tidak blocked
-- [x] Template `.env.railway.worker.production` diisi dengan model chain stabil
-- [x] Template `.env.railway.production` diisi dengan custom domain sandbox sehat
-- [x] Template `.env.example` diisi sebagai checklist Vercel Production
-- [x] File env lokal ignored diselaraskan agar tidak memakai fallback gratis bermasalah
-- [ ] Set model chain stabil di Railway worker
-- [ ] Set model chain stabil di Vercel production
-- [ ] Redeploy/restart Railway worker
-- [ ] Redeploy Vercel production
-- [ ] Cek provider health
-- [ ] Test prompt baru
-- [ ] Audit Railway worker logs jika provider masih failover
-- [ ] Replay dead-letter hanya setelah prompt baru sukses
-
-## Catatan Keamanan
-
-Beberapa secret pernah terlihat di layar/chat. Setelah production stabil, rotasi:
-
-- OpenRouter API key
-- Redis password
-- Neon database password
-- Supabase service role key
-- Sandbox service token
-
-Jangan commit file lokal berisi secret:
-
-```txt
-.env
-.env.production
-.env.railway.production.local
-.env.railway.worker.production.local
-```
+- [x] Tambahkan audit env lokal/Vercel/Railway tanpa mencetak secret
+- [x] Tambahkan log detail saat provider failover habis
+- [x] Sesuaikan regression contract agar file `.env*` tetap local-only dan tidak wajib di-track Git
+- [ ] Ambil log Railway worker yang benar dari `ingenious-appreciation`
+- [ ] Pastikan env worker Railway sudah sama dengan `.env.railway.worker.production`
+- [ ] Pastikan env sandbox Railway sudah sama dengan `.env.railway.production`
+- [ ] Pastikan env Vercel Production sudah sama dengan `.env.production`
+- [ ] Redeploy Railway worker
+- [ ] Redeploy Railway sandbox
+- [ ] Redeploy Vercel Production
+- [ ] Cek `/health` worker
+- [ ] Cek `/health` sandbox
+- [ ] Cek `/api/health?refreshProvider=true`
+- [ ] Test prompt baru kecil
+- [ ] Jika masih gagal, audit `provider_attempt_failed` dari Railway worker
+- [ ] Setelah sukses, baru urus dead-letter lama
+- [ ] Setelah stabil, rotasi semua secret yang pernah terlihat

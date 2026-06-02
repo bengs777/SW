@@ -21,6 +21,7 @@
     "postdeploy:health": "node scripts/post-deploy-health.js",
     "postdeploy:health:prod": "node scripts/post-deploy-health.js https://www.ai-swift.biz.id",
     "audit:production": "node scripts/production-audit.js",
+    "audit:production-env": "node scripts/production-env-audit.js",
     "schema:health": "node scripts/schema-health-check.js",
     "deploy:preflight": "npx prisma migrate status && node scripts/schema-health-check.js && npm run typecheck && npm run lint",
     "test:chaos": "node scripts/chaos-concurrency.js",
