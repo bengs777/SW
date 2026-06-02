@@ -6,7 +6,7 @@ const { loadEnvConfig } = require("@next/env")
 loadEnvConfig(process.cwd())
 
 const env = { ...process.env }
-env.NODE_ENV = env.NODE_ENV || "production"
+env.NODE_ENV = "production"
 
 const isWindows = process.platform === "win32"
 const isStrictPreflight =
