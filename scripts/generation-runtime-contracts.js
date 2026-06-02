@@ -20,6 +20,7 @@ function main() {
   const packageJson = JSON.parse(read("package.json"))
   const workerEntry = read("workers/index.ts")
   const workerDockerfile = read("workers/Dockerfile")
+  const sandboxDockerfile = read("services/sandbox-runtime/Dockerfile")
   const runTsScript = read("scripts/run-ts-script.js")
   const workerHealthRoute = read("app/api/worker/health/route.ts")
   const generationQueue = read("lib/queue/generation-queue.ts")
@@ -34,6 +35,7 @@ function main() {
   const previewPanel = read("components/editor/preview-panel.tsx")
   const errorLogPanel = read("components/editor/error-log-panel.tsx")
   const sandboxRuntimeServer = read("services/sandbox-runtime/server.mjs")
+  const sandboxHealthBlock = sandboxRuntimeServer.match(/app\.get\(\"\/health\"[\s\S]*?app\.get\(\"\/sandbox/ )?.[0] || ""
   const runtimeSandbox = read("lib/sandbox/runtime.ts")
   const sandboxRoute = read("app/api/projects/[id]/sandbox/route.ts")
   const externalRuntimeHealth = read("lib/observability/external-runtime-health.ts")
@@ -170,10 +172,13 @@ function main() {
 
   assert(
     "sandbox.health-detail",
-    /activeProjects/.test(sandboxRuntimeServer) &&
-      /rootReady/.test(sandboxRuntimeServer) &&
-      /storage/.test(sandboxRuntimeServer) &&
+    sandboxHealthBlock.includes('service: "swift-sandbox-runtime"') &&
+      sandboxHealthBlock.includes("rootReady: storageOk") &&
+      sandboxHealthBlock.includes("rootError: storageError") &&
+      sandboxHealthBlock.includes("storage,") &&
+      /activeProjects/.test(sandboxHealthBlock) &&
       /railway/.test(sandboxRuntimeServer) &&
+      /SWIFT_SANDBOX_ROOT=\/data\/swift-sandbox/.test(sandboxDockerfile) &&
       /sandbox_service_unavailable/.test(sandboxRoute) &&
       /service:\s*\{[\s\S]*tokenConfigured/.test(sandboxRoute),
     "sandbox runtime and proxy expose safe health details for Railway troubleshooting"

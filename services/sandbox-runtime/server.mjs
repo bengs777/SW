@@ -688,6 +688,9 @@ app.get("/health", async (_req, res) => {
       port: PORT,
       railway: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID),
       nodeEnv: process.env.NODE_ENV || "development",
+      rootReady: storageOk,
+      rootError: storageError,
+      storage,
     },
     sandbox: {
       activeProjects: states.size,
