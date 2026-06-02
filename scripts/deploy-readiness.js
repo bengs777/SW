@@ -257,13 +257,36 @@ async function sandboxRuntimeDiagnostic() {
   }
 
   const body = response.body && typeof response.body === "object" ? response.body : {}
-  const healthy = response.statusCode === 200 && body.ok !== false && (body.status === "healthy" || body.ok === true)
+  const runtime = body.runtime && typeof body.runtime === "object" ? body.runtime : {}
+  const storage = runtime.storage && typeof runtime.storage === "object"
+    ? runtime.storage
+    : body.storage && typeof body.storage === "object"
+      ? body.storage
+      : null
+  const hasStorageDetail = Boolean(storage)
+  const rootReady = runtime.rootReady !== false
+  const storageOk = Boolean(storage && storage.ok === true)
+  const availableBytes = typeof storage?.availableBytes === "number" ? storage.availableBytes : null
+  const minFreeBytes = typeof storage?.minFreeBytes === "number" ? storage.minFreeBytes : null
+  const healthy =
+    response.statusCode === 200 &&
+    body.ok !== false &&
+    hasStorageDetail &&
+    rootReady &&
+    storageOk &&
+    (body.status === "healthy" || body.ok === true)
 
   return {
     ok: healthy,
     detail: healthy
-      ? "Sandbox runtime health endpoint is healthy."
-      : `Sandbox runtime returned status ${body.status || "unknown"}.`,
+      ? `Sandbox runtime health endpoint is healthy with storage available ${availableBytes ?? "unknown"} bytes.`
+      : !hasStorageDetail
+        ? "Sandbox runtime health endpoint is missing runtime.storage. Redeploy the sandbox runtime service and ensure storage health is exposed."
+        : !rootReady
+          ? `Sandbox runtime root is not ready: ${runtime.rootError || "unknown root error"}.`
+          : !storageOk
+            ? `Sandbox runtime storage is not ready: availableBytes=${availableBytes ?? "unknown"}, minFreeBytes=${minFreeBytes ?? "unknown"}.`
+            : `Sandbox runtime returned status ${body.status || "unknown"}.`,
   }
 }
 

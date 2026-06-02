@@ -116,3 +116,33 @@ export function publicGenerationStructureErrorMessage(error: unknown) {
   }
   return message || "AI generated invalid project structure. Repair loop attempting automatic correction..."
 }
+
+export function publicGenerationRuntimeErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "")
+
+  if (/Sandbox storage exhausted|no space left on device|ENOSPC/i.test(message)) {
+    return "Sandbox storage penuh. Sistem belum bisa install dependency untuk preview. Tunggu sampai storage sandbox dibersihkan atau volume diperbesar, lalu jalankan ulang prompt."
+  }
+
+  if (
+    /Production generation must run in queue mode with a dedicated worker|GENERATION_WORKER_HEARTBEAT|worker.*missing|worker.*heartbeat|dedicated worker|SWIFT_WORKER_HEALTH_URL/i.test(message)
+  ) {
+    return "Swift production sedang menunggu dedicated worker. Pastikan worker generation aktif, lalu jalankan ulang prompt."
+  }
+
+  if (/Generation queue unavailable|Redis\/BullMQ|queue.*unavailable|queue_enqueue|BullMQ|dead-letter|dead letter/i.test(message)) {
+    return "Swift queue belum siap menerima job. Sistem akan aman jika Redis dan worker sudah sehat, lalu prompt bisa dijalankan ulang."
+  }
+
+  if (/SYSTEM_SATURATED|temporarily saturated/i.test(message)) {
+    return "Swift sedang penuh sementara. Tunggu sebentar lalu coba ulang prompt."
+  }
+
+  if (
+    /MALFORMED_GENERATED_ARTIFACT|Unrecognized key\(s\)|strict-json-schema|required|PATH_ERROR|diagnostic payload/i.test(message)
+  ) {
+    return publicGenerationStructureErrorMessage(error)
+  }
+
+  return message || "Generate gagal. Buka Logs untuk detail error."
+}

@@ -25,6 +25,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { DEFAULT_MODEL_KEY, DEFAULT_MODEL_OPTIONS } from "@/lib/ai/models"
 import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
 import { buildPreviewContextPacket } from "@/lib/ai/preview-context"
+import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
 import type { GeneratedFile, ModelOption, PreviewContext, PreviewViewport, PromptAttachment } from "@/lib/types"
 import {
@@ -257,21 +258,7 @@ export type ProviderStatus = {
 }
 
 function publicGenerationErrorMessage(message: string) {
-  if (/Production generation must run in queue mode with a dedicated worker/i.test(message)) {
-    return "Swift production sedang menunggu dedicated worker. Pastikan worker generation aktif, lalu jalankan ulang prompt."
-  }
-  if (/Generation queue unavailable|Redis\/BullMQ|queue.*unavailable|queue_enqueue/i.test(message)) {
-    return "Swift queue belum siap menerima job. Sistem akan aman jika Redis dan worker sudah sehat, lalu prompt bisa dijalankan ulang."
-  }
-  if (/SYSTEM_SATURATED|temporarily saturated/i.test(message)) {
-    return "Swift sedang penuh sementara. Tunggu sebentar lalu coba ulang prompt."
-  }
-  if (
-    /MALFORMED_GENERATED_ARTIFACT|Unrecognized key\(s\)|strict-json-schema|required|PATH_ERROR|diagnostic payload/i.test(message)
-  ) {
-    return "AI generated invalid project structure. Repair loop attempting automatic correction..."
-  }
-  return message
+  return publicGenerationRuntimeErrorMessage(message)
 }
 
 type GenerationQueueState =

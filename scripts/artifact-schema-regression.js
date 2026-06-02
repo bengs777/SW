@@ -63,7 +63,11 @@ function main() {
     parseGeneratedArtifact,
     summarizeArtifactContractError,
   } = loadModule("lib/ai/generated-artifact.ts")
-  const { parseRuntimeMessage, publicGenerationStructureErrorMessage } = loadModule("lib/ai/runtime-contracts.ts")
+  const {
+    parseRuntimeMessage,
+    publicGenerationRuntimeErrorMessage,
+    publicGenerationStructureErrorMessage,
+  } = loadModule("lib/ai/runtime-contracts.ts")
   const { SAFE_GENERATED_ROOT_FILES, validateGeneratedPath, formatGeneratedPathValidationError } =
     loadModule("lib/ai/file-policy.ts")
   const { buildPreviewModuleGraph } = loadModule("lib/preview/module-resolution.ts")
@@ -332,7 +336,7 @@ function main() {
 
   assert(
     "repair-loop.diagnostic-routing",
-    /publicGenerationStructureErrorMessage/.test(orchestrator) &&
+    /publicGenerationRuntimeErrorMessage/.test(orchestrator) &&
       /generation_slice_parse_retry/.test(orchestrator) &&
       /Repairing validation failure/.test(orchestrator) &&
       /artifact_parse_failed/.test(orchestrator) &&
@@ -353,10 +357,21 @@ function main() {
 
   assert(
     "frontend.public-schema-error",
-    /AI generated invalid project structure\. Repair loop attempting automatic correction\.\.\./.test(projectPage) &&
+    /publicGenerationRuntimeErrorMessage/.test(projectPage) &&
       publicGenerationStructureErrorMessage(new Error("MALFORMED_GENERATED_ARTIFACT:schema:artifact: Unrecognized key(s) in object: 'reason'")) ===
         "AI generated invalid project structure. Repair loop attempting automatic correction...",
     "frontend and shared helper hide raw schema dumps"
+  )
+
+  assert(
+    "frontend.public-runtime-error",
+    /publicGenerationRuntimeErrorMessage/.test(projectPage) &&
+      publicGenerationRuntimeErrorMessage(new Error("Sandbox storage exhausted before installing dependencies: available 0B, required 256MB.")) !==
+        "AI generated invalid project structure. Repair loop attempting automatic correction..." &&
+      /Sandbox storage penuh/.test(publicGenerationRuntimeErrorMessage(new Error("Sandbox storage exhausted before installing dependencies: available 0B, required 256MB."))) &&
+      /Swift production sedang menunggu dedicated worker/.test(publicGenerationRuntimeErrorMessage(new Error("GENERATION_WORKER_HEARTBEAT missing"))) &&
+      /Swift queue belum siap/.test(publicGenerationRuntimeErrorMessage(new Error("Generation queue unavailable"))),
+    "frontend and orchestrator distinguish sandbox, worker, queue, and artifact failures"
   )
 
   const nextLinkPreviewGraph = buildPreviewModuleGraph([

@@ -32,7 +32,7 @@ import {
   summarizeArtifactPayload,
   summarizeGeneratedFiles,
 } from "@/lib/ai/developer-diagnostics"
-import { publicGenerationStructureErrorMessage } from "@/lib/ai/runtime-contracts"
+import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
 import { ProviderRouter, SwiftProviderFailureError } from "@/lib/ai/provider-router"
 import { getSwiftTierConfig } from "@/lib/ai/swift-tiers"
 import { normalizePreviewContext } from "@/lib/ai/preview-context"
@@ -769,7 +769,7 @@ function publicGenerationErrorMessage(error: unknown) {
     return error.userMessage
   }
 
-  return publicGenerationStructureErrorMessage(error)
+  return publicGenerationRuntimeErrorMessage(error)
 }
 
 function publicArtifactParseError(error: unknown) {

@@ -36,6 +36,8 @@ function main() {
   const sandboxRuntimeServer = read("services/sandbox-runtime/server.mjs")
   const runtimeSandbox = read("lib/sandbox/runtime.ts")
   const sandboxRoute = read("app/api/projects/[id]/sandbox/route.ts")
+  const externalRuntimeHealth = read("lib/observability/external-runtime-health.ts")
+  const deployReadiness = read("scripts/deploy-readiness.js")
   const qualityService = read("lib/services/generation-quality.service.ts")
   const schema = read("prisma/schema.prisma")
   const diagnostics = read("lib/ai/developer-diagnostics.ts")
@@ -175,6 +177,16 @@ function main() {
       /sandbox_service_unavailable/.test(sandboxRoute) &&
       /service:\s*\{[\s\S]*tokenConfigured/.test(sandboxRoute),
     "sandbox runtime and proxy expose safe health details for Railway troubleshooting"
+  )
+
+  assert(
+    "sandbox.health-storage-required",
+    /sandboxStorageDiagnostic/.test(externalRuntimeHealth) &&
+      /runtime\.storage/.test(externalRuntimeHealth) &&
+      /hasStorageDetail/.test(externalRuntimeHealth) &&
+      /Sandbox health endpoint is missing runtime\.storage/.test(externalRuntimeHealth) &&
+      /Sandbox runtime health endpoint is missing runtime\.storage/.test(deployReadiness),
+    "app health and deploy readiness reject stale sandbox health endpoints without storage detail"
   )
 
   assert(
