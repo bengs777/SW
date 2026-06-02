@@ -76,6 +76,12 @@ function main() {
   )
 
   assert(
+    "worker.docker-postinstall-script",
+    /COPY scripts\/prisma-generate\.js \.\/scripts\/prisma-generate\.js[\s\S]*RUN npm ci/.test(workerDockerfile),
+    "worker dependency stage includes the Prisma postinstall script before npm ci"
+  )
+
+  assert(
     "worker.railway-config",
     /"dockerfilePath":\s*"workers\/Dockerfile"/.test(workerRailwayConfig) &&
       /"healthcheckPath":\s*"\/health"/.test(workerRailwayConfig),

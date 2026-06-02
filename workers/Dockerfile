@@ -8,6 +8,8 @@ RUN apk add --no-cache libc6-compat
 FROM base AS deps
 COPY package*.json ./
 COPY prisma ./prisma
+RUN mkdir -p scripts
+COPY scripts/prisma-generate.js ./scripts/prisma-generate.js
 RUN npm ci
 
 FROM base AS builder
