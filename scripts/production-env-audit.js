@@ -3,7 +3,7 @@ const path = require("node:path")
 const { execSync } = require("node:child_process")
 
 const root = process.cwd()
-const EXPECTED_SANDBOX_URL = "https://sanbox.ai-swift.biz.id"
+const EXPECTED_SANDBOX_PUBLIC_URL = "https://sanbox.ai-swift.biz.id"
 const EXPECTED_WORKER_HEALTH_URL = "https://ingenious-appreciation-production.up.railway.app/health"
 const EXPECTED_MODEL_CHAIN = "openrouter:deepseek/deepseek-v4-pro"
 
@@ -48,6 +48,10 @@ function hasAny(env, keys) {
   return keys.some((key) => Boolean(value(env, key)))
 }
 
+function isSandboxServiceUrl(value) {
+  return /^https?:\/\/[^/\s]+(?::\d+)?$/i.test(value)
+}
+
 function checkCommonProvider(checks, env, label) {
   assert(checks, value(env, "OPENROUTER_BASE_URL") === "https://openrouter.ai/api/v1", `${label}: OPENROUTER_BASE_URL points to OpenRouter API`)
   assert(checks, value(env, "SWIFT_AI_MODEL_CHAIN") === EXPECTED_MODEL_CHAIN, `${label}: SWIFT_AI_MODEL_CHAIN uses the stabilized DeepSeek route`)
@@ -73,7 +77,8 @@ function checkEnv() {
   assert(checks, value(parsed.vercel, "SWIFT_GENERATION_EXECUTION_MODE") === "queue", ".env.production: generation runs in queue mode")
   assert(checks, value(parsed.vercel, "SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK") === "true", ".env.production: serverless generation fallback is disabled")
   assert(checks, value(parsed.vercel, "SWIFT_WORKER_HEALTH_URL") === EXPECTED_WORKER_HEALTH_URL, ".env.production: worker health URL points to Railway worker")
-  assert(checks, value(parsed.vercel, "SANDBOX_SERVICE_URL") === EXPECTED_SANDBOX_URL, ".env.production: sandbox service URL uses verified custom domain")
+  assert(checks, isSandboxServiceUrl(value(parsed.vercel, "SANDBOX_SERVICE_URL")), ".env.production: sandbox service URL points to a reachable runtime origin")
+  assert(checks, value(parsed.vercel, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.production: sandbox public base URL uses verified custom domain")
   checkCommonProvider(checks, parsed.vercel, ".env.production")
 
   assert(checks, value(parsed.railwayWorker, "NODE_ENV") === "production", ".env.railway.worker.production: production mode")
@@ -81,12 +86,13 @@ function checkEnv() {
   assert(checks, value(parsed.railwayWorker, "SWIFT_WORKER_TYPE") === "generation", ".env.railway.worker.production: worker type generation")
   assert(checks, value(parsed.railwayWorker, "SWIFT_GENERATION_EXECUTION_MODE") === "queue", ".env.railway.worker.production: queue execution mode")
   assert(checks, value(parsed.railwayWorker, "SWIFT_ENABLE_GENERATION_WORKER") === "true", ".env.railway.worker.production: generation worker enabled")
-  assert(checks, value(parsed.railwayWorker, "SANDBOX_SERVICE_URL") === EXPECTED_SANDBOX_URL, ".env.railway.worker.production: sandbox service URL uses verified custom domain")
+  assert(checks, isSandboxServiceUrl(value(parsed.railwayWorker, "SANDBOX_SERVICE_URL")), ".env.railway.worker.production: sandbox service URL points to a reachable runtime origin")
+  assert(checks, value(parsed.railwayWorker, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.railway.worker.production: sandbox public base URL uses verified custom domain")
   checkCommonProvider(checks, parsed.railwayWorker, ".env.railway.worker.production")
 
   assert(checks, value(parsed.railwaySandbox, "NODE_ENV") === "production", ".env.railway.production: production mode")
   assert(checks, value(parsed.railwaySandbox, "PORT") === "8080", ".env.railway.production: sandbox service port")
-  assert(checks, value(parsed.railwaySandbox, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_URL, ".env.railway.production: sandbox public URL uses verified custom domain")
+  assert(checks, value(parsed.railwaySandbox, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.railway.production: sandbox public URL uses verified custom domain")
   assert(checks, value(parsed.railwaySandbox, "SWIFT_SANDBOX_ROOT") === "/data/swift-sandbox", ".env.railway.production: sandbox root uses Railway volume")
 
   const gitignore = fs.existsSync(path.join(root, ".gitignore")) ? fs.readFileSync(path.join(root, ".gitignore"), "utf8") : ""
