@@ -112,9 +112,10 @@ const SWIFT_FULLSTACK_TIMEOUT_MS = Math.max(
       500000
   )
 )
-const SWIFT_FULLSTACK_OUTPUT_TOKENS = Math.max(
-  12_000,
-  Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)
+const configuredOutputTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)
+const SWIFT_FULLSTACK_OUTPUT_TOKENS = Math.min(
+  16_000,
+  Math.max(3_000, Number.isFinite(configuredOutputTokens) && configuredOutputTokens > 0 ? configuredOutputTokens : 16_000)
 )
 
 function uniqueModelIds(modelIds: string[]) {

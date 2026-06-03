@@ -20,7 +20,7 @@ import {
 } from "@/lib/ai/openrouter-client"
 import { SwiftAiError, redactAiSecret } from "@/lib/ai/errors"
 import { getHealthSnapshot, isModelTemporarilyUnavailable, markModelFailure, markModelSuccess } from "@/lib/ai/provider-health"
-import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
+import { MAX_PROVIDER_ATTEMPTS_PER_REQUEST, MAX_RETRIES_PER_MODEL, retryDelayMs, shouldRetryModel, sleep } from "@/lib/ai/retries"
 import { buildCacheKey, getCachedResponse, setCachedResponse } from "@/lib/ai/response-cache"
 import { buildDomainAnchorDirective } from "@/lib/ai/prompt-guard"
 import {
@@ -179,6 +179,18 @@ function lastProviderAttempt(attempts: ProviderAttemptLog[]) {
   if (!last) return null
 
   return summarizeProviderAttempts([last])[0]
+}
+
+function affordableMaxTokensFromError(message: string, currentMaxTokens: number) {
+  const match = String(message || "").match(/can only afford\s+(\d+)/i)
+  if (!match) return null
+
+  const affordable = Number(match[1])
+  if (!Number.isFinite(affordable) || affordable <= 0) return null
+
+  const safeMaxTokens = Math.max(1_024, Math.floor(affordable * 0.9))
+  if (safeMaxTokens >= currentMaxTokens) return null
+  return safeMaxTokens
 }
 
 export class SwiftProviderFailureError extends Error {
@@ -425,6 +437,7 @@ export class ProviderRouter {
       }
 
       let retryCount = 0
+      let adaptiveMaxOutputTokens: number | undefined
       while (true) {
         if (providerBudget.signal.aborted) {
           recordAttempt(attempts, {
@@ -480,6 +493,7 @@ export class ProviderRouter {
             promptLanguage,
             tier,
             temperatureOverride,
+            maxOutputTokens: adaptiveMaxOutputTokens,
             signal: providerBudget.signal,
             lifecycle,
           })
@@ -556,6 +570,31 @@ export class ProviderRouter {
             })
             throw new SwiftProviderFailureError(tier.key, attempts)
           }
+
+          const currentMaxTokens = adaptiveMaxOutputTokens || target.maxOutputTokens || tier.maxOutputTokens
+          const affordableMaxTokens =
+            normalized.reason === "rate_limit" && normalized.statusCode === 402
+              ? affordableMaxTokensFromError(redactedErrorMessage, currentMaxTokens)
+              : null
+          if (affordableMaxTokens && retryCount < MAX_RETRIES_PER_MODEL) {
+            adaptiveMaxOutputTokens = affordableMaxTokens
+            retryCount += 1
+            const delayMs = retryDelayMs(retryCount)
+            log("warn", "ai_provider_retry_with_reduced_max_tokens", {
+              mode,
+              tier: tier.key,
+              targetRole: target.role,
+              model: target.modelId,
+              previousMaxTokens: currentMaxTokens,
+              nextMaxTokens: affordableMaxTokens,
+              retryCount,
+              delayMs,
+              requestId: normalized.requestId,
+            })
+            await sleep(delayMs, providerBudget.signal)
+            continue
+          }
+
           markModelFailure(target.modelId, {
             reason: normalized.reason,
             latencyMs,
@@ -691,6 +730,7 @@ export class ProviderRouter {
       promptLanguage: PromptLanguage
       tier: SwiftTierConfig
       temperatureOverride?: number
+      maxOutputTokens?: number
       signal?: AbortSignal
       lifecycle?: (event: OpenRouterLifecycleEvent) => void
     }
@@ -699,7 +739,7 @@ export class ProviderRouter {
       model: target.modelId,
       messages: this.buildMessages(input.prompt, input.mode, input.promptLanguage),
       temperature: this.getTemperature(input.mode, input.temperatureOverride),
-      maxTokens: target.maxOutputTokens || input.tier.maxOutputTokens,
+      maxTokens: input.maxOutputTokens || target.maxOutputTokens || input.tier.maxOutputTokens,
       responseFormat: input.mode === "files" ? "json_object" : undefined,
       timeoutMs: target.timeoutMs || input.tier.timeoutMs,
       signal: input.signal,
