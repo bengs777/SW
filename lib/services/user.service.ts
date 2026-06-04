@@ -1,10 +1,10 @@
 import { prisma } from '@/lib/db/client'
 import { isMissingRequiredTableError, shouldSoftFailMissingTable } from '@/lib/db/errors'
 import { env } from '@/lib/env'
+import { MONTHLY_FREE_CREDITS_AMOUNT, SIGNUP_CREDITS_AMOUNT } from '@/lib/billing/constants'
 import { Prisma } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 
-const FREE_CREDITS_AMOUNT = 5000
 const DEVELOPER_TREASURY_CREDITS = 1_000_000
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase()
@@ -21,7 +21,7 @@ const buildInitialAccountState = (email: string) => {
   const developerAccount = isDeveloperTreasuryEmail(email)
 
   return {
-    balance: developerAccount ? DEVELOPER_TREASURY_CREDITS : FREE_CREDITS_AMOUNT,
+    balance: developerAccount ? DEVELOPER_TREASURY_CREDITS : SIGNUP_CREDITS_AMOUNT,
     isDeveloperAccount: developerAccount,
     welcomeBonusGrantedAt: new Date(),
   }
@@ -244,14 +244,14 @@ export class UserService {
         }
 
         const balanceBefore = latestUser.balance
-        const balanceAfter = balanceBefore + FREE_CREDITS_AMOUNT
+        const balanceAfter = balanceBefore + MONTHLY_FREE_CREDITS_AMOUNT
         const grantedAt = new Date()
 
         await tx.user.update({
           where: { id: latestUser.id },
           data: {
             balance: {
-              increment: FREE_CREDITS_AMOUNT,
+              increment: MONTHLY_FREE_CREDITS_AMOUNT,
             },
             welcomeBonusGrantedAt: grantedAt,
           },
@@ -262,7 +262,7 @@ export class UserService {
             userId: latestUser.id,
             kind: "free_balance",
             direction: "credit",
-            amount: FREE_CREDITS_AMOUNT,
+            amount: MONTHLY_FREE_CREDITS_AMOUNT,
             balanceBefore,
             balanceAfter,
             reference: `free-balance:${currentMonthStart.toISOString().slice(0, 7)}:${latestUser.id}`,
@@ -270,7 +270,7 @@ export class UserService {
             description: "Monthly free Rupiah balance for the Free plan",
             metadata: JSON.stringify({
               source: "monthly_free_plan",
-              amount: FREE_CREDITS_AMOUNT,
+              amount: MONTHLY_FREE_CREDITS_AMOUNT,
               period: currentMonthStart.toISOString(),
             }),
           },
@@ -280,6 +280,101 @@ export class UserService {
       if (isMissingRequiredTableError(error)) {
         if (shouldSoftFailMissingTable()) {
           console.warn("[user] Required database tables are not ready yet; skipping monthly free balance sync.")
+          return
+        }
+      }
+
+      throw error
+    }
+  }
+
+  static async grantWelcomeBonusIfNeeded(email: string) {
+    try {
+      const normalizedEmail = email.trim().toLowerCase()
+
+      if (isDeveloperTreasuryEmail(normalizedEmail)) {
+        return
+      }
+
+      const reference = `welcome-bonus:${normalizedEmail}`
+      const user = await prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        select: {
+          id: true,
+          balance: true,
+          welcomeBonusGrantedAt: true,
+          isDeveloperAccount: true,
+        },
+      })
+
+      if (!user || user.isDeveloperAccount || user.welcomeBonusGrantedAt) {
+        return
+      }
+
+      await prisma.$transaction(async (tx) => {
+        const latestUser = await tx.user.findUnique({
+          where: { id: user.id },
+          select: {
+            id: true,
+            balance: true,
+            welcomeBonusGrantedAt: true,
+            isDeveloperAccount: true,
+          },
+        })
+
+        if (!latestUser || latestUser.isDeveloperAccount || latestUser.welcomeBonusGrantedAt) {
+          return
+        }
+
+        const existingBonus = await tx.billingTransaction.findUnique({
+          where: { reference },
+          select: { id: true },
+        })
+
+        if (existingBonus) {
+          await tx.user.update({
+            where: { id: latestUser.id },
+            data: { welcomeBonusGrantedAt: new Date() },
+          })
+          return
+        }
+
+        const balanceBefore = latestUser.balance
+        const balanceAfter = balanceBefore + SIGNUP_CREDITS_AMOUNT
+        const grantedAt = new Date()
+
+        await tx.user.update({
+          where: { id: latestUser.id },
+          data: {
+            balance: {
+              increment: SIGNUP_CREDITS_AMOUNT,
+            },
+            welcomeBonusGrantedAt: grantedAt,
+          },
+        })
+
+        await tx.billingTransaction.create({
+          data: {
+            userId: latestUser.id,
+            kind: "welcome_bonus",
+            direction: "credit",
+            amount: SIGNUP_CREDITS_AMOUNT,
+            balanceBefore,
+            balanceAfter,
+            reference,
+            provider: "internal",
+            description: "One-time welcome balance for new account",
+            metadata: JSON.stringify({
+              source: "signup",
+              amount: SIGNUP_CREDITS_AMOUNT,
+            }),
+          },
+        })
+      })
+    } catch (error) {
+      if (isMissingRequiredTableError(error)) {
+        if (shouldSoftFailMissingTable()) {
+          console.warn("[user] Required database tables are not ready yet; skipping welcome balance sync.")
           return
         }
       }

@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server"
 import { auth } from "@/auth"
-import { TOPUP_MINIMUM_IDR } from "@/lib/billing/constants"
+import { SIGNUP_CREDITS_AMOUNT, TOPUP_MINIMUM_IDR } from "@/lib/billing/constants"
 import { prisma } from "@/lib/db/client"
 
 const TOPUP_MINIMUM = TOPUP_MINIMUM_IDR
-const WELCOME_BONUS_AMOUNT = 5000
+const WELCOME_BONUS_AMOUNT = SIGNUP_CREDITS_AMOUNT
 
 export async function GET() {
   const session = await auth()

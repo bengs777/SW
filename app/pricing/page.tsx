@@ -120,7 +120,7 @@ const faqItems = [
   {
     question: "Bagaimana dengan saldo gratis?",
     answer:
-      "Akun Free mendapatkan Rp5.000 saldo generasi per bulan, plus bonus awal saat pendaftaran. Itu cukup untuk mencoba alur kerja sebelum upgrade.",
+      "Akun Free mendapatkan Rp5.000 saldo generasi per bulan, plus bonus awal Rp10.000 saat pendaftaran. Itu cukup untuk mencoba alur kerja sebelum upgrade.",
   },
   {
     question: "Apakah plan ini mengunci saya ke satu paket?",

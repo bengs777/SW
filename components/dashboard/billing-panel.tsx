@@ -20,7 +20,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Badge } from "@/components/ui/badge"
-import { MIN_CRYPTO_PAYMENT_USD, MIN_CRYPTO_PAYMENT_USD_CENTS, TOPUP_MINIMUM_IDR, USD_TO_IDR } from "@/lib/billing/constants"
+import { MIN_CRYPTO_PAYMENT_USD, MIN_CRYPTO_PAYMENT_USD_CENTS, SIGNUP_CREDITS_AMOUNT, TOPUP_MINIMUM_IDR, USD_TO_IDR } from "@/lib/billing/constants"
 import {
   BILLING_PLANS,
   getBillingPlan,
@@ -179,7 +179,7 @@ export function BillingPanel() {
       setOverview({
         balance: data.balance || 0,
         welcomeBonusGrantedAt: data.welcomeBonusGrantedAt || null,
-        welcomeBonusAmount: data.welcomeBonusAmount || 5000,
+        welcomeBonusAmount: data.welcomeBonusAmount || SIGNUP_CREDITS_AMOUNT,
         topupMinimum: data.topupMinimum || TOPUP_MINIMUM_IDR,
         topUpOrders: Array.isArray(data.topUpOrders) ? data.topUpOrders : [],
         billingTransactions: Array.isArray(data.billingTransactions) ? data.billingTransactions : [],
@@ -465,6 +465,8 @@ export function BillingPanel() {
   const currentBalance = overview?.balance ?? 0
   const topupMinimum = overview?.topupMinimum ?? 2000
   const freeCreditsGranted = Boolean(overview?.welcomeBonusGrantedAt)
+  const welcomeBonusAmount = overview?.welcomeBonusAmount ?? SIGNUP_CREDITS_AMOUNT
+  const freePlanMonthlyCredits = getBillingPlan("free").monthlyCredits
 
   return (
     <div className="space-y-6">
@@ -602,7 +604,7 @@ export function BillingPanel() {
               </div>
               <Badge variant={freeCreditsGranted ? "secondary" : "outline"} className="shrink-0">
                 {freeCreditsGranted
-                  ? `Saldo gratis bulan ini ${formatCurrency(overview?.welcomeBonusAmount || 5000)}`
+                  ? `Saldo gratis bulan ini ${formatCurrency(freePlanMonthlyCredits)}`
                   : "Saldo gratis bulan ini belum masuk"}
               </Badge>
             </div>
@@ -610,11 +612,11 @@ export function BillingPanel() {
             <div className="grid gap-3 sm:grid-cols-3">
               <InfoPill label="Minimum top up" value={formatCurrency(topupMinimum)} />
               <InfoPill label="Payment gateway" value="Pakasir + Crypto" />
-              <InfoPill label="Saldo Free plan" value={formatCurrency(overview?.welcomeBonusAmount || 5000)} />
+              <InfoPill label="Bonus signup" value={formatCurrency(welcomeBonusAmount)} />
             </div>
 
             <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
-              Akun Free mendapat Rp5.000 saldo generasi per bulan. Bonus awal Rp5.000 diberikan saat pendaftaran. Setelah itu, top up bisa mulai dari Rp 2.000 (Pakasir) atau minimum crypto {cryptoMinimumLabel}.
+              Akun Free mendapat {formatCurrency(freePlanMonthlyCredits)} saldo generasi per bulan. Bonus awal {formatCurrency(welcomeBonusAmount)} diberikan saat pendaftaran. Setelah itu, top up bisa mulai dari Rp 2.000 (Pakasir) atau minimum crypto {cryptoMinimumLabel}.
             </div>
           </CardContent>
         </Card>

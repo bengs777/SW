@@ -4,7 +4,7 @@ export default function SignupPage() {
   return (
     <GoogleAuthCard
       title="Create your account with Google"
-      description="New accounts are created automatically when you continue with Google."
+      description="New accounts are created automatically and receive 10.000 credits when you continue with Google."
       buttonLabel="Continue with Google"
       loadingLabel="Redirecting to Google..."
       helperText="Already have an account? Use the same Google button to sign in."

@@ -291,6 +291,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             user.name || user.email.split("@")[0],
             user.image || null
           )
+          await UserService.grantWelcomeBonusIfNeeded(user.email)
 
           userCache.delete(user.email.trim().toLowerCase())
         }
