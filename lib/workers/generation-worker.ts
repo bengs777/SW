@@ -611,11 +611,7 @@ export function startGenerationWorker() {
       traceId: payload?.traceId,
     })
     if (payload?.jobId) {
-      activeJobs.set(payload.jobId, {
-        stage: "stalled",
-        lastSuccessfulTransition: "worker_stalled",
-        startedAt: stalledJob?.processedOn || Date.now(),
-      })
+      activeJobs.delete(payload.jobId)
       await OrchestrationRuntimeService.persistFailure({
         jobId: payload.jobId,
         trace: { traceId: payload.traceId, workerId },
