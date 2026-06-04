@@ -45,9 +45,9 @@ function readGenerationTimeoutMs() {
   const value = Number(
     process.env.NEXT_PUBLIC_SWIFT_GENERATION_JOB_TIMEOUT_MS ||
       process.env.SWIFT_GENERATION_JOB_TIMEOUT_MS ||
-      500000
+      900000
   )
-  return Number.isFinite(value) ? Math.max(500_000, value) : 500000
+  return Number.isFinite(value) ? Math.max(900_000, value) : 900000
 }
 
 const GENERATE_BACKEND_TIMEOUT_MS = readGenerationTimeoutMs()

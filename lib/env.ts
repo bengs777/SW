@@ -155,7 +155,7 @@ export const env = {
     Math.round(getEnvNumber(86_400_000, "PROVIDER_STATUS_CACHE_TTL_MS"))
   ),
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
-  aiQueueTimeoutMs: Math.max(500_000, Math.round(getEnvNumber(500_000, "AI_QUEUE_TIMEOUT_MS"))),
+  aiQueueTimeoutMs: Math.max(900_000, Math.round(getEnvNumber(900_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterModel,
   swiftAiProviderName,

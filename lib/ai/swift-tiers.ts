@@ -68,12 +68,12 @@ export const USER_FRIENDLY_QUEUE_OVERLOAD_ERROR =
 
 export const SWIFT_PUBLIC_PRICE_IDR = 3000
 const SWIFT_FULLSTACK_TIMEOUT_MS = Math.max(
-  500_000,
+  900_000,
   Number(
     process.env.SWIFT_PROVIDER_TIMEOUT_MS ||
       process.env.SWIFT_GENERATION_JOB_TIMEOUT_MS ||
       process.env.AI_TIMEOUT_MS ||
-      500000
+      900000
   )
 )
 const configuredOutputTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)

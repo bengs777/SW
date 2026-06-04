@@ -432,8 +432,9 @@ async function main() {
   checks.push(required("REDIS_EVICTION_POLICY", "Redis maxmemory policy for BullMQ", redisEvictionPolicy.ok, redisEvictionPolicy.detail))
   checks.push(required("GENERATION_WORKER_HEARTBEAT", "Dedicated worker heartbeat in Redis", workerHeartbeat.ok, workerHeartbeat.detail))
   checks.push(required("SANDBOX_RUNTIME_HEALTH", "Sandbox runtime /health endpoint", sandboxRuntime.ok, sandboxRuntime.detail))
-  checks.push(required("SWIFT_WORKER_HEALTH_URL", "Dedicated worker runtime health endpoint", normalizeWorkerHealthUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL")), "Set this to the dedicated worker /health URL so production can directly probe the worker runtime."))
-  if (normalizeWorkerHealthUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))) {
+  const workerHealthUrl = normalizeWorkerHealthUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
+  checks.push(recommended("SWIFT_WORKER_HEALTH_URL", "Dedicated worker runtime health endpoint", workerHealthUrl, "Optional direct worker probe. Redis heartbeat is the primary production worker signal."))
+  if (workerHealthUrl) {
     checks.push(required("GENERATION_WORKER_RUNTIME", "Dedicated worker /health endpoint", workerRuntime.ok, workerRuntime.detail))
   }
 

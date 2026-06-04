@@ -1,6 +1,6 @@
 import { env, getEnvNumber } from "@/lib/env"
 
-export const MIN_GENERATION_JOB_TIMEOUT_MS = 500_000
+export const MIN_GENERATION_JOB_TIMEOUT_MS = 900_000
 
 export function getTimeoutMs(name: string, fallbackMs: number, minMs = 1_000) {
   const value = Math.round(getEnvNumber(fallbackMs, name))
