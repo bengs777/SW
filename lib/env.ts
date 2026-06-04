@@ -96,6 +96,8 @@ const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
 const swiftAiModelChain = getEnv("SWIFT_AI_MODEL_CHAIN")
 const swiftPrimaryModel = getEnv("SWIFT_PRIMARY_MODEL")
 const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
+const openRouterModel = getEnv("OPENROUTER_MODEL") || "poolside/laguna-m.1:free"
+const swiftAiProviderName = getEnv("SWIFT_AI_PROVIDER_NAME") || "openrouter"
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
 const hasRedisRestConfig = Boolean(upstashRedisRestUrl && upstashRedisRestToken)
@@ -139,6 +141,8 @@ export const env = {
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
   aiQueueTimeoutMs: Math.max(500_000, Math.round(getEnvNumber(500_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
+  openRouterModel,
+  swiftAiProviderName,
   swiftAiModelChain,
   swiftPrimaryModel,
   swiftFallbackModel1,

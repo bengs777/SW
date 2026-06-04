@@ -482,6 +482,12 @@ function parseSseEvent(raw: string): ParsedSseEvent | null {
 async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean, signal: AbortSignal) {
   try {
     const url = `${getOpenRouterBaseUrl()}/chat/completions`
+    log("info", "openrouter_request_created", {
+      provider: "openrouter",
+      model: input.model,
+      stream,
+      maxTokens: input.maxTokens,
+    })
     // Keep-alive agent for connection reuse — reduces TCP/TLS handshake overhead.
     // Note: undici (default Node 18+ fetch) ignores the agent option and uses
     // its own pool. We pass it anyway for older runtimes / future compatibility.

@@ -1,3 +1,5 @@
+import { getOpenRouterModelChain, normalizeOpenRouterModelId } from "@/lib/ai/openrouter-config"
+
 export const SWIFT_PROVIDER = "swift"
 export const SWIFT_FAST_MODEL_KEY = "swift-fast"
 export const SWIFT_BUILDER_MODEL_KEY = "swift-builder"
@@ -7,45 +9,7 @@ export const DEFAULT_SWIFT_TIER_KEY = SWIFT_BUILDER_MODEL_KEY
 export const LEGACY_SWIFT_2_MODEL_KEY = "swift-2"
 
 const freeAiMode = process.env.SWIFT_AI_FREE_MODE === "true"
-const envValue = (key: string) => process.env[key]?.trim() || ""
-const DEFAULT_SWIFT_AI_MODEL_CHAIN = [
-  "openrouter:deepseek/deepseek-v4-pro",
-  "openrouter:anthropic/claude-sonnet-4",
-  "openrouter:openai/gpt-4.1-mini",
-]
 let warnedDefaultChain = false
-
-function configuredModelChain() {
-  const raw = envValue("SWIFT_AI_MODEL_CHAIN")
-  if (!raw) return []
-
-  if (raw.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) {
-        return parsed.map((item) => String(item).trim()).filter(Boolean)
-      }
-    } catch {
-      return []
-    }
-  }
-
-  return raw
-    .split(/[,\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
-function normalizeOpenRouterModelId(modelSpec: string) {
-  return modelSpec.replace(/^openrouter:/i, "").trim()
-}
-
-const configuredPrimaryModel = () => envValue("SWIFT_PRIMARY_MODEL")
-const configuredFallbackModels = () => [
-  envValue("SWIFT_FALLBACK_MODEL_1"),
-  envValue("SWIFT_FALLBACK_MODEL_2"),
-  envValue("SWIFT_FALLBACK_MODEL_3"),
-]
 
 export type SwiftTierKey =
   | typeof SWIFT_FAST_MODEL_KEY
@@ -129,26 +93,15 @@ function uniqueModelIds(modelIds: string[]) {
 }
 
 export function getSwiftModelTargets(task: SwiftModelRoutingTask = "large_generation"): SwiftModelTarget[] {
-  const modelChain = configuredModelChain()
-  const hasConfiguredChain = modelChain.length > 0
-  const primary = configuredPrimaryModel()
-  const fallbacks = configuredFallbackModels()
-  const legacyChain = [primary, ...fallbacks]
-  const fallbackChain = hasConfiguredChain ? modelChain : legacyChain.filter(Boolean)
-  const chain =
-    fallbackChain.length > 0
-      ? fallbackChain
-      : DEFAULT_SWIFT_AI_MODEL_CHAIN
+  const chain = uniqueModelIds(getOpenRouterModelChain().map(normalizeOpenRouterModelId))
 
-  if (!hasConfiguredChain && legacyChain.every((modelId) => !modelId) && !warnedDefaultChain) {
+  if (!process.env.OPENROUTER_MODEL?.trim() && !warnedDefaultChain) {
     warnedDefaultChain = true
-    console.warn("[swift-ai] SWIFT_AI_MODEL_CHAIN is empty; using default OpenRouter model chain.")
+    console.warn("[swift-ai] OPENROUTER_MODEL is empty; using default OpenRouter free model chain.")
   }
 
-  const orderedModelIds =
-    task === "edit_patch"
-      ? uniqueModelIds([...chain.slice(1), chain[0]].map(normalizeOpenRouterModelId))
-      : uniqueModelIds(chain.map(normalizeOpenRouterModelId))
+  void task
+  const orderedModelIds = uniqueModelIds(chain.map(normalizeOpenRouterModelId))
 
   return orderedModelIds.map((modelId, index) => ({
     modelId,

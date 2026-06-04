@@ -1,6 +1,7 @@
 import type { SwiftArchitecturePlan } from "@/lib/ai/architecture-planner"
 import type { SwiftStructuredIntent } from "@/lib/ai/architecture-intent"
 import type { SwiftDependencyGraph, SwiftProjectMemoryGraph } from "@/lib/ai/project-memory-graph"
+import { getOpenRouterModel } from "@/lib/ai/openrouter-config"
 import {
   buildUXPlanInstructionBlock,
   buildUXProductPlan,
@@ -133,17 +134,17 @@ export const SOFTWARE_ORCHESTRATION_PIPELINE = [
 ]
 
 const DEFAULT_ROLE_MODELS: Record<SoftwareOrchestrationRole, string> = {
-  planner: "gpt-4o-mini",
-  architecture: "claude-sonnet",
-  builder: "deepseek",
-  validator: "gpt-4o-mini",
-  repair: "deepseek",
-  ui_enhancement: "gemini",
+  planner: getOpenRouterModel(),
+  architecture: getOpenRouterModel(),
+  builder: getOpenRouterModel(),
+  validator: getOpenRouterModel(),
+  repair: getOpenRouterModel(),
+  ui_enhancement: getOpenRouterModel(),
 }
 
 export function modelForSoftwareRole(role: SoftwareOrchestrationRole) {
   const envKey = `SWIFT_${role.toUpperCase()}_MODEL`
-  return process.env[envKey]?.trim() || DEFAULT_ROLE_MODELS[role]
+  return process.env.OPENROUTER_MODEL?.trim() || process.env[envKey]?.trim() || DEFAULT_ROLE_MODELS[role]
 }
 
 export function createSoftwareOrchestration(input: {

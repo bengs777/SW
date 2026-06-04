@@ -3,9 +3,9 @@ const path = require("node:path")
 const { execSync } = require("node:child_process")
 
 const root = process.cwd()
-const EXPECTED_SANDBOX_PUBLIC_URL = "https://sanbox.ai-swift.biz.id"
+const EXPECTED_SANDBOX_PUBLIC_URL = "https://sandbox.ai-swift.biz.id"
 const EXPECTED_WORKER_HEALTH_URL = "https://ingenious-appreciation-production.up.railway.app/health"
-const EXPECTED_MODEL_CHAIN = "openrouter:deepseek/deepseek-v4-pro"
+const EXPECTED_OPENROUTER_MODEL = "poolside/laguna-m.1:free"
 
 const files = {
   local: ".env",
@@ -54,9 +54,9 @@ function isSandboxServiceUrl(value) {
 
 function checkCommonProvider(checks, env, label) {
   assert(checks, value(env, "OPENROUTER_BASE_URL") === "https://openrouter.ai/api/v1", `${label}: OPENROUTER_BASE_URL points to OpenRouter API`)
-  assert(checks, value(env, "SWIFT_AI_MODEL_CHAIN") === EXPECTED_MODEL_CHAIN, `${label}: SWIFT_AI_MODEL_CHAIN uses the stabilized DeepSeek route`)
-  assert(checks, value(env, "SWIFT_AI_FREE_MODE") === "false", `${label}: SWIFT_AI_FREE_MODE is false`)
-  assert(checks, !hasAny(env, ["SWIFT_FALLBACK_MODEL_1", "SWIFT_FALLBACK_MODEL_2", "SWIFT_FALLBACK_MODEL_3", "OPENROUTER_FREE_MODEL"]), `${label}: degraded free fallback variables are not configured`)
+  assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "openrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses OpenRouter`)
+  assert(checks, value(env, "OPENROUTER_MODEL") === EXPECTED_OPENROUTER_MODEL, `${label}: OPENROUTER_MODEL uses the default free OpenRouter model`)
+  assert(checks, !hasAny(env, ["OPENROUTER_FREE_MODEL"]), `${label}: legacy free model variables are not configured`)
 }
 
 function checkEnv() {
