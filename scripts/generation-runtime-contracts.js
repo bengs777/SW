@@ -92,10 +92,10 @@ function main() {
     "worker.placeholder-url-normalization",
     envConfig.includes("isPlaceholderEnvValue") &&
       envConfig.includes("isPlaceholderEnvValue(trimmed)") &&
-      envConfig.includes('normalizeUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))') &&
+      envConfig.includes('normalizeWorkerHealthUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))') &&
       deployReadiness.includes("isPlaceholderValue") &&
-      deployReadiness.includes('normalizeUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))'),
-    "placeholder worker URLs are treated as missing instead of probed"
+      deployReadiness.includes('normalizeWorkerHealthUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))'),
+    "placeholder and legacy worker URLs are treated as missing instead of probed"
   )
 
   assert(

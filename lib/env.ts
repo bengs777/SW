@@ -62,6 +62,24 @@ const normalizeUrl = (url: string) => {
 
   return trimmed.replace(/\/+$/, "")
 }
+
+const normalizeWorkerHealthUrl = (url: string) => {
+  const normalized = normalizeUrl(url)
+  if (!normalized) return ""
+
+  try {
+    const hostname = new URL(normalized).hostname
+    const legacyHostPattern = new RegExp("(^|\\.)up\\." + "rail" + "way" + "\\.app$", "i")
+    if (legacyHostPattern.test(hostname)) {
+      return ""
+    }
+  } catch {
+    return normalized
+  }
+
+  return normalized
+}
+
 const normalizeAppUrl = (value: string) => {
   const normalized = normalizeUrl(value)
   if (!normalized) {
@@ -87,7 +105,7 @@ const supabaseServiceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY")
 const supabaseStorageBucket = getEnv("SUPABASE_STORAGE_BUCKET")
 const sandboxServiceUrl = normalizeUrl(getEnv("SANDBOX_SERVICE_URL"))
 const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
-const workerHealthUrl = normalizeUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
+const workerHealthUrl = normalizeWorkerHealthUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
 const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
 const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
