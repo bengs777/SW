@@ -19,6 +19,19 @@ function historyFileCount(result: string) {
   }
 }
 
+function parseJsonObject(value?: string | null): Record<string, unknown> | null {
+  if (!value) return null
+
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -79,12 +92,67 @@ export async function GET(
     })
     const latestUpdatedAt = latestFileUpdatedAt?.updatedAt.toISOString() || null
     const latestHistoryId = project.history[0]?.id || null
+    const latestDraftArtifact = visibleFiles.length === 0
+      ? await prisma.artifact.findFirst({
+          where: {
+            projectId: id,
+            source: "generation_draft",
+            status: "draft",
+            files: { some: {} },
+            generationJob: {
+              is: {
+                userId: session.user.id,
+                resultHistoryId: null,
+                status: { notIn: ["completed", "cancelled"] },
+              },
+            },
+          },
+          orderBy: { updatedAt: "desc" },
+          select: {
+            id: true,
+            updatedAt: true,
+            metadataJson: true,
+            _count: {
+              select: { files: true },
+            },
+            generationJob: {
+              select: {
+                id: true,
+                status: true,
+                stage: true,
+                error: true,
+                resultHistoryId: true,
+              },
+            },
+          },
+        })
+      : null
+    const latestDraftMetadata = parseJsonObject(latestDraftArtifact?.metadataJson)
+    const latestDraftManifest = latestDraftMetadata?.manifest && typeof latestDraftMetadata.manifest === "object"
+      ? latestDraftMetadata.manifest
+      : null
+    const latestDraft = latestDraftArtifact?.generationJob
+      ? {
+          status: "draft",
+          jobId: latestDraftArtifact.generationJob.id,
+          artifactId: latestDraftArtifact.id,
+          updatedAt: latestDraftArtifact.updatedAt.toISOString(),
+          fileCount: latestDraftArtifact._count.files,
+          jobStatus: latestDraftArtifact.generationJob.status,
+          jobStage: latestDraftArtifact.generationJob.stage,
+          jobError: latestDraftArtifact.generationJob.error || null,
+          resultHistoryId: latestDraftArtifact.generationJob.resultHistoryId || null,
+          manifest: latestDraftManifest,
+        }
+      : null
 
     log("info", "project_state_loaded", {
       requestId,
       projectId: id,
       userId: session.user.id,
       fileCount: visibleFiles.length,
+      draftFileCount: latestDraft?.fileCount || 0,
+      draftJobId: latestDraft?.jobId || null,
       manifest,
       latestHistoryId,
       reason: refreshReason,
@@ -138,6 +206,7 @@ export async function GET(
           latestHistoryId,
           manifest,
         },
+        draftState: latestDraft,
       },
     }, {
       headers: {

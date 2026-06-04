@@ -126,6 +126,10 @@ const WORKSPACE_DRAFT_STORAGE_PREFIX = "swift-workspace-draft"
 type WorkspaceDraft = {
   files: GeneratedFile[]
   workspaceState: WorkspaceState
+  artifactStatus?: WorkspaceArtifactStatus
+  draftJobId?: string | null
+  draftArtifactId?: string | null
+  draftUpdatedAt?: string | null
 }
 
 type WorkspaceArtifactStatus = "empty" | "draft" | "persisted"
@@ -151,6 +155,17 @@ type StreamedGeneratedFilesPayload = {
 }
 
 const buildWorkspaceDraftKey = (projectId: string) => `${WORKSPACE_DRAFT_STORAGE_PREFIX}:${projectId}`
+
+function writeWorkspaceDraftToStorage(projectId: string, draft: WorkspaceDraft) {
+  if (typeof window === "undefined") {
+    return
+  }
+
+  window.localStorage.setItem(
+    buildWorkspaceDraftKey(projectId),
+    JSON.stringify(draft)
+  )
+}
 
 function readWorkspaceDraftFromStorage(projectId: string): WorkspaceDraft | null {
   if (typeof window === "undefined") {
@@ -178,11 +193,31 @@ function readWorkspaceDraftFromStorage(projectId: string): WorkspaceDraft | null
     return {
       files,
       workspaceState,
+      artifactStatus: parsed.artifactStatus === "draft" || parsed.artifactStatus === "persisted"
+        ? parsed.artifactStatus
+        : undefined,
+      draftJobId: typeof parsed.draftJobId === "string" ? parsed.draftJobId : null,
+      draftArtifactId: typeof parsed.draftArtifactId === "string" ? parsed.draftArtifactId : null,
+      draftUpdatedAt: typeof parsed.draftUpdatedAt === "string" ? parsed.draftUpdatedAt : null,
     }
   } catch {
     return null
   }
 }
+
+const normalizeProjectHistory = (history: unknown): ProjectHistoryEntry[] =>
+  Array.isArray(history)
+    ? history.map((entry: ProjectHistoryEntry) => ({
+        id: String(entry.id),
+        prompt: String(entry.prompt || "Snapshot"),
+        intent: typeof entry.intent === "string" ? entry.intent : null,
+        usedAutoRepair: Boolean(entry.usedAutoRepair),
+        createdAt: String(entry.createdAt),
+        fileCount: Number(entry.fileCount || 0),
+      }))
+    : []
+
+const isDraftArtifactStatus = (status: unknown): status is "draft" => status === "draft"
 
 const buildWorkspaceFingerprint = (files: GeneratedFile[], lockedPaths: string[]) =>
   `${files
@@ -402,7 +437,17 @@ export default function EditorPage() {
   const workspaceDraftFingerprintRef = useRef<string | null>(null)
   const workspaceSaveFingerprintRef = useRef<string | null>(null)
   const workspaceDraftRef = useRef<WorkspaceDraft | null>(null)
+  const generatedFilesRef = useRef<GeneratedFile[]>([])
+  const workspaceArtifactStatusRef = useRef<WorkspaceArtifactStatus>("empty")
   const projectRefreshSequenceRef = useRef(0)
+
+  useEffect(() => {
+    generatedFilesRef.current = generatedFiles
+  }, [generatedFiles])
+
+  useEffect(() => {
+    workspaceArtifactStatusRef.current = workspaceArtifactStatus
+  }, [workspaceArtifactStatus])
 
   const latestUserPrompt = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -461,20 +506,33 @@ export default function EditorPage() {
           language: normalizeLanguage(file.language),
         }))
       : []
-    const serverHistory: ProjectHistoryEntry[] = Array.isArray(data.project?.history)
-      ? data.project.history.map((entry: ProjectHistoryEntry) => ({
-          id: String(entry.id),
-          prompt: String(entry.prompt || "Snapshot"),
-          intent: typeof entry.intent === "string" ? entry.intent : null,
-          usedAutoRepair: Boolean(entry.usedAutoRepair),
-          createdAt: String(entry.createdAt),
-          fileCount: Number(entry.fileCount || 0),
-        }))
-      : []
+    const serverHistory = normalizeProjectHistory(data.project?.history)
     const { files } = splitWorkspaceStateFiles(serverFiles)
     const expectedFileCount = Number(data.project?.fileState?.count ?? files.length)
     if (expectedFileCount !== files.length) {
       throw new Error(`Explorer file count mismatch. API=${expectedFileCount}, client=${files.length}`)
+    }
+    const latestHistoryId = data.project?.fileState?.latestHistoryId || null
+    const officialSourceEmpty = files.length === 0 && !latestHistoryId
+    const shouldPreserveActiveDraft =
+      officialSourceEmpty &&
+      workspaceArtifactStatusRef.current === "draft" &&
+      generatedFilesRef.current.length > 0 &&
+      (reason === "generation-completed" || reason === "explorer-refresh" || reason === "filesystem-persisted")
+
+    if (shouldPreserveActiveDraft) {
+      setProjectHistory(serverHistory)
+      setWorkspaceRestoreNotice("Draft AI masih belum menjadi snapshot resmi. Menunggu event persist sebelum Explorer diganti.")
+      console.info(JSON.stringify({
+        level: "warn",
+        msg: "official_project_empty_preserved_active_draft",
+        projectId,
+        reason,
+        draftFileCount: generatedFilesRef.current.length,
+        latestDraftJobId: data.project?.draftState?.jobId || null,
+        latestDraftArtifactId: data.project?.draftState?.artifactId || null,
+      }))
+      return
     }
     const serverWorkspaceState =
       readWorkspaceStateFile(
@@ -507,7 +565,7 @@ export default function EditorPage() {
         msg: "explorer_refreshed",
         projectId,
         fileCount: files.length,
-        latestHistoryId: data.project?.fileState?.latestHistoryId || null,
+        latestHistoryId,
         latestUpdatedAt: data.project?.fileState?.latestUpdatedAt || null,
         manifestHash: data.project?.fileState?.manifest?.sha256 || null,
       }))
@@ -560,6 +618,27 @@ export default function EditorPage() {
       throw new Error("Generation draft is empty.")
     }
 
+    const draftWorkspaceState = buildWorkspaceStateSnapshot({
+      version: currentVersion,
+      dirty: false,
+      lockedPaths: workspaceProtectedPathsRef.current,
+      activeFilePath: draftFiles[0]?.path || null,
+    })
+    const draft: WorkspaceDraft = {
+      files: draftFiles,
+      workspaceState: draftWorkspaceState,
+      artifactStatus: "draft",
+      draftJobId: jobId,
+      draftArtifactId: data.artifactId || payload?.draftArtifactId || null,
+      draftUpdatedAt: data.updatedAt || null,
+    }
+    workspaceDraftRef.current = draft
+    workspaceDraftFingerprintRef.current = buildWorkspaceFingerprint(
+      draft.files,
+      draft.workspaceState.lockedPaths
+    )
+    writeWorkspaceDraftToStorage(projectId, draft)
+
     setGeneratedFiles(draftFiles)
     setPreviewFiles(draftFiles)
     setRuntimePreviewUrl(null)
@@ -589,7 +668,7 @@ export default function EditorPage() {
       fileCount: draftFiles.length,
       manifest: data.manifest || payload?.manifest || null,
     }))
-  }, [projectId])
+  }, [currentVersion, projectId])
 
   const applyStreamedGeneratedFiles = useCallback((rawPayload: unknown, jobId?: string | null) => {
     const payload = rawPayload && typeof rawPayload === "object"
@@ -1124,6 +1203,7 @@ export default function EditorPage() {
             }))
           : []
         const { files: visibleServerFiles } = splitWorkspaceStateFiles(serverFiles)
+        const serverHistory = normalizeProjectHistory(data.project?.history)
         const serverWorkspaceState =
           readWorkspaceStateFile(
             data.project?.workspaceState
@@ -1136,34 +1216,101 @@ export default function EditorPage() {
             lockedPaths: [],
             activeFilePath: visibleServerFiles[0]?.path || null,
           })
-          const localDraft = readWorkspaceDraftFromStorage(projectId)
+        const latestDraftState = data.project?.draftState && typeof data.project.draftState === "object"
+          ? data.project.draftState as {
+              jobId?: string | null
+              artifactId?: string | null
+              updatedAt?: string | null
+            }
+          : null
+        const localDraft = readWorkspaceDraftFromStorage(projectId)
+        let remoteDraft: WorkspaceDraft | null = null
+        const shouldFetchRemoteDraft = Boolean(
+          visibleServerFiles.length === 0 &&
+          latestDraftState?.jobId &&
+          (!localDraft || localDraft.draftJobId !== latestDraftState.jobId)
+        )
+        if (shouldFetchRemoteDraft && latestDraftState?.jobId) {
+          try {
+            const draftResponse = await fetch(`/api/generate/jobs/${latestDraftState.jobId}/draft`, {
+              cache: "no-store",
+            })
+            const draftData = (await draftResponse.json().catch(() => ({}))) as {
+              files?: GeneratedFile[]
+              artifactId?: string | null
+              updatedAt?: string | null
+            }
+            const remoteDraftFiles = Array.isArray(draftData.files)
+              ? normalizeWorkspaceFiles(draftData.files)
+              : []
+            if (draftResponse.ok && remoteDraftFiles.length > 0) {
+              remoteDraft = {
+                files: remoteDraftFiles,
+                workspaceState: buildWorkspaceStateSnapshot({
+                  version: serverWorkspaceState.version,
+                  dirty: false,
+                  lockedPaths: serverWorkspaceState.lockedPaths,
+                  activeFilePath: remoteDraftFiles[0]?.path || null,
+                }),
+                artifactStatus: "draft",
+                draftJobId: latestDraftState.jobId,
+                draftArtifactId: draftData.artifactId || latestDraftState.artifactId || null,
+                draftUpdatedAt: draftData.updatedAt || latestDraftState.updatedAt || null,
+              }
+              writeWorkspaceDraftToStorage(projectId, remoteDraft)
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Gagal memulihkan draft generation."
+            pushErrorLog("project", message)
+          }
+        }
+        const candidateDraft = remoteDraft || localDraft
         const serverFingerprint = buildWorkspaceFingerprint(
           visibleServerFiles,
           serverWorkspaceState.lockedPaths
         )
-        const localFingerprint = localDraft
-          ? buildWorkspaceFingerprint(localDraft.files, localDraft.workspaceState.lockedPaths)
+        const localFingerprint = candidateDraft
+          ? buildWorkspaceFingerprint(candidateDraft.files, candidateDraft.workspaceState.lockedPaths)
           : null
-        const shouldRestoreDraft = Boolean(
-          localDraft && (localDraft.workspaceState.dirty || localFingerprint !== serverFingerprint)
+        const candidateIsDraftArtifact = Boolean(
+          candidateDraft && isDraftArtifactStatus(candidateDraft.artifactStatus)
         )
-        const nextFiles = shouldRestoreDraft ? localDraft!.files : visibleServerFiles
+        const shouldRestoreDraft = Boolean(
+          candidateDraft &&
+          (
+            candidateDraft.workspaceState.dirty ||
+            (!candidateIsDraftArtifact && localFingerprint !== serverFingerprint) ||
+            (candidateIsDraftArtifact && visibleServerFiles.length === 0 && localFingerprint !== serverFingerprint)
+          )
+        )
+        const nextFiles = shouldRestoreDraft ? candidateDraft!.files : visibleServerFiles
         const nextProtectedPaths = shouldRestoreDraft
-          ? localDraft!.workspaceState.lockedPaths
+          ? candidateDraft!.workspaceState.lockedPaths
           : serverWorkspaceState.lockedPaths
 
         workspaceProtectedPathsRef.current = nextProtectedPaths
-        workspaceDraftRef.current = shouldRestoreDraft ? localDraft : null
-        if (shouldRestoreDraft && localDraft) {
+        workspaceDraftRef.current = shouldRestoreDraft ? candidateDraft : null
+        if (shouldRestoreDraft && candidateDraft) {
           workspaceDraftFingerprintRef.current = buildWorkspaceFingerprint(
-            localDraft.files,
-            localDraft.workspaceState.lockedPaths
+            candidateDraft.files,
+            candidateDraft.workspaceState.lockedPaths
           )
-          setWorkspaceRestoreNotice("Pulihkan perubahan lokal yang belum tersimpan.")
+          setWorkspaceRestoreNotice(
+            candidateIsDraftArtifact
+              ? "Draft AI dipulihkan dari artifact sementara. Tunggu sandbox verified sebelum snapshot resmi."
+              : "Pulihkan perubahan lokal yang belum tersimpan."
+          )
         }
 
         setGeneratedFiles(nextFiles)
-        setWorkspaceArtifactStatus(nextFiles.length > 0 ? "persisted" : "empty")
+        setProjectHistory(serverHistory)
+        setWorkspaceArtifactStatus(
+          shouldRestoreDraft && candidateIsDraftArtifact
+            ? "draft"
+            : nextFiles.length > 0
+              ? "persisted"
+              : "empty"
+        )
         setActiveFileIndex(0)
         setCurrentVersion(serverWorkspaceState.version)
         setProjectName(data.project?.name || null)
@@ -1175,10 +1322,10 @@ export default function EditorPage() {
         setSubscriptionStatus(data.project?.workspace?.subscription?.status || "active")
         setShouldAutoGeneratePrompt(
           Boolean(data.project?.prompt?.trim()) &&
-            (data.project?.history?.length || 0) === 0 &&
+            serverHistory.length === 0 &&
             visibleServerFiles.length === 0
         )
-        setIsDirty(Boolean(shouldRestoreDraft && localDraft?.workspaceState.dirty))
+        setIsDirty(Boolean(shouldRestoreDraft && candidateDraft?.workspaceState.dirty))
       } catch (error) {
         if (!isMounted) return
         const message = error instanceof Error ? error.message : "Failed to load project"
@@ -1373,14 +1520,7 @@ export default function EditorPage() {
 
     workspaceDraftFingerprintRef.current = fingerprint
 
-    if (typeof window === "undefined") {
-      return
-    }
-
-    window.localStorage.setItem(
-      buildWorkspaceDraftKey(projectId),
-      JSON.stringify(input)
-    )
+    writeWorkspaceDraftToStorage(projectId, input)
   }, [projectId])
 
   const clearWorkspaceDraft = useCallback(() => {
@@ -1460,6 +1600,10 @@ export default function EditorPage() {
     const draft: WorkspaceDraft = {
       files: normalizeWorkspaceFiles(generatedFiles),
       workspaceState,
+      artifactStatus: workspaceArtifactStatus,
+      draftJobId: workspaceDraftRef.current?.draftJobId || activeGenerationJobIdRef.current,
+      draftArtifactId: workspaceDraftRef.current?.draftArtifactId || null,
+      draftUpdatedAt: workspaceArtifactStatus === "draft" ? new Date().toISOString() : null,
     }
 
     persistWorkspaceDraft(draft)
@@ -1879,6 +2023,10 @@ export default function EditorPage() {
         persistWorkspaceDraft({
           files: normalizeWorkspaceFiles(generatedFiles),
           workspaceState,
+          artifactStatus: workspaceArtifactStatus,
+          draftJobId: workspaceDraftRef.current?.draftJobId || activeGenerationJobIdRef.current,
+          draftArtifactId: workspaceDraftRef.current?.draftArtifactId || null,
+          draftUpdatedAt: workspaceArtifactStatus === "draft" ? new Date().toISOString() : null,
         })
         setIsDirty(false)
         setWorkspaceRestoreNotice("Draft disimpan lokal. Jalankan validasi/sandbox sampai verified sebelum snapshot resmi.")

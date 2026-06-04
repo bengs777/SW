@@ -131,6 +131,9 @@ assert(
     /artifactFile\.createMany/.test(generationDraftService) &&
     /GenerationDraftArtifactService\.readForJob/.test(generationDraftRoute) &&
     /applyGenerationDraft/.test(projectPage) &&
+    /writeWorkspaceDraftToStorage\(projectId,\s*draft\)/.test(projectPage) &&
+    /candidateIsDraftArtifact/.test(projectPage) &&
+    /draftState:\s*latestDraft/.test(projectApi) &&
     /streamed_draft_fetch_requested/.test(projectPage) &&
     /workspaceArtifactStatus === "draft"/.test(projectPage) &&
     /Draft sudah bisa diedit/.test(workspaceCommandCenter) &&
