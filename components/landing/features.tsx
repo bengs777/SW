@@ -35,10 +35,10 @@ const features = [
 
 export function Features() {
   return (
-    <section id="features" className="border-t border-border py-24 sm:py-36">
+    <section id="features" className="border-t border-border/70 py-24 sm:py-32">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">
-          <h2 className="text-balance text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
+          <h2 className="text-balance text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
             Semua yang Anda butuhkan untuk meluncurkan lebih cepat
           </h2>
           <p className="mt-6 text-pretty text-xl text-muted-foreground leading-relaxed">
@@ -46,13 +46,13 @@ export function Features() {
           </p>
         </div>
 
-        <div className="mt-20 grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {features.map((feature) => (
             <div
               key={feature.title}
-              className="group relative rounded-xl border border-border bg-card p-6 transition-all hover:border-primary/40 hover:bg-card/80 hover:shadow-lg"
+              className="group relative rounded-2xl border border-border/70 bg-card p-6 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-lg"
             >
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 transition-colors group-hover:bg-primary/15">
                 <feature.icon className="h-6 w-6 text-primary" />
               </div>
               <h3 className="text-lg font-semibold text-foreground">{feature.title}</h3>

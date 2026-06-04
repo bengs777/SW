@@ -184,7 +184,7 @@ export function WorkspaceCommandCenter({
   return (
     <section
       aria-label="Workspace builder controls"
-      className="border-b border-border bg-background px-3 py-3"
+      className="border-b border-border/70 bg-background/80 px-3 py-3 backdrop-blur-xl"
     >
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(560px,1.25fr)]">
         <div className="min-w-0">
@@ -229,7 +229,7 @@ export function WorkspaceCommandCenter({
               <div
                 key={step.label}
                 className={cn(
-                  "relative rounded-lg border px-3 py-3 transition-colors",
+                  "relative rounded-2xl border px-3 py-3 transition-colors",
                   tone.shell
                 )}
               >
@@ -253,7 +253,7 @@ export function WorkspaceCommandCenter({
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(320px,0.9fr)_minmax(300px,0.8fr)]">
-        <div className="rounded-lg border border-border bg-background p-3">
+        <div className="rounded-2xl border border-border/70 bg-card p-3 shadow-sm">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-medium">
               <ShieldCheck className={cn("h-4 w-4", validationPassed && "text-emerald-600", validationFailed && "text-destructive")} />
@@ -283,7 +283,7 @@ export function WorkspaceCommandCenter({
           </Button>
         </div>
 
-        <div className="rounded-lg border border-border bg-background p-3">
+        <div className="rounded-2xl border border-border/70 bg-card p-3 shadow-sm">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-medium">
               <History className="h-4 w-4" />

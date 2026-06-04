@@ -152,8 +152,7 @@ export default async function DashboardPage() {
         </Card>
       )}
 
-      <section className="relative overflow-hidden rounded-3xl border border-border/70 bg-card/90 p-6 shadow-sm sm:p-8">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,oklch(0.97_0_0_/_0.45),transparent_28%),radial-gradient(circle_at_bottom_left,oklch(0.985_0_0_/_0.65),transparent_32%)] dark:bg-[radial-gradient(circle_at_top_right,oklch(0.269_0_0_/_0.5),transparent_26%),radial-gradient(circle_at_bottom_left,oklch(0.205_0_0_/_0.42),transparent_30%)]" />
+      <section className="relative overflow-hidden rounded-[1.75rem] border border-border/70 bg-card p-6 shadow-sm sm:p-8">
         <div className="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-3xl space-y-4">
             <Badge
@@ -165,10 +164,10 @@ export default async function DashboardPage() {
             </Badge>
             <div className="space-y-3">
               <h1 className="max-w-2xl text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
-                Build and monitor workspaces without the template feel.
+                Studio yang tenang untuk membangun, memantau, dan ship.
               </h1>
               <p className="max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
-                Keep Rupiah balance, recent activity, and generated projects in one control room. The layout is tuned to feel like a real product dashboard, not a demo screen.
+                Saldo, aktivitas, workspace, dan project terbaru berada dalam satu control room yang rapi dan mudah dipindai.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -226,7 +225,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.15fr,0.85fr]">
-        <Card className="overflow-hidden border-border/70 shadow-sm">
+        <Card className="overflow-hidden rounded-[1.5rem] border-border/70 shadow-sm">
           <CardHeader>
             <CardTitle>Recent Usage</CardTitle>
             <CardDescription>
@@ -244,7 +243,7 @@ export default async function DashboardPage() {
                 {usageLogs.map((log) => (
                   <article
                     key={log.id}
-                    className="rounded-3xl border border-border/70 bg-background/60 p-4 shadow-sm transition-colors hover:border-border"
+                    className="rounded-2xl border border-border/70 bg-background/70 p-4 shadow-sm transition-colors hover:border-border"
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -273,7 +272,7 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
 
-        <Card className="overflow-hidden border-border/70 shadow-sm">
+        <Card className="overflow-hidden rounded-[1.5rem] border-border/70 shadow-sm">
           <CardHeader>
             <CardTitle>Workspace Health</CardTitle>
             <CardDescription>
@@ -338,7 +337,7 @@ export default async function DashboardPage() {
         </Card>
       </div>
 
-      <Card className="overflow-hidden border-border/70 shadow-sm">
+      <Card className="overflow-hidden rounded-[1.5rem] border-border/70 shadow-sm">
         <CardHeader className="border-b border-border/70 bg-muted/20">
           <CardTitle>Projects</CardTitle>
           <CardDescription>
@@ -365,7 +364,7 @@ function MetricCard({
   value: string
 }) {
   return (
-    <Card className="overflow-hidden border-border/70 shadow-sm">
+    <Card className="overflow-hidden rounded-[1.5rem] border-border/70 shadow-sm transition-all hover:shadow-md">
       <CardContent className="p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
@@ -373,7 +372,7 @@ function MetricCard({
             <div className="mt-2 text-2xl font-semibold tracking-tight text-foreground">{value}</div>
             <p className="mt-1 text-sm font-medium text-foreground/90">{label}</p>
           </div>
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-foreground">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border/70 bg-muted/40 text-foreground">
             <Icon className="h-5 w-5" />
           </div>
         </div>

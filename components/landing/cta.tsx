@@ -5,10 +5,9 @@ import { ArrowRight, CheckCircle2, Layers3, Sparkles, WandSparkles } from "lucid
 
 export function CTA() {
   return (
-    <section className="border-t border-border py-24 sm:py-36">
+    <section className="border-t border-border/70 py-24 sm:py-32">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="relative overflow-hidden rounded-3xl border border-border bg-card px-6 py-8 shadow-2xl shadow-black/5 sm:px-10 sm:py-12 lg:px-14 lg:py-14">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,oklch(0.68_0.18_28_/_0.1),transparent_26%),radial-gradient(circle_at_top_right,oklch(0.65_0.16_25_/_0.08),transparent_24%),radial-gradient(circle_at_bottom_right,oklch(0.68_0.18_28_/_0.05),transparent_28%)] dark:bg-[radial-gradient(circle_at_top_left,oklch(0.68_0.18_28_/_0.15),transparent_24%),radial-gradient(circle_at_top_right,oklch(0.65_0.16_25_/_0.1),transparent_22%),radial-gradient(circle_at_bottom_right,oklch(0.7_0.18_25_/_0.08),transparent_26%)]" />
+        <div className="relative overflow-hidden rounded-[1.75rem] border border-border/70 bg-card px-6 py-8 shadow-xl shadow-black/5 sm:px-10 sm:py-12 lg:px-14 lg:py-14">
           <div className="relative grid items-center gap-12 lg:grid-cols-[1.05fr,0.95fr] lg:gap-14">
             <div className="space-y-8">
               <Badge className="gap-2 rounded-full border border-primary/30 bg-primary/10 px-4 py-2 text-xs font-medium text-primary">
@@ -16,7 +15,7 @@ export function CTA() {
                 Dibangun untuk tim yang siap meluncurkan
               </Badge>
               <div className="space-y-6">
-                <h2 className="text-balance text-4xl font-bold tracking-tight text-foreground sm:text-5xl lg:text-5xl">
+                <h2 className="text-balance text-4xl font-semibold tracking-tight text-foreground sm:text-5xl lg:text-5xl">
                   Siap berubah dari ide ke UI yang sempurna?
                 </h2>
                 <p className="max-w-xl text-pretty text-lg leading-8 text-muted-foreground">
@@ -26,13 +25,13 @@ export function CTA() {
 
               <div className="flex flex-wrap gap-4">
                 <Link href="/signup">
-                  <Button size="lg" className="gap-2 rounded-full px-6 shadow-sm text-base font-semibold">
+                  <Button size="lg" className="gap-2 rounded-full px-6 text-base font-semibold shadow-sm shadow-primary/20">
                     Mulai Gratis
                     <ArrowRight className="h-5 w-5" />
                   </Button>
                 </Link>
                 <Link href="/pricing">
-                  <Button variant="outline" size="lg" className="rounded-full px-6 shadow-sm text-base font-semibold">
+                  <Button variant="outline" size="lg" className="rounded-full bg-background/70 px-6 text-base font-semibold shadow-sm">
                     Lihat Harga
                   </Button>
                 </Link>
@@ -46,8 +45,7 @@ export function CTA() {
             </div>
 
             <div className="relative">
-              <div className="absolute -inset-6 rounded-[2.25rem] bg-gradient-to-br from-primary/10 via-transparent to-accent/10 blur-2xl" />
-              <div className="relative overflow-hidden rounded-[1.75rem] border border-border bg-background shadow-xl">
+              <div className="relative overflow-hidden rounded-[1.75rem] border border-border/70 bg-background shadow-xl">
                 <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
                   <div className="flex items-center gap-2">
                     <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />

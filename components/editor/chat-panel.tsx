@@ -764,7 +764,7 @@ export function ChatPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden border-r border-border bg-background">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden border-r border-border/70 bg-background">
       {/* Messages */}
       <ScrollArea ref={scrollRef} className="min-h-0 flex-1 p-4">
         {messages.length === 0 ? (
@@ -792,7 +792,7 @@ export function ChatPanel({
       </ScrollArea>
 
       {/* Input */}
-      <div className="shrink-0 border-t border-border p-4">
+      <div className="shrink-0 border-t border-border/70 bg-background/80 p-4 backdrop-blur-xl">
         <div className="max-h-[42vh] space-y-3 overflow-y-auto pr-1">
           <ProviderHealthCard status={providerStatus} />
           {generationProgress && (
@@ -802,7 +802,7 @@ export function ChatPanel({
               onCancelGeneration={onCancelGeneration}
             />
           )}
-          <div className="rounded-2xl border border-border bg-card/80 p-3 shadow-sm">
+          <div className="rounded-[1.5rem] border border-border/70 bg-card p-3 shadow-sm">
             {previewErrorContext && (
               <div className="mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -828,7 +828,7 @@ export function ChatPanel({
               </div>
             )}
 
-            <div className="mb-3 rounded-xl border border-border bg-background/60 p-2">
+            <div className="mb-3 rounded-[1.1rem] border border-border/70 bg-background/70 p-2">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-1">
                 <div>
                   <p className="text-sm font-medium text-foreground">{promptCopy.collaborationLabel}</p>
@@ -845,7 +845,7 @@ export function ChatPanel({
                     type="button"
                     size="sm"
                     variant={collaborationMode === mode ? "default" : "ghost"}
-                    className="h-auto min-h-10 w-full items-start justify-start gap-3 px-3 py-2 text-left"
+                    className="h-auto min-h-10 w-full items-start justify-start gap-3 rounded-full px-3 py-2 text-left"
                     title={collaborationCopy[mode].description}
                     onClick={() => setCollaborationMode(mode)}
                     disabled={isGenerating}
@@ -869,7 +869,7 @@ export function ChatPanel({
                   type="button"
                   size="sm"
                   variant={showAdvancedTools ? "default" : "outline"}
-                  className="h-8 gap-2 px-3"
+                  className="h-8 gap-2 rounded-full px-3"
                   onClick={() => setShowAdvancedTools((current) => !current)}
                 >
                   Advanced
@@ -921,7 +921,7 @@ export function ChatPanel({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={promptCopy.promptPlaceholder}
-              className="mt-3 min-h-[140px] resize-none border-border bg-background/70 leading-6"
+              className="mt-3 min-h-[150px] resize-none rounded-[1.15rem] border-border/80 bg-background/80 leading-6 shadow-inner shadow-black/[0.02] focus-visible:ring-primary/30"
               disabled={isGenerating}
             />
 
@@ -934,7 +934,7 @@ export function ChatPanel({
               type="button"
               size="lg"
               variant={isGenerating ? "destructive" : "default"}
-              className="mt-3 h-12 w-full gap-2 text-sm font-semibold"
+              className="mt-3 h-12 w-full gap-2 rounded-full text-sm font-semibold shadow-sm shadow-primary/15"
               onClick={isGenerating ? onCancelGeneration : handleSubmit}
               disabled={isGenerating ? !onCancelGeneration : !canSubmit}
             >
@@ -1018,7 +1018,7 @@ export function ChatPanel({
                   {promptCopy.useTemplate}
                 </Button>
               </div>
-              <div className="rounded-xl border border-border bg-muted/30 p-3">
+              <div className="rounded-[1.15rem] border border-border/70 bg-muted/30 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium text-foreground">{promptCopy.examplesTitle}</p>
@@ -1036,7 +1036,7 @@ export function ChatPanel({
                       onClick={() => handleApplyPromptExample(example)}
                       disabled={isGenerating}
                       className={cn(
-                        "rounded-xl border border-border bg-background p-3 text-left transition-colors hover:border-foreground/20 hover:bg-card",
+                        "rounded-[1rem] border border-border/70 bg-background p-3 text-left transition-colors hover:border-foreground/20 hover:bg-card",
                         isGenerating && "cursor-not-allowed opacity-60"
                       )}
                     >
@@ -1145,7 +1145,7 @@ export function ChatPanel({
               <ImageIcon className="h-4 w-4" />
             </Button>
             <Select value={selectedModel} onValueChange={onModelChange} disabled={isGenerating}>
-              <SelectTrigger className="h-auto min-w-[280px] items-start gap-3 py-2 text-left">
+              <SelectTrigger className="h-auto min-w-[280px] items-start gap-3 rounded-full py-2 pl-4 pr-3 text-left">
                 <SelectValue className="sr-only" placeholder="Select model" />
                 <div className="flex min-w-0 flex-col text-left">
                   <span className="truncate text-sm font-medium text-foreground">{selectedModelLabel}</span>

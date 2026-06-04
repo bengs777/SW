@@ -17,7 +17,6 @@ export default async function DashboardLayout({
   return (
     <AuthSessionProvider>
       <div className="relative min-h-screen overflow-hidden bg-background text-foreground">
-        <div className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,oklch(0.985_0_0_/_0.82),transparent_32%),radial-gradient(circle_at_top_right,oklch(0.97_0_0_/_0.55),transparent_26%)] dark:bg-[radial-gradient(circle_at_top_left,oklch(0.269_0_0_/_0.82),transparent_28%),radial-gradient(circle_at_top_right,oklch(0.205_0_0_/_0.52),transparent_24%)]" />
         <div className="flex min-h-screen flex-col lg:flex-row">
           <DashboardSidebar />
           <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

@@ -2338,7 +2338,7 @@ export default function EditorPage() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-card shadow-sm">
       <EditorHeader
         projectId={projectId}
         currentVersion={currentVersion}
@@ -2446,7 +2446,7 @@ export default function EditorPage() {
         </>
       ) : (
         <>
-          <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+          <div className="flex items-center justify-between gap-2 border-b border-border/70 bg-background/80 px-3 py-2 backdrop-blur-xl">
             <div className="text-xs text-muted-foreground">
               Layout disembunyikan di menu agar toolbar tetap ringan.
             </div>

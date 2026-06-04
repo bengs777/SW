@@ -28,15 +28,15 @@ const navigation = {
 
 export function Footer() {
   return (
-    <footer className="border-t border-border">
+    <footer className="border-t border-border/70 bg-background">
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6 lg:py-20">
         <div className="grid grid-cols-2 gap-8 md:grid-cols-5">
           <div className="col-span-2">
             <Link href="/" className="flex items-center gap-2">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary">
                 <Zap className="h-5 w-5 text-primary-foreground" />
               </div>
-              <span className="text-xl font-bold text-foreground">Swift</span>
+              <span className="text-xl font-semibold text-foreground">Swift AI</span>
             </Link>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-muted-foreground">
               Bangun aplikasi web dengan AI. Jelaskan apa yang Anda inginkan, saksikan menjadi kenyataan.

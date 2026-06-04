@@ -19,31 +19,31 @@ const generatedFiles = [
 
 export function Hero() {
   return (
-    <section className="relative border-b border-border bg-background pt-24 sm:pt-28">
-      <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-7xl items-center gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[0.9fr,1.1fr] lg:px-8 lg:py-14">
+    <section className="relative border-b border-border/70 bg-background pt-24 sm:pt-28">
+      <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-7xl items-center gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[0.88fr,1.12fr] lg:px-8 lg:py-14">
         <div className="max-w-2xl">
-          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-secondary/70 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border/70 bg-card/80 px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-sm">
             <Sparkles className="h-3.5 w-3.5 text-primary" />
             Builder aplikasi AI untuk tim yang ingin rilis, bukan sekadar demo
           </div>
 
           <h1 className="text-balance text-5xl font-semibold tracking-tight text-foreground sm:text-6xl lg:text-7xl">
-            Bangun aplikasi web dari satu prompt.
+            Swift AI
           </h1>
 
           <p className="mt-6 max-w-xl text-pretty text-lg leading-8 text-muted-foreground sm:text-xl">
-            Swift AI mengubah ide menjadi project Next.js yang divalidasi, dipreview, diperbaiki otomatis, lalu siap disimpan dan dideploy.
+            Bangun aplikasi web dari satu prompt. Swift mengubah ide menjadi project Next.js yang divalidasi, dipreview, diperbaiki otomatis, lalu siap dideploy.
           </p>
 
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Link href="/dashboard">
-              <Button size="lg" className="h-12 gap-2 rounded-lg px-5 text-sm font-semibold">
+              <Button size="lg" className="h-12 gap-2 rounded-full px-6 text-sm font-semibold shadow-sm shadow-primary/20">
                 Mulai membangun
                 <ArrowRight className="h-4 w-4" />
               </Button>
             </Link>
             <Link href="#demo">
-              <Button variant="outline" size="lg" className="h-12 gap-2 rounded-lg px-5 text-sm font-semibold">
+              <Button variant="outline" size="lg" className="h-12 gap-2 rounded-full bg-card/70 px-6 text-sm font-semibold shadow-sm">
                 <Play className="h-4 w-4" />
                 Lihat alur kerja
               </Button>
@@ -61,8 +61,8 @@ export function Hero() {
         </div>
 
         <div className="w-full">
-          <div className="overflow-hidden rounded-xl border border-border bg-card shadow-2xl shadow-black/15">
-            <div className="flex items-center justify-between border-b border-border bg-secondary/55 px-4 py-3">
+          <div className="overflow-hidden rounded-[1.75rem] border border-border/80 bg-card shadow-2xl shadow-black/10">
+            <div className="flex items-center justify-between border-b border-border/70 bg-muted/45 px-4 py-3">
               <div className="flex items-center gap-2">
                 <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
                 <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
@@ -77,7 +77,7 @@ export function Hero() {
 
             <div className="grid lg:grid-cols-[0.92fr,1.08fr]">
               <div className="border-b border-border bg-background p-4 lg:border-b-0 lg:border-r">
-                <div className="rounded-lg border border-border bg-card p-3">
+                <div className="rounded-[1.35rem] border border-border/70 bg-card p-4 shadow-sm">
                   <div className="mb-2 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                     Prompt
                   </div>
@@ -86,7 +86,7 @@ export function Hero() {
                   </p>
                   <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
                     <span className="text-xs text-muted-foreground">Mode: bangun</span>
-                    <Button size="sm" className="h-9 gap-2 rounded-md px-3">
+                    <Button size="sm" className="h-9 gap-2 rounded-full px-4">
                       <Send className="h-3.5 w-3.5" />
                       Buat
                     </Button>
@@ -95,8 +95,8 @@ export function Hero() {
 
                 <div className="mt-4 space-y-2">
                   {["Rencana file", "Validasi import", "Build preview", "Repair otomatis"].map((step, index) => (
-                    <div key={step} className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+                    <div key={step} className="flex items-center gap-3 rounded-full border border-border/70 bg-card px-3 py-2.5 shadow-sm">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
                         {index + 1}
                       </span>
                       <span className="text-sm text-foreground">{step}</span>
@@ -118,22 +118,22 @@ export function Hero() {
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-border bg-background p-4">
+                <div className="rounded-[1.35rem] border border-border/70 bg-background p-4 shadow-sm">
                   <div className="grid gap-3 sm:grid-cols-3">
                     <Metric label="Lead" value="1.284" />
                     <Metric label="Pipeline" value="Rp82M" />
                     <Metric label="Rasio menang" value="32%" />
                   </div>
-                  <div className="mt-4 h-32 rounded-lg border border-border bg-card p-3">
+                  <div className="mt-4 h-32 rounded-[1.1rem] border border-border/70 bg-card p-3">
                     <div className="flex h-full items-end gap-2">
                       {[42, 58, 49, 70, 61, 84, 76].map((height, index) => (
-                        <div key={index} className="flex-1 rounded-t-md bg-primary/80" style={{ height: `${height}%` }} />
+                        <div key={index} className="flex-1 rounded-t-md bg-primary/75" style={{ height: `${height}%` }} />
                       ))}
                     </div>
                   </div>
                 </div>
 
-                <div className="mt-4 rounded-lg border border-border bg-background">
+                <div className="mt-4 rounded-[1.2rem] border border-border/70 bg-background">
                   <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground">
                     <Code2 className="h-3.5 w-3.5" />
                     File yang dibuat
@@ -157,7 +157,7 @@ export function Hero() {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-border bg-card p-3">
+    <div className="rounded-[1rem] border border-border/70 bg-card p-3">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 text-lg font-semibold text-foreground">{value}</div>
     </div>

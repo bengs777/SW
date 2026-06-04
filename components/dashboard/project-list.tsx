@@ -117,7 +117,7 @@ export function ProjectList({ searchQuery, workspaceId }: ProjectListProps) {
         {Array.from({ length: 3 }).map((_, index) => (
           <div
             key={index}
-            className="rounded-3xl border border-border/70 bg-card/80 p-5 shadow-sm"
+            className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm"
           >
             <div className="animate-pulse space-y-4">
               <div className="flex items-start gap-3">
@@ -157,7 +157,7 @@ export function ProjectList({ searchQuery, workspaceId }: ProjectListProps) {
 
     return (
       <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-border/70 bg-muted/20 px-6 py-16 text-center">
-        <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-background text-muted-foreground shadow-sm">
+        <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-background text-muted-foreground shadow-sm">
           <Globe className="h-7 w-7" />
         </div>
         <h3 className="text-lg font-semibold text-foreground">{title}</h3>
@@ -172,12 +172,11 @@ export function ProjectList({ searchQuery, workspaceId }: ProjectListProps) {
         <Link
           key={project.id}
           href={`/dashboard/project/${project.id}`}
-          className="group relative flex h-full flex-col overflow-hidden rounded-3xl border border-border/70 bg-card/85 p-5 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-border hover:shadow-lg"
+          className="group relative flex h-full flex-col overflow-hidden rounded-2xl border border-border/70 bg-card p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-lg"
         >
-          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 flex-1 gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                 <FolderOpen className="h-5 w-5" />
               </div>
               <div className="min-w-0">

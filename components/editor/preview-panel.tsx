@@ -159,7 +159,7 @@ export function PreviewPanel({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-muted/30">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border bg-background px-4 py-2">
+      <div className="flex items-center justify-between border-b border-border/70 bg-background/80 px-4 py-2 backdrop-blur-xl">
         <div className="flex items-center gap-4">
           <Tabs value={activeTab} onValueChange={(v) => handleTabChange(v as "preview" | "code" | "explorer") }>
             <TabsList>
@@ -193,11 +193,11 @@ export function PreviewPanel({
 
         {activeTab === "preview" && (
           <div className="flex items-center gap-2">
-            <div className="flex items-center rounded-lg border border-border bg-muted p-1">
+            <div className="flex items-center rounded-full border border-border/70 bg-muted p-1">
               <Button
                 variant={viewport === "mobile" ? "secondary" : "ghost"}
                 size="icon"
-                className="h-7 w-7"
+                className="h-7 w-7 rounded-full"
                 onClick={() => setViewport("mobile")}
                 title="Mobile view"
               >
@@ -206,7 +206,7 @@ export function PreviewPanel({
               <Button
                 variant={viewport === "tablet" ? "secondary" : "ghost"}
                 size="icon"
-                className="h-7 w-7"
+                className="h-7 w-7 rounded-full"
                 onClick={() => setViewport("tablet")}
                 title="Tablet view"
               >
@@ -215,7 +215,7 @@ export function PreviewPanel({
               <Button
                 variant={viewport === "desktop" ? "secondary" : "ghost"}
                 size="icon"
-                className="h-7 w-7"
+                className="h-7 w-7 rounded-full"
                 onClick={() => setViewport("desktop")}
                 title="Desktop view"
               >
@@ -225,7 +225,7 @@ export function PreviewPanel({
             <Button 
               variant="ghost" 
               size="icon" 
-              className="h-8 w-8"
+              className="h-8 w-8 rounded-full"
               onClick={handleRefresh}
               title="Refresh preview"
             >
@@ -234,7 +234,7 @@ export function PreviewPanel({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8"
+              className="h-8 w-8 rounded-full"
               title="Open in new tab"
               onClick={handleOpenPreview}
               disabled={!runtimePreviewUrl}
@@ -278,7 +278,7 @@ export function PreviewPanel({
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-4">
           <div
             className={cn(
-              "h-full overflow-hidden rounded-lg border border-border bg-background shadow-lg transition-all duration-300",
+              "h-full overflow-hidden rounded-[1.35rem] border border-border/70 bg-background shadow-xl shadow-black/10 transition-all duration-300",
               viewport === "desktop" ? "w-full" : ""
             )}
             style={{ width: viewportWidths[viewport], maxWidth: "100%" }}
