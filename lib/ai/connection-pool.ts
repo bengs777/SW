@@ -7,7 +7,7 @@ import { Agent as HttpsAgent } from "node:https"
  * Why this matters for "standby" + cost:
  * - Without keep-alive, every request opens a new TCP + TLS handshake (~150-300ms overhead).
  * - With keep-alive, established connections are reused → first byte arrives much sooner.
- * - Reduces compute time (Vercel/Railway charge by execution duration).
+ * - Reduces compute time on usage-metered runtimes.
  * - Reduces tail latency on cold starts after the first warm hit.
  *
  * Singleton agents persist across the process lifetime.

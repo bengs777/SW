@@ -2,10 +2,9 @@ import { env } from "@/lib/env"
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 export const OPENROUTER_PROVIDER = "openrouter"
-export const OPENROUTER_DEFAULT_MODEL = "poolside/laguna-m.1:free"
+export const OPENROUTER_DEFAULT_MODEL = "poolside/laguna-xs.2:free"
 export const OPENROUTER_DEFAULT_FALLBACK_MODELS = [
   "openrouter/owl-alpha",
-  "poolside/laguna-xs.2:free",
 ]
 export const PUBLIC_AI_NAME = "Swift AI"
 export const BASIC_PROMPT_FEE_IDR = 3000

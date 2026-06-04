@@ -7,11 +7,6 @@ function read(file) {
   return fs.readFileSync(path.join(root, file), "utf8")
 }
 
-function readOptional(file) {
-  const fullPath = path.join(root, file)
-  return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : ""
-}
-
 function assert(name, pass, detail) {
   if (!pass) {
     const error = new Error(`${name}: ${detail}`)
@@ -25,9 +20,7 @@ function main() {
   const packageJson = JSON.parse(read("package.json"))
   const workerEntry = read("workers/index.ts")
   const workerDockerfile = read("workers/Dockerfile")
-  const workerRailwayConfig = read("railway.worker.json")
   const gitignore = read(".gitignore")
-  const workerRailwayEnv = readOptional(".env.railway.worker.production")
   const sandboxDockerfile = read("services/sandbox-runtime/Dockerfile")
   const runTsScript = read("scripts/run-ts-script.js")
   const workerHealthRoute = read("app/api/worker/health/route.ts")
@@ -90,18 +83,9 @@ function main() {
   )
 
   assert(
-    "worker.railway-config",
-    /"dockerfilePath":\s*"workers\/Dockerfile"/.test(workerRailwayConfig) &&
-      /"healthcheckPath":\s*"\/health"/.test(workerRailwayConfig),
-    "Railway worker config points at the standalone worker image and health endpoint"
-  )
-
-  assert(
-    "worker.railway-env-template",
-    /\.env\*/.test(gitignore) &&
-      !/SWIFT_FALLBACK_MODEL_[123]=\S+/.test(workerRailwayEnv) &&
-      !/OPENROUTER_FREE_MODEL=\S+/.test(workerRailwayEnv),
-    "Railway worker env files are ignored, local-only, and do not reintroduce degraded free fallbacks"
+    "worker.env-files-ignored",
+    /\.env\*/.test(gitignore),
+    "local env files are ignored and are not part of production source control"
   )
 
   assert(
@@ -165,9 +149,8 @@ function main() {
       /queueWorkerDegraded/.test(generateJobsRoute) &&
       /generation_queue_worker_degraded_enqueue_anyway/.test(generateJobsRoute) &&
       /queue\.fallback_scheduled/.test(generateJobsRoute) &&
-      /hasDedicatedSandboxService/.test(generateJobsRoute) &&
-      /isRailwayRuntime/.test(generateJobsRoute),
-    "queue enqueue separates Redis availability from worker heartbeat and supports Railway sandbox fallback"
+      /hasDedicatedSandboxService/.test(generateJobsRoute),
+    "queue enqueue separates Redis availability from worker heartbeat and supports VPS sandbox fallback"
   )
 
   assert(
@@ -221,11 +204,10 @@ function main() {
       sandboxHealthBlock.includes("rootError: storageError") &&
       sandboxHealthBlock.includes("storage,") &&
       /activeProjects/.test(sandboxHealthBlock) &&
-      /railway/.test(sandboxRuntimeServer) &&
       /SWIFT_SANDBOX_ROOT=\/data\/swift-sandbox/.test(sandboxDockerfile) &&
       /sandbox_service_unavailable/.test(sandboxRoute) &&
       /service:\s*\{[\s\S]*tokenConfigured/.test(sandboxRoute),
-    "sandbox runtime and proxy expose safe health details for Railway troubleshooting"
+    "sandbox runtime and proxy expose safe health details for VPS troubleshooting"
   )
 
   assert(

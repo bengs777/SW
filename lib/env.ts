@@ -93,10 +93,8 @@ const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const verdiTeamId = getEnv("VERDI_TEAM")
 const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
-const swiftAiModelChain = getEnv("SWIFT_AI_MODEL_CHAIN")
-const swiftPrimaryModel = getEnv("SWIFT_PRIMARY_MODEL")
 const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
-const openRouterModel = getEnv("OPENROUTER_MODEL") || "poolside/laguna-m.1:free"
+const openRouterModel = getEnv("OPENROUTER_MODEL") || "poolside/laguna-xs.2:free"
 const swiftAiProviderName = getEnv("SWIFT_AI_PROVIDER_NAME") || "openrouter"
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
@@ -143,8 +141,6 @@ export const env = {
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterModel,
   swiftAiProviderName,
-  swiftAiModelChain,
-  swiftPrimaryModel,
   swiftFallbackModel1,
   openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || "https://openrouter.ai/api/v1"),
   openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),

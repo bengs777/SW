@@ -28,11 +28,6 @@ const requestedGenerationExecutionMode = (process.env.SWIFT_GENERATION_EXECUTION
 const isVercelProductionRuntime = process.env.VERCEL === "1" && process.env.NODE_ENV === "production"
 const isProductionRuntime = process.env.NODE_ENV === "production"
 const hasDedicatedSandboxService = Boolean(process.env.SANDBOX_SERVICE_URL)
-const isRailwayRuntime = Boolean(
-  process.env.RAILWAY_ENVIRONMENT ||
-  process.env.RAILWAY_PROJECT_ID ||
-  process.env.RAILWAY_SERVICE_ID
-)
 const generationExecutionMode = requestedGenerationExecutionMode === "serverless" ? "serverless" : "queue"
 const serverlessFallbackDisabled = process.env.SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK === "true"
 const explicitServerlessFallbackAllowed = process.env.SWIFT_ALLOW_SERVERLESS_GENERATION_FALLBACK === "true"
@@ -41,7 +36,6 @@ const allowServerlessGenerationFallback =
   (
     generationExecutionMode === "serverless" ||
     explicitServerlessFallbackAllowed ||
-    isRailwayRuntime ||
     (!isVercelProductionRuntime && !isProductionRuntime) ||
     (isVercelProductionRuntime && hasDedicatedSandboxService)
   )
@@ -788,7 +782,6 @@ export async function POST(request: NextRequest) {
       requestedGenerationExecutionMode,
       explicitServerlessFallbackAllowed,
       vercelProductionRuntime: isVercelProductionRuntime,
-      railwayRuntime: isRailwayRuntime,
       hasDedicatedSandboxService,
     })
     if (shouldUseServerlessFallback) {

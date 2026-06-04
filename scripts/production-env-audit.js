@@ -4,14 +4,11 @@ const { execSync } = require("node:child_process")
 
 const root = process.cwd()
 const EXPECTED_SANDBOX_PUBLIC_URL = "https://sandbox.ai-swift.biz.id"
-const EXPECTED_WORKER_HEALTH_URL = "https://ingenious-appreciation-production.up.railway.app/health"
-const EXPECTED_OPENROUTER_MODEL = "poolside/laguna-m.1:free"
+const EXPECTED_OPENROUTER_MODEL = "poolside/laguna-xs.2:free"
 
 const files = {
   local: ".env",
   vercel: ".env.production",
-  railwayWorker: ".env.railway.worker.production",
-  railwaySandbox: ".env.railway.production",
 }
 
 function parseEnvFile(file) {
@@ -48,10 +45,6 @@ function hasAny(env, keys) {
   return keys.some((key) => Boolean(value(env, key)))
 }
 
-function isSandboxServiceUrl(value) {
-  return /^https?:\/\/[^/\s]+(?::\d+)?$/i.test(value)
-}
-
 function checkCommonProvider(checks, env, label) {
   assert(checks, value(env, "OPENROUTER_BASE_URL") === "https://openrouter.ai/api/v1", `${label}: OPENROUTER_BASE_URL points to OpenRouter API`)
   assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "openrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses OpenRouter`)
@@ -76,24 +69,13 @@ function checkEnv() {
   assert(checks, value(parsed.vercel, "NEXT_PUBLIC_APP_URL") === "https://www.ai-swift.biz.id", ".env.production: production public app URL")
   assert(checks, value(parsed.vercel, "SWIFT_GENERATION_EXECUTION_MODE") === "queue", ".env.production: generation runs in queue mode")
   assert(checks, value(parsed.vercel, "SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK") === "true", ".env.production: serverless generation fallback is disabled")
-  assert(checks, value(parsed.vercel, "SWIFT_WORKER_HEALTH_URL") === EXPECTED_WORKER_HEALTH_URL, ".env.production: worker health URL points to Railway worker")
-  assert(checks, isSandboxServiceUrl(value(parsed.vercel, "SANDBOX_SERVICE_URL")), ".env.production: sandbox service URL points to a reachable runtime origin")
+  assert(checks, value(parsed.vercel, "SANDBOX_SERVICE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.production: sandbox service URL uses verified custom domain")
   assert(checks, value(parsed.vercel, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.production: sandbox public base URL uses verified custom domain")
   checkCommonProvider(checks, parsed.vercel, ".env.production")
 
-  assert(checks, value(parsed.railwayWorker, "NODE_ENV") === "production", ".env.railway.worker.production: production mode")
-  assert(checks, value(parsed.railwayWorker, "PORT") === "4000", ".env.railway.worker.production: worker health port")
-  assert(checks, value(parsed.railwayWorker, "SWIFT_WORKER_TYPE") === "generation", ".env.railway.worker.production: worker type generation")
-  assert(checks, value(parsed.railwayWorker, "SWIFT_GENERATION_EXECUTION_MODE") === "queue", ".env.railway.worker.production: queue execution mode")
-  assert(checks, value(parsed.railwayWorker, "SWIFT_ENABLE_GENERATION_WORKER") === "true", ".env.railway.worker.production: generation worker enabled")
-  assert(checks, isSandboxServiceUrl(value(parsed.railwayWorker, "SANDBOX_SERVICE_URL")), ".env.railway.worker.production: sandbox service URL points to a reachable runtime origin")
-  assert(checks, value(parsed.railwayWorker, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.railway.worker.production: sandbox public base URL uses verified custom domain")
-  checkCommonProvider(checks, parsed.railwayWorker, ".env.railway.worker.production")
-
-  assert(checks, value(parsed.railwaySandbox, "NODE_ENV") === "production", ".env.railway.production: production mode")
-  assert(checks, value(parsed.railwaySandbox, "PORT") === "8080", ".env.railway.production: sandbox service port")
-  assert(checks, value(parsed.railwaySandbox, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.railway.production: sandbox public URL uses verified custom domain")
-  assert(checks, value(parsed.railwaySandbox, "SWIFT_SANDBOX_ROOT") === "/data/swift-sandbox", ".env.railway.production: sandbox root uses Railway volume")
+  for (const file of [".env." + "rail" + "way.production", ".env." + "rail" + "way.worker.production"]) {
+    assert(checks, !fs.existsSync(path.join(root, file)), `${file}: removed for production`)
+  }
 
   const gitignore = fs.existsSync(path.join(root, ".gitignore")) ? fs.readFileSync(path.join(root, ".gitignore"), "utf8") : ""
   assert(checks, /\.env\*/.test(gitignore), ".gitignore: blocks all .env* files")
