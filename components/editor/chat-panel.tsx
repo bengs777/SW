@@ -1389,6 +1389,16 @@ function GenerationProgressCard({
           Prompt: {progress.prompt}
         </p>
       )}
+      {progress.statusHint && (
+        <p className="mt-2 rounded-md border border-border bg-background/70 px-2 py-1 text-[11px] text-muted-foreground">
+          {progress.statusHint}
+        </p>
+      )}
+      {progress.retryHint && (
+        <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+          {progress.retryHint}
+        </p>
+      )}
       {progress.workPlan && progress.workPlan.length > 0 && (
         <div className="mt-3 rounded-lg border border-border bg-background/70 p-2">
           <p className="mb-2 text-[11px] font-medium uppercase text-muted-foreground">Rencana Swift</p>

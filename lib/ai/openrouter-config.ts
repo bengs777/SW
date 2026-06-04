@@ -6,6 +6,11 @@ export const OPENROUTER_DEFAULT_MODEL = "poolside/laguna-xs.2:free"
 export const OPENROUTER_DEFAULT_FALLBACK_MODELS = [
   "openrouter/owl-alpha",
 ]
+const OPENROUTER_FALLBACK_ENV_KEYS = [
+  "SWIFT_FALLBACK_MODEL_1",
+  "SWIFT_FALLBACK_MODEL_2",
+  "OPENROUTER_FALLBACK_MODEL",
+]
 export const PUBLIC_AI_NAME = "Swift AI"
 export const BASIC_PROMPT_FEE_IDR = 3000
 export const BUILD_PROMPT_FEE_IDR = 3000
@@ -31,8 +36,13 @@ export function getOpenRouterModel() {
 }
 
 export function getOpenRouterModelChain() {
+  const configuredFallbackModels = OPENROUTER_FALLBACK_ENV_KEYS
+    .map((key) => process.env[key] || "")
+    .filter(Boolean)
+
   return uniqueModels([
     getOpenRouterModel(),
+    ...configuredFallbackModels.map(normalizeOpenRouterModelId),
     ...OPENROUTER_DEFAULT_FALLBACK_MODELS.map(normalizeOpenRouterModelId),
   ])
 }

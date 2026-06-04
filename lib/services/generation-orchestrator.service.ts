@@ -235,6 +235,12 @@ type GenerationPlan = {
   fileGraphPlan: string[]
   agentTasks: string[]
   actionPlan: AgentWorkflowAction[]
+  stagedFullStack: {
+    enabled: boolean
+    currentPass: "baseline_deployable"
+    reason: string
+    nextSteps: string[]
+  } | null
   contextBudget: {
     maxFiles: number
     maxCharsPerFile: number
@@ -322,6 +328,17 @@ const FULL_FRONTEND_FILE_LIMIT = 18
 const FULL_FRONTEND_BATCH_SIZE = 5
 const PRODUCTION_FULLSTACK_FILE_LIMIT = 16
 const PRODUCTION_FULLSTACK_BATCH_SIZE = 8
+const STAGED_FULLSTACK_BASELINE_FILE_LIMIT = 10
+const STAGED_FULLSTACK_BASELINE_FILES = [
+  "package.json",
+  "tsconfig.json",
+  "app/globals.css",
+  "app/layout.tsx",
+  "app/page.tsx",
+  "prisma/schema.prisma",
+  ".env.example",
+  "app/api/health/route.ts",
+]
 const MINIMAL_RUNNABLE_FALLBACK_REQUIRED_FILES = [
   "package.json",
   "tsconfig.json",
@@ -814,6 +831,63 @@ function shouldStartWithFrontendPass(input: {
   }
 
   return true
+}
+
+function buildStagedFullStackBaselinePlan(input: {
+  prompt: string
+  productionMode: GenerationPlan["productionMode"]
+  editMode: PartialEditPlan["mode"]
+  existingFileCount: number
+  plannerComplexity: string
+  requiredFileCount: number
+}) {
+  if (process.env.SWIFT_DISABLE_STAGED_FULLSTACK_BASELINE === "true") return null
+  if (input.productionMode !== "production_fullstack") return null
+  if (input.editMode !== "full") return null
+  if (input.existingFileCount > 0) return null
+
+  const text = input.prompt.trim()
+  const wordCount = text ? text.split(/\s+/).length : 0
+  const complexFeatureMentions = (
+    text.match(/\b(auth|login|register|role|rbac|admin|dashboard|crud|database|db|prisma|payment|webhook|upload|storage|api|integrasi|integration|report|analytics|notification|email|multi[-\s]?tenant)\b/gi) || []
+  ).length
+  const isLargePrompt =
+    wordCount >= 90 ||
+    input.requiredFileCount >= 14 ||
+    (input.plannerComplexity === "high" && complexFeatureMentions >= 5)
+
+  if (!isLargePrompt) return null
+
+  return {
+    enabled: true,
+    currentPass: "baseline_deployable" as const,
+    reason: "Prompt production full-stack besar diproses sebagai baseline deployable dulu agar provider free tidak timeout.",
+    nextSteps: [
+      "Validasi scaffold Next.js, Prisma schema, env example, dan route API kecil.",
+      "Tambahkan CRUD/domain routes utama setelah preview baseline lolos.",
+      "Tambahkan auth/role, upload, payment, atau integrasi eksternal pada pass lanjutan sesuai prompt.",
+      "Jalankan validasi sandbox ulang setelah setiap pass.",
+    ],
+  }
+}
+
+function stagedFullStackBaselinePaths(prompt: string) {
+  const text = prompt.toLowerCase()
+  const paths = [...STAGED_FULLSTACK_BASELINE_FILES]
+
+  if (/\b(todo|task|tugas)\b/i.test(text)) {
+    paths.push("app/api/todos/route.ts")
+  } else if (/\b(product|produk|marketplace|e-?commerce|shop|store|toko)\b/i.test(text)) {
+    paths.push("app/api/products/route.ts")
+  } else if (/\b(patient|pasien|clinic|klinik|appointment|janji temu)\b/i.test(text)) {
+    paths.push("app/api/patients/route.ts")
+  }
+
+  if (/\b(auth|login|register|role|rbac|admin|user|akun)\b/i.test(text)) {
+    paths.push("app/api/auth/route.ts")
+  }
+
+  return uniquePaths(paths).slice(0, STAGED_FULLSTACK_BASELINE_FILE_LIMIT)
 }
 
 function productionRequiredFiles(blueprint: ControlledAppBlueprint, prompt: string) {
@@ -1944,9 +2018,19 @@ function buildGenerationPlan(input: {
   })
   assertSoftwareOrchestrationReady(orchestration)
   const stagedEcommerceRequested = orchestration.plannerOutput.appType === "ecommerce" && editPlan.mode === "full"
+  const stagedFullStack = buildStagedFullStackBaselinePlan({
+    prompt: input.prompt,
+    productionMode,
+    editMode: editPlan.mode,
+    existingFileCount: input.existingFiles.length,
+    plannerComplexity: orchestration.plannerOutput.complexity,
+    requiredFileCount: requiredFilesForIntent.length,
+  })
   const maxFilesThisPass =
     productionMode === "production_fullstack"
-      ? stagedEcommerceRequested
+      ? stagedFullStack
+        ? STAGED_FULLSTACK_BASELINE_FILE_LIMIT
+        : stagedEcommerceRequested
         ? Math.max(PRODUCTION_FULLSTACK_FILE_LIMIT, 24)
         : PRODUCTION_FULLSTACK_FILE_LIMIT
       : productionMode === "full_frontend"
@@ -2112,6 +2196,30 @@ function buildGenerationPlan(input: {
       }
     }
   }
+  if (stagedFullStack) {
+    const plannedBySafePath = new Map(filePlan.map((item) => [normalizePath(item.path), item]))
+    const baselinePlan = stagedFullStackBaselinePaths(input.prompt).map((filePath) => {
+      const path = normalizePath(filePath)
+      const planned = plannedBySafePath.get(path)
+      return planned || {
+        path,
+        reason: "Baseline deployable full-stack pass requires this file",
+        action: "create_or_update" as const,
+        stage: stagedPhaseForPath(path, orchestration.plannerOutput.appType),
+      }
+    })
+    const baselinePathSet = new Set(baselinePlan.map((item) => normalizePath(item.path)))
+
+    for (const item of filePlan) {
+      const path = normalizePath(item.path)
+      if (!baselinePathSet.has(path) && baselinePlan.length < maxFilesThisPass) {
+        baselinePlan.push(item)
+        baselinePathSet.add(path)
+      }
+    }
+
+    filePlan.splice(0, filePlan.length, ...baselinePlan.slice(0, maxFilesThisPass))
+  }
   for (let index = filePlan.length - 1; index >= 0; index -= 1) {
     const safePath = safeGeneratedPath(filePlan[index].path)
     if (!safePath) {
@@ -2201,6 +2309,7 @@ function buildGenerationPlan(input: {
     fileGraphPlan: filePlan.map((file) => `${file.path}: ${file.reason}`),
     agentTasks,
     actionPlan,
+    stagedFullStack,
     contextBudget: {
       ...trimmed.budget,
       usedFiles: trimmed.files.length,
@@ -3314,6 +3423,9 @@ function buildSlicePrompt(input: {
       : fullFrontend
         ? "- FULL_FRONTEND_MODE: generate production-like frontend architecture with reusable components, realistic UI composition, responsive navigation, footer, CTA, loading/empty states, and domain-specific sections."
         : "- PREVIEW_MODE: generate a small explicit preview prototype only when the user asks for a quick preview.",
+    input.plan.stagedFullStack?.enabled
+      ? "- STAGED_FULLSTACK_BASELINE: this is pass 1 for a large production full-stack request. Build only the approved baseline files so the app validates and previews first. Put remaining CRUD/auth/payment/upload/admin work in later passes, not in speculative extra files."
+      : "",
     `- STAGED_GENERATION_PHASE: ${input.target.stage || "support"}.`,
     input.target.stage === "scaffold"
       ? "- TAHAP_1_SCAFFOLD_ONLY: generate only valid Next.js App Router scaffold/config files. Validation is atomic and will run after planned dependency files exist."
@@ -3430,6 +3542,7 @@ function buildSlicePrompt(input: {
       {
         tasks: input.plan.agentTasks,
         actionPlan: input.plan.actionPlan,
+        stagedFullStack: input.plan.stagedFullStack,
         incrementalEdit: input.plan.incrementalEdit,
         projectMemory: input.plan.projectMemory,
         dependencyGraph: input.plan.dependencyGraph,
@@ -7111,6 +7224,7 @@ export async function executeGenerationJob(
         appType: plan.appType,
         generationMode: plan.generationMode,
         productionMode: plan.productionMode,
+        stagedFullStack: plan.stagedFullStack,
         targetPaths: plan.allowedFileScope.targetPaths,
       },
     })
@@ -7161,6 +7275,7 @@ export async function executeGenerationJob(
       intent: plan.intent,
       structuredIntent: plan.structuredIntent,
       incrementalEdit: plan.incrementalEdit,
+      stagedFullStack: plan.stagedFullStack,
       filePlan: plan.filePlan,
       agentTasks: plan.agentTasks,
       actionPlan: plan.actionPlan,
@@ -7194,6 +7309,7 @@ export async function executeGenerationJob(
         appType: plan.appType,
         productionMode: plan.productionMode,
         fileCount: plan.filePlan.length,
+        stagedFullStack: plan.stagedFullStack,
       },
     })
     await updateDeveloperDiagnostics(input.jobId, developerDiagnostics)
@@ -7210,6 +7326,7 @@ export async function executeGenerationJob(
       intent: intentStorageKey(plan.intent),
       selectedTemplate: intentTemplate?.id || null,
       selectedRegistryComponents: selectedRegistryComponentsForTemplate(intentTemplate?.id || null),
+      stagedFullStack: plan.stagedFullStack,
     })
     log("info", "plan", {
       jobId: input.jobId,
@@ -7230,6 +7347,7 @@ export async function executeGenerationJob(
       promptClassification: plan.objective,
       productionMode: plan.productionMode,
       fileCount: plan.filePlan.length,
+      stagedFullStack: plan.stagedFullStack,
       generatedFiles: plan.filePlan.map((file) => file.path),
     })
     await GenerationJobService.transition(input.jobId, {
@@ -7251,6 +7369,7 @@ export async function executeGenerationJob(
         appType: plan.appType,
         productionMode: plan.productionMode,
         maxFilesThisPass: plan.maxFilesThisPass,
+        stagedFullStack: plan.stagedFullStack,
         intent: plan.intent,
         structuredIntent: plan.structuredIntent,
         incrementalEdit: plan.incrementalEdit,

@@ -1,4 +1,5 @@
-import type { Prisma } from "@prisma/client"
+import { Prisma } from "@prisma/client"
+import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
 import { prisma } from "@/lib/db/client"
 
 export const GENERATION_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"])
@@ -127,6 +128,132 @@ async function nextEventSequence(tx: Prisma.TransactionClient, jobId: string) {
   return (aggregate._max.sequence || 0) + 1
 }
 
+function isDuplicateGenerationEventSequenceError(error: unknown) {
+  const target = error instanceof Prisma.PrismaClientKnownRequestError
+    ? error.meta?.target
+    : null
+  const targetText = Array.isArray(target) ? target.map(String).join(",") : String(target || "")
+
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002" &&
+    /jobId/i.test(targetText) &&
+    /sequence/i.test(targetText)
+  )
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+type PublicGenerationFailureKind =
+  | "provider_timeout"
+  | "provider_exhausted"
+  | "worker_timeout"
+  | "dead_lettered"
+  | "sandbox_build_failed"
+  | "missing_fullstack_category"
+  | "event_log_race"
+  | "insufficient_balance"
+  | "unknown"
+
+function publicFailureSummary(input: {
+  status: string
+  label: string
+  error?: string | null
+  diagnosticsJson?: string | null
+  retryReason?: string | null
+  retryClass?: string | null
+  deadLetteredAt?: Date | null
+}) {
+  const diagnostics = safeJsonParse(input.diagnosticsJson) as Record<string, unknown> | null
+  const orchestrationSummary = diagnostics?.orchestrationSummary && typeof diagnostics.orchestrationSummary === "object"
+    ? diagnostics.orchestrationSummary as Record<string, unknown>
+    : null
+  const messages = [
+    input.error,
+    input.label,
+    input.retryReason,
+    input.retryClass,
+    typeof diagnostics?.message === "string" ? diagnostics.message : null,
+    typeof diagnostics?.publicMessage === "string" ? diagnostics.publicMessage : null,
+    typeof orchestrationSummary?.reason === "string" ? orchestrationSummary.reason : null,
+    typeof orchestrationSummary?.lastValidatorMessage === "string" ? orchestrationSummary.lastValidatorMessage : null,
+    typeof orchestrationSummary?.repairTerminationReason === "string" ? orchestrationSummary.repairTerminationReason : null,
+  ].filter(Boolean).join("\n")
+  const kind = classifyPublicFailureKind({
+    status: input.status,
+    deadLetteredAt: input.deadLetteredAt,
+    message: messages,
+  })
+  const label = publicGenerationRuntimeErrorMessage(messages || input.error || input.label)
+  const retryHint = retryHintForFailureKind(kind)
+
+  return {
+    kind,
+    label,
+    retryHint,
+  }
+}
+
+function classifyPublicFailureKind(input: {
+  status: string
+  deadLetteredAt?: Date | null
+  message: string
+}): PublicGenerationFailureKind {
+  const raw = input.message
+
+  if (input.status === "dead_lettered" || input.deadLetteredAt || /dead[-\s]?letter/i.test(raw)) {
+    return "dead_lettered"
+  }
+  if (/Unique constraint failed[\s\S]*jobId[\s\S]*sequence|P2002[\s\S]*sequence/i.test(raw)) {
+    return "event_log_race"
+  }
+  if (/Missing required full-stack categories|missingCategories|full-stack categories/i.test(raw)) {
+    return "missing_fullstack_category"
+  }
+  if (/insufficient balance|not enough balance|saldo tidak cukup|saldo.*kurang|can only afford/i.test(raw)) {
+    return "insufficient_balance"
+  }
+  if (/SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED|provider failover exhausted|model chain exhausted/i.test(raw)) {
+    return "provider_exhausted"
+  }
+  if (/Provider request budget exceeded|OpenRouter request timed out|request_timeout|provider.*timeout|timed out.*provider/i.test(raw)) {
+    return "provider_timeout"
+  }
+  if (/Generation timed out after|worker_timeout|worker.*timeout|timeout.*worker/i.test(raw)) {
+    return "worker_timeout"
+  }
+  if (/sandbox|npm run build|build failed|preview.*failed|runtime-smoke|compile failed/i.test(raw)) {
+    return "sandbox_build_failed"
+  }
+
+  return "unknown"
+}
+
+function retryHintForFailureKind(kind: PublicGenerationFailureKind) {
+  switch (kind) {
+    case "provider_timeout":
+      return "Coba retry dengan prompt lebih kecil atau tunggu provider lebih stabil."
+    case "provider_exhausted":
+      return "Retry aman setelah model fallback/env OpenRouter sehat."
+    case "worker_timeout":
+      return "Pastikan worker generation memakai timeout production terbaru, lalu retry."
+    case "dead_lettered":
+      return "Audit dead-letter dulu; replay hanya job yang masih valid."
+    case "sandbox_build_failed":
+      return "Buka Logs sandbox untuk melihat gagal install, build, atau runtime preview."
+    case "missing_fullstack_category":
+      return "Retry dengan scope bertahap agar UI, API, data, dan config dibuat lengkap."
+    case "event_log_race":
+      return "Retry aman setelah patch event sequence aktif di worker terbaru."
+    case "insufficient_balance":
+      return "Isi saldo atau kurangi output token/prompt sebelum retry."
+    default:
+      return "Buka Logs untuk detail, lalu retry setelah worker, provider, dan sandbox sehat."
+  }
+}
+
 export class GenerationJobService {
   static async create(input: CreateGenerationJobInput) {
     return prisma.$transaction(async (tx) => {
@@ -239,30 +366,44 @@ export class GenerationJobService {
   }
 
   static async appendEvent(input: AppendGenerationEventInput) {
-    return prisma.$transaction(async (tx) => {
-      const sequence = await nextEventSequence(tx, input.jobId)
-      return tx.generationEvent.create({
-        data: {
-          jobId: input.jobId,
-          traceId: input.traceId || null,
-          spanId: input.spanId || null,
-          parentSpanId: input.parentSpanId || null,
-          workerId: input.workerId || null,
-          sandboxId: input.sandboxId || null,
-          previewId: input.previewId || null,
-          sequence,
-          type: input.type,
-          eventType: input.eventType || input.type,
-          stage: input.stage,
-          status: input.status,
-          message: input.message,
-          dataJson: safeStringify(input.data),
-          metadataJson: safeStringify(input.metadata),
-          retryCount: Math.max(0, input.retryCount || 0),
-          terminationReason: input.terminationReason || null,
-        },
-      })
-    })
+    const maxAttempts = 3
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await prisma.$transaction(async (tx) => {
+          const sequence = await nextEventSequence(tx, input.jobId)
+          return tx.generationEvent.create({
+            data: {
+              jobId: input.jobId,
+              traceId: input.traceId || null,
+              spanId: input.spanId || null,
+              parentSpanId: input.parentSpanId || null,
+              workerId: input.workerId || null,
+              sandboxId: input.sandboxId || null,
+              previewId: input.previewId || null,
+              sequence,
+              type: input.type,
+              eventType: input.eventType || input.type,
+              stage: input.stage,
+              status: input.status,
+              message: input.message,
+              dataJson: safeStringify(input.data),
+              metadataJson: safeStringify(input.metadata),
+              retryCount: Math.max(0, input.retryCount || 0),
+              terminationReason: input.terminationReason || null,
+            },
+          })
+        })
+      } catch (error) {
+        if (!isDuplicateGenerationEventSequenceError(error) || attempt === maxAttempts) {
+          throw error
+        }
+
+        await sleep(25 * attempt)
+      }
+    }
+
+    throw new Error("Failed to append generation event")
   }
 
   static async update(jobId: string | null | undefined, input: UpdateGenerationJobInput) {
@@ -563,6 +704,7 @@ export class GenerationJobService {
     deadLetteredAt?: Date | null
     terminatedAt?: Date | null
     planJson?: string | null
+    diagnosticsJson?: string | null
     previewUrl?: string | null
     error?: string | null
     resultHistoryId?: string | null
@@ -577,6 +719,16 @@ export class GenerationJobService {
     failedAt?: Date | null
     timedOutAt?: Date | null
   }) {
+    const publicFailure = publicFailureSummary({
+      status: job.status,
+      label: job.label,
+      error: job.error,
+      diagnosticsJson: job.diagnosticsJson,
+      retryReason: job.retryReason,
+      retryClass: job.retryClass,
+      deadLetteredAt: job.deadLetteredAt,
+    })
+
     return {
       id: job.id,
       projectId: job.projectId,
@@ -605,8 +757,10 @@ export class GenerationJobService {
       deadLetteredAt: job.deadLetteredAt?.toISOString() || null,
       terminatedAt: job.terminatedAt?.toISOString() || null,
       plan: parsePlan(job.planJson),
+      stagedFullStack: parseStagedFullStack(job.planJson),
       previewUrl: job.previewUrl || null,
       error: job.error || null,
+      publicFailure,
       resultHistoryId: job.resultHistoryId || null,
       cancelRequested: job.cancelRequested,
       createdAt: job.createdAt.toISOString(),
@@ -687,6 +841,28 @@ function parsePlan(value?: string | null) {
   }
 
   return []
+}
+
+function parseStagedFullStack(value?: string | null) {
+  const parsed = safeJsonParse(value)
+  if (!parsed || typeof parsed !== "object") return null
+  const staged = (parsed as { stagedFullStack?: unknown }).stagedFullStack
+  if (!staged || typeof staged !== "object") return null
+  const record = staged as {
+    enabled?: unknown
+    currentPass?: unknown
+    reason?: unknown
+    nextSteps?: unknown
+  }
+  if (record.enabled !== true) return null
+
+  return {
+    currentPass: typeof record.currentPass === "string" ? record.currentPass : "baseline_deployable",
+    reason: typeof record.reason === "string" ? record.reason : "Large full-stack request is running as a staged baseline first.",
+    nextSteps: Array.isArray(record.nextSteps)
+      ? record.nextSteps.filter((item): item is string => typeof item === "string").slice(0, 6)
+      : [],
+  }
 }
 
 function safeJsonParse(value?: string | null) {

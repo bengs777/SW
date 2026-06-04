@@ -120,6 +120,30 @@ export function publicGenerationStructureErrorMessage(error: unknown) {
 export function publicGenerationRuntimeErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "")
 
+  if (/insufficient balance|not enough balance|saldo tidak cukup|saldo.*kurang|can only afford/i.test(message)) {
+    return "Saldo atau budget token tidak cukup untuk menyelesaikan generate. Kurangi scope prompt atau isi saldo sebelum mencoba lagi."
+  }
+
+  if (/Unique constraint failed[\s\S]*jobId[\s\S]*sequence|P2002[\s\S]*sequence/i.test(message)) {
+    return "Log generation sempat bentrok saat event paralel ditulis. Retry aman setelah worker memakai patch terbaru."
+  }
+
+  if (/Missing required full-stack categories|missingCategories|full-stack categories/i.test(message)) {
+    return "Output full-stack belum lengkap. Swift perlu membuat UI, API, data layer, dan config secara bertahap lalu divalidasi ulang."
+  }
+
+  if (/SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED|provider failover exhausted|model chain exhausted/i.test(message)) {
+    return "Provider AI belum berhasil mengembalikan output valid setelah fallback. Coba ulang dengan prompt lebih kecil atau gunakan model fallback yang lebih stabil."
+  }
+
+  if (/Provider request budget exceeded|OpenRouter request timed out|request_timeout|provider.*timeout|timed out.*provider/i.test(message)) {
+    return "Provider AI timeout sebelum output valid selesai. Coba ulang dengan scope lebih kecil atau tunggu model kembali stabil."
+  }
+
+  if (/Generation timed out after|worker_timeout|worker.*timeout|timeout.*worker/i.test(message)) {
+    return "Worker generation mencapai batas waktu. Pastikan worker production memakai timeout terbaru, lalu jalankan ulang prompt."
+  }
+
   if (/Sandbox storage exhausted|no space left on device|ENOSPC/i.test(message)) {
     return "Sandbox storage penuh. Sistem belum bisa install dependency untuk preview. Tunggu sampai storage sandbox dibersihkan atau volume diperbesar, lalu jalankan ulang prompt."
   }
@@ -136,6 +160,10 @@ export function publicGenerationRuntimeErrorMessage(error: unknown) {
 
   if (/SYSTEM_SATURATED|temporarily saturated/i.test(message)) {
     return "Swift sedang penuh sementara. Tunggu sebentar lalu coba ulang prompt."
+  }
+
+  if (/sandbox|npm run build|build failed|preview.*failed|runtime-smoke|compile failed/i.test(message)) {
+    return "Sandbox gagal memvalidasi build atau preview. Buka Logs untuk melihat apakah gagal install, typecheck, build, atau runtime."
   }
 
   if (

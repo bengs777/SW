@@ -34,14 +34,35 @@ const sourceLabel: Record<ErrorLogSource, string> = {
 }
 
 function errorAdvice(message: string) {
+  if (/failover exhausted|provider.*fallback|Provider AI belum berhasil|model fallback/i.test(message)) {
+    return "Cek OPENROUTER_MODEL dan fallback model, lalu retry dengan scope lebih kecil bila provider sedang lambat."
+  }
+  if (/provider.*timeout|timeout sebelum output|request budget/i.test(message)) {
+    return "Provider timeout. Retry dengan prompt lebih kecil atau tunggu model kembali stabil."
+  }
   if (/dedicated worker|waiting worker|menunggu worker|worker generation/i.test(message)) {
     return "Cek worker generation dan heartbeat, lalu retry prompt setelah worker sehat."
+  }
+  if (/worker.*batas waktu|Generation timed out|worker.*timeout/i.test(message)) {
+    return "Pastikan worker memakai timeout production terbaru dan tidak stalled sebelum retry."
   }
   if (/queue|Redis|BullMQ|queue_enqueue/i.test(message)) {
     return "Cek Redis/BullMQ dan queue health. Job aman diulang setelah queue menerima request."
   }
+  if (/dead[-\s]?letter/i.test(message)) {
+    return "Audit dead-letter dulu. Replay hanya job yang masih valid setelah worker dan provider sehat."
+  }
+  if (/Log generation sempat bentrok|Unique constraint|event.*sequence/i.test(message)) {
+    return "Retry aman setelah worker menjalankan patch event sequence terbaru."
+  }
+  if (/full-stack belum lengkap|full-stack categories|UI, API, data layer/i.test(message)) {
+    return "Jalankan perbaikan bertahap: baseline deployable, lalu CRUD/auth/payment di pass lanjutan."
+  }
   if (/sandbox|runtime|build failed|preview/i.test(message)) {
     return "Cek sandbox logs untuk membedakan gagal install, build, atau runtime preview."
+  }
+  if (/saldo|balance|budget token/i.test(message)) {
+    return "Cek saldo/budget token atau kurangi scope prompt sebelum retry."
   }
   if (/saturated|penuh sementara/i.test(message)) {
     return "Tunggu backlog turun sebentar, lalu coba ulang prompt."

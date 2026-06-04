@@ -679,6 +679,16 @@ export default function EditorPage() {
     createdAt?: string
     queueJobId?: string | null
     orchestrationState?: string | null
+    publicFailure?: {
+      kind: string
+      label: string
+      retryHint: string
+    } | null
+    stagedFullStack?: {
+      currentPass?: string
+      reason?: string
+      nextSteps?: string[]
+    } | null
   }) => {
     const mappedStage = mapJobStageToProgressStage(job.stage, job.status)
     const fallbackJob = typeof job.queueJobId === "string" && job.queueJobId.startsWith("serverless:")
@@ -694,7 +704,11 @@ export default function EditorPage() {
               : /worker|heartbeat|recover/i.test(`${job.label} ${job.orchestrationState || ""}`)
                 ? "waiting_worker"
                 : "queued"
-    const statusHint = queueStateCopy(queueState)
+    const stagedWorkPlan =
+      job.stagedFullStack && Array.isArray(job.stagedFullStack.nextSteps) && job.stagedFullStack.nextSteps.length > 0
+        ? ["Baseline deployable full-stack pass", ...job.stagedFullStack.nextSteps]
+        : null
+    const statusHint = job.stagedFullStack?.reason || queueStateCopy(queueState)
     setGenerationProgress((current) => ({
       stage: mappedStage,
       label: job.label || current?.label || "Swift sedang bekerja",
@@ -702,12 +716,14 @@ export default function EditorPage() {
       timeoutMs: current?.timeoutMs || GENERATE_CLIENT_TIMEOUT_MS,
       modelKey: job.model || current?.modelKey,
       prompt: job.prompt || current?.prompt,
-      workPlan: Array.isArray(job.plan) && job.plan.length > 0 ? job.plan : current?.workPlan,
+      workPlan: stagedWorkPlan || (Array.isArray(job.plan) && job.plan.length > 0 ? job.plan : current?.workPlan),
       jobId: job.id,
       progressPercent: job.progress,
       queueState,
       statusHint,
-      retryHint: job.status === "failed" ? "Retry prompt aman dilakukan setelah queue dan worker sehat." : current?.retryHint || null,
+      retryHint: job.status === "failed"
+        ? job.publicFailure?.retryHint || "Retry prompt aman dilakukan setelah queue dan worker sehat."
+        : current?.retryHint || null,
     }))
   }, [])
 
@@ -873,7 +889,7 @@ export default function EditorPage() {
             return
           }
           if (job.status === "failed") {
-            const message = publicGenerationErrorMessage(job.error || job.label || "Generate gagal. Buka Logs untuk detail error.")
+            const message = job.publicFailure?.label || publicGenerationErrorMessage(job.error || job.label || "Generate gagal. Buka Logs untuk detail error.")
             pushErrorLog("generate", message)
             setShowLogsPanel(true)
             setMessages((prev) =>
