@@ -9,14 +9,18 @@ import { getActiveSwiftModelChain } from "@/lib/ai/swift-tiers"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { getRuntimeMetricsSnapshot } from "@/lib/observability/runtime-metrics"
 import { getMemoryUsageSnapshot } from "@/lib/observability/performance-monitor"
+import { hasValidObservabilityToken } from "@/lib/security/internal-observability"
+import { requireDeveloperActorResponse } from "@/lib/admin"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 export async function GET(request: NextRequest) {
-  const token = process.env.SWIFT_METRICS_TOKEN
-  if (token && request.headers.get("authorization") !== `Bearer ${token}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasValidObservabilityToken(request)) {
+    const actorResult = await requireDeveloperActorResponse()
+    if ("error" in actorResult) {
+      return actorResult.error
+    }
   }
 
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000)

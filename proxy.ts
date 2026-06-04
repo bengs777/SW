@@ -1,6 +1,7 @@
 import { auth } from "@/auth"
 import { NextResponse } from "next/server"
 import type { NextRequest } from "next/server"
+import { hasValidObservabilityToken } from "@/lib/security/internal-observability"
 
 /**
  * Next.js 16 proxy handler (replaces middleware.ts).
@@ -24,13 +25,43 @@ const PUBLIC_PATHS = new Set([
   "/",
 ])
 
+const INTERNAL_OBSERVABILITY_PATH_PREFIXES = [
+  "/api/metrics",
+  "/api/production",
+  "/api/worker",
+]
+
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_PATHS.has(pathname)) return true
   return PUBLIC_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix))
 }
 
+function isInternalObservabilityPath(pathname: string): boolean {
+  return INTERNAL_OBSERVABILITY_PATH_PREFIXES.some((prefix) =>
+    pathname === prefix || pathname.startsWith(`${prefix}/`)
+  )
+}
+
 function isApiRoute(pathname: string): boolean {
   return pathname.startsWith("/api/")
+}
+
+function contentSecurityPolicy() {
+  return [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data: https:",
+    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://va.vercel-scripts.com https://vercel.live",
+    "connect-src 'self' https: wss:",
+    "frame-src 'self' https:",
+    "worker-src 'self' blob:",
+    "upgrade-insecure-requests",
+  ].join("; ")
 }
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
@@ -47,6 +78,7 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
       "Strict-Transport-Security",
       "max-age=31536000; includeSubDomains; preload"
     )
+    response.headers.set("Content-Security-Policy", contentSecurityPolicy())
   }
   return response
 }
@@ -94,6 +126,15 @@ export const proxy = auth((req) => {
         { status: 413 }
       )
     }
+  }
+
+  if (isInternalObservabilityPath(pathname) && !req.auth && !hasValidObservabilityToken(request)) {
+    const response = NextResponse.json(
+      { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
+      { status: 401 }
+    )
+    applySecurityHeaders(response)
+    return response
   }
 
   // Public paths — no auth required

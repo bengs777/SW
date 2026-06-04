@@ -12,6 +12,7 @@ import { timeoutConfig } from "@/lib/timeouts"
 import { getAuthRuntimeDiagnostic } from "@/lib/auth/runtime"
 import { getDeploymentRuntimeReadiness, getProductionReadiness } from "@/lib/production/readiness"
 import { getRuntimeHealthDashboard } from "@/lib/observability/runtime-recovery"
+import { canExposeInternalObservability } from "@/lib/security/internal-observability"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -201,18 +202,26 @@ function isCoreEnvironmentIssue(issue: { key: string; severity: string }) {
 export async function GET(request: NextRequest) {
   const startedAt = Date.now()
   const requestId = request.headers.get("x-request-id") || request.headers.get("x-vercel-id") || randomUUID()
+  const exposeInternalHealth = canExposeInternalObservability(request)
   const coldStartProbe = request.nextUrl.searchParams.get("coldStart") === "true"
-  const refreshProvider = request.nextUrl.searchParams.get("refreshProvider") === "true"
+  const refreshProvider = exposeInternalHealth && request.nextUrl.searchParams.get("refreshProvider") === "true"
 
   if (coldStartProbe) {
     const envReport = validateEnv()
-    return NextResponse.json({
+    const auth = await checkAuth()
+    const deployment = {
+      status: getProductionReadiness().ok ? "healthy" : "unhealthy",
+      detail: getProductionReadiness(),
+    } satisfies HealthCheck
+    const durationMs = Date.now() - startedAt
+    const checkedAt = new Date().toISOString()
+    const body = {
       status: "healthy",
       database: "skipped",
       worker: "skipped",
       queue: "skipped",
-      checkedAt: new Date().toISOString(),
-      durationMs: Date.now() - startedAt,
+      checkedAt,
+      durationMs,
       requestId,
       service: "swift-ai",
       environment: env.nodeEnv,
@@ -232,13 +241,25 @@ export async function GET(request: NextRequest) {
             })),
           },
         },
-        auth: await checkAuth(),
-        deployment: {
-          status: getProductionReadiness().ok ? "healthy" : "unhealthy",
-          detail: getProductionReadiness(),
-        },
+        auth,
+        deployment,
       },
-    }, {
+    }
+    const publicBody = {
+      status: body.status,
+      database: body.database,
+      worker: body.worker,
+      queue: body.queue,
+      auth: okLabel(auth),
+      deployment: okLabel(deployment),
+      checkedAt,
+      durationMs,
+      requestId,
+      service: body.service,
+      environment: body.environment,
+    }
+
+    return NextResponse.json(exposeInternalHealth ? body : publicBody, {
       headers: {
         "Cache-Control": "no-store",
         "X-Request-Id": requestId,
@@ -289,14 +310,15 @@ export async function GET(request: NextRequest) {
     envBlockingErrorCount: envBlockingErrors.length,
   })
 
-  return NextResponse.json({
+  const checkedAt = new Date().toISOString()
+  const fullBody = {
     status,
     database: okLabel(database),
     auth: okLabel(authCheck),
     deployment: okLabel(deployment),
     worker: workerLabel(queue),
     queue: okLabel(queue),
-    checkedAt: new Date().toISOString(),
+    checkedAt,
     durationMs,
     requestId,
     service: "swift-ai",
@@ -337,7 +359,22 @@ export async function GET(request: NextRequest) {
         },
       },
     },
-  }, {
+  }
+  const publicBody = {
+    status,
+    database: okLabel(database),
+    auth: okLabel(authCheck),
+    deployment: okLabel(deployment),
+    worker: workerLabel(queue),
+    queue: okLabel(queue),
+    checkedAt,
+    durationMs,
+    requestId,
+    service: "swift-ai",
+    environment: env.nodeEnv,
+  }
+
+  return NextResponse.json(exposeInternalHealth ? fullBody : publicBody, {
     status: status === "unhealthy" ? 503 : 200,
     headers: {
       "Cache-Control": "no-store",

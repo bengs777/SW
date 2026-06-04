@@ -117,9 +117,10 @@ export function getProductionReadiness() {
       "service",
       env.workerHealthUrl
         ? "Direct worker runtime probe configured."
-        : "Recommended so deploy readiness can verify the dedicated worker service directly.",
+        : "Optional direct probe. Redis/BullMQ heartbeat is the primary production worker signal.",
       true
     ),
+    check("SWIFT_METRICS_TOKEN", "Internal observability bearer token", process.env.SWIFT_METRICS_TOKEN, "optional", "service", "Recommended for Prometheus scraping; admin auth still protects internal JSON health routes.", true),
     check("PREVIEW_DEPLOYMENT_URL", "Preview deployment URL is HTTPS", !isPreviewDeployment || isProductionUrl(env.appUrl) || Boolean(process.env.VERCEL_URL), "required", "preview", "Preview deployments need an HTTPS Vercel URL or explicit app URL."),
     check("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", env.supabaseUrl, "required", "service"),
     check("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "Supabase publishable key", env.supabasePublicAnonKey, "required", "service"),
@@ -242,7 +243,6 @@ export async function getDeploymentRuntimeReadiness() {
     ...(migrationReady ? [] : ["MIGRATION_READINESS"]),
     ...(enforceDedicatedWorker && queueRedisHealthy ? [] : enforceDedicatedWorker ? ["QUEUE_RUNTIME_HEALTH"] : []),
     ...(enforceDedicatedWorker && workerHeartbeatFresh ? [] : enforceDedicatedWorker ? ["GENERATION_WORKER_HEARTBEAT"] : []),
-    ...(enforceDedicatedWorker && workerRuntime.configured && !workerRuntime.ok ? ["GENERATION_WORKER_RUNTIME"] : []),
     ...(enforceSandboxRuntime && sandboxRuntime.configured && !sandboxRuntime.ok ? ["SANDBOX_RUNTIME_HEALTH"] : []),
   ]
 
@@ -254,7 +254,8 @@ export async function getDeploymentRuntimeReadiness() {
     degradedServices: Array.from(new Set([
       ...base.degradedServices,
       ...(saturationDegraded ? ["QUEUE_SATURATION"] : []),
-      ...(workerRuntime.configured && !workerRuntime.ok ? ["GENERATION_WORKER_RUNTIME"] : []),
+      ...(workerRuntime.configured && !workerRuntime.ok ? ["GENERATION_WORKER_RUNTIME_OPTIONAL"] : []),
+      ...(!workerRuntime.configured ? ["SWIFT_WORKER_HEALTH_URL_OPTIONAL"] : []),
       ...(sandboxRuntime.configured && !sandboxRuntime.ok ? ["SANDBOX_RUNTIME_HEALTH"] : []),
     ])),
     dbConnectivity,

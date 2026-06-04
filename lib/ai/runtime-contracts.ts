@@ -149,7 +149,7 @@ export function publicGenerationRuntimeErrorMessage(error: unknown) {
   }
 
   if (
-    /Production generation must run in queue mode with a dedicated worker|GENERATION_WORKER_HEARTBEAT|worker.*missing|worker.*heartbeat|dedicated worker|SWIFT_WORKER_HEALTH_URL/i.test(message)
+    /Production generation must run in queue mode with a dedicated worker|GENERATION_WORKER_HEARTBEAT|worker.*missing|worker.*heartbeat|dedicated worker/i.test(message)
   ) {
     return "Swift production sedang menunggu dedicated worker. Pastikan worker generation aktif, lalu jalankan ulang prompt."
   }

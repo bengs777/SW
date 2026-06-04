@@ -320,7 +320,7 @@ async function sandboxRuntimeDiagnostic() {
 async function workerRuntimeDiagnostic() {
   const workerHealthUrl = normalizeWorkerHealthUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
   if (!workerHealthUrl) {
-    return { ok: false, detail: "SWIFT_WORKER_HEALTH_URL is not configured. Redis heartbeat will be used as the primary worker signal." }
+    return { ok: true, status: "not_configured", detail: "SWIFT_WORKER_HEALTH_URL is not configured. Redis heartbeat will be used as the primary worker signal." }
   }
 
   const response = await requestJson(workerHealthUrl, "Worker health")
@@ -336,6 +336,7 @@ async function workerRuntimeDiagnostic() {
 
   return {
     ok: healthy,
+    status: healthy ? "healthy" : "degraded_optional",
     detail: healthy
       ? "Dedicated worker runtime health endpoint is healthy."
       : `Worker runtime returned status ${body.status || "unknown"} in mode ${body.mode || "unknown"}.`,
@@ -350,6 +351,7 @@ const generationExecutionMode = value("SWIFT_GENERATION_EXECUTION_MODE").toLower
 const queueMode = !generationExecutionMode || generationExecutionMode === "queue"
 const supabaseServiceRoleKey = value("SUPABASE_SERVICE_ROLE_KEY")
 const supabasePublicKey = value("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY")
+const metricsToken = value("SWIFT_METRICS_TOKEN")
 const authProviderConfigured = Boolean(value("GOOGLE_CLIENT_ID") && value("GOOGLE_CLIENT_SECRET") && isStrongSecret(value("NEXTAUTH_SECRET")))
 const migrationStatus = commandDiagnostic("npx prisma migrate status", { timeoutMs: 30_000 })
 const schemaHealth = commandDiagnostic("node scripts/schema-health-check.js", { timeoutMs: 30_000 })
@@ -393,6 +395,7 @@ const checks = [
   ),
   required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
   required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),
+  required("SWIFT_METRICS_TOKEN", "Internal observability bearer token", isStrongSecret(metricsToken, 32), "Set a random 32+ character token and pass it as Bearer token to metrics/monitoring health checks."),
   required("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", value("NEXT_PUBLIC_SUPABASE_URL")),
   required(
     "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY",
@@ -435,7 +438,7 @@ async function main() {
   const workerHealthUrl = normalizeWorkerHealthUrl(value("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
   checks.push(recommended("SWIFT_WORKER_HEALTH_URL", "Dedicated worker runtime health endpoint", workerHealthUrl, "Optional direct worker probe. Redis heartbeat is the primary production worker signal."))
   if (workerHealthUrl) {
-    checks.push(required("GENERATION_WORKER_RUNTIME", "Dedicated worker /health endpoint", workerRuntime.ok, workerRuntime.detail))
+    checks.push(recommended("GENERATION_WORKER_RUNTIME", "Dedicated worker /health endpoint", workerRuntime.ok, workerRuntime.detail))
   }
 
   const requiredMissing = checks.filter((check) => check.severity === "required" && !check.ok)

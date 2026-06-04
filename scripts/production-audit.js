@@ -42,9 +42,11 @@ function run(command, args) {
 function staticChecks() {
   const packageJson = JSON.parse(read("package.json"))
   const gitignore = exists(".gitignore") ? read(".gitignore") : ""
+  const proxy = exists("proxy.ts") ? read("proxy.ts") : ""
   const generateJobsRoute = exists("app/api/generate/jobs/route.ts") ? read("app/api/generate/jobs/route.ts") : ""
   const providerRouter = exists("lib/ai/provider-router.ts") ? read("lib/ai/provider-router.ts") : ""
   const swiftTiers = exists("lib/ai/swift-tiers.ts") ? read("lib/ai/swift-tiers.ts") : ""
+  const openrouterConfig = exists("lib/ai/openrouter-config.ts") ? read("lib/ai/openrouter-config.ts") : ""
   const architecturePlanner = exists("lib/ai/architecture-planner.ts") ? read("lib/ai/architecture-planner.ts") : ""
   const generationPipeline = exists("lib/ai/generation-pipeline.ts") ? read("lib/ai/generation-pipeline.ts") : ""
   const softwareOrchestration = exists("lib/ai/software-orchestration.ts") ? read("lib/ai/software-orchestration.ts") : ""
@@ -74,6 +76,7 @@ function staticChecks() {
   const generatedArtifact = exists("lib/ai/generated-artifact.ts") ? read("lib/ai/generated-artifact.ts") : ""
   const sandboxRuntime = exists("lib/sandbox/runtime.ts") ? read("lib/sandbox/runtime.ts") : ""
   const preview = exists("components/editor/sandbox-preview.tsx") ? read("components/editor/sandbox-preview.tsx") : ""
+  const previewPanel = exists("components/editor/preview-panel.tsx") ? read("components/editor/preview-panel.tsx") : ""
   const prisma = exists("prisma/schema.prisma") ? read("prisma/schema.prisma") : ""
   const deployRoute = exists("app/api/projects/[id]/deploy/route.ts")
     ? read("app/api/projects/[id]/deploy/route.ts")
@@ -87,11 +90,11 @@ function staticChecks() {
     check(
       "ai.single-orchestrator-model",
       /SWIFT_BUILDER_MODEL_KEY\s*=\s*"swift-builder"/.test(swiftTiers) &&
-        /configuredPrimaryModel/.test(swiftTiers) &&
-        /configuredFallbackModels/.test(swiftTiers) &&
+        /configuredPrimaryModel/.test(openrouterConfig) &&
+        /configuredFallbackModels/.test(openrouterConfig) &&
         /SWIFT_AI_FREE_MODE/.test(swiftTiers) &&
         !/deepseek-v4-flash|deepseek-v3\.2|OPENROUTER_DEEPSEEK_FLASH|OPENROUTER_DEEPSEEK_V32/.test(
-          [swiftTiers, providerRouter, generationPipeline].join("\n")
+          [swiftTiers, openrouterConfig, providerRouter, generationPipeline].join("\n")
         ),
       "Swift AI runtime uses one public builder orchestrator backed by environment-configured model routing"
     ),
@@ -191,8 +194,16 @@ function staticChecks() {
     check("ops.prompt-corpus-script", packageJson.scripts && packageJson.scripts["test:corpus"] && exists("scripts/prompt-corpus-regression.js") && exists("fixtures/prompts/malicious.txt"), "Prompt corpus regression gate is available"),
     check("preview.iframe-sandbox", /sandbox="[^"]*allow-scripts/.test(preview), "Preview iframe uses sandbox attribute"),
     check("preview.iframe-no-same-origin", !/sandbox="[^"]*allow-same-origin/.test(preview), "Preview iframe does not combine allow-scripts with allow-same-origin", "warn"),
+    check(
+      "preview.runtime-origin-isolation",
+      /resolveRuntimePreviewSandbox/.test(previewPanel) &&
+        /previewOrigin !== window\.location\.origin/.test(previewPanel) &&
+        !/allow-popups|allow-downloads/.test(previewPanel),
+      "Runtime preview iframe only grants same-origin semantics to an isolated preview origin and blocks popups/downloads"
+    ),
     check("preview.error-boundary", /ErrorBoundary/.test(preview), "Preview contains an error boundary"),
     check("preview.compile-timeout", /timed out/.test(preview) && /15000/.test(preview), "Preview compilation has timeout protection"),
+    check("security.csp-header", /Content-Security-Policy/.test(proxy) && /default-src 'self'/.test(proxy), "Production responses include a Content Security Policy header"),
     check("security.env-gitignore", /^\.env$/m.test(gitignore) && /^\.env\*\.local$/m.test(gitignore), ".env and local env files are ignored"),
     check("db.project-file-unique", /@@unique\(\[projectId,\s*path\]\)/.test(prisma), "Project files are unique per project path"),
     check("db.history-index", /model GenerationHistory[\s\S]*@@index\(\[projectId/.test(prisma), "Generation history is indexed by project"),

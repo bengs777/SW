@@ -1,6 +1,6 @@
 import { env } from "@/lib/env"
 
-export type ExternalRuntimeHealthStatus = "healthy" | "degraded" | "unhealthy" | "missing"
+export type ExternalRuntimeHealthStatus = "healthy" | "degraded" | "unhealthy" | "missing" | "not_configured" | "degraded_optional"
 
 export type ExternalRuntimeHealth = {
   configured: boolean
@@ -80,12 +80,12 @@ export async function getExternalWorkerRuntimeHealth(): Promise<ExternalRuntimeH
     return {
       configured: false,
       endpoint: null,
-      status: "missing",
-      ok: false,
+      status: "not_configured",
+      ok: true,
       httpStatus: null,
       latencyMs: null,
       checkedAt: new Date().toISOString(),
-      error: "Set SWIFT_WORKER_HEALTH_URL to probe the dedicated worker directly.",
+      error: "SWIFT_WORKER_HEALTH_URL is not configured; Redis/BullMQ heartbeat remains the primary worker health signal.",
     }
   }
 
@@ -106,7 +106,7 @@ export async function getExternalWorkerRuntimeHealth(): Promise<ExternalRuntimeH
     return {
       configured: true,
       endpoint: env.workerHealthUrl,
-      status: healthy ? "healthy" : degraded ? "degraded" : "unhealthy",
+      status: healthy ? "healthy" : degraded ? "degraded_optional" : "degraded_optional",
       ok: healthy,
       httpStatus: response.httpStatus,
       latencyMs: response.latencyMs,
@@ -118,7 +118,7 @@ export async function getExternalWorkerRuntimeHealth(): Promise<ExternalRuntimeH
     return {
       configured: true,
       endpoint: env.workerHealthUrl,
-      status: "unhealthy",
+      status: "degraded_optional",
       ok: false,
       httpStatus: null,
       latencyMs: null,

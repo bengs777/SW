@@ -33,6 +33,26 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ),
 })
 
+const RUNTIME_PREVIEW_SANDBOX_BASE = "allow-scripts allow-forms"
+const SAME_ORIGIN_SANDBOX_TOKEN = "allow-same-origin"
+
+function resolveRuntimePreviewSandbox(runtimePreviewUrl: string | null) {
+  if (!runtimePreviewUrl || typeof window === "undefined") {
+    return RUNTIME_PREVIEW_SANDBOX_BASE
+  }
+
+  try {
+    const previewOrigin = new URL(runtimePreviewUrl, window.location.href).origin
+    if (previewOrigin && previewOrigin !== window.location.origin) {
+      return `${RUNTIME_PREVIEW_SANDBOX_BASE} ${SAME_ORIGIN_SANDBOX_TOKEN}`
+    }
+  } catch {
+    return RUNTIME_PREVIEW_SANDBOX_BASE
+  }
+
+  return RUNTIME_PREVIEW_SANDBOX_BASE
+}
+
 type ViewportSize = "mobile" | "tablet" | "desktop"
 
 interface PreviewPanelProps {
@@ -86,6 +106,10 @@ export function PreviewPanel({
   const [previewKey, setPreviewKey] = useState(0)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const activeTab = activeTabProp || internalActiveTab
+  const runtimePreviewSandbox = useMemo(
+    () => resolveRuntimePreviewSandbox(runtimePreviewUrl),
+    [runtimePreviewUrl]
+  )
 
   useEffect(() => {
     if (files.length > 0 && activeFile >= files.length) {
@@ -289,7 +313,7 @@ export function PreviewPanel({
                 src={runtimePreviewUrl}
                 title="Runtime preview"
                 className="h-full w-full border-0 bg-background"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
+                sandbox={runtimePreviewSandbox}
                 referrerPolicy="no-referrer"
                 onLoad={() => setPreviewError(null)}
               />

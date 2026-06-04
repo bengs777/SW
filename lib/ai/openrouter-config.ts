@@ -36,12 +36,13 @@ export function getOpenRouterModel() {
 }
 
 export function getOpenRouterModelChain() {
+  const configuredPrimaryModel = getOpenRouterModel()
   const configuredFallbackModels = OPENROUTER_FALLBACK_ENV_KEYS
     .map((key) => process.env[key] || "")
     .filter(Boolean)
 
   return uniqueModels([
-    getOpenRouterModel(),
+    configuredPrimaryModel,
     ...configuredFallbackModels.map(normalizeOpenRouterModelId),
     ...OPENROUTER_DEFAULT_FALLBACK_MODELS.map(normalizeOpenRouterModelId),
   ])

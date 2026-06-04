@@ -49,6 +49,7 @@ const projectMemoryGraph = read("lib/ai/project-memory-graph.ts")
 const generationWorker = read("lib/workers/generation-worker.ts")
 const productionReadiness = read("lib/production/readiness.ts")
 const deployReadiness = read("scripts/deploy-readiness.js")
+const externalRuntimeHealth = read("lib/observability/external-runtime-health.ts")
 const instrumentation = read("instrumentation.ts")
 const generationPipeline = read("lib/ai/generation-pipeline.ts")
 const taskGraphExecutor = read("lib/ai/task-graph-executor.ts")
@@ -594,6 +595,18 @@ assert(
     /AUTH_PROVIDER_HEALTH/.test(productionReadiness) &&
     /deployment_readiness/.test(instrumentation),
   "runtime startup and health must fail closed on critical envs while keeping optional services degraded"
+)
+
+assert(
+  "missing worker health url is optional when heartbeat is fresh",
+  /SWIFT_WORKER_HEALTH_URL[\s\S]*"optional"[\s\S]*Optional direct probe/.test(productionReadiness) &&
+    /status:\s*"not_configured"/.test(externalRuntimeHealth) &&
+    /Redis\/BullMQ heartbeat remains the primary worker health signal/.test(externalRuntimeHealth) &&
+    !/!workerRuntime\.configured\s*\?\s*\["GENERATION_WORKER_RUNTIME"\]/.test(productionReadiness) &&
+    /SWIFT_WORKER_HEALTH_URL_OPTIONAL/.test(productionReadiness) &&
+    /workerService\.status === "not_configured"/.test(workerHealthApi) &&
+    /workerService\.status === "degraded_optional"/.test(workerHealthApi),
+  "missing SWIFT_WORKER_HEALTH_URL must not make engine health unhealthy when Redis/BullMQ heartbeat is fresh"
 )
 
 assert(

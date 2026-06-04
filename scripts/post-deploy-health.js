@@ -53,8 +53,12 @@ function parseJson(body) {
 
 function fetchJson(url, redirects = []) {
   const client = url.startsWith("https://") ? https : http
+  const headers = { accept: "application/json" }
+  const token = (process.env.SWIFT_METRICS_TOKEN || "").trim()
+  if (token) headers.authorization = `Bearer ${token}`
+
   return new Promise((resolve, reject) => {
-    const request = client.get(url, { timeout: HEALTH_TIMEOUT_MS, headers: { accept: "application/json" } }, (response) => {
+    const request = client.get(url, { timeout: HEALTH_TIMEOUT_MS, headers }, (response) => {
       let body = ""
       response.setEncoding("utf8")
       response.on("data", (chunk) => {
