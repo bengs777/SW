@@ -1,11 +1,13 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useSearchParams } from "next/navigation"
 import { Search } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { ProjectList } from "@/components/dashboard/project-list"
 import { useWorkspaces } from "@/hooks/use-workspaces"
 import { NewProjectTrigger } from "@/components/dashboard/new-project-trigger"
+import { clearPendingProjectPrompt, readPendingProjectPrompt } from "@/lib/pending-project-prompt"
 import {
   Select,
   SelectContent,
@@ -15,9 +17,12 @@ import {
 } from "@/components/ui/select"
 
 export default function ProjectsPage() {
+  const searchParams = useSearchParams()
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | undefined>()
+  const [pendingPrompt, setPendingPrompt] = useState("")
   const { workspaces, isLoading } = useWorkspaces()
+  const shouldContinuePrompt = searchParams.get("continuePrompt") === "1"
 
   // Set default workspace on first load
   useEffect(() => {
@@ -25,6 +30,15 @@ export default function ProjectsPage() {
       setSelectedWorkspaceId(workspaces[0].id)
     }
   }, [workspaces, isLoading, selectedWorkspaceId])
+
+  useEffect(() => {
+    if (!shouldContinuePrompt) return
+
+    const pending = readPendingProjectPrompt()
+    if (pending?.prompt) {
+      setPendingPrompt(pending.prompt)
+    }
+  }, [shouldContinuePrompt])
 
   return (
     <div className="flex min-h-screen flex-col gap-6">
@@ -36,7 +50,18 @@ export default function ProjectsPage() {
             Manage all your AI-generated web projects in one place.
           </p>
         </div>
-        <NewProjectTrigger workspaces={workspaces} defaultWorkspaceId={selectedWorkspaceId} />
+        <NewProjectTrigger
+          workspaces={workspaces}
+          defaultWorkspaceId={selectedWorkspaceId}
+          buttonLabel={pendingPrompt ? "Lanjutkan Prompt" : "New Project"}
+          initialPrompt={pendingPrompt}
+          initialDescription={pendingPrompt ? "Dibuat dari prompt landing Swift." : ""}
+          autoOpenKey={pendingPrompt ? `landing:${pendingPrompt}` : null}
+          onProjectCreated={() => {
+            clearPendingProjectPrompt()
+            setPendingPrompt("")
+          }}
+        />
       </div>
 
       {/* Search and Filter */}

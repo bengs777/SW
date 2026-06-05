@@ -33,6 +33,11 @@ interface NewProjectDialogProps {
     name: string
   }>
   defaultWorkspaceId?: string
+  initialName?: string
+  initialPrompt?: string
+  initialDescription?: string
+  initialTemplateId?: string | null
+  onProjectCreated?: (projectId: string) => void
 }
 
 export function NewProjectDialog({
@@ -40,12 +45,17 @@ export function NewProjectDialog({
   onOpenChange,
   workspaces,
   defaultWorkspaceId,
+  initialName = "",
+  initialPrompt = "",
+  initialDescription = "",
+  initialTemplateId = null,
+  onProjectCreated,
 }: NewProjectDialogProps) {
   const router = useRouter()
   const [isCreating, setIsCreating] = useState(false)
-  const [name, setName] = useState("")
-  const [prompt, setPrompt] = useState("")
-  const [description, setDescription] = useState("")
+  const [name, setName] = useState(initialName)
+  const [prompt, setPrompt] = useState(initialPrompt)
+  const [description, setDescription] = useState(initialDescription)
   const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId ?? workspaces[0]?.id ?? "")
   const [error, setError] = useState("")
 
@@ -62,6 +72,15 @@ export function NewProjectDialog({
   useEffect(() => {
     setWorkspaceId(defaultWorkspaceId ?? workspaces[0]?.id ?? "")
   }, [defaultWorkspaceId, workspaces])
+
+  useEffect(() => {
+    if (!open) return
+
+    setName(initialName)
+    setPrompt(initialPrompt)
+    setDescription(initialDescription)
+    setWorkspaceId(defaultWorkspaceId ?? workspaces[0]?.id ?? "")
+  }, [defaultWorkspaceId, initialDescription, initialName, initialPrompt, open, workspaces])
 
   const handleCreate = async () => {
     if (!workspaceId || !prompt.trim()) return
@@ -80,6 +99,7 @@ export function NewProjectDialog({
           prompt: prompt.trim(),
           description: description.trim() || undefined,
           workspaceId,
+          templateId: initialTemplateId || undefined,
         }),
       })
 
@@ -100,6 +120,7 @@ export function NewProjectDialog({
       setPrompt("")
       setDescription("")
       setWorkspaceId(defaultWorkspaceId ?? workspaces[0]?.id ?? "")
+      onProjectCreated?.(projectId)
       onOpenChange(false)
       router.refresh()
       router.push(`/dashboard/project/${projectId}`)

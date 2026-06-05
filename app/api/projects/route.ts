@@ -10,6 +10,7 @@ const CreateProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(500).optional().nullable(),
   prompt: z.string().trim().max(12000).optional().nullable(),
+  templateId: z.string().trim().min(1).max(120).optional().nullable(),
 })
 
 /**
@@ -171,7 +172,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
     }
 
-    const { name, description, workspaceId, prompt } = CreateProjectSchema.parse(await request.json())
+    const { name, description, workspaceId, prompt, templateId } = CreateProjectSchema.parse(await request.json())
 
     // Use session.user.id as the authoritative user ID
     const userId = session.user.id || user.id
@@ -187,6 +188,7 @@ export async function POST(request: NextRequest) {
         name,
         description,
         prompt,
+        templateId,
         workspaceId: resolvedWorkspaceId,
       },
     })

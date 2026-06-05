@@ -15,6 +15,12 @@ const IS_VERCEL = Boolean(process.env.VERCEL)
 const MAX_SANDBOX_FILES = Number(process.env.SWIFT_SANDBOX_MAX_FILES || 240)
 const MAX_SANDBOX_TOTAL_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_TOTAL_BYTES || 6 * 1024 * 1024)
 const MAX_SANDBOX_FILE_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_FILE_BYTES || 512 * 1024)
+function readSandboxProxyTimeoutMs() {
+  const value = Number(process.env.SWIFT_SANDBOX_PROXY_TIMEOUT_MS || 30_000)
+  return Number.isFinite(value) ? Math.max(5_000, value) : 30_000
+}
+
+const SANDBOX_PROXY_TIMEOUT_MS = readSandboxProxyTimeoutMs()
 
 async function assertProjectAccess(projectId: string, userId: string) {
   const project = await prisma.project.findFirst({
@@ -116,21 +122,28 @@ async function proxySandboxRequest(input: {
   }
 
   let response: Response
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), SANDBOX_PROXY_TIMEOUT_MS)
+
   try {
     response = await fetch(`${SANDBOX_SERVICE_URL}/sandbox/${encodeURIComponent(input.projectId)}`, {
       method: input.method,
       headers,
       body,
       cache: "no-store",
+      signal: controller.signal,
     })
   } catch (error) {
+    const isTimeout = error instanceof Error && error.name === "AbortError"
     return NextResponse.json(
       {
         status: "error",
         previewUrl: null,
         logs: [],
-        error: `Sandbox service unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        code: "sandbox_service_unavailable",
+        error: isTimeout
+          ? `Sandbox service timed out after ${SANDBOX_PROXY_TIMEOUT_MS}ms.`
+          : `Sandbox service unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        code: isTimeout ? "sandbox_service_timeout" : "sandbox_service_unavailable",
         service: {
           configured: Boolean(SANDBOX_SERVICE_URL),
           tokenConfigured: Boolean(SANDBOX_SERVICE_TOKEN),
@@ -140,6 +153,8 @@ async function proxySandboxRequest(input: {
       },
       { status: 503 }
     )
+  } finally {
+    clearTimeout(timeout)
   }
 
   const data = await response.json().catch(() => ({

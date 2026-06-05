@@ -1,6 +1,25 @@
 import { GoogleAuthCard } from "@/components/auth/google-auth-card"
 
-export default function SignupPage() {
+type AuthPageProps = {
+  searchParams?: Promise<{
+    callbackUrl?: string | string[]
+  }>
+}
+
+function resolveCallbackUrl(value?: string | string[]) {
+  const callbackUrl = Array.isArray(value) ? value[0] : value
+  if (callbackUrl?.startsWith("/") && !callbackUrl.startsWith("//")) {
+    return callbackUrl
+  }
+
+  return "/dashboard"
+}
+
+export default async function SignupPage({ searchParams }: AuthPageProps) {
+  const params = searchParams ? await searchParams : {}
+  const callbackUrl = resolveCallbackUrl(params.callbackUrl)
+  const callbackQuery = callbackUrl === "/dashboard" ? "" : `?callbackUrl=${encodeURIComponent(callbackUrl)}`
+
   return (
     <GoogleAuthCard
       title="Create your account with Google"
@@ -9,8 +28,9 @@ export default function SignupPage() {
       loadingLabel="Redirecting to Google..."
       helperText="Already have an account? Use the same Google button to sign in."
       footerLabel="Want to go back? Sign in with Google"
-      footerHref="/login"
+      footerHref={`/login${callbackQuery}`}
       errorMessage="Failed to sign up with Google"
+      callbackUrl={callbackUrl}
     />
   )
 }

@@ -1,12 +1,14 @@
 "use client"
 
 import { useState, useMemo } from "react"
-import Link from "next/link"
-import { Search, ArrowRight, Code, Palette, BarChart3, ShoppingCart, BookOpen, Grid3x3 } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { Search, ArrowRight, Palette, BarChart3, ShoppingCart, ShieldCheck, Grid3x3, Loader2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { useWorkspaces } from "@/hooks/use-workspaces"
 import {
   Select,
   SelectContent,
@@ -27,60 +29,56 @@ interface Template {
 
 const TEMPLATES: Template[] = [
   {
-    id: "dashboard",
-    name: "Modern Dashboard",
-    description: "Complete analytics dashboard with KPI cards, charts, and real-time data visualization.",
-    category: "Analytics",
+    id: "admin-dashboard",
+    name: "Dashboard Operasional",
+    description: "Dashboard admin dengan KPI, aktivitas terbaru, dan aksi cepat untuk tim operasional.",
+    category: "Dashboard",
     complexity: "intermediate",
     icon: BarChart3,
   },
   {
-    id: "landing",
-    name: "Landing Page",
-    description: "High-converting landing page with hero section, features, testimonials, and CTA.",
+    id: "landing-page",
+    name: "Landing UMKM",
+    description: "Landing page siap pakai dengan hero, benefit, pricing, testimonial, dan CTA.",
     category: "Marketing",
     complexity: "beginner",
     icon: Palette,
   },
   {
-    id: "ecommerce",
-    name: "E-Commerce Store",
-    description: "Full-featured online store with product catalog, cart, and checkout flow.",
+    id: "storefront",
+    name: "Toko Online",
+    description: "Storefront dengan katalog produk, ringkasan cart, dan alur checkout yang jelas.",
     category: "E-Commerce",
     complexity: "advanced",
     icon: ShoppingCart,
   },
   {
-    id: "documentation",
-    name: "Documentation Site",
-    description: "Professional documentation portal with search, sidebar navigation, and code blocks.",
-    category: "Documentation",
+    id: "auth-suite",
+    name: "Auth & Akun",
+    description: "Halaman login, signup, dan reset password dengan shell auth yang rapi.",
+    category: "Auth",
     complexity: "intermediate",
-    icon: BookOpen,
+    icon: ShieldCheck,
   },
   {
-    id: "admin-panel",
-    name: "Admin Panel",
-    description: "Comprehensive admin interface with user management, settings, and activity logs.",
-    category: "Admin",
+    id: "workspace-builder",
+    name: "Workspace Builder",
+    description: "Starter workspace split-pane dengan file browser, preview, dan command bar.",
+    category: "Builder",
     complexity: "advanced",
     icon: Grid3x3,
-  },
-  {
-    id: "blog",
-    name: "Blog Platform",
-    description: "Content management system with articles, categories, comments, and author profiles.",
-    category: "Content",
-    complexity: "intermediate",
-    icon: Code,
   },
 ]
 
 const CATEGORIES = ["All", ...new Set(TEMPLATES.map((t) => t.category))]
 
 export default function TemplatesPage() {
+  const router = useRouter()
+  const { workspaces, isLoading: isLoadingWorkspaces } = useWorkspaces()
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedCategory, setSelectedCategory] = useState("All")
+  const [creatingTemplateId, setCreatingTemplateId] = useState<string | null>(null)
+  const [error, setError] = useState("")
 
   const filteredTemplates = useMemo(() => {
     return TEMPLATES.filter((template) => {
@@ -107,6 +105,37 @@ export default function TemplatesPage() {
     }
   }
 
+  const handleUseTemplate = async (template: Template) => {
+    if (creatingTemplateId || isLoadingWorkspaces) return
+
+    setCreatingTemplateId(template.id)
+    setError("")
+
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(template.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: workspaces[0]?.id,
+          projectName: template.name,
+          description: template.description,
+        }),
+      })
+      const data = await response.json().catch(() => ({}))
+
+      if (!response.ok || !data.project?.id) {
+        throw new Error(data.error || "Template gagal dibuat menjadi project.")
+      }
+
+      router.push(`/dashboard/project/${data.project.id}`)
+      router.refresh()
+    } catch (templateError) {
+      setError(templateError instanceof Error ? templateError.message : "Template gagal dibuat menjadi project.")
+    } finally {
+      setCreatingTemplateId(null)
+    }
+  }
+
   return (
     <div className="flex min-h-screen flex-col gap-6">
       {/* Header */}
@@ -118,6 +147,12 @@ export default function TemplatesPage() {
       </div>
 
       {/* Search and Filter */}
+      {error && (
+        <Alert variant="destructive" className="rounded-2xl border-destructive/30 bg-destructive/5">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -183,15 +218,23 @@ export default function TemplatesPage() {
                       {template.category}
                     </Badge>
                     <Button
-                      asChild
                       variant="ghost"
                       size="sm"
                       className="gap-2 rounded-full"
+                      disabled={creatingTemplateId !== null || isLoadingWorkspaces}
+                      onClick={() => void handleUseTemplate(template)}
                     >
-                      <Link href={`/dashboard/projects?template=${template.id}`}>
-                        Use Template
+                      {creatingTemplateId === template.id ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Membuat...
+                        </>
+                      ) : (
+                        <>
+                          Pakai Template
                         <ArrowRight className="h-3 w-3" />
-                      </Link>
+                        </>
+                      )}
                     </Button>
                   </div>
                 </CardContent>

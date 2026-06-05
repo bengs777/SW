@@ -1,8 +1,11 @@
 "use client"
 
+import { useState, type FormEvent } from "react"
 import Link from "next/link"
 import { ArrowRight, CheckCircle2, Code2, Play, Send, ShieldCheck, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Textarea } from "@/components/ui/textarea"
+import { writePendingProjectPrompt } from "@/lib/pending-project-prompt"
 
 const trustItems = [
   "Validasi build sebelum preview",
@@ -18,6 +21,21 @@ const generatedFiles = [
 ]
 
 export function Hero() {
+  const [prompt, setPrompt] = useState(
+    "Buat SaaS dashboard untuk tim sales dengan login, tabel lead, form tambah lead, dan grafik pipeline mingguan."
+  )
+
+  const handlePromptSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    const trimmedPrompt = prompt.trim()
+    if (!trimmedPrompt) return
+
+    writePendingProjectPrompt(trimmedPrompt)
+    const callbackUrl = "/dashboard/projects?continuePrompt=1"
+    window.location.assign(`/signup?callbackUrl=${encodeURIComponent(callbackUrl)}`)
+  }
+
   return (
     <section className="relative border-b border-border/70 bg-background pt-24 sm:pt-28">
       <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-7xl items-center gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[0.88fr,1.12fr] lg:px-8 lg:py-14">
@@ -77,21 +95,29 @@ export function Hero() {
 
             <div className="grid lg:grid-cols-[0.92fr,1.08fr]">
               <div className="border-b border-border bg-background p-4 lg:border-b-0 lg:border-r">
-                <div className="rounded-[1.35rem] border border-border/70 bg-card p-4 shadow-sm">
+                <form
+                  id="swift-prompt"
+                  className="rounded-[1.35rem] border border-border/70 bg-card p-4 shadow-sm"
+                  onSubmit={handlePromptSubmit}
+                >
                   <div className="mb-2 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                     Prompt
                   </div>
-                  <p className="min-h-28 text-sm leading-6 text-foreground">
-                    Buat SaaS dashboard untuk tim sales dengan login, tabel lead, form tambah lead, dan grafik pipeline mingguan.
-                  </p>
+                  <Textarea
+                    aria-label="Prompt aplikasi Swift"
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    className="min-h-28 resize-none border-0 bg-transparent p-0 text-sm leading-6 shadow-none focus-visible:ring-0"
+                    maxLength={12000}
+                  />
                   <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
                     <span className="text-xs text-muted-foreground">Mode: bangun</span>
-                    <Button size="sm" className="h-9 gap-2 rounded-full px-4">
+                    <Button size="sm" className="h-9 gap-2 rounded-full px-4" disabled={!prompt.trim()}>
                       <Send className="h-3.5 w-3.5" />
                       Buat
                     </Button>
                   </div>
-                </div>
+                </form>
 
                 <div className="mt-4 space-y-2">
                   {["Rencana file", "Validasi import", "Build preview", "Repair otomatis"].map((step, index) => (

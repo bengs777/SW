@@ -4,11 +4,14 @@ const path = require("path")
 const { execSync } = require("child_process")
 const IORedis = require("ioredis")
 
-loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production")
+const deployTarget = (process.env.DEPLOY_TARGET || process.env.SWIFT_DEPLOY_TARGET || "production").toLowerCase()
+const isProductionDeployTarget = deployTarget === "production" || deployTarget === "prod"
+
+loadEnvConfig(process.cwd(), !isProductionDeployTarget && process.env.NODE_ENV !== "production")
 
 const explicitEnvFile =
   process.env.DEPLOY_ENV_FILE ||
-  (process.env.NODE_ENV === "production" && fs.existsSync(path.join(process.cwd(), ".env.production"))
+  (isProductionDeployTarget && fs.existsSync(path.join(process.cwd(), ".env.production"))
     ? ".env.production"
     : "")
 
@@ -395,7 +398,7 @@ const checks = [
   ),
   required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
   required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),
-  required("SWIFT_METRICS_TOKEN", "Internal observability bearer token", isStrongSecret(metricsToken, 32), "Set a random 32+ character token and pass it as Bearer token to metrics/monitoring health checks."),
+  recommended("SWIFT_METRICS_TOKEN", "Internal observability bearer token", isStrongSecret(metricsToken, 32), "Set a random 32+ character token and pass it as Bearer token to metrics/monitoring health checks."),
   required("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", value("NEXT_PUBLIC_SUPABASE_URL")),
   required(
     "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY",
@@ -446,6 +449,8 @@ async function main() {
 
   console.log("\nDeploy Readiness")
   console.log("----------------")
+  console.log(`Target: ${isProductionDeployTarget ? "production" : deployTarget}`)
+  console.log(`Env file: ${explicitEnvFile || "Next default env resolution"}`)
   for (const check of checks) {
     const state = check.ok ? "PASS" : check.severity === "required" ? "FAIL" : "WARN"
     console.log(`${state} ${check.key} - ${check.label}${check.detail ? ` (${check.detail})` : ""}`)
