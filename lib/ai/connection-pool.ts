@@ -2,7 +2,7 @@ import { Agent as HttpAgent } from "node:http"
 import { Agent as HttpsAgent } from "node:https"
 
 /**
- * Persistent HTTP/HTTPS keep-alive agent for OpenRouter calls.
+ * Persistent HTTP/HTTPS keep-alive agent for AI gateway calls.
  *
  * Why this matters for "standby" + cost:
  * - Without keep-alive, every request opens a new TCP + TLS handshake (~150-300ms overhead).
@@ -74,23 +74,32 @@ export async function pingOpenRouter(baseUrl: string, apiKey: string): Promise<{
   if (!apiKey) return { ok: false, latencyMs: 0 }
 
   const startedAt = Date.now()
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/auth/key`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(5_000),
-    })
-    return {
-      ok: response.ok,
-      latencyMs: Date.now() - startedAt,
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "")
+  const paths = /openrouter\.ai/i.test(normalizedBaseUrl) ? ["/auth/key", "/models"] : ["/models", "/auth/key"]
+
+  for (const path of paths) {
+    try {
+      const response = await fetch(`${normalizedBaseUrl}${path}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (response.ok) {
+        return {
+          ok: true,
+          latencyMs: Date.now() - startedAt,
+        }
+      }
+    } catch {
+      // Try the next free metadata endpoint before reporting warmup failure.
     }
-  } catch {
-    return {
-      ok: false,
-      latencyMs: Date.now() - startedAt,
-    }
+  }
+
+  return {
+    ok: false,
+    latencyMs: Date.now() - startedAt,
   }
 }

@@ -87,26 +87,31 @@ const STREAM_TOKEN_WATCHDOG_MS = positiveEnvMs(
 )
 
 export function getOpenRouterBaseUrl() {
-  return (env.openRouterBaseUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "")
+  return (env.openRouterBaseUrl || "https://agentrouter.org/v1").replace(/\/+$/, "")
 }
 
 export function assertOpenRouterConfigured() {
   if (!env.openRouterApiKey) {
-    throw new SwiftAiError("OPENROUTER_API_KEY is not configured", { reason: "config" })
+    throw new SwiftAiError("AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured", { reason: "config" })
   }
 }
 
 export function buildOpenRouterHeaders() {
   assertOpenRouterConfigured()
 
-  return {
+  const headers: Record<string, string> = {
     Authorization: `Bearer ${env.openRouterApiKey}`,
     "Content-Type": "application/json",
     "HTTP-Referer": env.openRouterSiteUrl || env.appUrl || "https://swift.biz.id",
     "X-Title": env.openRouterAppName || "Swift AI",
-    "X-OpenRouter-Cache": "true",
-    "X-OpenRouter-Cache-TTL": "300",
   }
+
+  if (/openrouter\.ai/i.test(getOpenRouterBaseUrl())) {
+    headers["X-OpenRouter-Cache"] = "true"
+    headers["X-OpenRouter-Cache-TTL"] = "300"
+  }
+
+  return headers
 }
 
 function createRequestRuntime(input: OpenRouterCompletionInput, stream: boolean) {
@@ -211,7 +216,7 @@ export async function createOpenRouterChatCompletion(
     const message = data.choices?.[0]?.message?.content || ""
 
     if (!String(message).trim()) {
-      throw new SwiftAiError("OpenRouter returned an empty response", {
+      throw new SwiftAiError("AI gateway returned an empty response", {
         reason: "empty_response",
         requestId,
         internalModelId: input.model,
@@ -271,7 +276,7 @@ export async function* streamOpenRouterChatCompletion(
     reader = response.body?.getReader() || null
 
     if (!reader) {
-      throw new SwiftAiError("OpenRouter stream body is empty", {
+      throw new SwiftAiError("AI gateway stream body is empty", {
         reason: "empty_response",
         requestId,
         internalModelId: input.model,
@@ -314,7 +319,7 @@ export async function* streamOpenRouterChatCompletion(
         try {
           parsed = JSON.parse(payload)
         } catch {
-          throw new SwiftAiError("OpenRouter returned malformed stream event JSON", {
+          throw new SwiftAiError("AI gateway returned malformed stream event JSON", {
             reason: "invalid_output",
             requestId,
             internalModelId: input.model,
@@ -323,7 +328,7 @@ export async function* streamOpenRouterChatCompletion(
 
         if (parsed.error) {
           const errorMessage = typeof parsed.error === "string" ? parsed.error : parsed.error.message
-          throw new SwiftAiError(`OpenRouter stream error: ${redactAiSecret(errorMessage || "Unknown error")}`, {
+          throw new SwiftAiError(`AI gateway stream error: ${redactAiSecret(errorMessage || "Unknown error")}`, {
             reason: "server_error",
             requestId,
             internalModelId: input.model,
@@ -504,7 +509,6 @@ async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean
         temperature: input.temperature ?? 0.2,
         top_p: input.topP ?? 0.9,
         max_tokens: input.maxTokens,
-        include_reasoning: false,
         stream,
         ...(input.responseFormat ? { response_format: { type: input.responseFormat } } : {}),
       }),
@@ -540,7 +544,7 @@ async function errorFromOpenRouterResponse(response: Response, internalModelId: 
     // keep text body
   }
 
-  return new SwiftAiError(`OpenRouter API error (${response.status}): ${redactAiSecret(message)}`.trim(), {
+  return new SwiftAiError(`AI gateway API error (${response.status}): ${redactAiSecret(message)}`.trim(), {
     reason: reasonFromStatus(response.status),
     statusCode: response.status,
     requestId: response.headers.get("x-request-id"),

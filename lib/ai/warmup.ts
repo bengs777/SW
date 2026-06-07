@@ -10,9 +10,9 @@ import { log } from "@/lib/logging"
  * burning compute when no one is actively using it.
  *
  * Strategy:
- * - On process start: open Redis connection + open keep-alive socket to OpenRouter.
- * - Periodically (every 4 minutes): ping OpenRouter so the keep-alive socket
- *   stays warm. Free OpenRouter probe endpoint, costs nothing.
+ * - On process start: open Redis connection + open keep-alive socket to the AI gateway.
+ * - Periodically (every 4 minutes): ping a free metadata endpoint so the
+ *   keep-alive socket stays warm.
  * - Cache stays connected so first cached lookup is fast.
  *
  * Why 4 minutes?
@@ -20,7 +20,7 @@ import { log } from "@/lib/logging"
  * - 4-minute intervals keep the socket alive without wasting requests.
  *
  * Cost analysis:
- * - OpenRouter /auth/key endpoint is FREE (no model invocation).
+ * - Gateway metadata endpoints are free probes (no model invocation).
  * - Redis PING is essentially free.
  * - One keep-alive cycle per 4 min = 360 pings/day = $0 in AI costs.
  */

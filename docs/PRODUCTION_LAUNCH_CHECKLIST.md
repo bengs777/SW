@@ -23,10 +23,10 @@ Dashboard app:
 - `NEXT_PUBLIC_APP_URL`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `OPENROUTER_API_KEY`
-- Optional OpenRouter gateway metadata: `OPENROUTER_BASE_URL`, `OPENROUTER_SITE_URL`, `OPENROUTER_APP_NAME`
-- `OPENROUTER_MODEL`
-- `SWIFT_AI_PROVIDER_NAME=openrouter`
+- `AGENTROUTER_API_KEY`
+- Optional AgentRouter gateway metadata: `AGENTROUTER_BASE_URL`, `AGENTROUTER_SITE_URL`, `AGENTROUTER_APP_NAME`
+- `AGENTROUTER_MODEL`
+- `SWIFT_AI_PROVIDER_NAME=agentrouter`
 - `SWIFT_WORKER_HEALTH_URL`
 - `REDIS_URL`
 - `NEXT_PUBLIC_SUPABASE_URL`
@@ -42,10 +42,10 @@ Generation worker:
 - `DATABASE_URL`
 - `DIRECT_DATABASE_URL`
 - `REDIS_URL`
-- `OPENROUTER_API_KEY`
-- `OPENROUTER_BASE_URL`
-- `OPENROUTER_MODEL`
-- `SWIFT_AI_PROVIDER_NAME=openrouter`
+- `AGENTROUTER_API_KEY`
+- `AGENTROUTER_BASE_URL`
+- `AGENTROUTER_MODEL`
+- `SWIFT_AI_PROVIDER_NAME=agentrouter`
 - `SWIFT_GENERATION_EXECUTION_MODE=queue`
 - `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`
 - `SANDBOX_SERVICE_URL`
@@ -85,6 +85,6 @@ Before marketing Swift publicly:
 3. Deploy the dedicated generation worker to the locked-down VPS.
 4. Deploy `services/sandbox-runtime` to the locked-down VPS.
 5. Set `SWIFT_WORKER_HEALTH_URL`, `SANDBOX_SERVICE_URL`, and `SANDBOX_SERVICE_TOKEN` on Vercel.
-6. Keep `OPENROUTER_MODEL` identical in Vercel Production and the generation worker.
+6. Keep `AGENTROUTER_MODEL` identical in Vercel Production and the generation worker.
 7. Verify a prompt can generate, build, preview, upload an attachment, and deploy.
 8. Verify production readiness reports no required missing env vars.

@@ -218,7 +218,7 @@ function classifyPublicFailureKind(input: {
   if (/SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED|provider failover exhausted|model chain exhausted/i.test(raw)) {
     return "provider_exhausted"
   }
-  if (/Provider request budget exceeded|OpenRouter request timed out|request_timeout|provider.*timeout|timed out.*provider/i.test(raw)) {
+  if (/Provider request budget exceeded|OpenRouter request timed out|AI gateway request timed out|request_timeout|provider.*timeout|timed out.*provider/i.test(raw)) {
     return "provider_timeout"
   }
   if (/Generation timed out after|worker_timeout|worker.*timeout|timeout.*worker/i.test(raw)) {

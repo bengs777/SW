@@ -1,14 +1,13 @@
 import { env } from "@/lib/env"
 
-export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-export const OPENROUTER_PROVIDER = "openrouter"
-export const OPENROUTER_DEFAULT_MODEL = "poolside/laguna-xs.2:free"
-export const OPENROUTER_DEFAULT_FALLBACK_MODELS = [
-  "openrouter/owl-alpha",
-]
+export const OPENROUTER_BASE_URL = "https://agentrouter.org/v1"
+export const OPENROUTER_PROVIDER = "agentrouter"
+export const OPENROUTER_DEFAULT_MODEL = "glm-5.1"
+export const OPENROUTER_DEFAULT_FALLBACK_MODELS: string[] = []
 const OPENROUTER_FALLBACK_ENV_KEYS = [
   "SWIFT_FALLBACK_MODEL_1",
   "SWIFT_FALLBACK_MODEL_2",
+  "AGENTROUTER_FALLBACK_MODEL",
   "OPENROUTER_FALLBACK_MODEL",
 ]
 export const PUBLIC_AI_NAME = "Swift AI"
@@ -28,11 +27,11 @@ function uniqueModels(modelIds: string[]) {
 }
 
 export function normalizeOpenRouterModelId(modelSpec: string) {
-  return modelSpec.replace(/^openrouter:/i, "").trim()
+  return modelSpec.replace(/^(openrouter|agentrouter):/i, "").trim()
 }
 
 export function getOpenRouterModel() {
-  return normalizeOpenRouterModelId(process.env.OPENROUTER_MODEL || OPENROUTER_DEFAULT_MODEL)
+  return normalizeOpenRouterModelId(process.env.AGENTROUTER_MODEL || process.env.OPENROUTER_MODEL || OPENROUTER_DEFAULT_MODEL)
 }
 
 export function getOpenRouterModelChain() {
@@ -65,7 +64,7 @@ export function assertOpenRouterReady() {
   const config = getOpenRouterConfig()
 
   if (!config.apiKey) {
-    throw new Error("OPENROUTER_API_KEY is not configured")
+    throw new Error("AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured")
   }
 
   return config

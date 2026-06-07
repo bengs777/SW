@@ -136,7 +136,7 @@ export function publicGenerationRuntimeErrorMessage(error: unknown) {
     return "Provider AI belum berhasil mengembalikan output valid setelah fallback. Coba ulang dengan prompt lebih kecil atau gunakan model fallback yang lebih stabil."
   }
 
-  if (/Provider request budget exceeded|OpenRouter request timed out|request_timeout|provider.*timeout|timed out.*provider/i.test(message)) {
+  if (/Provider request budget exceeded|OpenRouter request timed out|AI gateway request timed out|request_timeout|provider.*timeout|timed out.*provider/i.test(message)) {
     return "Provider AI timeout sebelum output valid selesai. Coba ulang dengan scope lebih kecil atau tunggu model kembali stabil."
   }
 

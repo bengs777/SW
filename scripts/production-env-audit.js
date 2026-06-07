@@ -4,7 +4,8 @@ const { execSync } = require("node:child_process")
 
 const root = process.cwd()
 const EXPECTED_SANDBOX_PUBLIC_URL = "https://sandbox.ai-swift.biz.id"
-const EXPECTED_OPENROUTER_MODEL = "poolside/laguna-xs.2:free"
+const EXPECTED_OPENROUTER_MODEL = "glm-5.1"
+const EXPECTED_AGENTROUTER_BASE_URL = "https://agentrouter.org/v1"
 
 const files = {
   local: ".env",
@@ -46,9 +47,11 @@ function hasAny(env, keys) {
 }
 
 function checkCommonProvider(checks, env, label) {
-  assert(checks, value(env, "OPENROUTER_BASE_URL") === "https://openrouter.ai/api/v1", `${label}: OPENROUTER_BASE_URL points to OpenRouter API`)
-  assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "openrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses OpenRouter`)
-  assert(checks, value(env, "OPENROUTER_MODEL") === EXPECTED_OPENROUTER_MODEL, `${label}: OPENROUTER_MODEL uses the default free OpenRouter model`)
+  const baseUrl = value(env, "AGENTROUTER_BASE_URL") || value(env, "OPENROUTER_BASE_URL")
+  const model = value(env, "AGENTROUTER_MODEL") || value(env, "OPENROUTER_MODEL")
+  assert(checks, baseUrl === EXPECTED_AGENTROUTER_BASE_URL, `${label}: AI gateway base URL points to AgentRouter API`)
+  assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "agentrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses AgentRouter`)
+  assert(checks, model === EXPECTED_OPENROUTER_MODEL, `${label}: AI model uses the configured Swift default model`)
   assert(checks, !hasAny(env, ["OPENROUTER_FREE_MODEL"]), `${label}: legacy free model variables are not configured`)
 }
 

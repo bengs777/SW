@@ -328,7 +328,7 @@ export class ProviderRouter {
       log("error", "provider_attempt_failed", {
         provider: "openrouter",
         model: targets[0]?.modelId || tier.key,
-        error: "OPENROUTER_API_KEY is not configured",
+        error: "AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured",
         failover: "exhausted",
       })
       recordAttempt(attempts, {
@@ -337,7 +337,7 @@ export class ProviderRouter {
         status: "failed",
         failureReason: "config",
         latencyMs: 0,
-        errorMessage: "OPENROUTER_API_KEY is not configured",
+        errorMessage: "AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured",
       })
       throw new SwiftProviderFailureError(tier.key, attempts)
     }
@@ -633,7 +633,7 @@ export class ProviderRouter {
       const summarizedAttempts = summarizeProviderAttempts(attempts)
       const lastAttempt = lastProviderAttempt(attempts)
 
-      log("warn", "Swift AI OpenRouter request exhausted", {
+      log("warn", "Swift AI gateway request exhausted", {
       selectedTier: tier.key,
       attempts: summarizedAttempts,
       lastAttempt,
@@ -760,7 +760,7 @@ export class ProviderRouter {
     }
 
     if (!message.trim()) {
-      throw new SwiftAiError("OpenRouter returned an empty streamed response", {
+      throw new SwiftAiError("AI gateway returned an empty streamed response", {
         reason: "empty_response",
         requestId,
         internalModelId: target.modelId,

@@ -369,7 +369,7 @@ const checks = [
   required("GOOGLE_CLIENT_ID", "Google OAuth client ID", value("GOOGLE_CLIENT_ID")),
   required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", isStrongSecret(value("GOOGLE_CLIENT_SECRET"), 24), "Must be present and non-placeholder."),
   required("AUTH_PROVIDER_HEALTH", "Auth provider health", authProviderConfigured, authProviderConfigured ? "Google OAuth and session secret configured." : "Missing or invalid Google OAuth/session env."),
-  required("OPENROUTER_API_KEY", "AI provider API key", isStrongSecret(value("OPENROUTER_API_KEY"), 20), "Must be present and non-placeholder."),
+  required("AGENTROUTER_API_KEY", "AI provider API key", isStrongSecret(value("AGENTROUTER_API_KEY", "OPENROUTER_API_KEY"), 20), "Must be present and non-placeholder."),
   required(
     "REDIS_BULLMQ_CONFIG",
     "Native Redis config for BullMQ jobs and workers",

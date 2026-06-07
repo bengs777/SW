@@ -442,7 +442,7 @@ function collectRuntimeDiagnosticText(diagnostics: RuntimeFailureDiagnostics, te
   if (/module not found|cannot find module|can't resolve|failed to resolve|missing dependency/i.test(raw)) {
     diagnostics.missingDependencies.push(raw)
   }
-  if (/env|environment variable|process\.env|NEXT_PUBLIC_|DATABASE_URL|NEXTAUTH|OPENROUTER|SUPABASE/i.test(raw)) {
+  if (/env|environment variable|process\.env|NEXT_PUBLIC_|DATABASE_URL|NEXTAUTH|OPENROUTER|AGENTROUTER|SUPABASE/i.test(raw)) {
     diagnostics.environmentVariableErrors.push(raw)
   }
   if (/import|export|dynamic import|Cannot access .* before initialization|does not provide an export/i.test(raw)) {

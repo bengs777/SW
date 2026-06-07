@@ -26,7 +26,7 @@ export class SwiftAiError extends Error {
 
 export class SwiftAiTimeoutError extends SwiftAiError {
   constructor(timeoutMs: number, internalModelId?: string) {
-    super(`OpenRouter request timed out after ${Math.round(timeoutMs / 1000)} seconds`, {
+    super(`AI gateway request timed out after ${Math.round(timeoutMs / 1000)} seconds`, {
       reason: "timeout",
       internalModelId,
     })
@@ -36,7 +36,7 @@ export class SwiftAiTimeoutError extends SwiftAiError {
 
 export class SwiftAiCancelledError extends SwiftAiError {
   constructor(internalModelId?: string) {
-    super("OpenRouter request was cancelled", {
+    super("AI gateway request was cancelled", {
       reason: "cancelled",
       internalModelId,
     })
