@@ -23,3 +23,5 @@ prisma/dev.db
 .swift-sandboxes
 .swift-reports
 fixing*.md
+
+.vercel

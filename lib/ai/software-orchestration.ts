@@ -144,7 +144,7 @@ const DEFAULT_ROLE_MODELS: Record<SoftwareOrchestrationRole, string> = {
 
 export function modelForSoftwareRole(role: SoftwareOrchestrationRole) {
   const envKey = `SWIFT_${role.toUpperCase()}_MODEL`
-  return process.env.AGENTROUTER_MODEL?.trim() || process.env.OPENROUTER_MODEL?.trim() || process.env[envKey]?.trim() || DEFAULT_ROLE_MODELS[role]
+  return process.env.AGENTROUTER_MODEL?.trim() || process.env[envKey]?.trim() || DEFAULT_ROLE_MODELS[role]
 }
 
 export function createSoftwareOrchestration(input: {

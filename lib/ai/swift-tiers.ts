@@ -76,7 +76,7 @@ const SWIFT_FULLSTACK_TIMEOUT_MS = Math.max(
       900000
   )
 )
-const configuredOutputTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.AGENTROUTER_MAX_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)
+const configuredOutputTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.AGENTROUTER_MAX_TOKENS || 16_000)
 const SWIFT_FULLSTACK_OUTPUT_TOKENS = Math.min(
   16_000,
   Math.max(3_000, Number.isFinite(configuredOutputTokens) && configuredOutputTokens > 0 ? configuredOutputTokens : 16_000)
@@ -95,9 +95,9 @@ function uniqueModelIds(modelIds: string[]) {
 export function getSwiftModelTargets(task: SwiftModelRoutingTask = "large_generation"): SwiftModelTarget[] {
   const chain = uniqueModelIds(getOpenRouterModelChain().map(normalizeOpenRouterModelId))
 
-  if (!process.env.AGENTROUTER_MODEL?.trim() && !process.env.OPENROUTER_MODEL?.trim() && !warnedDefaultChain) {
+  if (!process.env.AGENTROUTER_MODEL?.trim() && !warnedDefaultChain) {
     warnedDefaultChain = true
-    console.warn("[swift-ai] AGENTROUTER_MODEL/OPENROUTER_MODEL is empty; using default Swift AI model chain.")
+    console.warn("[swift-ai] AGENTROUTER_MODEL is empty; using default AgentRouter glm-5.1 model.")
   }
 
   void task

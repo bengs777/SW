@@ -113,7 +113,7 @@ const verdiTeamId = getEnv("VERDI_TEAM")
 const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
 const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
 const aiGatewayDefaultBaseUrl = "https://agentrouter.org/v1"
-const openRouterModel = getEnv("AGENTROUTER_MODEL", "OPENROUTER_MODEL") || "glm-5.1"
+const openRouterModel = getEnv("AGENTROUTER_MODEL") || "glm-5.1"
 const swiftAiProviderName = getEnv("SWIFT_AI_PROVIDER_NAME") || "agentrouter"
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
@@ -150,7 +150,7 @@ export const env = {
   googleClientSecret: getEnv("GOOGLE_CLIENT_SECRET"),
   aiTimeoutMs: getEnvNumber(500_000, "AI_TIMEOUT_MS"),
   aiMaxRetries: Math.max(0, Math.round(getEnvNumber(2, "AI_MAX_RETRIES"))),
-  aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "AGENTROUTER_MAX_TOKENS", "OPENROUTER_MAX_TOKENS")),
+  aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "AGENTROUTER_MAX_TOKENS")),
   providerStatusCacheTtlMs: Math.max(
     60_000,
     Math.round(getEnvNumber(86_400_000, "PROVIDER_STATUS_CACHE_TTL_MS"))
@@ -161,7 +161,7 @@ export const env = {
   openRouterModel,
   swiftAiProviderName,
   swiftFallbackModel1,
-  openRouterBaseUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL", "OPENROUTER_BASE_URL") || aiGatewayDefaultBaseUrl),
+  openRouterBaseUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL") || aiGatewayDefaultBaseUrl),
   openRouterSiteUrl: normalizeAppUrl(getEnv("AGENTROUTER_SITE_URL", "OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),
   openRouterAppName: getEnv("AGENTROUTER_APP_NAME", "OPENROUTER_APP_NAME") || "Swift AI",
   devOwnerEmail: DEV_OWNER_EMAIL,
