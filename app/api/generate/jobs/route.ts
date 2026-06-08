@@ -48,7 +48,7 @@ function canQueueAcceptJobs(health: GenerationQueueHealth | null) {
   if (!health?.enabled) return false
   if (health.redis?.error) return false
   if (health.redis?.ping && String(health.redis.ping).toUpperCase() !== "PONG") return false
-  if (health.status !== "healthy") return false
+  if (health.status === "disabled") return false
 
   const redisStatus = String(health.redis?.status || "unavailable").toLowerCase()
   return redisStatus !== "unavailable" && redisStatus !== "end"

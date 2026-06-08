@@ -345,7 +345,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://esm.sh blob:; connect-src https://esm.sh https://unpkg.com blob: data:; img-src data: blob: https:; style-src 'unsafe-inline'; font-src data: https:; worker-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://cdn.jsdelivr.net https://esm.sh blob:; connect-src https://esm.sh https://unpkg.com https://cdn.jsdelivr.net blob: data:; img-src data: blob: https:; style-src 'unsafe-inline'; font-src data: https:; worker-src blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
 <title>Preview</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
@@ -467,6 +467,79 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         metrics: metrics || {}
       }, '*');
     } catch (postMessageError) {}
+  }
+
+  function hasBabelRuntime(){
+    return Boolean(window.Babel && window.Babel.transform && window.Babel.packages && window.Babel.packages.parser);
+  }
+
+  function loadExternalScript(src){
+    return new Promise(function(resolve, reject){
+      var existing = document.querySelector('script[src="' + src + '"]');
+      if(existing && existing.getAttribute('data-loaded') === 'true'){
+        resolve(src);
+        return;
+      }
+
+      var script = existing || document.createElement('script');
+      script.src = src;
+      script.async = false;
+      script.onload = function(){
+        script.setAttribute('data-loaded', 'true');
+        resolve(src);
+      };
+      script.onerror = function(){
+        reject(new Error('Failed to load script: ' + src));
+      };
+      if(!existing){
+        document.head.appendChild(script);
+      }
+    });
+  }
+
+  function ensureBabelReady(callback){
+    if(hasBabelRuntime()){
+      callback();
+      return;
+    }
+
+    var sources = [
+      'https://unpkg.com/@babel/standalone/babel.min.js',
+      'https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js'
+    ];
+    var index = 0;
+
+    function tryNext(){
+      if(hasBabelRuntime()){
+        callback();
+        return;
+      }
+      if(index >= sources.length){
+        showError('Preview compiler failed to load Babel. Refresh preview or use runtime preview.');
+        return;
+      }
+
+      var source = sources[index++];
+      emitTelemetry('compile.babel_load_attempt', { source: source, attempt: index });
+      loadExternalScript(source)
+        .then(function(){
+          if(hasBabelRuntime()){
+            emitTelemetry('compile.babel_loaded', { source: source });
+            callback();
+          } else {
+            tryNext();
+          }
+        })
+        .catch(function(error){
+          emitTelemetry('compile.babel_load_failed', {
+            source: source,
+            message: error && error.message ? error.message : String(error)
+          });
+          tryNext();
+        });
+    }
+
+    tryNext();
   }
 
   function containsUnresolvedAlias(code){
@@ -677,6 +750,9 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     content = rewriteStaleErrorBoundaryReferences(path, content, 'pre-transform');
 
     try{
+      if(!hasBabelRuntime()){
+        throw new Error('Babel compiler is not ready');
+      }
       var result = Babel.transform(content, {
         filename: path,
         presets: [
@@ -767,6 +843,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     return url;
   }
 
+  function bootPreview(){
   try{
     document.body.className='ready';
     revokeAllBlobUrls();
@@ -907,6 +984,8 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   }catch(e){
     showError(e);
   }
+  }
+  ensureBabelReady(bootPreview);
 })();
 <\/script>
 </body>
