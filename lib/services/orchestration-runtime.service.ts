@@ -40,6 +40,19 @@ export type TraceIds = {
   previewId?: string | null
 }
 
+export type RecentWorkerHeartbeat = {
+  workerId: string
+  pid: number
+  at: string
+  alive?: boolean
+  currentStage?: string | null
+  lastSuccessfulTransition?: string | null
+  activeJobIds?: string[]
+  idleTimeoutMs?: number | null
+  stalledGenerationDetected?: boolean
+  sourceKey: string
+}
+
 const DEFAULT_LEASE_MS = 120_000
 const DEFAULT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const STALE_SSE_MINUTES = 10
@@ -537,6 +550,48 @@ export class OrchestrationRuntimeService {
         runtimeInfoJson: safeStringify(input.runtimeInfo),
         metadataJson: safeStringify(input.metadata),
       },
+    })
+  }
+
+  static async getRecentWorkerHeartbeats(maxAgeMs = 90_000): Promise<RecentWorkerHeartbeat[]> {
+    const rows = await prisma.workerHeartbeat.findMany({
+      where: {
+        heartbeatAt: {
+          gte: new Date(Date.now() - Math.max(1_000, maxAgeMs)),
+        },
+      },
+      orderBy: { heartbeatAt: "desc" },
+      take: 20,
+      select: {
+        workerId: true,
+        currentJobId: true,
+        currentStage: true,
+        lastSuccessfulTransition: true,
+        heartbeatAt: true,
+        runtimeInfoJson: true,
+      },
+    })
+
+    return rows.map((row) => {
+      const runtimeInfo = parseJson(row.runtimeInfoJson) as Record<string, unknown> | null
+      const activeJobIds = Array.isArray(runtimeInfo?.activeJobIds)
+        ? runtimeInfo.activeJobIds.map(String)
+        : row.currentJobId
+          ? [row.currentJobId]
+          : []
+
+      return {
+        workerId: row.workerId,
+        pid: Number(runtimeInfo?.pid || 0),
+        alive: typeof runtimeInfo?.alive === "boolean" ? runtimeInfo.alive : undefined,
+        currentStage: row.currentStage || null,
+        lastSuccessfulTransition: row.lastSuccessfulTransition || null,
+        activeJobIds,
+        idleTimeoutMs: typeof runtimeInfo?.idleTimeoutMs === "number" ? runtimeInfo.idleTimeoutMs : null,
+        stalledGenerationDetected: Boolean(runtimeInfo?.stalledGenerationDetected),
+        at: row.heartbeatAt.toISOString(),
+        sourceKey: "database:WorkerHeartbeat",
+      }
     })
   }
 

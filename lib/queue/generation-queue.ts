@@ -719,9 +719,17 @@ export async function getGenerationQueueHealth() {
   const memory = await getRedisMemoryHealth(connection)
   const saturation = await getQueueSaturation({ queue, counts, workerConcurrency })
   const activeQueueJobs = Number(counts.active || 0)
-  const workerHeartbeats = heartbeatPayloads
+  let workerHeartbeats = heartbeatPayloads
     .map((heartbeat) => getDecoratedWorkerHeartbeat(heartbeat, activeQueueJobs))
     .sort(compareWorkerHeartbeats)
+  if (!workerHeartbeats.some((heartbeat) => heartbeat.healthy)) {
+    const databaseHeartbeats = await OrchestrationRuntimeService.getRecentWorkerHeartbeats()
+      .then((heartbeats) => heartbeats.map((heartbeat) => getDecoratedWorkerHeartbeat(heartbeat, activeQueueJobs)))
+      .catch(() => [])
+    if (databaseHeartbeats.length > 0) {
+      workerHeartbeats = [...databaseHeartbeats, ...workerHeartbeats].sort(compareWorkerHeartbeats)
+    }
+  }
   const workerHeartbeat = workerHeartbeats[0] || null
   const heartbeatAgeMs = workerHeartbeat?.ageMs ?? null
   const workerHeartbeatIssues = workerHeartbeat?.issues || []
