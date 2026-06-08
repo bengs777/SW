@@ -132,6 +132,24 @@ npm --prefix services/sandbox-runtime ci --omit=dev
 npx prisma generate
 ```
 
+Jalur cepat setelah repo ada di VPS:
+
+```bash
+cd /root/swift-runtime
+bash scripts/vps-production-bootstrap.sh
+```
+
+Script bootstrap akan:
+
+- install package OS, Node.js 22, PM2, Nginx, Certbot, UFW, Fail2ban, dan `jq`;
+- clone/update repo;
+- install dependency app dan sandbox runtime;
+- membuat placeholder `.env` dan `.env.sandbox` dengan permission `600` bila belum ada;
+- membuat folder `/data/swift-sandbox`;
+- memasang Nginx reverse proxy untuk sandbox dan worker health.
+
+Script tidak mengisi secret. Setelah bootstrap selesai, isi `.env` dan `.env.sandbox` di VPS.
+
 Jika folder sudah ada:
 
 ```bash
@@ -253,6 +271,28 @@ Lihat log jika ada error:
 ```bash
 pm2 logs swift-generation-worker --lines 120
 pm2 logs swift-sandbox --lines 120
+```
+
+Jika menggunakan script deploy:
+
+```bash
+cd /root/swift-runtime
+bash scripts/vps-production-deploy.sh
+```
+
+Script deploy akan:
+
+- memastikan `.env` dan `.env.sandbox` punya key wajib tanpa menampilkan nilainya;
+- `git pull --ff-only origin main`;
+- install dependency;
+- restart `swift-generation-worker` dan `swift-sandbox`;
+- menjalankan `npm run deploy:readiness`;
+- mengecek local/public health sandbox dan worker.
+
+Jika DNS/HTTPS belum siap, jalankan sementara:
+
+```bash
+SWIFT_SKIP_PUBLIC_HEALTH=1 bash scripts/vps-production-deploy.sh
 ```
 
 ## 10. Nginx Reverse Proxy
@@ -430,14 +470,7 @@ Setiap ada commit baru:
 
 ```bash
 cd /root/swift-runtime
-git pull --ff-only origin main
-npm ci
-npm --prefix services/sandbox-runtime ci --omit=dev
-npx prisma generate
-pm2 restart swift-generation-worker --update-env
-pm2 restart swift-sandbox --update-env
-pm2 save
-npm run deploy:readiness
+bash scripts/vps-production-deploy.sh
 ```
 
 ## 17. Rollback

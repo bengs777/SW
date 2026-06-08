@@ -42,6 +42,9 @@ function run(command, args) {
 function staticChecks() {
   const packageJson = JSON.parse(read("package.json"))
   const gitignore = exists(".gitignore") ? read(".gitignore") : ""
+  const productionPlan = exists("planproduction.md") ? read("planproduction.md") : ""
+  const vpsBootstrap = exists("scripts/vps-production-bootstrap.sh") ? read("scripts/vps-production-bootstrap.sh") : ""
+  const vpsDeploy = exists("scripts/vps-production-deploy.sh") ? read("scripts/vps-production-deploy.sh") : ""
   const proxy = exists("proxy.ts") ? read("proxy.ts") : ""
   const generateJobsRoute = exists("app/api/generate/jobs/route.ts") ? read("app/api/generate/jobs/route.ts") : ""
   const providerRouter = exists("lib/ai/provider-router.ts") ? read("lib/ai/provider-router.ts") : ""
@@ -192,6 +195,17 @@ function staticChecks() {
     check("ops.resilience-script", packageJson.scripts && packageJson.scripts["test:resilience"] && exists("scripts/pipeline-resilience-smoke.js"), "Pipeline resilience smoke test script is available"),
     check("ops.hardening-regression-script", packageJson.scripts && packageJson.scripts["test:hardening"] && exists("scripts/pipeline-hardening-regression.js"), "Pipeline hardening regression gate is available"),
     check("ops.prompt-corpus-script", packageJson.scripts && packageJson.scripts["test:corpus"] && exists("scripts/prompt-corpus-regression.js") && exists("fixtures/prompts/malicious.txt"), "Prompt corpus regression gate is available"),
+    check(
+      "ops.vps-production-runbook",
+      /Swift Production VPS Sandbox Plan/.test(productionPlan) &&
+        /scripts\/vps-production-bootstrap\.sh/.test(productionPlan) &&
+        /scripts\/vps-production-deploy\.sh/.test(productionPlan) &&
+        /SANDBOX_SERVICE_TOKEN/.test(vpsBootstrap) &&
+        /npm run deploy:readiness/.test(vpsDeploy) &&
+        /pm2 restart swift-generation-worker/.test(vpsDeploy) &&
+        /worker\/health/.test(vpsDeploy),
+      "VPS sandbox and worker production runbook has bootstrap, deploy, readiness, and health automation"
+    ),
     check("preview.iframe-sandbox", /sandbox="[^"]*allow-scripts/.test(preview), "Preview iframe uses sandbox attribute"),
     check("preview.iframe-no-same-origin", !/sandbox="[^"]*allow-same-origin/.test(preview), "Preview iframe does not combine allow-scripts with allow-same-origin", "warn"),
     check(
