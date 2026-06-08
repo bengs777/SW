@@ -4,6 +4,10 @@ const path = require("path")
 const { execSync } = require("child_process")
 const IORedis = require("ioredis")
 
+const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
+const GENERATION_WORKER_HEARTBEAT_INDEX_KEY = "swift:generation:worker:heartbeats"
+const GENERATION_WORKER_HEARTBEAT_MAX_AGE_MS = 90_000
+
 const deployTarget = (process.env.DEPLOY_TARGET || process.env.SWIFT_DEPLOY_TARGET || "production").toLowerCase()
 const isProductionDeployTarget = deployTarget === "production" || deployTarget === "prod"
 
@@ -102,6 +106,122 @@ function isNativeRedisUrl(input) {
   return /^rediss?:\/\//i.test(String(input || ""))
 }
 
+function parseHeartbeatPayload(rawHeartbeat, source) {
+  if (!rawHeartbeat) return null
+  try {
+    const parsed = JSON.parse(rawHeartbeat)
+    if (!parsed || typeof parsed !== "object") return null
+    return {
+      workerId: String(parsed.workerId || "unknown-worker"),
+      pid: Number(parsed.pid || 0),
+      at: String(parsed.at || ""),
+      currentStage: parsed.currentStage || null,
+      lastSuccessfulTransition: parsed.lastSuccessfulTransition || null,
+      activeJobIds: Array.isArray(parsed.activeJobIds) ? parsed.activeJobIds.map(String) : [],
+      idleTimeoutMs: typeof parsed.idleTimeoutMs === "number" ? parsed.idleTimeoutMs : null,
+      stalledGenerationDetected: Boolean(parsed.stalledGenerationDetected),
+      source,
+    }
+  } catch {
+    return null
+  }
+}
+
+function decorateHeartbeat(heartbeat, activeQueueJobs) {
+  const parsedAt = Date.parse(String(heartbeat.at || ""))
+  const ageMs = Number.isFinite(parsedAt) ? Math.max(0, Date.now() - parsedAt) : null
+  const activeHeartbeatJobs = Array.isArray(heartbeat.activeJobIds) ? heartbeat.activeJobIds.length : 0
+  const issues = [
+    heartbeat.stalledGenerationDetected ? "stalled_generation_detected" : "",
+    activeHeartbeatJobs > 0 && activeQueueJobs === 0 ? "heartbeat_active_jobs_without_queue_active_jobs" : "",
+  ].filter(Boolean)
+
+  return {
+    ...heartbeat,
+    ageMs,
+    issues,
+    healthy: ageMs !== null && ageMs <= GENERATION_WORKER_HEARTBEAT_MAX_AGE_MS && issues.length === 0,
+  }
+}
+
+function compareHeartbeats(left, right) {
+  if (left.healthy !== right.healthy) return left.healthy ? -1 : 1
+  const leftAge = left.ageMs ?? Number.POSITIVE_INFINITY
+  const rightAge = right.ageMs ?? Number.POSITIVE_INFINITY
+  return leftAge - rightAge
+}
+
+async function getRedisWorkerHeartbeats(redis) {
+  const indexedKeys = await redis.smembers(GENERATION_WORKER_HEARTBEAT_INDEX_KEY).catch(() => [])
+  const indexed = indexedKeys.length > 0
+    ? (await redis.mget(...indexedKeys).catch(() => [])).map((rawHeartbeat, index) =>
+        parseHeartbeatPayload(rawHeartbeat, `redis:${indexedKeys[index] || GENERATION_WORKER_HEARTBEAT_KEY}`)
+      ).filter(Boolean)
+    : []
+
+  if (indexed.length > 0) return indexed
+
+  const legacy = parseHeartbeatPayload(
+    await redis.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null),
+    `redis:${GENERATION_WORKER_HEARTBEAT_KEY}`
+  )
+  return legacy ? [legacy] : []
+}
+
+async function getDatabaseWorkerHeartbeats() {
+  try {
+    const { PrismaClient } = require("@prisma/client")
+    const prisma = new PrismaClient()
+    try {
+      const rows = await prisma.workerHeartbeat.findMany({
+        where: {
+          heartbeatAt: {
+            gte: new Date(Date.now() - GENERATION_WORKER_HEARTBEAT_MAX_AGE_MS),
+          },
+        },
+        orderBy: { heartbeatAt: "desc" },
+        take: 20,
+        select: {
+          workerId: true,
+          currentJobId: true,
+          currentStage: true,
+          lastSuccessfulTransition: true,
+          heartbeatAt: true,
+          runtimeInfoJson: true,
+        },
+      })
+
+      return rows.map((row) => {
+        let runtimeInfo = {}
+        try {
+          runtimeInfo = row.runtimeInfoJson ? JSON.parse(row.runtimeInfoJson) : {}
+        } catch {
+          runtimeInfo = {}
+        }
+        return {
+          workerId: row.workerId,
+          pid: Number(runtimeInfo.pid || 0),
+          at: row.heartbeatAt.toISOString(),
+          currentStage: row.currentStage || null,
+          lastSuccessfulTransition: row.lastSuccessfulTransition || null,
+          activeJobIds: Array.isArray(runtimeInfo.activeJobIds)
+            ? runtimeInfo.activeJobIds.map(String)
+            : row.currentJobId
+              ? [row.currentJobId]
+              : [],
+          idleTimeoutMs: typeof runtimeInfo.idleTimeoutMs === "number" ? runtimeInfo.idleTimeoutMs : null,
+          stalledGenerationDetected: Boolean(runtimeInfo.stalledGenerationDetected),
+          source: "database:WorkerHeartbeat",
+        }
+      })
+    } finally {
+      await prisma.$disconnect().catch(() => {})
+    }
+  } catch {
+    return []
+  }
+}
+
 function isStrongSecret(input, minLength = 32) {
   const current = String(input || "")
   const normalized = current.trim().toLowerCase()
@@ -188,26 +308,31 @@ async function generationWorkerHeartbeatDiagnostic() {
     })
     await redis.connect()
     const ping = await redis.ping()
-    const rawHeartbeat = await redis.get("swift:generation:worker:heartbeat")
-    if (!rawHeartbeat) {
+    const redisHeartbeats = await getRedisWorkerHeartbeats(redis)
+    const activeQueueJobs = Number(await redis.llen("bull:swift-generation-v2:active").catch(() => 0))
+    const redisCandidates = redisHeartbeats
+      .map((heartbeat) => decorateHeartbeat(heartbeat, activeQueueJobs))
+      .sort(compareHeartbeats)
+    const redisHeartbeat = redisCandidates[0] || null
+    const databaseCandidates = redisHeartbeat?.healthy
+      ? []
+      : (await getDatabaseWorkerHeartbeats())
+          .map((heartbeat) => decorateHeartbeat(heartbeat, activeQueueJobs))
+          .sort(compareHeartbeats)
+    const databaseHeartbeat = databaseCandidates[0] || null
+    const heartbeat = redisHeartbeat?.healthy ? redisHeartbeat : databaseHeartbeat?.healthy ? databaseHeartbeat : redisHeartbeat || databaseHeartbeat
+
+    if (!heartbeat) {
       return { ok: false, detail: "Worker heartbeat key is missing in Redis. Start the dedicated worker service." }
     }
 
-    const heartbeat = JSON.parse(rawHeartbeat)
-    const ageMs = Math.max(0, Date.now() - Date.parse(String(heartbeat.at || "")))
-    const activeQueueJobs = Number(await redis.llen("bull:swift-generation-v2:active").catch(() => 0))
-    const activeHeartbeatJobs = Array.isArray(heartbeat.activeJobIds) ? heartbeat.activeJobIds.length : 0
-    const heartbeatIssues = [
-      heartbeat.stalledGenerationDetected ? "stalled_generation_detected" : "",
-      activeHeartbeatJobs > 0 && activeQueueJobs === 0 ? "heartbeat_active_jobs_without_queue_active_jobs" : "",
-    ].filter(Boolean)
-    const ok = ping === "PONG" && Number.isFinite(ageMs) && ageMs <= 90_000 && heartbeatIssues.length === 0
+    const ok = ping === "PONG" && heartbeat.healthy
 
     return {
       ok,
       detail: ok
-        ? `Heartbeat fresh at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}).`
-        : `Heartbeat unhealthy at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}): ${heartbeatIssues.join(", ") || "stale_or_unreachable"}.`,
+        ? `Heartbeat fresh at ${heartbeat.ageMs}ms (${heartbeat.workerId || "unknown-worker"}, ${heartbeat.source || "unknown-source"}).`
+        : `Heartbeat unhealthy at ${heartbeat.ageMs ?? "unknown"}ms (${heartbeat.workerId || "unknown-worker"}, ${heartbeat.source || "unknown-source"}): ${heartbeat.issues.join(", ") || "stale_or_unreachable"}.`,
     }
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) }

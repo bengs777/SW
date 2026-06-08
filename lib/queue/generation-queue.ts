@@ -36,6 +36,7 @@ export type GenerationQueuePriority = "normal" | "retry" | "recovery" | "admin"
 const QUEUE_NAME = "swift-generation-v2"
 const DEAD_LETTER_QUEUE_NAME = "swift-generation-dead-letter-v1"
 const GENERATION_WORKER_HEARTBEAT_KEY = "swift:generation:worker:heartbeat"
+const GENERATION_WORKER_HEARTBEAT_INDEX_KEY = "swift:generation:worker:heartbeats"
 const QUEUE_SATURATION_LIMITS = {
   maxBacklogDepth: Math.max(1, Number(process.env.SWIFT_QUEUE_MAX_BACKLOG_DEPTH || 30)),
   maxBacklogAgeMs: Math.max(5_000, Number(process.env.SWIFT_QUEUE_MAX_BACKLOG_AGE_MS || 120_000)),
@@ -43,6 +44,103 @@ const QUEUE_SATURATION_LIMITS = {
   maxWorkerUtilizationPct: Math.max(1, Math.min(100, Number(process.env.SWIFT_QUEUE_MAX_WORKER_UTILIZATION_PCT || 90))),
   heavySaturationPct: Math.max(100, Number(process.env.SWIFT_QUEUE_HEAVY_SATURATION_PCT || 150)),
   waitSampleSize: Math.max(1, Math.min(200, Number(process.env.SWIFT_QUEUE_WAIT_SAMPLE_SIZE || 50))),
+}
+
+type GenerationWorkerHeartbeatPayload = {
+  workerId: string
+  pid: number
+  at: string
+  alive?: boolean
+  currentStage?: string | null
+  lastSuccessfulTransition?: string | null
+  activeJobIds?: string[]
+  idleTimeoutMs?: number | null
+  stalledGenerationDetected?: boolean
+}
+
+type GenerationWorkerHeartbeatCandidate = GenerationWorkerHeartbeatPayload & {
+  ageMs: number | null
+  healthy: boolean
+  issues: string[]
+  sourceKey: string
+}
+
+function getGenerationWorkerHeartbeatKey(workerId: string) {
+  return `${GENERATION_WORKER_HEARTBEAT_KEY}:${encodeURIComponent(workerId)}`
+}
+
+function parseGenerationWorkerHeartbeat(
+  rawHeartbeat: string | null,
+  sourceKey: string
+): (GenerationWorkerHeartbeatPayload & { sourceKey: string }) | null {
+  if (!rawHeartbeat) return null
+  try {
+    const parsed = JSON.parse(rawHeartbeat) as Partial<GenerationWorkerHeartbeatPayload>
+    if (!parsed || typeof parsed !== "object") return null
+    return {
+      workerId: String(parsed.workerId || "unknown-worker"),
+      pid: Number(parsed.pid || 0),
+      alive: parsed.alive,
+      currentStage: parsed.currentStage || null,
+      lastSuccessfulTransition: parsed.lastSuccessfulTransition || null,
+      activeJobIds: Array.isArray(parsed.activeJobIds) ? parsed.activeJobIds.map(String) : [],
+      idleTimeoutMs: typeof parsed.idleTimeoutMs === "number" ? parsed.idleTimeoutMs : null,
+      stalledGenerationDetected: Boolean(parsed.stalledGenerationDetected),
+      at: String(parsed.at || ""),
+      sourceKey,
+    } satisfies GenerationWorkerHeartbeatPayload & { sourceKey: string }
+  } catch {
+    return null
+  }
+}
+
+async function getGenerationWorkerHeartbeatPayloads(connection: IORedis | null) {
+  if (!connection) return []
+
+  const indexedKeys = await connection.smembers(GENERATION_WORKER_HEARTBEAT_INDEX_KEY).catch(() => [])
+  const indexedHeartbeats = indexedKeys.length > 0
+    ? (await connection.mget(...indexedKeys).catch(() => [])).map((rawHeartbeat, index) =>
+        parseGenerationWorkerHeartbeat(rawHeartbeat, indexedKeys[index] || GENERATION_WORKER_HEARTBEAT_KEY)
+      ).filter((heartbeat): heartbeat is GenerationWorkerHeartbeatPayload & { sourceKey: string } => Boolean(heartbeat))
+    : []
+
+  if (indexedHeartbeats.length > 0) {
+    return indexedHeartbeats
+  }
+
+  const legacyHeartbeat = parseGenerationWorkerHeartbeat(
+    await connection.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null),
+    GENERATION_WORKER_HEARTBEAT_KEY
+  )
+  return legacyHeartbeat ? [legacyHeartbeat] : []
+}
+
+function getDecoratedWorkerHeartbeat(
+  heartbeat: GenerationWorkerHeartbeatPayload & { sourceKey: string },
+  activeQueueJobs: number
+): GenerationWorkerHeartbeatCandidate {
+  const parsedAt = Date.parse(heartbeat.at)
+  const ageMs = Number.isFinite(parsedAt) ? Math.max(0, Date.now() - parsedAt) : null
+  const activeHeartbeatJobs = heartbeat.activeJobIds?.length || 0
+  const issues = [
+    heartbeat.stalledGenerationDetected ? "stalled_generation_detected" : "",
+    activeHeartbeatJobs > 0 && activeQueueJobs === 0 ? "heartbeat_active_jobs_without_queue_active_jobs" : "",
+  ].filter(Boolean)
+  const healthy = ageMs !== null && ageMs <= 90_000 && issues.length === 0
+
+  return {
+    ...heartbeat,
+    ageMs,
+    healthy,
+    issues,
+  }
+}
+
+function compareWorkerHeartbeats(left: GenerationWorkerHeartbeatCandidate, right: GenerationWorkerHeartbeatCandidate) {
+  if (left.healthy !== right.healthy) return left.healthy ? -1 : 1
+  const leftAge = left.ageMs ?? Number.POSITIVE_INFINITY
+  const rightAge = right.ageMs ?? Number.POSITIVE_INFINITY
+  return leftAge - rightAge
 }
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
@@ -519,8 +617,14 @@ export async function recordGenerationWorkerHeartbeat(
     stalledGenerationDetected: Boolean(details?.stalledGenerationDetected),
     at: new Date().toISOString(),
   })
+  const heartbeatKey = getGenerationWorkerHeartbeatKey(workerId)
 
-  await connection.set(GENERATION_WORKER_HEARTBEAT_KEY, payload, "PX", 120_000)
+  await Promise.all([
+    connection.set(heartbeatKey, payload, "PX", 120_000),
+    connection.sadd(GENERATION_WORKER_HEARTBEAT_INDEX_KEY, heartbeatKey),
+    connection.expire(GENERATION_WORKER_HEARTBEAT_INDEX_KEY, 120),
+    connection.set(GENERATION_WORKER_HEARTBEAT_KEY, payload, "PX", 120_000),
+  ])
   await OrchestrationRuntimeService.recordWorkerHeartbeat({
     workerId,
     currentJobId: details?.activeJobIds?.[0] || null,
@@ -607,41 +711,20 @@ export async function getGenerationQueueHealth() {
   recordWorkerUtilization(Number(counts.active || 0), workerConcurrency, {
     queueName: QUEUE_NAME,
   })
-  const rawHeartbeat = connection ? await connection.get(GENERATION_WORKER_HEARTBEAT_KEY).catch(() => null) : null
+  const heartbeatPayloads = await getGenerationWorkerHeartbeatPayloads(connection)
   const deadLetterQueue = getGenerationDeadLetterQueue()
   const deadLetterCounts = deadLetterQueue
     ? await deadLetterQueue.getJobCounts("waiting", "active", "delayed", "failed", "completed", "paused").catch(() => null)
     : null
-  const workerHeartbeat = rawHeartbeat
-    ? (() => {
-        try {
-          return JSON.parse(rawHeartbeat) as {
-            workerId: string
-            pid: number
-            at: string
-            alive?: boolean
-            currentStage?: string | null
-            lastSuccessfulTransition?: string | null
-            activeJobIds?: string[]
-            idleTimeoutMs?: number | null
-            stalledGenerationDetected?: boolean
-          }
-        } catch {
-          return null
-        }
-      })()
-    : null
-  const heartbeatAgeMs = workerHeartbeat ? Date.now() - Date.parse(workerHeartbeat.at) : null
   const memory = await getRedisMemoryHealth(connection)
   const saturation = await getQueueSaturation({ queue, counts, workerConcurrency })
-  const heartbeatActiveJobCount = workerHeartbeat?.activeJobIds?.length || 0
   const activeQueueJobs = Number(counts.active || 0)
-  const heartbeatActiveJobDrift = heartbeatActiveJobCount > 0 && activeQueueJobs === 0
-  const heartbeatStalled = Boolean(workerHeartbeat?.stalledGenerationDetected)
-  const workerHeartbeatIssues = [
-    heartbeatStalled ? "stalled_generation_detected" : "",
-    heartbeatActiveJobDrift ? "heartbeat_active_jobs_without_queue_active_jobs" : "",
-  ].filter(Boolean)
+  const workerHeartbeats = heartbeatPayloads
+    .map((heartbeat) => getDecoratedWorkerHeartbeat(heartbeat, activeQueueJobs))
+    .sort(compareWorkerHeartbeats)
+  const workerHeartbeat = workerHeartbeats[0] || null
+  const heartbeatAgeMs = workerHeartbeat?.ageMs ?? null
+  const workerHeartbeatIssues = workerHeartbeat?.issues || []
 
   return {
     enabled: true,
@@ -668,10 +751,9 @@ export async function getGenerationQueueHealth() {
     workerHeartbeat: workerHeartbeat
       ? {
           ...workerHeartbeat,
-          ageMs: heartbeatAgeMs,
-          issues: workerHeartbeatIssues,
         }
       : null,
+    workerHeartbeats,
     redis: {
       configured: env.hasNativeRedisConfig,
       status: connection?.status || "unavailable",
