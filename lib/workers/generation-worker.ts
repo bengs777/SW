@@ -1,5 +1,6 @@
 import type { Job } from "bullmq"
 import { env } from "@/lib/env"
+import { getActiveSwiftModelChain } from "@/lib/ai/swift-tiers"
 import { MIN_GENERATION_JOB_TIMEOUT_MS, timeoutConfig } from "@/lib/timeouts"
 import {
   createGenerationWorker,
@@ -27,6 +28,15 @@ const GENERATION_JOB_TIMEOUT_MS = Math.max(
   MIN_GENERATION_JOB_TIMEOUT_MS,
   Math.round(timeoutConfig.generationJobMs || env.aiQueueTimeoutMs)
 )
+const DEPRECATED_MODEL_ENV_KEYS = [
+  "OPENROUTER_FREE_MODEL",
+  "OPENROUTER_MODEL_ID",
+  "SWIFT_FALLBACK_MODEL_1",
+  "AGENTROUTER_FALLBACK_MODEL",
+  "AGENTROUTER_FALLBACK_MODELS",
+  "OPENROUTER_FALLBACK_MODEL",
+  "OPENROUTER_FALLBACK_MODELS",
+]
 
 class GenerationJobTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -380,14 +390,29 @@ export async function processGenerationQueueJob(job: Job<GenerationQueuePayload>
 export function startGenerationWorker() {
   const bootStartedAt = Date.now()
   const workerId = `generation:${process.env.VERCEL_REGION || "local"}:${process.pid}`
+  const activeSwiftModelChain = getActiveSwiftModelChain()
   const worker = createGenerationWorker((job) => processGenerationQueueJob(job, workerId))
   const activeJobs = new Map<string, { stage: string; lastSuccessfulTransition: string; startedAt: number }>()
 
+  log("info", "generation_worker_env_snapshot", {
+    workerId,
+    nodeEnv: env.nodeEnv,
+    providerName: env.swiftAiProviderName,
+    baseUrl: env.openRouterBaseUrl,
+    configuredModel: env.openRouterModel,
+    activeSwiftModelChain,
+    agentRouterModel: process.env.AGENTROUTER_MODEL || null,
+    swiftAiModelChain: process.env.SWIFT_AI_MODEL_CHAIN || null,
+    hasAgentRouterApiKey: Boolean(process.env.AGENTROUTER_API_KEY?.trim()),
+    hasOpenRouterApiKeyAlias: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
+    deprecatedModelEnvKeys: DEPRECATED_MODEL_ENV_KEYS.filter((key) => Boolean(process.env[key]?.trim())),
+  })
   log("info", "generation_worker_booted", {
     workerId,
     pid: process.pid,
     concurrency: Number(process.env.SWIFT_GENERATION_WORKER_CONCURRENCY || 2),
     timeoutMs: GENERATION_JOB_TIMEOUT_MS,
+    activeSwiftModelChain,
   })
   log("info", "worker_boot", {
     event: "worker_boot",

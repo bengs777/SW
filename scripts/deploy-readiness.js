@@ -195,13 +195,19 @@ async function generationWorkerHeartbeatDiagnostic() {
 
     const heartbeat = JSON.parse(rawHeartbeat)
     const ageMs = Math.max(0, Date.now() - Date.parse(String(heartbeat.at || "")))
-    const ok = ping === "PONG" && Number.isFinite(ageMs) && ageMs <= 90_000
+    const activeQueueJobs = Number(await redis.llen("bull:swift-generation-v2:active").catch(() => 0))
+    const activeHeartbeatJobs = Array.isArray(heartbeat.activeJobIds) ? heartbeat.activeJobIds.length : 0
+    const heartbeatIssues = [
+      heartbeat.stalledGenerationDetected ? "stalled_generation_detected" : "",
+      activeHeartbeatJobs > 0 && activeQueueJobs === 0 ? "heartbeat_active_jobs_without_queue_active_jobs" : "",
+    ].filter(Boolean)
+    const ok = ping === "PONG" && Number.isFinite(ageMs) && ageMs <= 90_000 && heartbeatIssues.length === 0
 
     return {
       ok,
       detail: ok
         ? `Heartbeat fresh at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}).`
-        : `Heartbeat is stale at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}).`,
+        : `Heartbeat unhealthy at ${ageMs}ms (${heartbeat.workerId || "unknown-worker"}): ${heartbeatIssues.join(", ") || "stale_or_unreachable"}.`,
     }
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) }

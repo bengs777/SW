@@ -10,6 +10,16 @@ export const BASIC_PROMPT_FEE_IDR = 3000
 export const BUILD_PROMPT_FEE_IDR = 3000
 export const PRO_PROMPT_FEE_IDR = 3000
 export const PROMPT_FEE_IDR = BASIC_PROMPT_FEE_IDR
+const PRODUCTION_BLOCKED_MODEL_RE = /\b(poolside\/laguna|openrouter\/owl-alpha|owl-alpha)\b/i
+const DEPRECATED_MODEL_ENV_KEYS = [
+  "OPENROUTER_FREE_MODEL",
+  "OPENROUTER_MODEL_ID",
+  "SWIFT_FALLBACK_MODEL_1",
+  "AGENTROUTER_FALLBACK_MODEL",
+  "AGENTROUTER_FALLBACK_MODELS",
+  "OPENROUTER_FALLBACK_MODEL",
+  "OPENROUTER_FALLBACK_MODELS",
+]
 
 function uniqueModels(modelIds: string[]) {
   const seen = new Set<string>()
@@ -25,21 +35,55 @@ export function normalizeOpenRouterModelId(modelSpec: string) {
   return modelSpec.replace(/^(openrouter|agentrouter):/i, "").trim()
 }
 
+function configuredModelChainFromEnv() {
+  return (process.env.SWIFT_AI_MODEL_CHAIN || "")
+    .split(",")
+    .map(normalizeOpenRouterModelId)
+    .filter(Boolean)
+}
+
+function assertProductionModelConfig(modelIds: string[]) {
+  if (process.env.NODE_ENV !== "production" || process.env.SWIFT_ALLOW_LEGACY_PROVIDER_MODELS === "true") {
+    return
+  }
+
+  const deprecatedEnvKey = DEPRECATED_MODEL_ENV_KEYS.find((key) => Boolean(process.env[key]?.trim()))
+  if (deprecatedEnvKey) {
+    throw new Error(
+      `Deprecated production model env ${deprecatedEnvKey} is configured. Use AGENTROUTER_MODEL=glm-5.1 and SWIFT_AI_MODEL_CHAIN=agentrouter:glm-5.1.`
+    )
+  }
+
+  const blockedModel = modelIds.find((modelId) => PRODUCTION_BLOCKED_MODEL_RE.test(modelId))
+  if (blockedModel) {
+    throw new Error(
+      `Blocked production AgentRouter model configured: ${blockedModel}. Use AGENTROUTER_MODEL=glm-5.1 and SWIFT_AI_MODEL_CHAIN=agentrouter:glm-5.1.`
+    )
+  }
+}
+
 export function getOpenRouterModel() {
-  return normalizeOpenRouterModelId(process.env.AGENTROUTER_MODEL || OPENROUTER_DEFAULT_MODEL)
+  const [firstChainModel] = configuredModelChainFromEnv()
+  return normalizeOpenRouterModelId(
+    process.env.AGENTROUTER_MODEL || process.env.OPENROUTER_MODEL || firstChainModel || OPENROUTER_DEFAULT_MODEL
+  )
 }
 
 export function getOpenRouterModelChain() {
   const configuredPrimaryModel = getOpenRouterModel()
+  const configuredChainModels = configuredModelChainFromEnv()
   const configuredFallbackModels = OPENROUTER_FALLBACK_ENV_KEYS
     .map((key) => process.env[key] || "")
     .filter(Boolean)
 
-  return uniqueModels([
+  const chain = uniqueModels([
     configuredPrimaryModel,
+    ...configuredChainModels,
     ...configuredFallbackModels.map(normalizeOpenRouterModelId),
     ...OPENROUTER_DEFAULT_FALLBACK_MODELS.map(normalizeOpenRouterModelId),
   ])
+  assertProductionModelConfig(chain)
+  return chain
 }
 
 export function getOpenRouterConfig() {

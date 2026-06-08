@@ -634,6 +634,14 @@ export async function getGenerationQueueHealth() {
   const heartbeatAgeMs = workerHeartbeat ? Date.now() - Date.parse(workerHeartbeat.at) : null
   const memory = await getRedisMemoryHealth(connection)
   const saturation = await getQueueSaturation({ queue, counts, workerConcurrency })
+  const heartbeatActiveJobCount = workerHeartbeat?.activeJobIds?.length || 0
+  const activeQueueJobs = Number(counts.active || 0)
+  const heartbeatActiveJobDrift = heartbeatActiveJobCount > 0 && activeQueueJobs === 0
+  const heartbeatStalled = Boolean(workerHeartbeat?.stalledGenerationDetected)
+  const workerHeartbeatIssues = [
+    heartbeatStalled ? "stalled_generation_detected" : "",
+    heartbeatActiveJobDrift ? "heartbeat_active_jobs_without_queue_active_jobs" : "",
+  ].filter(Boolean)
 
   return {
     enabled: true,
@@ -648,6 +656,8 @@ export async function getGenerationQueueHealth() {
           ? "degraded"
           : heartbeatAgeMs > 90_000
             ? "stale"
+            : workerHeartbeatIssues.length > 0
+              ? "stale"
             : "healthy",
     counts,
     saturation,
@@ -659,6 +669,7 @@ export async function getGenerationQueueHealth() {
       ? {
           ...workerHeartbeat,
           ageMs: heartbeatAgeMs,
+          issues: workerHeartbeatIssues,
         }
       : null,
     redis: {

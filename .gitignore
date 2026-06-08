@@ -25,3 +25,4 @@ prisma/dev.db
 fixing*.md
 
 .vercel
+.env*.local

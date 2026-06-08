@@ -11,6 +11,7 @@ const STALE_GENERATION_TIMEOUT_MS = Math.max(
   MIN_GENERATION_JOB_TIMEOUT_MS,
   Number(timeoutConfig.staleGenerationMs || env.aiQueueTimeoutMs)
 )
+const TERMINAL_STATUS_VALUES = ["completed", "failed", "cancelled", "dead_lettered", "terminated"]
 
 function parseBillingContext(contextJson: string | null) {
   if (!contextJson) return null
@@ -35,12 +36,70 @@ function parseBillingContext(contextJson: string | null) {
   }
 }
 
+async function reconcileTerminalStatusDrift() {
+  const now = new Date()
+  const deadLettered = await prisma.generationJob.updateMany({
+    where: {
+      deadLetteredAt: { not: null },
+      status: { not: "dead_lettered" },
+    },
+    data: {
+      status: "dead_lettered",
+      orchestrationState: "dead_lettered",
+      stage: "failed",
+      progress: 100,
+      terminatedAt: now,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    },
+  })
+  const failed = await prisma.generationJob.updateMany({
+    where: {
+      failedAt: { not: null },
+      status: { notIn: TERMINAL_STATUS_VALUES },
+    },
+    data: {
+      status: "failed",
+      orchestrationState: "terminated",
+      stage: "failed",
+      progress: 100,
+      terminatedAt: now,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    },
+  })
+  const cancelled = await prisma.generationJob.updateMany({
+    where: {
+      cancelledAt: { not: null },
+      status: { notIn: TERMINAL_STATUS_VALUES },
+    },
+    data: {
+      status: "cancelled",
+      orchestrationState: "terminated",
+      stage: "cancelled",
+      progress: 100,
+      terminatedAt: now,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    },
+  })
+
+  if (deadLettered.count > 0 || failed.count > 0 || cancelled.count > 0) {
+    log("warn", "terminal_generation_status_drift_reconciled", {
+      deadLettered: deadLettered.count,
+      failed: failed.count,
+      cancelled: cancelled.count,
+    })
+  }
+}
+
 export async function reconcileStaleGenerationJobs() {
   await OrchestrationRuntimeService.recoverOrphanedJobs().catch((error) => {
     log("warn", "orphaned_generation_recovery_failed", {
       error: error instanceof Error ? error.message : String(error),
     })
   })
+  await reconcileTerminalStatusDrift()
   const cutoff = new Date(Date.now() - STALE_GENERATION_TIMEOUT_MS)
   const staleJobs = await prisma.generationJob.findMany({
     where: {

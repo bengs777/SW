@@ -45,6 +45,7 @@ const DEFAULT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const STALE_SSE_MINUTES = 10
 const ORPHANED_JOB_MINUTES = 5
 export const MAX_JOB_RECOVERY_ATTEMPTS = 3
+const TERMINAL_JOB_STATUSES: GenerationJobStatus[] = ["completed", "failed", "cancelled", "dead_lettered", "terminated"]
 
 const RETRYABLE_RETRY_CLASSES = new Set<RetryClass>([
   "provider_transient",
@@ -464,8 +465,27 @@ export class OrchestrationRuntimeService {
   }
 
   static async releaseLease(jobId: string, workerId: string, state: OrchestrationRecoveryState = "terminated") {
+    const terminalRelease = await prisma.generationJob.updateMany({
+      where: {
+        id: jobId,
+        leaseOwner: workerId,
+        status: { in: TERMINAL_JOB_STATUSES },
+      },
+      data: {
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastHeartbeatAt: new Date(),
+        version: { increment: 1 },
+      },
+    })
+    if (terminalRelease.count > 0) return
+
     await prisma.generationJob.updateMany({
-      where: { id: jobId, leaseOwner: workerId },
+      where: {
+        id: jobId,
+        leaseOwner: workerId,
+        status: { notIn: TERMINAL_JOB_STATUSES },
+      },
       data: {
         orchestrationState: state,
         leaseOwner: null,

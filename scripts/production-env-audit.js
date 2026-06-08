@@ -6,6 +6,15 @@ const root = process.cwd()
 const EXPECTED_SANDBOX_PUBLIC_URL = "https://sandbox.ai-swift.biz.id"
 const EXPECTED_OPENROUTER_MODEL = "glm-5.1"
 const EXPECTED_AGENTROUTER_BASE_URL = "https://agentrouter.org/v1"
+const LEGACY_MODEL_ENV_KEYS = [
+  "OPENROUTER_FREE_MODEL",
+  "OPENROUTER_MODEL_ID",
+  "SWIFT_FALLBACK_MODEL_1",
+  "AGENTROUTER_FALLBACK_MODEL",
+  "AGENTROUTER_FALLBACK_MODELS",
+  "OPENROUTER_FALLBACK_MODEL",
+  "OPENROUTER_FALLBACK_MODELS",
+]
 
 const files = {
   local: ".env",
@@ -52,7 +61,8 @@ function checkCommonProvider(checks, env, label) {
   assert(checks, baseUrl === EXPECTED_AGENTROUTER_BASE_URL, `${label}: AI gateway base URL points to AgentRouter API`)
   assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "agentrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses AgentRouter`)
   assert(checks, model === EXPECTED_OPENROUTER_MODEL, `${label}: AI model uses the configured Swift default model`)
-  assert(checks, !hasAny(env, ["OPENROUTER_FREE_MODEL"]), `${label}: legacy free model variables are not configured`)
+  assert(checks, !hasAny(env, LEGACY_MODEL_ENV_KEYS), `${label}: legacy/fallback model variables are not configured`)
+  assert(checks, value(env, "SWIFT_AI_MODEL_CHAIN") === "agentrouter:glm-5.1", `${label}: Swift model chain uses AgentRouter glm-5.1 only`)
 }
 
 function checkEnv() {

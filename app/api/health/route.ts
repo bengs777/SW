@@ -175,10 +175,14 @@ function okLabel(check: HealthCheck) {
 function workerLabel(queue: HealthCheck) {
   if (queue.status === "disabled") return "disabled"
   if (queue.status === "unhealthy") return "unhealthy"
+  if (queue.status !== "healthy") return "degraded"
 
-  const detail = queue.detail as { workerHeartbeat?: { ageMs?: number | null } | null } | undefined
+  const detail = queue.detail as {
+    workerHeartbeat?: { ageMs?: number | null; issues?: string[] | null } | null
+  } | undefined
   const ageMs = detail?.workerHeartbeat?.ageMs
-  return typeof ageMs === "number" && ageMs <= 90_000 ? "ok" : "degraded"
+  const issues = detail?.workerHeartbeat?.issues || []
+  return typeof ageMs === "number" && ageMs <= 90_000 && issues.length === 0 ? "ok" : "degraded"
 }
 
 const CORE_ENV_BLOCKING_KEYS = new Set([
