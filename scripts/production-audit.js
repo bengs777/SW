@@ -78,6 +78,7 @@ function staticChecks() {
   const taskGraphExecutor = exists("lib/ai/task-graph-executor.ts") ? read("lib/ai/task-graph-executor.ts") : ""
   const generatedArtifact = exists("lib/ai/generated-artifact.ts") ? read("lib/ai/generated-artifact.ts") : ""
   const sandboxRuntime = exists("lib/sandbox/runtime.ts") ? read("lib/sandbox/runtime.ts") : ""
+  const sandboxRuntimeServer = exists("services/sandbox-runtime/server.mjs") ? read("services/sandbox-runtime/server.mjs") : ""
   const preview = exists("components/editor/sandbox-preview.tsx") ? read("components/editor/sandbox-preview.tsx") : ""
   const previewPanel = exists("components/editor/preview-panel.tsx") ? read("components/editor/preview-panel.tsx") : ""
   const prisma = exists("prisma/schema.prisma") ? read("prisma/schema.prisma") : ""
@@ -179,6 +180,7 @@ function staticChecks() {
     check("sandbox.process-restart", /stopProcess/.test(sandboxRuntime) && /resetRuntimeSandbox/.test(sandboxRuntime), "Sandbox supports process stop and reset"),
     check("sandbox.npm-install-ignore-scripts", /npm["'], \["install", "--ignore-scripts"/.test(sandboxRuntime) && /SWIFT_SANDBOX_COPY_ROOT_LOCK/.test(sandboxRuntime), "Runtime sandbox installs generated apps without lifecycle scripts or root lockfile drift"),
     check("sandbox.build-before-preview", /npm["'], \["run", "db:generate"/.test(sandboxRuntime) && /npm["'], \["run", "build"/.test(sandboxRuntime), "Runtime sandbox runs Prisma generate and build before preview"),
+    check("sandbox.worker-health-proxy", /app\.get\("\/worker\/health"/.test(sandboxRuntimeServer) && /SWIFT_WORKER_HEALTH_PROXY_URL/.test(sandboxRuntimeServer), "Sandbox runtime exposes a safe worker health proxy for VPS deployments"),
     check("ops.health-route", /getGenerationQueueHealth/.test(healthRoute) && /ProviderRouter/.test(healthRoute), "Health endpoint reports database, queue, env, and provider status"),
     check("ops.worker-heartbeat", /recordGenerationWorkerHeartbeat/.test(generationQueue) && /recordGenerationWorkerHeartbeat/.test(generationWorker), "Queue health includes worker heartbeat reporting"),
     check(

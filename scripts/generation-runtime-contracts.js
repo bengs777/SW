@@ -203,6 +203,9 @@ function main() {
       sandboxHealthBlock.includes("rootReady: storageOk") &&
       sandboxHealthBlock.includes("rootError: storageError") &&
       sandboxHealthBlock.includes("storage,") &&
+      /app\.get\("\/worker\/health"/.test(sandboxRuntimeServer) &&
+      /SWIFT_WORKER_HEALTH_PROXY_URL/.test(sandboxRuntimeServer) &&
+      /workerHeartbeat/.test(sandboxRuntimeServer) &&
       /activeProjects/.test(sandboxHealthBlock) &&
       /SWIFT_SANDBOX_ROOT=\/data\/swift-sandbox/.test(sandboxDockerfile) &&
       /sandbox_service_unavailable/.test(sandboxRoute) &&

@@ -16,6 +16,7 @@ const BASE_PORT = Number(process.env.SWIFT_SANDBOX_BASE_PORT || 4300)
 const MAX_LOG_LINES = Number(process.env.SWIFT_SANDBOX_MAX_LOG_LINES || 600)
 const SERVICE_TOKEN = process.env.SANDBOX_SERVICE_TOKEN || ""
 const IS_PRODUCTION = process.env.NODE_ENV === "production"
+const WORKER_HEALTH_PROXY_URL = process.env.SWIFT_WORKER_HEALTH_PROXY_URL || "http://127.0.0.1:4000/health"
 const MAX_PROJECTS = Number(process.env.SWIFT_SANDBOX_MAX_PROJECTS || 12)
 const MAX_FILES = Number(process.env.SWIFT_SANDBOX_MAX_FILES || 240)
 const MAX_TOTAL_BYTES = Number(process.env.SWIFT_SANDBOX_MAX_TOTAL_BYTES || 6 * 1024 * 1024)
@@ -703,6 +704,61 @@ app.get("/health", async (_req, res) => {
       hasDatabaseUrl: Boolean(sandboxDatabaseUrl()),
     },
   })
+})
+
+app.get("/worker/health", async (_req, res) => {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.SWIFT_WORKER_HEALTH_PROXY_TIMEOUT_MS || 5000))
+  const startedAt = Date.now()
+
+  try {
+    const response = await fetch(WORKER_HEALTH_PROXY_URL, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+      },
+    })
+    const body = await response.json().catch(() => ({}))
+    const queue = body && typeof body === "object" && body.queue && typeof body.queue === "object"
+      ? body.queue
+      : null
+    const worker = body && typeof body === "object" && body.worker && typeof body.worker === "object"
+      ? body.worker
+      : null
+    const healthy = response.ok && body?.status === "healthy" && body?.mode === "queue"
+
+    res.status(healthy ? 200 : 503).json({
+      status: healthy ? "healthy" : String(body?.status || "unhealthy"),
+      ok: healthy,
+      mode: "queue",
+      worker: worker?.healthy === false ? "unhealthy" : worker?.ready === false ? "starting" : healthy ? "healthy" : "degraded",
+      queue: queue?.status || "unknown",
+      heartbeat: queue?.workerHeartbeat
+        ? {
+            workerId: queue.workerHeartbeat.workerId || null,
+            ageMs: queue.workerHeartbeat.ageMs ?? null,
+            issues: Array.isArray(queue.workerHeartbeat.issues) ? queue.workerHeartbeat.issues : [],
+          }
+        : null,
+      latencyMs: Date.now() - startedAt,
+      checkedAt: new Date().toISOString(),
+    })
+  } catch (error) {
+    res.status(503).json({
+      status: "unhealthy",
+      ok: false,
+      mode: "queue",
+      worker: "unreachable",
+      queue: "unknown",
+      latencyMs: Date.now() - startedAt,
+      checkedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 })
 
 app.get("/sandbox/:projectId", requireAuth, (req, res) => {
