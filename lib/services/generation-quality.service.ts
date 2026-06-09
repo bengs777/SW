@@ -232,7 +232,7 @@ export function classifyRuntimeGenerationFailure(input: {
   const raw = [input.failureStage, input.failureCode, metadata ? JSON.stringify(metadata) : ""].join(" ").toLowerCase()
   if (/hydration/.test(raw)) return "hydration_failed"
   if (/module not found|cannot find module|can't resolve|missing dependency/.test(raw)) return "dependency_failed"
-  if (/environment|process\.env|database_url|nextauth|supabase|openrouter|agentrouter/.test(raw)) return "environment_failed"
+  if (/environment|process\.env|database_url|nextauth|supabase|openrouter/.test(raw)) return "environment_failed"
   if (/import|export|does not provide an export/.test(raw)) return "import_failed"
   if (/route|api_route|homepage_render|route_render|returned 5\d\d/.test(raw)) return "route_failed"
   if (/sandbox|server_unreachable|timeout|preview server exited/.test(raw)) return "sandbox_failed"
@@ -276,7 +276,7 @@ export function classifyGenerationFailure(input: {
   if (/context[_ -]?overflow|context length|token limit|too many files|max(total)?chars|64kb|maxfiles/.test(raw)) {
     return "context_overflow"
   }
-  if (/provider|openrouter|agentrouter|429|rate limit|fetch failed|network|timeout|model|api key/.test(raw)) {
+  if (/provider|openrouter|429|rate limit|fetch failed|network|timeout|model|api key/.test(raw)) {
     return "provider_failed"
   }
   if (/repair|validator_deadlock|max_retries|repeated_identical|empty_repair|malformed_repair/.test(raw)) {

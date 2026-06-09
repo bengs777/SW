@@ -2598,7 +2598,7 @@ function extractRuntimeFailureDiagnostics(message: string, metadata?: Record<str
     ]),
     environmentVariableErrors: uniqueStrings([
       ...asStringArray(diagnostics.environmentVariableErrors),
-      ...pick(/env|environment variable|process\.env|DATABASE_URL|NEXTAUTH|SUPABASE|OPENROUTER|AGENTROUTER/i),
+      ...pick(/env|environment variable|process\.env|DATABASE_URL|NEXTAUTH|SUPABASE|OPENROUTER/i),
     ]),
     importErrors: uniqueStrings([
       ...asStringArray(diagnostics.importErrors),
@@ -2647,7 +2647,7 @@ function categorizeRuntimeFailure(
 
   if (diagnostics.hydrationErrors.length > 0 || /hydration/.test(raw)) return "hydration_failed"
   if (diagnostics.missingDependencies.length > 0 || /module not found|cannot find module|can't resolve|missing dependency/.test(raw)) return "dependency_failed"
-  if (diagnostics.environmentVariableErrors.length > 0 || /environment variable|process\.env|database_url|nextauth|supabase|openrouter|agentrouter/.test(raw)) return "environment_failed"
+  if (diagnostics.environmentVariableErrors.length > 0 || /environment variable|process\.env|database_url|nextauth|supabase|openrouter/.test(raw)) return "environment_failed"
   if (diagnostics.importErrors.length > 0 || /import|export|does not provide an export/.test(raw)) return "import_failed"
   if (diagnostics.routeErrors.length > 0 || /api_route|route_render|homepage_render|failed to render|returned 5\d\d/.test(raw)) return "route_failed"
   if (/sandbox|server_unreachable|timeout|preview server exited/.test(raw)) return "sandbox_failed"

@@ -112,9 +112,9 @@ const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const verdiTeamId = getEnv("VERDI_TEAM")
 const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
 const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
-const aiGatewayDefaultBaseUrl = "https://agentrouter.org/v1"
-const openRouterModel = getEnv("AGENTROUTER_MODEL") || "glm-5.1"
-const swiftAiProviderName = getEnv("SWIFT_AI_PROVIDER_NAME") || "agentrouter"
+const aiGatewayDefaultBaseUrl = "https://openrouter.ai/api/v1"
+const openRouterModel = getEnv("OPENROUTER_MODEL") || "google/gemma-4-31b-it:free"
+const swiftAiProviderName = getEnv("SWIFT_AI_PROVIDER_NAME") || "openrouter"
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
 const hasRedisRestConfig = Boolean(upstashRedisRestUrl && upstashRedisRestToken)
@@ -150,20 +150,20 @@ export const env = {
   googleClientSecret: getEnv("GOOGLE_CLIENT_SECRET"),
   aiTimeoutMs: getEnvNumber(500_000, "AI_TIMEOUT_MS"),
   aiMaxRetries: Math.max(0, Math.round(getEnvNumber(2, "AI_MAX_RETRIES"))),
-  aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "AGENTROUTER_MAX_TOKENS")),
+  aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "OPENROUTER_MAX_TOKENS")),
   providerStatusCacheTtlMs: Math.max(
     60_000,
     Math.round(getEnvNumber(86_400_000, "PROVIDER_STATUS_CACHE_TTL_MS"))
   ),
   aiMaxConcurrentGenerations: Math.max(1, Math.round(getEnvNumber(4, "AI_MAX_CONCURRENT_GENERATIONS"))),
   aiQueueTimeoutMs: Math.max(900_000, Math.round(getEnvNumber(900_000, "AI_QUEUE_TIMEOUT_MS"))),
-  openRouterApiKey: getEnv("AGENTROUTER_API_KEY", "OPENROUTER_API_KEY"),
+  openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterModel,
   swiftAiProviderName,
   swiftFallbackModel1,
-  openRouterBaseUrl: normalizeUrl(getEnv("AGENTROUTER_BASE_URL") || aiGatewayDefaultBaseUrl),
-  openRouterSiteUrl: normalizeAppUrl(getEnv("AGENTROUTER_SITE_URL", "OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),
-  openRouterAppName: getEnv("AGENTROUTER_APP_NAME", "OPENROUTER_APP_NAME") || "Swift AI",
+  openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || aiGatewayDefaultBaseUrl),
+  openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),
+  openRouterAppName: getEnv("OPENROUTER_APP_NAME") || "Swift AI",
   devOwnerEmail: DEV_OWNER_EMAIL,
   supabaseServiceRoleKey,
   supabasePublicAnonKey,
@@ -219,7 +219,7 @@ export function getMissingProductionEnvVars() {
   if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
   if (!env.verdiTeamId) missing.push("VERDI_TEAM")
 
-  if (!env.openRouterApiKey) missing.push("AGENTROUTER_API_KEY or OPENROUTER_API_KEY")
+  if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
 
   return missing
 }
@@ -408,7 +408,7 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
   validateSecret(issues, "NEXTAUTH_SECRET", env.nextAuthSecret, { minLength: 32, isProduction })
   validateSecret(issues, "GOOGLE_CLIENT_SECRET", env.googleClientSecret, { minLength: 24, isProduction })
   validateSecret(issues, "SUPABASE_SERVICE_ROLE_KEY", env.supabaseServiceRoleKey, { minLength: 32, isProduction })
-  validateSecret(issues, "AGENTROUTER_API_KEY or OPENROUTER_API_KEY", env.openRouterApiKey, { minLength: 20, isProduction })
+  validateSecret(issues, "OPENROUTER_API_KEY", env.openRouterApiKey, { minLength: 20, isProduction })
   validateLikelyGoogleClientId(issues, env.googleClientId, isProduction)
 
   if (env.supabaseServiceRoleKey && env.supabasePublicAnonKey && env.supabaseServiceRoleKey === env.supabasePublicAnonKey) {
@@ -421,8 +421,8 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
 
   validateOptionalUrl(issues, "NEXTAUTH_URL", env.nextAuthUrl, isProduction)
   validateOptionalUrl(issues, "NEXT_PUBLIC_APP_URL / APP_URL / NEXTAUTH_URL / VERCEL_URL", env.appUrl, isProduction)
-  validateOptionalUrl(issues, "AGENTROUTER_BASE_URL / OPENROUTER_BASE_URL", env.openRouterBaseUrl, isProduction)
-  validateOptionalUrl(issues, "AGENTROUTER_SITE_URL / OPENROUTER_SITE_URL", env.openRouterSiteUrl, isProduction)
+  validateOptionalUrl(issues, "OPENROUTER_BASE_URL", env.openRouterBaseUrl, isProduction)
+  validateOptionalUrl(issues, "OPENROUTER_SITE_URL", env.openRouterSiteUrl, isProduction)
   validateOptionalUrl(issues, "NEXT_PUBLIC_SUPABASE_URL", env.supabaseUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_SERVICE_URL", env.sandboxServiceUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_PUBLIC_BASE_URL", env.sandboxPublicBaseUrl, isProduction)
@@ -432,7 +432,6 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
   validateOptionalNumber(issues, "AI_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_MAX_RETRIES", { min: 0, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_MAX_OUTPUT_TOKENS", { min: 1, integer: true, isProduction })
-  validateOptionalNumber(issues, "AGENTROUTER_MAX_TOKENS", { min: 1, integer: true, isProduction })
   validateOptionalNumber(issues, "OPENROUTER_MAX_TOKENS", { min: 1, integer: true, isProduction })
   validateOptionalNumber(issues, "PROVIDER_STATUS_CACHE_TTL_MS", { min: 1_000, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_MAX_CONCURRENT_GENERATIONS", { min: 1, integer: true, isProduction })

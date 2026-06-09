@@ -4,21 +4,25 @@ const { execSync } = require("node:child_process")
 
 const root = process.cwd()
 const EXPECTED_SANDBOX_PUBLIC_URL = "https://sandbox.ai-swift.biz.id"
-const EXPECTED_OPENROUTER_MODEL = "glm-5.1"
-const EXPECTED_AGENTROUTER_BASE_URL = "https://agentrouter.org/v1"
+const EXPECTED_OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
+const EXPECTED_OPENROUTER_MODEL_CHAIN = [
+  "google/gemma-4-31b-it:free",
+  "nvidia/nemotron-nano-9b-v2:free",
+  "qwen/qwen3-next-80b-a3b-instruct:free",
+  "openrouter/free",
+].join(",")
+const EXPECTED_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 const LEGACY_MODEL_ENV_KEYS = [
   "OPENROUTER_FREE_MODEL",
   "OPENROUTER_MODEL_ID",
   "SWIFT_FALLBACK_MODEL_1",
-  "AGENTROUTER_FALLBACK_MODEL",
-  "AGENTROUTER_FALLBACK_MODELS",
   "OPENROUTER_FALLBACK_MODEL",
   "OPENROUTER_FALLBACK_MODELS",
 ]
 
 const files = {
   local: ".env",
-  vercel: ".env.production",
+  vercel: ".env.vercel",
 }
 
 function parseEnvFile(file) {
@@ -56,13 +60,13 @@ function hasAny(env, keys) {
 }
 
 function checkCommonProvider(checks, env, label) {
-  const baseUrl = value(env, "AGENTROUTER_BASE_URL") || value(env, "OPENROUTER_BASE_URL")
-  const model = value(env, "AGENTROUTER_MODEL") || value(env, "OPENROUTER_MODEL")
-  assert(checks, baseUrl === EXPECTED_AGENTROUTER_BASE_URL, `${label}: AI gateway base URL points to AgentRouter API`)
-  assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "agentrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses AgentRouter`)
+  const baseUrl = value(env, "OPENROUTER_BASE_URL")
+  const model = value(env, "OPENROUTER_MODEL")
+  assert(checks, baseUrl === EXPECTED_OPENROUTER_BASE_URL, `${label}: AI gateway base URL points to OpenRouter API`)
+  assert(checks, value(env, "SWIFT_AI_PROVIDER_NAME") === "openrouter", `${label}: SWIFT_AI_PROVIDER_NAME uses OpenRouter`)
   assert(checks, model === EXPECTED_OPENROUTER_MODEL, `${label}: AI model uses the configured Swift default model`)
   assert(checks, !hasAny(env, LEGACY_MODEL_ENV_KEYS), `${label}: legacy/fallback model variables are not configured`)
-  assert(checks, value(env, "SWIFT_AI_MODEL_CHAIN") === "agentrouter:glm-5.1", `${label}: Swift model chain uses AgentRouter glm-5.1 only`)
+  assert(checks, value(env, "SWIFT_AI_MODEL_CHAIN") === EXPECTED_OPENROUTER_MODEL_CHAIN, `${label}: Swift model chain uses OpenRouter free fallback chain`)
 }
 
 function checkEnv() {
@@ -77,14 +81,14 @@ function checkEnv() {
   assert(checks, value(parsed.local, "NODE_ENV") === "development", ".env: local development mode")
   assert(checks, value(parsed.local, "NEXTAUTH_URL") === "http://localhost:3000", ".env: local NEXTAUTH_URL")
 
-  assert(checks, value(parsed.vercel, "NODE_ENV") === "production", ".env.production: production mode")
-  assert(checks, value(parsed.vercel, "NEXTAUTH_URL") === "https://www.ai-swift.biz.id", ".env.production: production NEXTAUTH_URL")
-  assert(checks, value(parsed.vercel, "NEXT_PUBLIC_APP_URL") === "https://www.ai-swift.biz.id", ".env.production: production public app URL")
-  assert(checks, value(parsed.vercel, "SWIFT_GENERATION_EXECUTION_MODE") === "queue", ".env.production: generation runs in queue mode")
-  assert(checks, value(parsed.vercel, "SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK") === "true", ".env.production: serverless generation fallback is disabled")
-  assert(checks, value(parsed.vercel, "SANDBOX_SERVICE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.production: sandbox service URL uses verified custom domain")
-  assert(checks, value(parsed.vercel, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.production: sandbox public base URL uses verified custom domain")
-  checkCommonProvider(checks, parsed.vercel, ".env.production")
+  assert(checks, value(parsed.vercel, "NODE_ENV") === "production", ".env.vercel: production mode")
+  assert(checks, value(parsed.vercel, "NEXTAUTH_URL") === "https://www.ai-swift.biz.id", ".env.vercel: production NEXTAUTH_URL")
+  assert(checks, value(parsed.vercel, "NEXT_PUBLIC_APP_URL") === "https://www.ai-swift.biz.id", ".env.vercel: production public app URL")
+  assert(checks, value(parsed.vercel, "SWIFT_GENERATION_EXECUTION_MODE") === "queue", ".env.vercel: generation runs in queue mode")
+  assert(checks, value(parsed.vercel, "SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK") === "true", ".env.vercel: serverless generation fallback is disabled")
+  assert(checks, value(parsed.vercel, "SANDBOX_SERVICE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.vercel: sandbox service URL uses verified custom domain")
+  assert(checks, value(parsed.vercel, "SANDBOX_PUBLIC_BASE_URL") === EXPECTED_SANDBOX_PUBLIC_URL, ".env.vercel: sandbox public base URL uses verified custom domain")
+  checkCommonProvider(checks, parsed.vercel, ".env.vercel")
 
   for (const file of [".env." + "rail" + "way.production", ".env." + "rail" + "way.worker.production"]) {
     assert(checks, !fs.existsSync(path.join(root, file)), `${file}: removed for production`)

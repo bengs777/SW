@@ -32,8 +32,6 @@ const DEPRECATED_MODEL_ENV_KEYS = [
   "OPENROUTER_FREE_MODEL",
   "OPENROUTER_MODEL_ID",
   "SWIFT_FALLBACK_MODEL_1",
-  "AGENTROUTER_FALLBACK_MODEL",
-  "AGENTROUTER_FALLBACK_MODELS",
   "OPENROUTER_FALLBACK_MODEL",
   "OPENROUTER_FALLBACK_MODELS",
 ]
@@ -401,10 +399,9 @@ export function startGenerationWorker() {
     baseUrl: env.openRouterBaseUrl,
     configuredModel: env.openRouterModel,
     activeSwiftModelChain,
-    agentRouterModel: process.env.AGENTROUTER_MODEL || null,
+    openRouterModel: process.env.OPENROUTER_MODEL || null,
     swiftAiModelChain: process.env.SWIFT_AI_MODEL_CHAIN || null,
-    hasAgentRouterApiKey: Boolean(process.env.AGENTROUTER_API_KEY?.trim()),
-    hasOpenRouterApiKeyAlias: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
+    hasOpenRouterApiKey: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
     deprecatedModelEnvKeys: DEPRECATED_MODEL_ENV_KEYS.filter((key) => Boolean(process.env[key]?.trim())),
   })
   log("info", "generation_worker_booted", {

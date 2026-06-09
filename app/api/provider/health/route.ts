@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic"
 
 export async function GET(request: NextRequest) {
   const chain = getActiveSwiftModelChain()
-  const model = request.nextUrl.searchParams.get("model")?.trim() || chain[0]?.replace(/^(openrouter|agentrouter):/i, "") || ""
+  const model = request.nextUrl.searchParams.get("model")?.trim() || chain[0]?.replace(/^openrouter:/i, "") || ""
 
   if (!model) {
     return NextResponse.json(

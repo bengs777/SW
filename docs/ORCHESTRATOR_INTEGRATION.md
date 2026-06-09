@@ -1,6 +1,6 @@
 # Swift AI Orchestrator
 
-The orchestrator routes Swift 1, Swift 2, and Swift 3 through the AgentRouter gateway configured by `AGENTROUTER_API_KEY`.
+The orchestrator routes Swift 1, Swift 2, and Swift 3 through the OpenRouter gateway configured by `OPENROUTER_API_KEY`.
 
 Public users never see internal model IDs, provider routing, token pricing, or gateway branding. Admin-only health checks may inspect internal model health for debugging.
 

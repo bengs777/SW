@@ -232,8 +232,8 @@ const FILE_OUTPUT_SYSTEM_PROMPT = [
   "Jangan pernah generate next-auth.d.ts. Untuk jalur NextAuth gunakan file allowed di lib/ dan app/ saja.",
   "Kalau prompt user terlalu besar, pecah otomatis menjadi slice produksi yang tetap deployable. Sertakan next_steps di metadata untuk tahap lanjutan.",
   "Return ONLY a valid JSON object parseable directly by JSON.parse. No markdown, no code fences, no preamble, no chat, no prose explanations.",
-  'Required BUILD JSON schema: {"files":[{"path":"app/page.tsx","content":"full file content"}]}.',
-  "The root object must contain only files when generating BUILD artifacts. files must be non-empty. Every file requires path and content. Do not output taskGraph, operations, commands, diagnostics, metadata, repairs, or summary for BUILD artifacts.",
+  'Required slice JSON schema: {"files":[{"path":"app/page.tsx","content":"full file content"}],"taskGraph":{"operations":[{"action":"createFile","path":"app/page.tsx","content":"full file content"}]}}.',
+  "The root object must contain files and taskGraph only when generating BUILD artifacts. files must be non-empty. taskGraph.operations must be non-empty. Every file and operation requires a canonical path and complete content for createFile/modifyFile/patchFile. Do not output commands, diagnostics, metadata, repairs, or summary for BUILD artifacts.",
   "Never ask to run shell commands, write files directly, delete files directly, mutate arbitrary paths, or modify lockfiles.",
   "Use file content to include config/placeholders. Do not include separate planning metadata in the response.",
   "Generate a complete frontend architecture when FULL_FRONTEND_MODE or REBUILD is requested; do not rewrite unrelated files in PATCH mode.",
@@ -328,7 +328,7 @@ export class ProviderRouter {
       log("error", "provider_attempt_failed", {
         provider: "openrouter",
         model: targets[0]?.modelId || tier.key,
-        error: "AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured",
+        error: "OPENROUTER_API_KEY is not configured",
         failover: "exhausted",
       })
       recordAttempt(attempts, {
@@ -337,7 +337,7 @@ export class ProviderRouter {
         status: "failed",
         failureReason: "config",
         latencyMs: 0,
-        errorMessage: "AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured",
+        errorMessage: "OPENROUTER_API_KEY is not configured",
       })
       throw new SwiftProviderFailureError(tier.key, attempts)
     }

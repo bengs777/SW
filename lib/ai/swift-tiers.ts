@@ -76,7 +76,7 @@ const SWIFT_FULLSTACK_TIMEOUT_MS = Math.max(
       900000
   )
 )
-const configuredOutputTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.AGENTROUTER_MAX_TOKENS || 16_000)
+const configuredOutputTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || process.env.OPENROUTER_MAX_TOKENS || 16_000)
 const SWIFT_FULLSTACK_OUTPUT_TOKENS = Math.min(
   16_000,
   Math.max(3_000, Number.isFinite(configuredOutputTokens) && configuredOutputTokens > 0 ? configuredOutputTokens : 16_000)
@@ -95,9 +95,9 @@ function uniqueModelIds(modelIds: string[]) {
 export function getSwiftModelTargets(task: SwiftModelRoutingTask = "large_generation"): SwiftModelTarget[] {
   const chain = uniqueModelIds(getOpenRouterModelChain().map(normalizeOpenRouterModelId))
 
-  if (!process.env.AGENTROUTER_MODEL?.trim() && !warnedDefaultChain) {
+  if (!process.env.OPENROUTER_MODEL?.trim() && !warnedDefaultChain) {
     warnedDefaultChain = true
-    console.warn("[swift-ai] AGENTROUTER_MODEL is empty; using default AgentRouter glm-5.1 model.")
+    console.warn("[swift-ai] OPENROUTER_MODEL is empty; using default OpenRouter free model.")
   }
 
   void task
@@ -120,7 +120,7 @@ export function getSwiftTierConfigs(): SwiftTierConfig[] {
     description: "Satu-satunya engine produksi Swift untuk full-stack, dashboard, CRUD, Prisma, API route, repair, dan arsitektur project.",
     note: freeAiMode
       ? "Mode evaluasi gratis aktif. Request Swift dirutekan melalui gateway AI kompatibel OpenAI."
-      : "Semua request Swift dirutekan melalui chain model AgentRouter dari konfigurasi environment.",
+      : "Semua request Swift dirutekan melalui chain model OpenRouter dari konfigurasi environment.",
     priceIdr: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     price: Number(process.env.SWIFT_BUILDER_PRICE_IDR || SWIFT_PUBLIC_PRICE_IDR),
     timeoutMs: SWIFT_FULLSTACK_TIMEOUT_MS,
@@ -192,11 +192,11 @@ export function getDefaultSwiftTier() {
 }
 
 export function hasOpenRouterGatewayKey() {
-  return Boolean(process.env.AGENTROUTER_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim())
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim())
 }
 
 export function getActiveSwiftModelChain() {
-  return getSwiftModelTargets("large_generation").map((target) => `agentrouter:${target.modelId}`)
+  return getSwiftModelTargets("large_generation").map((target) => `openrouter:${target.modelId}`)
 }
 
 export function isSwiftFreeAiMode() {

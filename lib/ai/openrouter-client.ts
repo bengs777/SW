@@ -87,12 +87,12 @@ const STREAM_TOKEN_WATCHDOG_MS = positiveEnvMs(
 )
 
 export function getOpenRouterBaseUrl() {
-  return (env.openRouterBaseUrl || "https://agentrouter.org/v1").replace(/\/+$/, "")
+  return (env.openRouterBaseUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "")
 }
 
 export function assertOpenRouterConfigured() {
   if (!env.openRouterApiKey) {
-    throw new SwiftAiError("AGENTROUTER_API_KEY or OPENROUTER_API_KEY is not configured", { reason: "config" })
+    throw new SwiftAiError("OPENROUTER_API_KEY is not configured", { reason: "config" })
   }
 }
 
