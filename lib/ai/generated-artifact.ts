@@ -53,7 +53,7 @@ const dependencySchema = z.string().trim().min(1)
 
 const taskGraphOperationSchema = z.object({
   id: z.string().trim().min(1).optional(),
-  action: z.enum(["create", "modify", "delete", "patch"]).optional(),
+  action: z.enum(["createFile", "modifyFile", "deleteFile", "patchFile", "create", "modify", "delete", "patch"]).optional(),
   operation: z.enum(["createFile", "modifyFile", "deleteFile", "patchFile", "create", "modify", "delete", "patch"]).optional(),
   path: generatedPathSchema.optional(),
   file: generatedPathSchema.optional(),

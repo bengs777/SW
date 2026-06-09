@@ -8166,7 +8166,7 @@ export async function executeGenerationJob(
                   maxChangedFiles: maxChangedFilesForGenerationSlice(plan, targets.length),
                   outputMode: "taskGraph",
                 }),
-                "- For this generation slice, return taskGraph.operations using createFile, modifyFile, deleteFile, or patchFile operations only.",
+                "- For this generation slice, return taskGraph.operations using action create, modify, delete, or patch only.",
                 "- Use app/page.tsx, sections/HeroSection.tsx, components/Button.tsx, lib/utils.ts, or package.json as canonical workspace-relative path examples.",
                 "- taskGraph.operations must be non-empty and every listed target file must be present.",
               ].join("\n"),
