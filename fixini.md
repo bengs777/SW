@@ -4,7 +4,9 @@ Tanggal audit: 2026-06-12
 
 ## Ringkasan
 
-Alur utama aplikasi dalam kondisi buildable dan deploy-ready. TypeScript, lint, build production, runtime smoke, deploy preflight, production audit, demo readiness, dan regression inti lulus.
+Kode lokal alur utama aplikasi dalam kondisi buildable. TypeScript, lint, regression, runtime contracts, dan audit env lulus.
+
+Status live production terbaru: belum siap dipakai semua user sampai dedicated worker VPS direstart/waras lagi. `deploy:readiness` terbaru gagal di `GENERATION_WORKER_HEARTBEAT` karena Redis heartbeat masih menandai worker/job lama yang stalled, dan endpoint worker proxy membalas `503 worker unreachable`.
 
 Update investigasi screenshot 2026-06-12:
 
@@ -28,13 +30,13 @@ Verifikasi setelah fix screenshot:
 ```text
 npm run typecheck -> PASS
 npm run lint -> PASS
-npm run worker:health -> PASS
-npm run deploy:readiness -> READY_FOR_DEPLOY
 npm run test:generation-runtime-contracts -> PASS
 npm run test:regression -> PASS
 npm run audit:production-env -> PASS
-npm run audit:production -> PASS, Commands 3/3, Static checks 56/56
+npm run deploy:readiness -> NOT_READY_FOR_DEPLOY: GENERATION_WORKER_HEARTBEAT
 ```
+
+Catatan: `audit:production` penuh sempat lulus pada audit sebelumnya, tetapi run terbaru timeout di cek eksternal setelah 184 detik. Karena perubahan terakhir hanya preview loader dan dokumen, sinyal blocker utama tetap readiness worker live.
 
 Temuan provider live:
 
@@ -58,6 +60,51 @@ Catatan live production:
 - Perubahan kode belum otomatis aktif untuk user sampai commit/push/deploy dilakukan dan VPS worker/sandbox direstart.
 - Setelah deploy/restart, cek `/worker/health` atau dashboard system. Heartbeat seharusnya menunjukkan `timeouts.executorHardMs` minimal `120000`.
 - Jika masih muncul `Executor hard timeout after 31xxxms`, berarti worker production masih menjalankan build lama atau `.env` worker tidak terbaca.
+
+Update live 14:59 WIB:
+
+- `https://www.ai-swift.biz.id/api/provider/health` sudah memakai provider chain baru tanpa `openrouter/free`.
+- `https://sandbox.ai-swift.biz.id/health` sehat dan storage tersedia.
+- `https://sandbox.ai-swift.biz.id/worker/health` masih `503` dengan status `worker: unreachable`.
+- `npm run deploy:readiness` gagal di `GENERATION_WORKER_HEARTBEAT`: `stalled_generation_detected` dan `heartbeat_active_jobs_without_queue_active_jobs`.
+- Kesimpulan: code/app/provider sudah lebih baik, tetapi VPS worker perlu pull kode terbaru, sync `.env`, restart PM2, lalu bersihkan/replay job stalled jika masih tersisa.
+
+Langkah fix operasional di VPS:
+
+```bash
+cd /root/swift-runtime
+git pull origin main
+npm ci
+npx prisma generate
+pm2 restart swift-generation-worker --update-env
+pm2 restart swift-sandbox --update-env
+pm2 save
+npm run worker:health
+npm run deploy:readiness
+```
+
+Jika `deploy:readiness` masih gagal dengan `stalled_generation_detected`, cek log worker dan DLQ:
+
+```bash
+pm2 logs swift-generation-worker --lines 200
+npm run metrics:generation
+```
+
+Jangan lanjut push/deploy project user dari dashboard sebelum `deploy:readiness` kembali `READY_FOR_DEPLOY`.
+
+Update investigasi screenshot 14:44 WIB:
+
+- Project `cmq672gu3000112to1k3yj3xj` belum punya `ProjectFile` resmi dan belum punya `GenerationHistory` sukses.
+- UI menampilkan `generation_draft` artifact terbaru `cmqam92cr0i5mp9d67cf51imf` dengan 18 file, status masih `draft`.
+- Job terbaru `cmqam8y6z00035vfg6n4hhvs5` gagal dengan `SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED`.
+- Provider attempts job tersebut masih jatuh ke `poolside/laguna-m.1:free`, `openrouter/owl-alpha`, dan `poolside/laguna-xs.2:free`; ini tanda worker production masih memakai chain lama `openrouter/free` atau belum restart dengan `.env` baru.
+- Preview timeout `90000ms` menunjukkan patch timeout preview sudah aktif, tetapi runtime preview masih bisa hang jika CDN compiler Babel/Tailwind lambat.
+
+Fix tambahan:
+
+- `components/editor/sandbox-preview.tsx` sekarang tidak lagi memuat Babel sebagai blocking script di `<head>`.
+- Tailwind CDN dibuat `defer`.
+- Loader Babel dinamis diberi timeout 8 detik per CDN dan fallback ke jsdelivr, supaya preview tidak menunggu 90 detik hanya karena CDN compiler lambat.
 
 Update perbaikan 2026-06-12:
 

@@ -379,8 +379,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
     }
   };
 <\/script>
-<script src="https://cdn.tailwindcss.com"><\/script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
+<script defer src="https://cdn.tailwindcss.com"><\/script>
 </head>
 <body class="compiling">
 <div class="loader"><div class="spinner"></div><span>Compiling preview...</span></div>
@@ -485,15 +484,28 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         return;
       }
 
+      var settled = false;
+      var timeout = setTimeout(function(){
+        if(settled) return;
+        settled = true;
+        reject(new Error('Timed out loading script: ' + src));
+      }, 8000);
+      function finish(fn, value){
+        if(settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        fn(value);
+      }
+
       var script = existing || document.createElement('script');
       script.src = src;
-      script.async = false;
+      script.async = true;
       script.onload = function(){
         script.setAttribute('data-loaded', 'true');
-        resolve(src);
+        finish(resolve, src);
       };
       script.onerror = function(){
-        reject(new Error('Failed to load script: ' + src));
+        finish(reject, new Error('Failed to load script: ' + src));
       };
       if(!existing){
         document.head.appendChild(script);
