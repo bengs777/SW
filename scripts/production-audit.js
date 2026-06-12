@@ -218,7 +218,7 @@ function staticChecks() {
       "Runtime preview iframe only grants same-origin semantics to an isolated preview origin and blocks popups/downloads"
     ),
     check("preview.error-boundary", /ErrorBoundary/.test(preview), "Preview contains an error boundary"),
-    check("preview.compile-timeout", /timed out/.test(preview) && /15000/.test(preview), "Preview compilation has timeout protection"),
+    check("preview.compile-timeout", /timed out/.test(preview) && /PREVIEW_EXECUTION_TIMEOUT_MS/.test(preview), "Preview compilation has timeout protection"),
     check("security.csp-header", /Content-Security-Policy/.test(proxy) && /default-src 'self'/.test(proxy), "Production responses include a Content Security Policy header"),
     check("security.env-gitignore", /^\.env$/m.test(gitignore) && /^\.env\*\.local$/m.test(gitignore), ".env and local env files are ignored"),
     check("db.project-file-unique", /@@unique\(\[projectId,\s*path\]\)/.test(prisma), "Project files are unique per project path"),

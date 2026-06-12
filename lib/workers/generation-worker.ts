@@ -401,6 +401,9 @@ export function startGenerationWorker() {
     activeSwiftModelChain,
     openRouterModel: process.env.OPENROUTER_MODEL || null,
     swiftAiModelChain: process.env.SWIFT_AI_MODEL_CHAIN || null,
+    generationJobTimeoutMs: GENERATION_JOB_TIMEOUT_MS,
+    executorHardTimeoutMs: timeoutConfig.executorHardMs,
+    executorStuckOperationMs: timeoutConfig.executorStuckOperationMs,
     hasOpenRouterApiKey: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
     deprecatedModelEnvKeys: DEPRECATED_MODEL_ENV_KEYS.filter((key) => Boolean(process.env[key]?.trim())),
   })
@@ -442,6 +445,13 @@ export function startGenerationWorker() {
       activeJobIds: active.map(([jobId]) => jobId),
       idleTimeoutMs: GENERATION_JOB_TIMEOUT_MS,
       stalledGenerationDetected,
+      nodeEnv: env.nodeEnv,
+      generationExecutionMode: process.env.SWIFT_GENERATION_EXECUTION_MODE || null,
+      timeouts: {
+        generationJobMs: GENERATION_JOB_TIMEOUT_MS,
+        executorHardMs: timeoutConfig.executorHardMs,
+        executorStuckOperationMs: timeoutConfig.executorStuckOperationMs,
+      },
     }).catch((error) => {
       log("warn", "Generation worker heartbeat failed", {
         workerId,

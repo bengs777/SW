@@ -26,6 +26,7 @@ Dashboard app:
 - `OPENROUTER_API_KEY`
 - Optional OpenRouter gateway metadata: `OPENROUTER_BASE_URL`, `OPENROUTER_SITE_URL`, `OPENROUTER_APP_NAME`
 - `OPENROUTER_MODEL`
+- `SWIFT_AI_MODEL_CHAIN`
 - `SWIFT_AI_PROVIDER_NAME=openrouter`
 - `SWIFT_WORKER_HEALTH_URL`
 - `REDIS_URL`
@@ -45,6 +46,7 @@ Generation worker:
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_BASE_URL`
 - `OPENROUTER_MODEL`
+- `SWIFT_AI_MODEL_CHAIN`
 - `SWIFT_AI_PROVIDER_NAME=openrouter`
 - `SWIFT_GENERATION_EXECUTION_MODE=queue`
 - `SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true`
@@ -85,6 +87,6 @@ Before marketing Swift publicly:
 3. Deploy the dedicated generation worker to the locked-down VPS.
 4. Deploy `services/sandbox-runtime` to the locked-down VPS.
 5. Set `SWIFT_WORKER_HEALTH_URL`, `SANDBOX_SERVICE_URL`, and `SANDBOX_SERVICE_TOKEN` on Vercel.
-6. Keep `OPENROUTER_MODEL` identical in Vercel Production and the generation worker.
+6. Keep `OPENROUTER_MODEL` and `SWIFT_AI_MODEL_CHAIN` identical in Vercel Production and the generation worker.
 7. Verify a prompt can generate, build, preview, upload an attachment, and deploy.
 8. Verify production readiness reports no required missing env vars.

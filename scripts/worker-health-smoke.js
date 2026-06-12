@@ -1,7 +1,33 @@
 const http = require("node:http")
 const https = require("node:https")
 
-const url = process.env.SWIFT_WORKER_HEALTH_URL || process.env.WORKER_HEALTH_URL || "http://127.0.0.1:4000/health"
+try {
+  const { loadEnvConfig } = require("@next/env")
+  loadEnvConfig(process.cwd())
+} catch {
+  // If @next/env is unavailable, continue with the process environment.
+}
+
+function trimTrailingSlash(value) {
+  return String(value || "").replace(/\/+$/, "")
+}
+
+function resolveWorkerHealthUrl() {
+  if (process.env.SWIFT_WORKER_HEALTH_URL || process.env.WORKER_HEALTH_URL) {
+    return process.env.SWIFT_WORKER_HEALTH_URL || process.env.WORKER_HEALTH_URL
+  }
+
+  const sandboxBaseUrl = trimTrailingSlash(
+    process.env.SANDBOX_PUBLIC_BASE_URL || process.env.SANDBOX_SERVICE_URL
+  )
+  if (sandboxBaseUrl) {
+    return `${sandboxBaseUrl}/worker/health`
+  }
+
+  return "http://127.0.0.1:4000/health"
+}
+
+const url = resolveWorkerHealthUrl()
 
 function requestJson(targetUrl) {
   const parsed = new URL(targetUrl)
@@ -50,5 +76,8 @@ async function main() {
 
 main().catch((error) => {
   console.error(error)
+  console.error(
+    `Worker health endpoint checked: ${url}. Set SWIFT_WORKER_HEALTH_URL to the public worker proxy or start the local worker health server.`
+  )
   process.exit(1)
 })

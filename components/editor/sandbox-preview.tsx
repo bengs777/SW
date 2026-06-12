@@ -33,6 +33,9 @@ interface SandboxPreviewProps {
   onError?: (error: string) => void
 }
 
+const PREVIEW_BOOT_TIMEOUT_MS = 90_000
+const PREVIEW_EXECUTION_TIMEOUT_MS = 90_000
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -184,9 +187,10 @@ export function SandboxPreview({ files, className, onError }: SandboxPreviewProp
     bootWatchdogRef.current = setTimeout(() => {
       logPreviewTelemetry("runtime.boot_timeout", {
         iframeBootTimeMs: Math.round(performance.now() - startedAt),
+        timeoutMs: PREVIEW_BOOT_TIMEOUT_MS,
       })
       recoverPreview("Preview runtime timed out while booting.")
-    }, 12_000)
+    }, PREVIEW_BOOT_TIMEOUT_MS)
 
     return () => {
       if (bootWatchdogRef.current) {
@@ -401,8 +405,8 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   var __bootStartedAt = performance.now();
 
   var __executionTimeout = setTimeout(function(){
-    showError('Preview execution timed out. Check for an infinite render loop or a long-running module.');
-  }, 15000);
+    showError('Preview execution timed out after ${PREVIEW_EXECUTION_TIMEOUT_MS}ms. Check for an infinite render loop or a long-running module.');
+  }, ${PREVIEW_EXECUTION_TIMEOUT_MS});
 
   emitTelemetry('runtime.boot', {
     moduleCount: Object.keys(__compiledModules).length

@@ -56,6 +56,13 @@ type GenerationWorkerHeartbeatPayload = {
   activeJobIds?: string[]
   idleTimeoutMs?: number | null
   stalledGenerationDetected?: boolean
+  nodeEnv?: string | null
+  generationExecutionMode?: string | null
+  timeouts?: {
+    generationJobMs?: number | null
+    executorHardMs?: number | null
+    executorStuckOperationMs?: number | null
+  } | null
 }
 
 type GenerationWorkerHeartbeatCandidate = GenerationWorkerHeartbeatPayload & {
@@ -86,6 +93,15 @@ function parseGenerationWorkerHeartbeat(
       activeJobIds: Array.isArray(parsed.activeJobIds) ? parsed.activeJobIds.map(String) : [],
       idleTimeoutMs: typeof parsed.idleTimeoutMs === "number" ? parsed.idleTimeoutMs : null,
       stalledGenerationDetected: Boolean(parsed.stalledGenerationDetected),
+      nodeEnv: parsed.nodeEnv ? String(parsed.nodeEnv) : null,
+      generationExecutionMode: parsed.generationExecutionMode ? String(parsed.generationExecutionMode) : null,
+      timeouts: parsed.timeouts && typeof parsed.timeouts === "object"
+        ? {
+            generationJobMs: typeof parsed.timeouts.generationJobMs === "number" ? parsed.timeouts.generationJobMs : null,
+            executorHardMs: typeof parsed.timeouts.executorHardMs === "number" ? parsed.timeouts.executorHardMs : null,
+            executorStuckOperationMs: typeof parsed.timeouts.executorStuckOperationMs === "number" ? parsed.timeouts.executorStuckOperationMs : null,
+          }
+        : null,
       at: String(parsed.at || ""),
       sourceKey,
     } satisfies GenerationWorkerHeartbeatPayload & { sourceKey: string }
@@ -600,6 +616,9 @@ export async function recordGenerationWorkerHeartbeat(
     activeJobIds?: string[]
     idleTimeoutMs?: number | null
     stalledGenerationDetected?: boolean
+    nodeEnv?: string | null
+    generationExecutionMode?: string | null
+    timeouts?: GenerationWorkerHeartbeatPayload["timeouts"]
   }
 ) {
   const connection = getRedisConnection()
@@ -615,6 +634,9 @@ export async function recordGenerationWorkerHeartbeat(
     activeJobIds: details?.activeJobIds || [],
     idleTimeoutMs: details?.idleTimeoutMs ?? null,
     stalledGenerationDetected: Boolean(details?.stalledGenerationDetected),
+    nodeEnv: details?.nodeEnv || null,
+    generationExecutionMode: details?.generationExecutionMode || null,
+    timeouts: details?.timeouts || null,
     at: new Date().toISOString(),
   })
   const heartbeatKey = getGenerationWorkerHeartbeatKey(workerId)
@@ -636,6 +658,9 @@ export async function recordGenerationWorkerHeartbeat(
       activeJobIds: details?.activeJobIds || [],
       idleTimeoutMs: details?.idleTimeoutMs ?? null,
       stalledGenerationDetected: Boolean(details?.stalledGenerationDetected),
+      nodeEnv: details?.nodeEnv || null,
+      generationExecutionMode: details?.generationExecutionMode || null,
+      timeouts: details?.timeouts || null,
     },
     metadata: {
       source: "bullmq_worker_heartbeat",

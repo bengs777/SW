@@ -5,8 +5,10 @@ export const OPENROUTER_PROVIDER = "openrouter"
 export const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-31b-it:free"
 export const OPENROUTER_DEFAULT_FALLBACK_MODELS: string[] = [
   "nvidia/nemotron-nano-9b-v2:free",
-  "qwen/qwen3-next-80b-a3b-instruct:free",
-  "openrouter/free",
+  "nvidia/nemotron-3-nano-30b-a3b:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
 ]
 const OPENROUTER_FALLBACK_ENV_KEYS: string[] = []
 export const PUBLIC_AI_NAME = "Swift AI"
@@ -14,7 +16,7 @@ export const BASIC_PROMPT_FEE_IDR = 3000
 export const BUILD_PROMPT_FEE_IDR = 3000
 export const PRO_PROMPT_FEE_IDR = 3000
 export const PROMPT_FEE_IDR = BASIC_PROMPT_FEE_IDR
-const PRODUCTION_BLOCKED_MODEL_RE = /\b(poolside\/laguna|openrouter\/owl-alpha|owl-alpha)\b/i
+const PRODUCTION_BLOCKED_MODEL_RE = /(^openrouter\/free$|\bpoolside\/laguna\b|\bopenrouter\/owl-alpha\b|\bowl-alpha\b)/i
 const DEPRECATED_MODEL_ENV_KEYS = [
   "OPENROUTER_FREE_MODEL",
   "OPENROUTER_MODEL_ID",

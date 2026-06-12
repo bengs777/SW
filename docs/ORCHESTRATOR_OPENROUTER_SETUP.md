@@ -10,7 +10,8 @@ OPENROUTER_API_KEY=your_openrouter_key
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_SITE_URL=https://www.ai-swift.biz.id
 OPENROUTER_APP_NAME=Swift AI
-OPENROUTER_MODEL=openrouter/free
+OPENROUTER_MODEL=google/gemma-4-31b-it:free
+SWIFT_AI_MODEL_CHAIN=google/gemma-4-31b-it:free,nvidia/nemotron-nano-9b-v2:free,nvidia/nemotron-3-nano-30b-a3b:free,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3-ultra-550b-a55b:free
 SWIFT_AI_PROVIDER_NAME=openrouter
 SWIFT_USD_TO_IDR=16000
 ```
@@ -23,4 +24,4 @@ SWIFT_BUILDER_PRICE_IDR=3000
 
 Public UI must show one Swift AI orchestrator option and Rupiah pricing, while the runtime continues to use the configured OpenRouter model.
 
-Keep `OPENROUTER_MODEL` identical in Vercel Production and the dedicated VPS generation worker.
+Keep `OPENROUTER_MODEL` and `SWIFT_AI_MODEL_CHAIN` identical in Vercel Production and the dedicated VPS generation worker. Do not use `openrouter/free` in production; it can resolve to internal free models that reject requests with auth or capacity errors.

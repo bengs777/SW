@@ -436,6 +436,8 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
   validateOptionalNumber(issues, "PROVIDER_STATUS_CACHE_TTL_MS", { min: 1_000, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_MAX_CONCURRENT_GENERATIONS", { min: 1, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_QUEUE_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })
+  validateOptionalNumber(issues, "SWIFT_EXECUTOR_HARD_TIMEOUT_MS", { min: 30_000, integer: true, isProduction })
+  validateOptionalNumber(issues, "SWIFT_EXECUTOR_STUCK_OPERATION_MS", { min: 5_000, integer: true, isProduction })
   validateOptionalNumber(issues, "SWIFT_SANDBOX_BASE_PORT", { min: 1, integer: true, isProduction })
   validateOptionalNumber(issues, "NEXT_PUBLIC_BNB_CHAIN_ID", { min: 1, integer: true, isProduction })
   validateOptionalNumber(issues, "NEXT_PUBLIC_BASE_CHAIN_ID", { min: 1, integer: true, isProduction })
