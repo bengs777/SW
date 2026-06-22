@@ -1,0 +1,79 @@
+====== QUICK DEBUG: Swift Worker 500 Error ======
+
+The prompt is stuck because swift-worker returns 500.
+This is 99% caused by: Missing or wrong REDIS_URL or DATABASE_URL
+
+STEP 1: SSH to VPS and check environment
+========================================
+ssh root@8.215.40.119
+
+STEP 2: Check if Redis env var is set
+========================================
+echo $REDIS_URL
+
+EXPECTED OUTPUT:
+redis://localhost:6379
+OR
+redis://<password>@<host>:6379
+
+IF EMPTY or WRONG:
+→ Go to STEP 4
+
+STEP 3: Check if DATABASE_URL is set
+========================================
+echo $DATABASE_URL
+
+EXPECTED OUTPUT:
+postgresql://user:pass@host:5432/dbname
+
+IF EMPTY or WRONG:
+→ Go to STEP 4
+
+STEP 4: Set the environment variables
+========================================
+Option A: Edit .env file
+nano ~/.env
+OR
+nano /home/swift/.env
+
+Add/fix these lines:
+REDIS_URL=redis://localhost:6379
+DATABASE_URL=postgresql://... (get from Vercel/Neon dashboard)
+AI_GATEWAY_API_KEY=your-key
+OPENROUTER_API_KEY=your-key
+
+Save (Ctrl+O, Enter, Ctrl+X)
+
+Option B: Set directly in session
+export REDIS_URL="redis://localhost:6379"
+export DATABASE_URL="your_postgres_url"
+
+STEP 5: Restart swift-worker
+========================================
+pm2 restart swift-worker
+
+STEP 6: Check logs for errors
+========================================
+pm2 logs swift-worker --lines 30
+
+STEP 7: Test in browser
+========================================
+Refresh browser
+Click "Langkukan Prompt" again
+Should work now!
+
+STILL NOT WORKING?
+==================
+Run this to see full error:
+pm2 show swift-worker
+
+Or check logs:
+pm2 logs swift-worker
+
+Look for:
+- REDIS connection refused
+- DATABASE connection timeout
+- ENOTFOUND (DNS issue)
+- 404 on external APIs
+
+If you see specific error → send screenshot and I'll help fix!
