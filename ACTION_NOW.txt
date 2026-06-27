@@ -1,0 +1,102 @@
+================================================================================
+REDDY FIX - ACTION REQUIRED NOW
+================================================================================
+
+STATUS: Your app is live at ai-swift.biz.id but prompt returns 500 error
+
+ROOT CAUSE: Environment variables not set on VPS
+
+TIME TO FIX: 15 minutes
+
+================================================================================
+WHAT YOU NEED TO DO RIGHT NOW:
+================================================================================
+
+1. SSH to your VPS:
+   ssh root@8.215.40.119
+
+2. Open DETAILED FIX GUIDE:
+   → Read: URGENT_FIX_500_ERROR.md
+   → This file has all the steps
+
+3. Follow 7 steps in that guide:
+   Step 1: SSH ✓ (you're already doing this)
+   Step 2: Check current status
+   Step 3: Create/update /home/swift/.env file
+   Step 4: Set file permissions
+   Step 5: Restart services
+   Step 6: Verify working
+   Step 7: Test in browser
+
+4. Gather these values BEFORE starting:
+   ☐ DATABASE_URL (from Neon)
+   ☐ REDIS_URL (redis://localhost:6379)
+   ☐ NEXTAUTH_SECRET (from Vercel env vars)
+   ☐ GOOGLE_CLIENT_ID (from Google Console)
+   ☐ GOOGLE_CLIENT_SECRET (from Google Console)
+   ☐ NEXT_PUBLIC_SUPABASE_URL (from Supabase)
+   ☐ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY
+   ☐ SUPABASE_SERVICE_ROLE_KEY
+   ☐ OPENROUTER_API_KEY (from OpenRouter)
+   ☐ SANDBOX_SERVICE_TOKEN (random 64-char hex)
+
+5. After fix, reply with:
+   ✓ Are all services online? (pm2 list)
+   ✓ Any errors in logs? (pm2 logs swift-worker)
+   ✓ Does prompt work now?
+
+================================================================================
+QUICK COPY-PASTE (If you have all values ready):
+================================================================================
+
+ssh root@8.215.40.119 << 'EOF'
+cat > /home/swift/.env << 'EOFENV'
+NODE_ENV=production
+DATABASE_URL=YOUR_NEON_URL_HERE
+REDIS_URL=redis://localhost:6379
+NEXTAUTH_SECRET=YOUR_SECRET_HERE
+NEXTAUTH_URL=https://ai-swift.biz.id
+GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET=YOUR_GOOGLE_SECRET
+NEXT_PUBLIC_SUPABASE_URL=YOUR_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=YOUR_SUPABASE_KEY
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+SUPABASE_STORAGE_BUCKET=swift-artifacts
+OPENROUTER_API_KEY=YOUR_OPENROUTER_KEY
+SANDBOX_SERVICE_URL=https://sandbox.ai-swift.biz.id
+SANDBOX_SERVICE_TOKEN=YOUR_64_CHAR_HEX_TOKEN
+SANDBOX_PUBLIC_BASE_URL=https://sandbox.ai-swift.biz.id
+SWIFT_WORKER_HEALTH_URL=https://sandbox.ai-swift.biz.id/worker/health
+SWIFT_SANDBOX_ROOT=/data/swift-sandbox
+SWIFT_SANDBOX_MAX_PROJECTS=12
+SWIFT_SANDBOX_MAX_FILES=240
+SWIFT_SANDBOX_MAX_TOTAL_BYTES=6291456
+SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS=1800000
+SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS=1200000
+EOFENV
+chmod 600 /home/swift/.env
+pm2 restart all
+pm2 list
+EOF
+
+================================================================================
+AFTER YOU COMPLETE THIS:
+================================================================================
+
+→ Reply with results from:
+  pm2 list
+  pm2 logs swift-worker --lines 20
+
+Then we move to Phase 2: Testing & Optimization
+
+================================================================================
+NEED HELP? Send me:
+================================================================================
+
+1. Output of: pm2 list
+2. Output of: pm2 logs swift-worker --lines 50
+3. Error message from browser console (F12 → Console → try prompt again)
+4. Screenshot of ai-swift.biz.id dashboard
+
+I'll fix it immediately!
+================================================================================
