@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto"
 import { subHours } from "date-fns"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationHistory, generationJobs, orchestrationFailures, repairAttempts, previewSessions } from "@/lib/db/schema"
+import { eq, and, gte, desc, sql } from "drizzle-orm"
 import { buildStructuredRepairPlan } from "@/lib/ai/repair-engine"
 import type { GeneratedFile } from "@/lib/types"
 import { log } from "@/lib/logging"
@@ -318,27 +320,27 @@ export async function createRuntimeSnapshot(input: {
   intent?: string | null
 }) {
   const files = ProjectFilesystemService.normalizeFiles(input.files || await ProjectFilesystemService.readFiles(input.projectId))
-  const history = await prisma.generationHistory.upsert({
-    where: {
-      projectId_idempotencyKey: {
-        projectId: input.projectId,
-        idempotencyKey: input.idempotencyKey,
-      },
-    },
-    create: {
-      projectId: input.projectId,
-      prompt: input.prompt,
-      result: JSON.stringify(files),
-      idempotencyKey: input.idempotencyKey,
-      intent: input.intent || "runtime-snapshot",
-      usedAutoRepair: false,
-    },
-    update: {
-      prompt: input.prompt,
-      result: JSON.stringify(files),
-      intent: input.intent || "runtime-snapshot",
-    },
+  const existing = await db.query.generationHistory.findFirst({
+    where: and(
+      eq(generationHistory.projectId, input.projectId),
+      eq(generationHistory.idempotencyKey, input.idempotencyKey)
+    ),
   })
+  const history = existing
+    ? await db.update(generationHistory).set({
+        prompt: input.prompt,
+        result: JSON.stringify(files),
+        intent: input.intent || "runtime-snapshot",
+      }).where(eq(generationHistory.id, existing.id)).returning().then((rows) => rows[0])
+    : await db.insert(generationHistory).values({
+        id: crypto.randomUUID(),
+        projectId: input.projectId,
+        prompt: input.prompt,
+        result: JSON.stringify(files),
+        idempotencyKey: input.idempotencyKey,
+        intent: input.intent || "runtime-snapshot",
+        usedAutoRepair: false,
+      }).returning().then((rows) => rows[0])
   const manifest = ProjectFilesystemService.buildManifest(files)
   return {
     historyId: history.id,
@@ -355,11 +357,11 @@ export async function rollbackToSnapshot(input: {
   jobId?: string | null
   trace?: TraceIds
 }) {
-  const history = await prisma.generationHistory.findFirst({
-    where: {
-      id: input.historyId,
-      projectId: input.projectId,
-    },
+  const history = await db.query.generationHistory.findFirst({
+    where: and(
+      eq(generationHistory.id, input.historyId),
+      eq(generationHistory.projectId, input.projectId)
+    ),
   })
   if (!history) {
     throw new Error(`Rollback snapshot not found: ${input.historyId}`)
@@ -439,31 +441,37 @@ export async function getRuntimeHealthDashboard(windowHours = 24) {
     previewSessionsByStatus,
     recentFailures,
   ] = await Promise.all([
-    prisma.generationJob.groupBy({
-      by: ["status"],
-      where: { createdAt: { gte: since } },
-      _count: { _all: true },
-    }),
-    prisma.orchestrationFailure.groupBy({
-      by: ["eventType", "severity", "terminationReason"],
-      where: { createdAt: { gte: since } },
-      _count: { _all: true },
-    }),
-    prisma.repairAttempt.groupBy({
-      by: ["status", "terminationReason"],
-      where: { createdAt: { gte: since } },
-      _count: { _all: true },
-    }),
-    prisma.previewSession.groupBy({
-      by: ["status"],
-      where: { createdAt: { gte: since } },
-      _count: { _all: true },
-    }),
-    prisma.orchestrationFailure.findMany({
-      where: { createdAt: { gte: since } },
-      orderBy: { createdAt: "desc" },
-      take: 12,
-      select: {
+    db.select({
+      status: generationJobs.status,
+      count: sql<number>`count(*)`,
+    }).from(generationJobs).where(gte(generationJobs.createdAt, since)).groupBy(generationJobs.status),
+    db.select({
+      eventType: orchestrationFailures.eventType,
+      severity: orchestrationFailures.severity,
+      terminationReason: orchestrationFailures.terminationReason,
+      count: sql<number>`count(*)`,
+    }).from(orchestrationFailures).where(gte(orchestrationFailures.createdAt, since)).groupBy(
+      orchestrationFailures.eventType,
+      orchestrationFailures.severity,
+      orchestrationFailures.terminationReason
+    ),
+    db.select({
+      status: repairAttempts.status,
+      terminationReason: repairAttempts.terminationReason,
+      count: sql<number>`count(*)`,
+    }).from(repairAttempts).where(gte(repairAttempts.createdAt, since)).groupBy(
+      repairAttempts.status,
+      repairAttempts.terminationReason
+    ),
+    db.select({
+      status: previewSessions.status,
+      count: sql<number>`count(*)`,
+    }).from(previewSessions).where(gte(previewSessions.createdAt, since)).groupBy(previewSessions.status),
+    db.query.orchestrationFailures.findMany({
+      where: gte(orchestrationFailures.createdAt, since),
+      orderBy: [desc(orchestrationFailures.createdAt)],
+      limit: 12,
+      columns: {
         jobId: true,
         traceId: true,
         eventType: true,

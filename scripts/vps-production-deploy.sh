@@ -90,7 +90,7 @@ install_dependencies() {
   log "installing dependencies"
   npm ci
   npm --prefix services/sandbox-runtime ci --omit=dev
-  npx prisma generate
+  node scripts/drizzle-migrate.js
 }
 
 restart_services() {

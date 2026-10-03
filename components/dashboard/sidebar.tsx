@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { signOut, useSession } from "next-auth/react"
+import { useClerk, useUser } from "@clerk/nextjs"
 import {
   BookOpen,
   FolderOpen,
@@ -37,13 +37,14 @@ const navigation = [
 
 export function DashboardSidebar() {
   const pathname = usePathname()
-  const { data: session } = useSession()
-  const displayName = session?.user?.name || session?.user?.email?.split("@")[0] || "User"
+  const { user } = useUser()
+  const { signOut } = useClerk()
+  const displayName = user?.fullName || user?.primaryEmailAddress?.emailAddress?.split("@")[0] || "User"
 
   const avatarInitial = displayName.charAt(0).toUpperCase() || "U"
 
   const handleSignOut = async () => {
-    await signOut({ redirectTo: "/" })
+    await signOut({ redirectUrl: "/" })
   }
 
   return (
@@ -112,7 +113,7 @@ export function DashboardSidebar() {
                   {displayName}
                 </div>
                 <div className="text-xs text-sidebar-foreground/70">
-                  {session?.user?.email || "user@example.com"}
+                  {user?.primaryEmailAddress?.emailAddress || "user@example.com"}
                 </div>
               </div>
             </Button>

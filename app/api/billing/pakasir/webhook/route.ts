@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { topUpOrders } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { BillingService } from "@/lib/services/billing.service"
 import { PakasirService } from "@/lib/services/pakasir.service"
@@ -128,15 +130,8 @@ export async function POST(request: NextRequest) {
   const status = normalizeStatus(body.status)
   const amount = extractAmount(body)
 
-  const order = await prisma.topUpOrder.findUnique({
-    where: { reference: orderId },
-    select: {
-      reference: true,
-      amount: true,
-      status: true,
-      providerReference: true,
-      paymentCode: true,
-    },
+  const order = await db.query.topUpOrders.findFirst({
+    where: eq(topUpOrders.reference, orderId),
   })
 
   if (!order) {

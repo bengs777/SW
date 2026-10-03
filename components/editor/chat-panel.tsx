@@ -16,6 +16,7 @@ import { analyzePromptIntent } from "@/lib/ai/prompt-intent"
 import { getTemplate, PROMPT_LANGUAGE_LABELS } from "@/lib/ai/prompt-templates"
 import type { PromptLanguage, PromptTemplateKey, TemplateVariant } from "@/lib/ai/prompt-templates"
 import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
+import { isMutatingCollaborationMode } from "@/lib/ai/collaboration-mode"
 
 const MAX_PROMPT_LENGTH = 12000
 const MAX_ATTACHMENTS = 5
@@ -478,6 +479,37 @@ export function ChatPanel({
     selectedModelInfo?.description || selectedModelInfo?.note || "Swift AI"
   const promptCopy = PROMPT_PANEL_COPY[promptLanguage]
   const collaborationCopy = COLLABORATION_MODES[promptLanguage]
+  const isChatCollaborationMode = !isMutatingCollaborationMode(collaborationMode)
+  const submitLabel = isChatCollaborationMode
+    ? promptLanguage === "id"
+      ? collaborationMode === "review"
+        ? "Mulai review"
+        : "Tanya AI"
+      : collaborationMode === "review"
+        ? "Start review"
+        : "Ask AI"
+    : promptCopy.submitLabel
+  const stopLabel = isChatCollaborationMode
+    ? promptLanguage === "id"
+      ? "Stop jawaban"
+      : "Stop answer"
+    : promptLanguage === "id"
+      ? "Stop generate"
+      : "Stop generation"
+  const promptHint = isChatCollaborationMode
+    ? promptLanguage === "id"
+      ? "Mode ini menjawab / mereview saja: tidak mengubah file dan tidak memakai kuota generate."
+      : "This mode only answers / reviews: it does not change files or use generate quota."
+    : promptCopy.promptHint
+  const promptPlaceholder = isChatCollaborationMode
+    ? promptLanguage === "id"
+      ? collaborationMode === "review"
+        ? "Minta AI meninjau kode, preview, atau error tertentu..."
+        : "Tanyakan apa saja soal project, kode, atau rencana fitur..."
+      : collaborationMode === "review"
+        ? "Ask the AI to review code, preview, or a specific error..."
+        : "Ask anything about the project, code, or feature plans..."
+    : promptCopy.promptPlaceholder
   const promptIntent = analyzePromptIntent(input, promptLanguage)
   const promptExamples = getPromptExamples(templateKey, promptLanguage)
   const selectedModelSupportsVision = VISION_CAPABLE_MODEL_KEYS.has(selectedModel)
@@ -698,7 +730,7 @@ export function ChatPanel({
   useEffect(() => {
     const prompt = input.trim()
 
-    if (!prompt || prompt.length > MAX_PROMPT_LENGTH) {
+    if (!prompt || prompt.length > MAX_PROMPT_LENGTH || !isMutatingCollaborationMode(collaborationMode)) {
       setEstimate({ isLoading: false })
       return
     }
@@ -754,7 +786,7 @@ export function ChatPanel({
       window.clearTimeout(timeout)
       controller.abort()
     }
-  }, [attachments, input, selectedModel, projectId])
+  }, [attachments, input, selectedModel, projectId, collaborationMode])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -920,13 +952,13 @@ export function ChatPanel({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={promptCopy.promptPlaceholder}
+              placeholder={promptPlaceholder}
               className="mt-3 min-h-[150px] resize-none rounded-[1.15rem] border-border/80 bg-background/80 leading-6 shadow-inner shadow-black/[0.02] focus-visible:ring-primary/30"
               disabled={isGenerating}
             />
 
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-              <span>{promptCopy.promptHint}</span>
+              <span>{promptHint}</span>
               <span className={cn(input.length > MAX_PROMPT_LENGTH && "text-destructive")}>{input.length.toLocaleString("id-ID")} / {MAX_PROMPT_LENGTH.toLocaleString("id-ID")} {promptCopy.charactersLabel}</span>
             </div>
 
@@ -941,12 +973,12 @@ export function ChatPanel({
               {isGenerating ? (
                 <>
                   <Square className="h-4 w-4" />
-                  {promptLanguage === "id" ? "Stop generate" : "Stop generation"}
+                  {stopLabel}
                 </>
               ) : (
                 <>
                   <Send className="h-4 w-4" />
-                  {promptCopy.submitLabel}
+                  {submitLabel}
                 </>
               )}
             </Button>
@@ -1051,7 +1083,7 @@ export function ChatPanel({
                   ))}
                 </div>
               </div>
-              {input.trim() && (
+              {input.trim() && isMutatingCollaborationMode(collaborationMode) && (
                 <div
                   className={cn(
                     "rounded-lg border px-3 py-2 text-xs",
@@ -1221,11 +1253,16 @@ function ProviderStatusBadge({ status }: { status?: ProviderStatus | null }) {
               label: "quota",
               className: "border-rose-500/40 bg-rose-500/10 text-rose-300",
             }
-          : status.issue === "config"
+          : status.issue === "limit"
             ? {
-                label: "config",
-                className: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+                label: "limit",
+                className: "border-amber-500/40 bg-amber-500/10 text-amber-300",
               }
+            : status.issue === "config"
+              ? {
+                  label: "config",
+                  className: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+                }
         : {
             label: "error",
             className: "border-rose-500/40 bg-rose-500/10 text-rose-300",
@@ -1273,10 +1310,15 @@ function ProviderHealthCard({
               title: "Masalah auth atau akses model",
               className: "border-rose-500/30 bg-rose-500/10 text-rose-100",
             }
-          : status.issue === "quota"
+        : status.issue === "quota"
+          ? {
+              title: "Kapasitas Swift sedang penuh",
+              className: "border-rose-500/30 bg-rose-500/10 text-rose-100",
+            }
+          : status.issue === "limit"
             ? {
-                title: "Kapasitas Swift sedang penuh",
-                className: "border-rose-500/30 bg-rose-500/10 text-rose-100",
+                title: "Kuota generate harian sudah habis",
+                className: "border-amber-500/30 bg-amber-500/10 text-amber-100",
               }
             : status.issue === "config"
               ? {

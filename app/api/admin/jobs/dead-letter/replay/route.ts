@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationJobs } from "@/lib/db/schema"
+import { eq, sql } from "drizzle-orm"
 import { requireDeveloperActorResponse } from "@/lib/admin"
 import { getGenerationDeadLetterPayload, replayGenerationDeadLetterJob } from "@/lib/queue/generation-queue"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
@@ -31,9 +33,8 @@ export async function POST(request: NextRequest) {
   try {
     const deadLetterPayload = await getGenerationDeadLetterPayload(parsed.data.deadLetterJobId)
     const replayQueueJobId = `replay:${deadLetterPayload.jobId}:${Date.now()}`
-    await prisma.generationJob.update({
-      where: { id: deadLetterPayload.jobId },
-      data: {
+    await db.update(generationJobs)
+      .set({
         status: "queued",
         stage: "queued",
         label: "Replayed from dead-letter queue",
@@ -46,9 +47,10 @@ export async function POST(request: NextRequest) {
         cancelRequested: false,
         cancelReason: null,
         queueJobId: replayQueueJobId,
-        version: { increment: 1 },
-      },
-    })
+        version: sql`${generationJobs.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(eq(generationJobs.id, deadLetterPayload.jobId))
 
     await GenerationJobService.appendEvent({
       jobId: deadLetterPayload.jobId,

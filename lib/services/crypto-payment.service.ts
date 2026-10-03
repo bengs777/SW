@@ -1,6 +1,8 @@
 import { ethers } from "ethers"
 import { env } from "@/lib/env"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { topUpOrders, cryptoPayments, users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { BillingService } from "@/lib/services/billing.service"
 
 export type CryptoChain = "bsc" | "base"
@@ -44,16 +46,14 @@ function getTokenSymbol(chainId: number): string {
 async function getPriceInUsd(chainId: number): Promise<number> {
   try {
     if (chainId === 56 || chainId === env.bnbChainId) {
-      // BNB price - using CoinGecko free API
       const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd")
       const data = (await response.json()) as Record<string, Record<string, number>>
-      return data.binancecoin?.usd || 600 // fallback price
+      return data.binancecoin?.usd || 600
     }
     if (chainId === 8453 || chainId === env.baseChainId) {
-      // ETH price
       const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd")
       const data = (await response.json()) as Record<string, Record<string, number>>
-      return data.ethereum?.usd || 2500 // fallback price
+      return data.ethereum?.usd || 2500
     }
   } catch (error) {
     console.error("Error fetching price:", error)
@@ -72,11 +72,9 @@ export class CryptoPaymentService {
       throw new Error("Unable to fetch current crypto price")
     }
 
-    // Convert USD to token (assuming price in USD cents input)
-    const amountInUsd = request.amountInUsd / 100 // convert from cents
+    const amountInUsd = request.amountInUsd / 100
     const amountInToken = (amountInUsd / priceInUsd).toFixed(6)
 
-    // Generate checkout URL (simple payment page)
     const params = new URLSearchParams({
       ref: request.reference,
       chain: String(request.chainId),
@@ -138,7 +136,6 @@ export class CryptoPaymentService {
       const currentBlock = await provider.getBlockNumber()
       const confirmations = receipt.blockNumber ? currentBlock - receipt.blockNumber : 0
 
-      // Validate recipient
       if (tx.to?.toLowerCase() !== expectedRecipient.toLowerCase()) {
         return {
           isValid: false,
@@ -149,11 +146,10 @@ export class CryptoPaymentService {
         }
       }
 
-      // Validate amount (with small tolerance for gas)
       const actualAmount = ethers.formatEther(tx.value)
       const expectedAmountNum = parseFloat(expectedAmount)
       const actualAmountNum = parseFloat(actualAmount)
-      const tolerance = expectedAmountNum * 0.01 // 1% tolerance
+      const tolerance = expectedAmountNum * 0.01
 
       if (Math.abs(actualAmountNum - expectedAmountNum) > tolerance) {
         return {
@@ -165,7 +161,6 @@ export class CryptoPaymentService {
         }
       }
 
-      // Check if transaction succeeded
       if (receipt.status !== 1) {
         return {
           isValid: false,
@@ -196,14 +191,25 @@ export class CryptoPaymentService {
 
   static async finalizePayment(topUpOrderId: string, txHash: string): Promise<boolean> {
     try {
-      const topUpOrder = await prisma.topUpOrder.findUnique({
-        where: { id: topUpOrderId },
-        include: { user: true, cryptoPayment: true },
-      })
+      const topUpOrderResult = await db.select().from(topUpOrders)
+        .where(eq(topUpOrders.id, topUpOrderId))
+        .limit(1)
 
-      if (!topUpOrder || !topUpOrder.cryptoPayment) {
-        throw new Error("TopUpOrder or CryptoPayment not found")
+      if (topUpOrderResult.length === 0) {
+        throw new Error("TopUpOrder not found")
       }
+
+      const topUpOrder = topUpOrderResult[0]
+
+      const cryptoPaymentResult = await db.select().from(cryptoPayments)
+        .where(eq(cryptoPayments.topUpOrderId, topUpOrderId))
+        .limit(1)
+
+      if (cryptoPaymentResult.length === 0) {
+        throw new Error("CryptoPayment not found")
+      }
+
+      const cryptoPayment = cryptoPaymentResult[0]
 
       const verification = await this.verifyTransaction(
         txHash,
@@ -213,32 +219,28 @@ export class CryptoPaymentService {
       )
 
       if (!verification.isValid) {
-        await prisma.cryptoPayment.update({
-          where: { id: topUpOrder.cryptoPayment.id },
-          data: {
+        await db.update(cryptoPayments)
+          .set({
             status: "failed",
             errorMessage: verification.error,
-          },
-        })
+          })
+          .where(eq(cryptoPayments.id, cryptoPayment.id))
         return false
       }
 
       const confirmationsNeeded = env.cryptoPaymentConfirmationsRequired
       const isConfirmed = verification.confirmations >= confirmationsNeeded
 
-      // Update CryptoPayment record
-      await prisma.cryptoPayment.update({
-        where: { id: topUpOrder.cryptoPayment.id },
-        data: {
+      await db.update(cryptoPayments)
+        .set({
           status: isConfirmed ? "confirmed" : "confirming",
           confirmations: verification.confirmations,
-          blockNumber: undefined, // Will be set by webhook if needed
           confirmedAt: isConfirmed ? new Date() : null,
-        },
-      })
+        })
+        .where(eq(cryptoPayments.id, cryptoPayment.id))
 
       if (!isConfirmed) {
-        return false // Still waiting for confirmations
+        return false
       }
 
       const finalized = await BillingService.finalizeTopUpOrder({
@@ -253,16 +255,14 @@ export class CryptoPaymentService {
         paidAt: new Date(),
       })
 
-      await prisma.cryptoPayment.update({
-        where: { id: topUpOrder.cryptoPayment.id },
-        data: {
+      await db.update(cryptoPayments)
+        .set({
           status: "confirmed",
           confirmations: verification.confirmations,
-          blockNumber: undefined,
           confirmedAt: new Date(),
           transactionHash: txHash,
-        },
-      })
+        })
+        .where(eq(cryptoPayments.id, cryptoPayment.id))
 
       if (finalized.order.status !== "paid") {
         throw new Error("FAILED_TO_FINALIZE_CRYPTO_PAYMENT")

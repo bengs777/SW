@@ -1,16 +1,17 @@
 import { after, NextRequest, NextResponse } from "next/server"
 import { randomUUID } from "node:crypto"
-import { Prisma } from "@prisma/client"
 import { z } from "zod"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users, projects, generationJobs } from "@/lib/db/schema"
+import { eq, and, lt, inArray, sql } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
-import { COLLABORATION_MODES } from "@/lib/ai/collaboration-mode"
+import { COLLABORATION_MODES, isMutatingCollaborationMode } from "@/lib/ai/collaboration-mode"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { enqueueGenerationTask, getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { processGenerationPayload } from "@/lib/workers/generation-worker"
-import { enforceAiUsageRateLimit } from "@/lib/security/rate-limit"
+import { enforceAiUsageRateLimit, releaseAiUsageQuota } from "@/lib/security/rate-limit"
 import { log } from "@/lib/logging"
 import { createCorrelationIds, traceExecution } from "@/lib/observability/execution-tracer"
 import { monitorOperation, warnIfSlow } from "@/lib/observability/performance-monitor"
@@ -20,6 +21,7 @@ import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/services/generation-job-request.service"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -121,9 +123,7 @@ function logFatal(stage: string, error: unknown, detail?: Record<string, unknown
 
 function probableRootCause(stage: string, error?: unknown) {
   const message = error instanceof Error ? error.message : String(error || "")
-  const prismaCode = error instanceof Prisma.PrismaClientKnownRequestError ? error.code : ""
   if (
-    prismaCode === "P2022" ||
     /column .* does not exist|table .* does not exist|relation .* does not exist|schema mismatch/i.test(message)
   ) {
     return "database schema mismatch"
@@ -165,6 +165,11 @@ function isSystemSaturatedError(error: unknown): error is SystemSaturatedError {
 }
 
 export async function POST(request: NextRequest) {
+  const featureCheck = assertFeatureEnabled("enableAiGenerate", "AI generation")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
   const startedAt = Date.now()
   let requestId = "unassigned"
   let traceId = requestId
@@ -283,9 +288,9 @@ export async function POST(request: NextRequest) {
 
   currentStage = "auth_start"
   logEarlyStage("auth_start", requestId)
-  let session: { user?: { email?: string | null } } | null
+  let session: { email?: string | null } | null
   try {
-    session = await auth()
+    session = await getSession()
   } catch (error) {
     log("error", "auth_fatal", {
       error: error instanceof Error ? error.message : String(error),
@@ -296,7 +301,7 @@ export async function POST(request: NextRequest) {
   }
   currentStage = "auth_success"
   logEarlyStage("auth_success", requestId)
-  const email = session?.user?.email
+  const email = session?.email
   developerDiagnosticsAllowed =
     Boolean(email && email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()) ||
     Boolean(email?.endsWith("@swift.local"))
@@ -356,6 +361,30 @@ export async function POST(request: NextRequest) {
     attachmentsCount: parsed.data.attachments.length,
   })
 
+  if (parsed.data.collaborationMode === "edit" || parsed.data.collaborationMode === "fix") {
+    const editFeatureCheck = assertFeatureEnabled("enableAiEdit", "AI edit")
+    if (editFeatureCheck) {
+      return NextResponse.json({ error: editFeatureCheck.error }, { status: editFeatureCheck.status })
+    }
+  }
+
+  if (!isMutatingCollaborationMode(parsed.data.collaborationMode)) {
+    log("warn", "generation_job_non_mutating_mode_rejected", {
+      requestId,
+      collaborationMode: parsed.data.collaborationMode,
+      projectId: parsed.data.projectId,
+    })
+    return NextResponse.json(
+      {
+        error: "collaboration_mode_not_generating",
+        message:
+          "Ask and review modes never create a generation job. Send them to /api/ai/answer instead.",
+        mode: parsed.data.collaborationMode,
+      },
+      { status: 409 }
+    )
+  }
+
   currentStage = "previewContext_normalization"
   logStage("previewContext_normalization", false, { requestId })
   const previewAudit = previewContextAudit(parsed.data.previewContext)
@@ -411,36 +440,23 @@ export async function POST(request: NextRequest) {
   })
 
   const userLookupStartedAt = Date.now()
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true, isDeveloperAccount: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
   })
   developerDiagnosticsAllowed = developerDiagnosticsAllowed || Boolean(user?.isDeveloperAccount)
   const userLookupDurationMs = Date.now() - userLookupStartedAt
-  recordPrismaDuration(userLookupDurationMs, { operation: "user.findUnique", requestId })
-  warnIfSlow("prisma", userLookupDurationMs, { operation: "user.findUnique", requestId })
+  warnIfSlow("db", userLookupDurationMs, { operation: "user.findFirst", requestId })
 
   if (!user) {
     return NextResponse.json({ error: "Authenticated user not found", requestId }, { status: 404 })
   }
 
   const projectLookupStartedAt = Date.now()
-  const project = await prisma.project.findFirst({
-    where: {
-      id: parsed.data.projectId,
-      workspace: {
-        members: {
-          some: {
-            userId: user.id,
-          },
-        },
-      },
-    },
-    select: { id: true },
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, parsed.data.projectId),
   })
   const projectLookupDurationMs = Date.now() - projectLookupStartedAt
-  recordPrismaDuration(projectLookupDurationMs, { operation: "project.findFirst", requestId })
-  warnIfSlow("prisma", projectLookupDurationMs, { operation: "project.findFirst", requestId })
+  warnIfSlow("db", projectLookupDurationMs, { operation: "project.findFirst", requestId })
 
   if (!project) {
     auditSummary()
@@ -512,15 +528,14 @@ export async function POST(request: NextRequest) {
     // orphaned jobs that block new submissions forever.
     const STUCK_THRESHOLD_MS = 5 * 60_000 // 5 minutes
     const stuckCutoff = new Date(Date.now() - STUCK_THRESHOLD_MS)
-    const stuckJobs = await prisma.generationJob.findMany({
-      where: {
-        userId: user.id,
-        status: { in: ["queued", "running", "cancelling"] },
-        updatedAt: { lt: stuckCutoff },
-      },
-      select: { id: true },
-      take: 5,
-    })
+    const stuckJobs = await db.select({ id: generationJobs.id })
+      .from(generationJobs)
+      .where(and(
+        eq(generationJobs.userId, user.id),
+        inArray(generationJobs.status, ["queued", "running", "cancelling"]),
+        lt(generationJobs.updatedAt, stuckCutoff)
+      ))
+      .limit(5)
 
     if (stuckJobs.length > 0) {
       // Mark stuck jobs as failed so user can proceed
@@ -547,22 +562,22 @@ export async function POST(request: NextRequest) {
   }
 
   const [queuedGenerationCount, latestUserJob] = await Promise.all([
-    prisma.generationJob.count({
-      where: {
-        userId: user.id,
-        status: { in: ["queued", "retrying", "orphaned"] },
-      },
-    }),
-    prisma.generationJob.findFirst({
-      where: { userId: user.id },
-      orderBy: { createdAt: "desc" },
-      select: { createdAt: true },
-    }),
+    db.select({ count: sql<number>`count(*)` })
+      .from(generationJobs)
+      .where(and(
+        eq(generationJobs.userId, user.id),
+        inArray(generationJobs.status, ["queued", "retrying", "orphaned"])
+      )),
+    db.select({ createdAt: generationJobs.createdAt })
+      .from(generationJobs)
+      .where(eq(generationJobs.userId, user.id))
+      .orderBy(sql`${generationJobs.createdAt} DESC`)
+      .limit(1),
   ])
-  const cooldownRemainingMs = latestUserJob
-    ? Math.max(0, GENERATION_COOLDOWN_MS - (Date.now() - latestUserJob.createdAt.getTime()))
+  const cooldownRemainingMs = latestUserJob && latestUserJob.length > 0
+    ? Math.max(0, GENERATION_COOLDOWN_MS - (Date.now() - latestUserJob[0].createdAt.getTime()))
     : 0
-  if (queuedGenerationCount >= MAX_QUEUED_JOBS_PER_USER) {
+  if (queuedGenerationCount[0]?.count >= MAX_QUEUED_JOBS_PER_USER) {
     return NextResponse.json({
       error: "Too many queued generation jobs. Wait for the queue to drain before starting another.",
       requestId,
@@ -600,10 +615,11 @@ export async function POST(request: NextRequest) {
   })
   const modelConfig = await ModelConfigService.getActiveModelByKey(routingDecision.modelName)
 
-  if (!modelConfig) {
-    auditSummary()
-    return NextResponse.json({ error: "Selected model is not available", requestId }, { status: 403 })
-  }
+    if (!modelConfig) {
+      await releaseAiUsageQuota(user.id).catch(() => null)
+      auditSummary()
+      return NextResponse.json({ error: "Selected model is not available", requestId }, { status: 403 })
+    }
 
   const pricing = calculateModelRequestPrice({
     modelKey: modelConfig.key,
@@ -1127,8 +1143,7 @@ export async function POST(request: NextRequest) {
       saturation: saturationError?.saturation,
     })
     const duplicateJob =
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === "P2002" &&
+      /UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(message) &&
       (parsed.data.idempotencyKey || requestHash)
 
     if (duplicateJob) {
@@ -1182,6 +1197,8 @@ export async function POST(request: NextRequest) {
         pricing.estimatedCost,
         message
       ).catch(() => null)
+    } else {
+      await releaseAiUsageQuota(user.id).catch(() => null)
     }
 
     if (jobId) {

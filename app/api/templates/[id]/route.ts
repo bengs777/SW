@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { auth } from "@/auth"
+import { getSession } from "@/auth"
 import { getTemplateById } from "@/lib/templates/catalog"
 import { TemplateInstantiationService } from "@/lib/services/template-instantiation.service"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 const InstantiateSchema = z.object({
   workspaceId: z.string().trim().optional(),
@@ -43,10 +44,16 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
+  const session = await getSession()
 
-  if (!session?.user?.id) {
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`template-instantiate:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
   }
 
   try {
@@ -54,7 +61,7 @@ export async function POST(
     const body = InstantiateSchema.parse(await request.json())
 
     const result = await TemplateInstantiationService.instantiateTemplate({
-      userId: session.user.id,
+      userId: session.userId,
       templateId: id,
       workspaceId: body.workspaceId,
       projectName: body.projectName,

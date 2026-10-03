@@ -124,6 +124,14 @@ export function publicGenerationRuntimeErrorMessage(error: unknown) {
     return "Saldo atau budget token tidak cukup untuk menyelesaikan generate. Kurangi scope prompt atau isi saldo sebelum mencoba lagi."
   }
 
+  if (/free limit exceeded|generations per 24 hours|daily fair usage limit exceeded|paid prompts per day/i.test(message)) {
+    return "Kuota generate harian sudah terpakai. Generate yang gagal otomatis dikembalikan dan tidak mengurangi kuota; tunggu jendela 24 jam berikutnya atau upgrade paket untuk melanjutkan."
+  }
+
+  if (/rate limit exceeded|requests per minute|prompts per minute|generation rate limit/i.test(message)) {
+    return "Terlalu banyak permintaan dalam waktu singkat. Tunggu beberapa detik lalu coba kirim prompt lagi."
+  }
+
   if (/Unique constraint failed[\s\S]*jobId[\s\S]*sequence|P2002[\s\S]*sequence/i.test(message)) {
     return "Log generation sempat bentrok saat event paralel ditulis. Retry aman setelah worker memakai patch terbaru."
   }

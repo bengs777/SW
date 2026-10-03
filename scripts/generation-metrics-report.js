@@ -1,9 +1,7 @@
 const { loadEnvConfig } = require("@next/env")
-const { PrismaClient } = require("@prisma/client")
+const { createClient } = require("@libsql/client")
 
 loadEnvConfig(process.cwd())
-
-const prisma = new PrismaClient()
 
 function parseJson(value) {
   if (!value) return null
@@ -74,19 +72,31 @@ function componentRegistry(metric) {
 async function main() {
   const days = Math.max(1, Math.min(90, Number(process.argv[2] || 7)))
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-  const metrics = await prisma.generationQualityMetric.findMany({
-    where: { createdAt: { gte: since } },
-    select: {
-      status: true,
-      failureStage: true,
-      failureCode: true,
-      buildPassed: true,
-      runtimePassed: true,
-      repairSucceeded: true,
-      repairAttempts: true,
-      metadataJson: true,
-    },
+  const databaseUrl = process.env.TURSO_DATABASE_URL
+  if (!databaseUrl) {
+    throw new Error("TURSO_DATABASE_URL is required for metrics:generation")
+  }
+  const client = createClient({
+    url: databaseUrl,
+    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
   })
+
+  try {
+    const sinceSeconds = Math.floor(since.getTime() / 1000)
+    const result = await client.execute({
+      sql: "SELECT status, failure_stage, failure_code, build_passed, runtime_passed, repair_succeeded, repair_attempts, metadata_json FROM generation_quality_metrics WHERE created_at >= ?",
+      args: [sinceSeconds],
+    })
+    const metrics = result.rows.map((row) => ({
+      status: row.status == null ? null : String(row.status),
+      failureStage: row.failure_stage == null ? null : String(row.failure_stage),
+      failureCode: row.failure_code == null ? null : String(row.failure_code),
+      buildPassed: Boolean(row.build_passed),
+      runtimePassed: Boolean(row.runtime_passed),
+      repairSucceeded: Boolean(row.repair_succeeded),
+      repairAttempts: Number(row.repair_attempts || 0),
+      metadataJson: row.metadata_json == null ? null : String(row.metadata_json),
+    }))
   const total = metrics.length
   const completed = metrics.filter((metric) => metric.status === "completed").length
   const failed = metrics.filter((metric) => metric.status === "failed")
@@ -197,11 +207,16 @@ async function main() {
       failedRate: rate(repairFailed, repairAttempted.length),
     },
   }, null, 2))
+  } finally {
+    try {
+      client.close()
+    } catch {
+      // ignore close errors
+    }
+  }
 }
 
-main()
-  .catch((error) => {
-    console.error(error)
-    process.exit(1)
-  })
-  .finally(() => prisma.$disconnect())
+main().catch((error) => {
+  console.error(error)
+  process.exit(1)
+})

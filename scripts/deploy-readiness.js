@@ -89,17 +89,8 @@ function isProductionUrl(input) {
   return /^https:\/\//i.test(current) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(current)
 }
 
-function isPostgresUrl(input) {
-  return /^postgres(?:ql)?:\/\//i.test(String(input || ""))
-}
-
-function isNeonPooledUrl(input) {
-  if (!isPostgresUrl(input)) return false
-  try {
-    return /pooler\./i.test(new URL(input).hostname)
-  } catch {
-    return false
-  }
+function isLibsqlUrl(input) {
+  return /^(libsql|https?):\/\//i.test(String(input || ""))
 }
 
 function isNativeRedisUrl(input) {
@@ -169,56 +160,62 @@ async function getRedisWorkerHeartbeats(redis) {
 }
 
 async function getDatabaseWorkerHeartbeats() {
-  try {
-    const { PrismaClient } = require("@prisma/client")
-    const prisma = new PrismaClient()
-    try {
-      const rows = await prisma.workerHeartbeat.findMany({
-        where: {
-          heartbeatAt: {
-            gte: new Date(Date.now() - GENERATION_WORKER_HEARTBEAT_MAX_AGE_MS),
-          },
-        },
-        orderBy: { heartbeatAt: "desc" },
-        take: 20,
-        select: {
-          workerId: true,
-          currentJobId: true,
-          currentStage: true,
-          lastSuccessfulTransition: true,
-          heartbeatAt: true,
-          runtimeInfoJson: true,
-        },
-      })
-
-      return rows.map((row) => {
-        let runtimeInfo = {}
-        try {
-          runtimeInfo = row.runtimeInfoJson ? JSON.parse(row.runtimeInfoJson) : {}
-        } catch {
-          runtimeInfo = {}
-        }
-        return {
-          workerId: row.workerId,
-          pid: Number(runtimeInfo.pid || 0),
-          at: row.heartbeatAt.toISOString(),
-          currentStage: row.currentStage || null,
-          lastSuccessfulTransition: row.lastSuccessfulTransition || null,
-          activeJobIds: Array.isArray(runtimeInfo.activeJobIds)
-            ? runtimeInfo.activeJobIds.map(String)
-            : row.currentJobId
-              ? [row.currentJobId]
-              : [],
-          idleTimeoutMs: typeof runtimeInfo.idleTimeoutMs === "number" ? runtimeInfo.idleTimeoutMs : null,
-          stalledGenerationDetected: Boolean(runtimeInfo.stalledGenerationDetected),
-          source: "database:WorkerHeartbeat",
-        }
-      })
-    } finally {
-      await prisma.$disconnect().catch(() => {})
-    }
-  } catch {
+  const databaseUrl = process.env.TURSO_DATABASE_URL
+  if (!databaseUrl) {
+    console.warn("[deploy-readiness] TURSO_DATABASE_URL not set; skipping database worker heartbeat check")
     return []
+  }
+
+  const { createClient } = require("@libsql/client")
+  const client = createClient({
+    url: databaseUrl,
+    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
+  })
+
+  try {
+    const sinceSeconds = Math.floor((Date.now() - GENERATION_WORKER_HEARTBEAT_MAX_AGE_MS) / 1000)
+    const result = await client.execute({
+      sql: "SELECT worker_id, current_job_id, current_stage, last_successful_transition, heartbeat_at, runtime_info_json FROM worker_heartbeats WHERE heartbeat_at >= ? ORDER BY heartbeat_at DESC LIMIT 20",
+      args: [sinceSeconds],
+    })
+
+    return result.rows.map((row) => {
+      let runtimeInfo = {}
+      try {
+        runtimeInfo = row.runtime_info_json ? JSON.parse(String(row.runtime_info_json)) : {}
+      } catch {
+        runtimeInfo = {}
+      }
+      const heartbeatAt = new Date(Number(row.heartbeat_at) * 1000)
+      const currentJobId = row.current_job_id == null ? null : String(row.current_job_id)
+      return {
+        workerId: String(row.worker_id),
+        pid: Number(runtimeInfo.pid || 0),
+        at: heartbeatAt.toISOString(),
+        currentStage: row.current_stage == null ? null : String(row.current_stage),
+        lastSuccessfulTransition: row.last_successful_transition == null ? null : String(row.last_successful_transition),
+        activeJobIds: Array.isArray(runtimeInfo.activeJobIds)
+          ? runtimeInfo.activeJobIds.map(String)
+          : currentJobId
+            ? [currentJobId]
+            : [],
+        idleTimeoutMs: typeof runtimeInfo.idleTimeoutMs === "number" ? runtimeInfo.idleTimeoutMs : null,
+        stalledGenerationDetected: Boolean(runtimeInfo.stalledGenerationDetected),
+        source: "database:WorkerHeartbeat",
+      }
+    })
+  } catch (error) {
+    console.warn(
+      "[deploy-readiness] database worker heartbeat check failed:",
+      error && error.message ? error.message : String(error)
+    )
+    return []
+  } finally {
+    try {
+      client.close()
+    } catch {
+      // ignore close errors
+    }
   }
 }
 
@@ -275,17 +272,28 @@ function commandDiagnostic(command, options = {}) {
 }
 
 async function databaseConnectivityDiagnostic() {
-  if (!isPostgresUrl(databaseUrl)) {
-    return { ok: false, detail: "DATABASE_URL is missing or invalid." }
+  const tursoUrl = value("TURSO_DATABASE_URL")
+  if (!isLibsqlUrl(tursoUrl)) {
+    return { ok: false, detail: "TURSO_DATABASE_URL is missing or invalid (expected libsql:// or https:// URL)." }
   }
 
   try {
-    const { PrismaClient } = require("@prisma/client")
-    const prisma = new PrismaClient()
-    const startedAt = Date.now()
-    await prisma.$queryRaw`SELECT 1`
-    await prisma.$disconnect()
-    return { ok: true, detail: `Connected in ${Date.now() - startedAt}ms.` }
+    const { createClient } = require("@libsql/client")
+    const client = createClient({
+      url: tursoUrl,
+      authToken: value("TURSO_AUTH_TOKEN") || undefined,
+    })
+    try {
+      const startedAt = Date.now()
+      await client.execute("SELECT 1")
+      return { ok: true, detail: `Connected in ${Date.now() - startedAt}ms.` }
+    } finally {
+      try {
+        client.close()
+      } catch {
+        // ignore close errors
+      }
+    }
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) }
   }
@@ -386,11 +394,14 @@ async function redisEvictionPolicyDiagnostic() {
       }
     }
 
+    const isUpstash = /\.upstash\.io/i.test(redisUrl)
     return {
-      ok: policy === "noeviction",
+      ok: policy === "noeviction" || isUpstash,
       detail: policy === "noeviction"
         ? "Redis maxmemory-policy is noeviction."
-        : `Redis maxmemory-policy is ${policy}; set it to noeviction for BullMQ production safety.`,
+        : isUpstash
+          ? `Upstash-managed eviction policy is ${policy} (provider-fixed algorithm; cannot be changed over the wire).`
+          : `Redis maxmemory-policy is ${policy}; set it to noeviction for BullMQ production safety.`,
     }
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) }
@@ -477,29 +488,25 @@ async function workerRuntimeDiagnostic() {
   }
 }
 
-const nextAuthUrl = value("NEXTAUTH_URL")
 const appUrl = value("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL")
-const databaseUrl = value("DATABASE_URL")
-const directDatabaseUrl = value("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
 const generationExecutionMode = value("SWIFT_GENERATION_EXECUTION_MODE").toLowerCase()
 const queueMode = !generationExecutionMode || generationExecutionMode === "queue"
 const supabaseServiceRoleKey = value("SUPABASE_SERVICE_ROLE_KEY")
 const supabasePublicKey = value("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY")
 const metricsToken = value("SWIFT_METRICS_TOKEN")
-const authProviderConfigured = Boolean(value("GOOGLE_CLIENT_ID") && value("GOOGLE_CLIENT_SECRET") && isStrongSecret(value("NEXTAUTH_SECRET")))
-const migrationStatus = commandDiagnostic("npx prisma migrate status", { timeoutMs: 30_000 })
+const clerkConfigured = Boolean(
+  isStrongSecret(value("CLERK_SECRET_KEY"), 20) && /^pk_/.test(value("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"))
+)
+const migrationStatus = commandDiagnostic("node scripts/drizzle-migrate.js --status", { timeoutMs: 30_000 })
 const schemaHealth = commandDiagnostic("node scripts/schema-health-check.js", { timeoutMs: 30_000 })
 
 const checks = [
-  required("DATABASE_URL", "Neon pooled PostgreSQL app URL", isPostgresUrl(databaseUrl), databaseUrl ? "Must be a PostgreSQL URL." : "Set the Neon pooled connection string."),
-  recommended("DATABASE_URL_POOLING", "Serverless pooled Neon host", isNeonPooledUrl(databaseUrl), "Use the Neon pooler host for app runtime traffic."),
-  recommended("DIRECT_DATABASE_URL", "Direct Neon URL for migrations/admin scripts", isPostgresUrl(directDatabaseUrl), "Set DIRECT_DATABASE_URL, DIRECT_URL, or POSTGRES_URL_NON_POOLING."),
-  required("NEXTAUTH_SECRET", "Auth session secret", isStrongSecret(value("NEXTAUTH_SECRET")), "Must be at least 32 chars and not a placeholder."),
-  required("NEXTAUTH_URL", "Canonical auth URL", isProductionUrl(nextAuthUrl), "Must be an https production URL, not localhost."),
+  required("TURSO_DATABASE_URL", "Turso/libsql application database URL", isLibsqlUrl(value("TURSO_DATABASE_URL")), value("TURSO_DATABASE_URL") ? "Must be a libsql:// or https:// URL." : "Set the Turso database connection string."),
+  required("TURSO_AUTH_TOKEN", "Turso database auth token", isStrongSecret(value("TURSO_AUTH_TOKEN"), 20), "Must be present and non-placeholder."),
+  required("CLERK_SECRET_KEY", "Clerk server secret key", isStrongSecret(value("CLERK_SECRET_KEY"), 20), "Must be present and non-placeholder."),
+  required("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", "Clerk publishable key", /^pk_/.test(value("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY")), "Must be present and start with pk_."),
   required("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(appUrl), "Must be an https production URL, not localhost."),
-  required("GOOGLE_CLIENT_ID", "Google OAuth client ID", value("GOOGLE_CLIENT_ID")),
-  required("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", isStrongSecret(value("GOOGLE_CLIENT_SECRET"), 24), "Must be present and non-placeholder."),
-  required("AUTH_PROVIDER_HEALTH", "Auth provider health", authProviderConfigured, authProviderConfigured ? "Google OAuth and session secret configured." : "Missing or invalid Google OAuth/session env."),
+  required("AUTH_PROVIDER_HEALTH", "Auth provider health", clerkConfigured, clerkConfigured ? "Clerk publishable and secret keys configured." : "Missing or invalid Clerk keys."),
   required("OPENROUTER_API_KEY", "AI provider API key", isStrongSecret(value("OPENROUTER_API_KEY"), 20), "Must be present and non-placeholder."),
   required(
     "REDIS_BULLMQ_CONFIG",
@@ -528,7 +535,7 @@ const checks = [
     "Set SWIFT_DISABLE_SERVERLESS_GENERATION_FALLBACK=true so production cannot silently bypass the dedicated worker."
   ),
   required("SANDBOX_SERVICE_URL", "External sandbox runtime URL", normalizeUrl(value("SANDBOX_SERVICE_URL"))),
-  required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN")),
+  required("SANDBOX_SERVICE_TOKEN", "External sandbox bearer token", value("SANDBOX_SERVICE_TOKEN", "SANDBOX_API_KEY")),
   recommended("SWIFT_METRICS_TOKEN", "Internal observability bearer token", isStrongSecret(metricsToken, 32), "Set a random 32+ character token and pass it as Bearer token to metrics/monitoring health checks."),
   required("NEXT_PUBLIC_SUPABASE_URL", "Supabase project URL", value("NEXT_PUBLIC_SUPABASE_URL")),
   required(
@@ -551,7 +558,7 @@ const checks = [
   recommended("PAKASIR_API_KEY", "Payment API key", value("PAKASIR_API_KEY")),
   recommended("CRYPTO_PAYMENT_PRIVATE_KEY", "Crypto payment private key", value("CRYPTO_PAYMENT_PRIVATE_KEY")),
   recommended("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS", "Crypto payment receiving address", value("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS")),
-  required("MIGRATION_STATUS", "Prisma migration status", migrationStatus.ok, migrationStatus.ok ? "No pending migration mismatch detected." : migrationStatus.output),
+  required("MIGRATION_STATUS", "Drizzle migration status", migrationStatus.ok, migrationStatus.ok ? "No pending Drizzle migration detected." : migrationStatus.output),
   required("SCHEMA_HEALTH", "Runtime schema compatibility", schemaHealth.ok, schemaHealth.ok ? "Runtime schema compatible." : schemaHealth.output),
 ]
 
@@ -592,7 +599,7 @@ async function main() {
   console.log(`invalid secrets: ${checks.filter((check) => !check.ok && /SECRET|KEY|TOKEN/.test(check.key)).map((check) => check.key).join(", ") || "none"}`)
   console.log(`migration mismatch: ${migrationStatus.ok && schemaHealth.ok ? "none" : "detected"}`)
   console.log(`db connectivity: ${dbConnectivity.ok ? "ok" : "failed"}`)
-  console.log(`auth provider health: ${authProviderConfigured ? "ok" : "failed"}`)
+  console.log(`auth provider health: ${clerkConfigured ? "ok" : "failed"}`)
 
   console.log("\nSummary")
   console.log(`Required: ${checks.filter((check) => check.severity === "required" && check.ok).length}/${checks.filter((check) => check.severity === "required").length} passed`)

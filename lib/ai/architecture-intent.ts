@@ -9,6 +9,7 @@ export type SwiftIntegrationProvider =
   | "supabase"
   | "cloudflare_r2"
   | "nextauth"
+  | "clerk"
   | "midtrans"
   | "stripe"
   | "xendit"
@@ -266,6 +267,7 @@ export function envVarsForProvider(provider: SwiftIntegrationProvider) {
     supabase: ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"],
     cloudflare_r2: ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME", "R2_PUBLIC_BASE_URL"],
     nextauth: ["NEXTAUTH_SECRET", "NEXTAUTH_URL"],
+    clerk: ["CLERK_SECRET_KEY", "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"],
     midtrans: ["MIDTRANS_SERVER_KEY", "MIDTRANS_CLIENT_KEY", "MIDTRANS_IS_PRODUCTION"],
     stripe: ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY"],
     xendit: ["XENDIT_SECRET_KEY", "XENDIT_WEBHOOK_TOKEN"],

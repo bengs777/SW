@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects, projectFiles } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import type { GeneratedFile } from "@/lib/types"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 const MAX_GITHUB_FILE_BYTES = 900_000
 
@@ -37,16 +41,9 @@ async function githubFetch<T>(url: string, token: string, init?: RequestInit): P
 }
 
 async function resolveProject(projectId: string, userId: string) {
-  return prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: { userId },
-        },
-      },
-    },
-    include: { files: true },
+  return db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    with: { files: true },
   })
 }
 
@@ -54,9 +51,20 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const featureCheck = assertFeatureEnabled("enableGithubSync", "GitHub sync")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`project-github:${session.userId}`, { maxPerMinute: 5, maxPerHour: 30 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
   }
 
   const token = process.env.GITHUB_TOKEN || process.env.SWIFT_GITHUB_TOKEN
@@ -71,7 +79,7 @@ export async function POST(
   }
 
   const { id } = await params
-  const project = await resolveProject(id, session.user.id)
+  const project = await resolveProject(id, session.userId)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }
@@ -79,7 +87,7 @@ export async function POST(
   const body = await request.json().catch(() => ({}))
   const rawFiles = Array.isArray((body as { files?: unknown }).files)
     ? ((body as { files: GeneratedFile[] }).files)
-    : project.files.map((file) => ({
+    : (project.files as GeneratedFile[]).map((file) => ({
         path: file.path,
         content: file.content,
         language: file.language,

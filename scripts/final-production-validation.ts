@@ -224,7 +224,6 @@ async function main() {
     await writeFile(path.join(REPORT_ROOT, "latest.json"), `${JSON.stringify(progress, null, 2)}\n`, "utf8")
   }
 
-  const { prisma } = await import("@/lib/db/client")
   const { parseGeneratedArtifact } = await import("@/lib/ai/generated-artifact")
   const { executeGeneratedTaskGraph } = await import("@/lib/ai/task-graph-executor")
   const { validateGeneratedPath } = await import("@/lib/ai/file-policy")
@@ -342,7 +341,7 @@ async function main() {
         routingTask: "large_generation",
         temperatureOverride: 0.2,
         signal: controller.signal,
-        lifecycle: (event: any) => {
+        lifecycle: (event: { event: string; provider: string; model: string }) => {
           lifecycleLog.push(event)
           lastProgressAt = Date.now()
           void writeProgress({
@@ -534,7 +533,6 @@ async function main() {
   await writeFile(path.join(reportDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   await writeFile(path.join(REPORT_ROOT, "latest.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   console.log(JSON.stringify(summary, null, 2))
-  await prisma.$disconnect()
   process.exit(finalProductionReadinessScore >= 90 ? 0 : 2)
 }
 
@@ -711,10 +709,10 @@ async function runChaosChecks() {
   }
 
   try {
-    const { prisma } = await import("@/lib/db/client")
-    await prisma.$queryRaw`SELECT 1`
-    await prisma.$disconnect()
-    await prisma.$queryRaw`SELECT 1`
+    const { db } = await import("@/lib/db/client")
+    const { sql } = await import("drizzle-orm")
+    await db.all(sql`SELECT 1`)
+    await db.all(sql`SELECT 1`)
     add("database_reconnect", "passed")
   } catch (error) {
     add("database_reconnect", "failed", error instanceof Error ? error.message : String(error))

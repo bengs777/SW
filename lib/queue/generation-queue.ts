@@ -627,7 +627,7 @@ export async function recordGenerationWorkerHeartbeat(
 
   const payload = JSON.stringify({
     workerId,
-    pid: process.pid,
+    pid: typeof process !== "undefined" ? process.pid : 0,
     alive: details?.alive ?? true,
     currentStage: details?.currentStage || "idle",
     lastSuccessfulTransition: details?.lastSuccessfulTransition || null,
@@ -654,7 +654,7 @@ export async function recordGenerationWorkerHeartbeat(
     lastSuccessfulTransition: details?.lastSuccessfulTransition || null,
     leaseOwner: details?.activeJobIds?.[0] ? workerId : null,
     runtimeInfo: {
-      pid: process.pid,
+      pid: typeof process !== "undefined" ? process.pid : 0,
       activeJobIds: details?.activeJobIds || [],
       idleTimeoutMs: details?.idleTimeoutMs ?? null,
       stalledGenerationDetected: Boolean(details?.stalledGenerationDetected),

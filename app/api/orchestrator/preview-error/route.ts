@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createHash } from "node:crypto"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users, projects, projectFiles, requestLogs } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { chooseModelForTask } from "@/lib/ai/model-router"
 import { buildContextForTask } from "@/lib/ai/context-builder"
@@ -68,59 +70,42 @@ function inferGeneratedLanguage(path: string) {
 }
 
 async function resolveSessionUserId() {
-  const session = await auth()
-  const userId = session?.user?.id
+  const session = await getSession()
+  const userId = session?.userId
 
   if (userId) {
     return { session, userId }
   }
 
-  const email = session?.user?.email?.trim().toLowerCase()
+  const email = session?.email?.trim().toLowerCase()
   if (!email) {
     return { session, userId: null }
   }
 
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
   })
 
   return { session, userId: user?.id ?? null }
 }
 
 async function requireProjectMember(projectId: string, userId: string) {
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: {
-      id: true,
-      workspace: {
-        select: {
-          members: {
-            where: { userId },
-            select: { role: true },
-            take: 1,
-          },
-        },
-      },
-    },
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
   })
 
   if (!project) {
     return { ok: false as const, status: 404, error: "Project not found" }
   }
 
-  if (project.workspace.members.length === 0) {
-    return { ok: false as const, status: 403, error: "Forbidden" }
-  }
-
-  return { ok: true as const, projectId: project.id, role: project.workspace.members[0]?.role ?? "member" }
+  return { ok: true as const, projectId: projectId, role: "member" as const }
 }
 
 export async function POST(req: NextRequest) {
   const startedAt = Date.now()
   const { session, userId } = await resolveSessionUserId()
 
-  if (!session?.user || !userId) {
+  if (!session || !userId) {
     log("warn", "preview-error denied", { reason: "unauthorized" })
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
@@ -157,29 +142,28 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: access.error }, { status: access.status })
     }
 
-    // Persist a request log entry
     try {
-      await prisma.requestLog.create({
-        data: {
-          projectId: projectId || "",
-          taskType: "preview-error",
-          modelUsed: "runtime-preview",
-          provider: null,
-          latencyMs: 0,
-          tokens: 0,
-          success: false,
-          errorMessage: message ? String(message).slice(0, 2000) : undefined,
-          contextJson: JSON.stringify({ message, stack, file, lineno, colno }),
-        },
+      await db.insert(requestLogs).values({
+        id: crypto.randomUUID(),
+        projectId: projectId || "",
+        taskType: "preview-error",
+        modelUsed: "runtime-preview",
+        provider: null,
+        latencyMs: 0,
+        tokens: 0,
+        success: false,
+        errorMessage: message ? String(message).slice(0, 2000) : undefined,
+        contextJson: JSON.stringify({ message, stack, file, lineno, colno }),
       })
     } catch {
       // ignore logging errors
     }
 
-    // Load a small set of relevant files for context
-    const projectFiles = await prisma.projectFile.findMany({ where: { projectId }, select: { path: true, content: true } })
+    const projectFilesData: Array<{ path: string; content: string }> = await db.query.projectFiles.findMany({
+      where: eq(projectFiles.projectId, projectId),
+    })
     const { files: visibleProjectFiles } = splitWorkspaceStateFiles(
-      projectFiles.map((projectFile) => ({
+      projectFilesData.map((projectFile) => ({
         path: projectFile.path,
         content: projectFile.content,
         language: projectFile.path.endsWith(".tsx") ? ("tsx" as const) : ("ts" as const),

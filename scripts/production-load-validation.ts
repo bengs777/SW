@@ -42,7 +42,7 @@ async function main() {
   loadLocalEnv()
   process.env.AI_MAX_RETRIES = process.env.AI_MAX_RETRIES || "0"
 
-  const { prisma } = await import("@/lib/db/client")
+  const { db } = await import("@/lib/db/client")
   const { getGenerationQueueHealth } = await import("@/lib/queue/generation-queue")
   const { ProviderRouter } = await import("@/lib/ai/provider-router")
   const { DEFAULT_SWIFT_TIER_KEY, getSwiftModelTargets, getActiveSwiftModelChain } = await import("@/lib/ai/swift-tiers")
@@ -75,7 +75,8 @@ async function main() {
       Array.from({ length: concurrency }, async (_item, index) => {
         const startedAt = Date.now()
         const dbStartedAt = Date.now()
-        await prisma.$queryRaw`SELECT 1`
+        const { sql } = await import("drizzle-orm")
+        await db.all(sql`SELECT 1`)
         const dbLatencyMs = Date.now() - dbStartedAt
 
         const queueStartedAt = Date.now()
@@ -240,7 +241,6 @@ async function main() {
   await writeFile(path.join(REPORT_ROOT, "latest.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   console.log(JSON.stringify(summary, null, 2))
   await loadWorker?.close().catch(() => null)
-  await prisma.$disconnect()
   process.exit(targetPass ? 0 : 2)
 }
 

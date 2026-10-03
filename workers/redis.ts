@@ -27,6 +27,11 @@ export function getRedisConnection(): IORedis {
     enableReadyCheck: false,
     ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
     retryStrategy: (times) => {
+      const maxRetries = 10
+      if (times > maxRetries) {
+        console.error(`[Redis] Max retries (${maxRetries}) exceeded, giving up`)
+        return null
+      }
       const delay = Math.min(times * 50, 2000)
       console.log(`[Redis] Retrying connection in ${delay}ms (attempt ${times})`)
       return delay

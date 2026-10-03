@@ -13,14 +13,15 @@ import {
   Sparkles,
   Wallet,
 } from "lucide-react"
-import { auth } from "@/auth"
+import { getSession } from "@/auth"
 import { ProjectList } from "@/components/dashboard/project-list"
 import { NewProjectTrigger } from "@/components/dashboard/new-project-trigger"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { isMissingRequiredTableError, shouldSoftFailMissingTable } from "@/lib/db/errors"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { users, usageLogs as usageLogsTable, workspaceMembers, workspaces } from "@/lib/db/schema"
+import { eq, desc } from "drizzle-orm"
 import { cn } from "@/lib/utils"
 
 type DashboardUsageLog = {
@@ -40,9 +41,9 @@ type DashboardWorkspaceOption = {
 }
 
 export default async function DashboardPage() {
-  const session = await auth()
+  const session = await getSession()
 
-  if (!session?.user?.email) {
+  if (!session?.email) {
     redirect("/login")
   }
 
@@ -52,9 +53,9 @@ export default async function DashboardPage() {
   let hasDataWarning = false
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { email: session.user.email },
-      select: {
+    const user = await db.query.users.findFirst({
+      where: eq(users.email, session.email),
+      columns: {
         id: true,
         balance: true,
       },
@@ -64,11 +65,11 @@ export default async function DashboardPage() {
       balance = user.balance
 
       const [usageLogsResult, membershipsResult] = await Promise.allSettled([
-        prisma.usageLog.findMany({
-          where: { userId: user.id },
-          orderBy: { createdAt: "desc" },
-          take: 10,
-          select: {
+        db.query.usageLogs.findMany({
+          where: eq(usageLogsTable.userId, user.id),
+          orderBy: desc(usageLogsTable.createdAt),
+          limit: 10,
+          columns: {
             id: true,
             model: true,
             provider: true,
@@ -79,11 +80,11 @@ export default async function DashboardPage() {
             createdAt: true,
           },
         }),
-        prisma.workspaceMember.findMany({
-          where: { userId: user.id },
-          include: {
+        db.query.workspaceMembers.findMany({
+          where: eq(workspaceMembers.userId, user.id),
+          with: {
             workspace: {
-              select: {
+              columns: {
                 id: true,
                 name: true,
               },
@@ -100,7 +101,7 @@ export default async function DashboardPage() {
       }
 
       if (membershipsResult.status === "fulfilled") {
-        workspaceOptions = membershipsResult.value.map((membership) => ({
+        workspaceOptions = (membershipsResult.value as unknown as Array<{ workspace: { id: string; name: string } }>).map((membership) => ({
           id: membership.workspace.id,
           name: membership.workspace.name,
         }))
@@ -113,11 +114,6 @@ export default async function DashboardPage() {
     }
   } catch (error) {
     hasDataWarning = true
-
-    if (isMissingRequiredTableError(error) && !shouldSoftFailMissingTable()) {
-      throw error
-    }
-
     console.error("[dashboard] Failed to load dashboard data:", error)
   }
 

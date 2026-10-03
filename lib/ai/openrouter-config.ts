@@ -2,13 +2,12 @@ import { env } from "@/lib/env"
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 export const OPENROUTER_PROVIDER = "openrouter"
-export const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-31b-it:free"
+export const OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat-v3.1:free"
 export const OPENROUTER_DEFAULT_FALLBACK_MODELS: string[] = [
-  "nvidia/nemotron-nano-9b-v2:free",
-  "nvidia/nemotron-3-nano-30b-a3b:free",
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "deepseek/deepseek-chat-v3.1:free",
+  "qwen/qwen3-coder:free",
+  "moonshotai/kimi-k2:free",
+  "openai/gpt-oss-20b:free",
 ]
 const OPENROUTER_FALLBACK_ENV_KEYS: string[] = []
 export const PUBLIC_AI_NAME = "Swift AI"
@@ -69,7 +68,7 @@ function assertProductionModelConfig(modelIds: string[]) {
 export function getOpenRouterModel() {
   const [firstChainModel] = configuredModelChainFromEnv()
   return normalizeOpenRouterModelId(
-    process.env.OPENROUTER_MODEL || firstChainModel || OPENROUTER_DEFAULT_MODEL
+    process.env.OPENROUTER_MODEL || process.env.OPENROUTER_DEFAULT_MODEL || firstChainModel || OPENROUTER_DEFAULT_MODEL
   )
 }
 

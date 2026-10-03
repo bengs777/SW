@@ -1,4 +1,6 @@
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationHistory } from "@/lib/db/schema"
+import { eq, and, inArray, asc } from "drizzle-orm"
 import type { GeneratedFile } from "@/lib/types"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
@@ -13,10 +15,10 @@ export type ProjectVersionSummary = {
 }
 
 export async function listProjectVersions(projectId: string): Promise<ProjectVersionSummary[]> {
-  const histories = await prisma.generationHistory.findMany({
-    where: { projectId },
-    orderBy: { createdAt: "asc" },
-    select: { id: true, prompt: true, result: true, createdAt: true },
+  const histories = await db.query.generationHistory.findMany({
+    where: eq(generationHistory.projectId, projectId),
+    orderBy: [asc(generationHistory.createdAt)],
+    columns: { id: true, prompt: true, result: true, createdAt: true },
   })
 
   return histories.map((history, index) => ({
@@ -54,9 +56,12 @@ export async function rollbackProjectVersion(input: {
   historyId: string
   reason: string
 }) {
-  const target = await prisma.generationHistory.findFirst({
-    where: { id: input.historyId, projectId: input.projectId },
-    select: { id: true, prompt: true, result: true, createdAt: true },
+  const target = await db.query.generationHistory.findFirst({
+    where: and(
+      eq(generationHistory.id, input.historyId),
+      eq(generationHistory.projectId, input.projectId)
+    ),
+    columns: { id: true, prompt: true, result: true, createdAt: true },
   })
   if (!target) throw new Error("Project version not found.")
 
@@ -76,12 +81,12 @@ export async function compareProjectVersions(input: {
   fromHistoryId: string
   toHistoryId: string
 }) {
-  const versions = await prisma.generationHistory.findMany({
-    where: {
-      projectId: input.projectId,
-      id: { in: [input.fromHistoryId, input.toHistoryId] },
-    },
-    select: { id: true, result: true },
+  const versions = await db.query.generationHistory.findMany({
+    where: and(
+      eq(generationHistory.projectId, input.projectId),
+      inArray(generationHistory.id, [input.fromHistoryId, input.toHistoryId])
+    ),
+    columns: { id: true, result: true },
   })
   const from = versions.find((item) => item.id === input.fromHistoryId)
   const to = versions.find((item) => item.id === input.toHistoryId)

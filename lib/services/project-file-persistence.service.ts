@@ -1,9 +1,11 @@
-import type { Prisma } from "@prisma/client"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationHistory, generationJobs, projects } from "@/lib/db/schema"
+import { eq, and, desc, notInArray, sql } from "drizzle-orm"
 import { withDatabaseWriteRetry } from "@/lib/db/errors"
 import { log } from "@/lib/logging"
 import {
   ProjectFilesystemService,
+  type DbClient,
   type ProjectFileDiff,
   type ProjectFileManifest,
 } from "@/lib/services/project-filesystem.service"
@@ -17,11 +19,6 @@ type PersistProjectFilesOptions = {
   projectMemoryJson?: string | null
   tokensUsed?: number | null
   generationJobId?: string | null
-}
-
-const PERSISTENCE_TRANSACTION_OPTIONS = {
-  maxWait: 15_000,
-  timeout: 30_000,
 }
 
 export class ProjectFilePersistenceService {
@@ -46,78 +43,95 @@ export class ProjectFilePersistenceService {
 
     try {
       return await withDatabaseWriteRetry(() =>
-        prisma.$transaction(async (tx) => {
-        if (opts?.generationJobId) {
-          await assertLatestProjectGeneration(tx, projectId, opts.generationJobId)
-        }
+        db.transaction(async (tx) => {
+          if (opts?.generationJobId) {
+            await assertLatestProjectGeneration(tx, projectId, opts.generationJobId)
+          }
 
-        const historyData = {
-          prompt,
-          result: JSON.stringify(normalizedFiles),
-          tokensUsed: opts?.tokensUsed ?? 0,
-          cost: opts?.cost ?? 0,
-          intent: opts?.intent || null,
-          usedAutoRepair: Boolean(opts?.usedAutoRepair),
-        }
+          const historyData = {
+            prompt,
+            result: JSON.stringify(normalizedFiles),
+            tokensUsed: opts?.tokensUsed ?? 0,
+            cost: opts?.cost ?? 0,
+            intent: opts?.intent || null,
+            usedAutoRepair: Boolean(opts?.usedAutoRepair),
+          }
 
-        const createdHistory = opts?.idempotencyKey
-          ? await tx.generationHistory.upsert({
-              where: {
-                projectId_idempotencyKey: {
+          let createdHistory
+          if (opts?.idempotencyKey) {
+            const existing = await tx.select().from(generationHistory)
+              .where(and(
+                eq(generationHistory.projectId, projectId),
+                eq(generationHistory.idempotencyKey, opts.idempotencyKey)
+              ))
+              .limit(1)
+
+            if (existing.length > 0) {
+              const result = await tx.update(generationHistory)
+                .set(historyData)
+                .where(and(
+                  eq(generationHistory.projectId, projectId),
+                  eq(generationHistory.idempotencyKey, opts.idempotencyKey)
+                ))
+                .returning()
+              createdHistory = result[0]
+            } else {
+              const result = await tx.insert(generationHistory)
+                .values({
+                  id: crypto.randomUUID(),
                   projectId,
                   idempotencyKey: opts.idempotencyKey,
-                },
-              },
-              create: {
-                projectId,
-                idempotencyKey: opts.idempotencyKey,
-                ...historyData,
-              },
-              update: historyData,
-            })
-          : await tx.generationHistory.create({
-              data: {
+                  ...historyData,
+                })
+                .returning()
+              createdHistory = result[0]
+            }
+          } else {
+            const result = await tx.insert(generationHistory)
+              .values({
+                id: crypto.randomUUID(),
                 projectId,
                 ...historyData,
-              },
+              })
+              .returning()
+            createdHistory = result[0]
+          }
+
+          const filesystemWrite = await ProjectFilesystemService.replaceFiles({
+            projectId,
+            files: normalizedFiles,
+            tx,
+          })
+
+          const endedAt = Date.now()
+          log("info", "files_written", {
+            event: "files_written",
+            jobId: opts?.generationJobId || null,
+            projectId,
+            startedAt: new Date(startedAt).toISOString(),
+            endedAt: new Date(endedAt).toISOString(),
+            durationMs: endedAt - startedAt,
+            historyId: createdHistory.id,
+            fileCount: filesystemWrite.files.length,
+            fileDiff: filesystemWrite.fileDiff,
+            manifest: filesystemWrite.manifest,
+          })
+
+          await tx.update(projects)
+            .set({
+              prompt,
+              ...(opts?.projectMemoryJson ? { memoryJson: opts.projectMemoryJson } : {}),
             })
+            .where(eq(projects.id, projectId))
 
-        const filesystemWrite = await ProjectFilesystemService.replaceFiles({
-          projectId,
-          files: normalizedFiles,
-          tx,
+          return {
+            historyId: createdHistory.id,
+            files: filesystemWrite.files,
+            fileDiff: filesystemWrite.fileDiff,
+            integrity: filesystemWrite.manifest,
+            manifest: filesystemWrite.manifest,
+          }
         })
-
-        const endedAt = Date.now()
-        log("info", "files_written", {
-          event: "files_written",
-          jobId: opts?.generationJobId || null,
-          projectId,
-          startedAt: new Date(startedAt).toISOString(),
-          endedAt: new Date(endedAt).toISOString(),
-          durationMs: endedAt - startedAt,
-          historyId: createdHistory.id,
-          fileCount: filesystemWrite.files.length,
-          fileDiff: filesystemWrite.fileDiff,
-          manifest: filesystemWrite.manifest,
-        })
-
-        await tx.project.update({
-          where: { id: projectId },
-          data: {
-            prompt,
-            ...(opts?.projectMemoryJson ? { memoryJson: opts.projectMemoryJson } : {}),
-          },
-        })
-
-        return {
-          historyId: createdHistory.id,
-          files: filesystemWrite.files,
-          fileDiff: filesystemWrite.fileDiff,
-          integrity: filesystemWrite.manifest,
-          manifest: filesystemWrite.manifest,
-        }
-        }, PERSISTENCE_TRANSACTION_OPTIONS)
       )
     } catch (error) {
       log("error", "project_files_persistence_failed", {
@@ -159,34 +173,35 @@ export class ProjectFilePersistenceService {
 }
 
 async function assertLatestProjectGeneration(
-  tx: Prisma.TransactionClient,
+  tx: DbClient,
   projectId: string,
   generationJobId: string
 ) {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${projectId}))`
+  const currentJobResult = await tx.select({ id: generationJobs.id, createdAt: generationJobs.createdAt })
+    .from(generationJobs)
+    .where(eq(generationJobs.id, generationJobId))
+    .limit(1)
 
-  const currentJob = await tx.generationJob.findUnique({
-    where: { id: generationJobId },
-    select: { id: true, createdAt: true },
-  })
+  const currentJob = currentJobResult[0]
   if (!currentJob) {
     throw new Error("Generation job not found for persistence guard.")
   }
 
-  const newerJob = await tx.generationJob.findFirst({
-    where: {
-      projectId,
-      createdAt: { gt: currentJob.createdAt },
-      status: { notIn: ["failed", "cancelled"] },
-    },
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      status: true,
-      stage: true,
-      createdAt: true,
-    },
-  })
+  const newerJobResult = await tx.select({
+    id: generationJobs.id,
+    status: generationJobs.status,
+    stage: generationJobs.stage,
+    createdAt: generationJobs.createdAt,
+  }).from(generationJobs)
+    .where(and(
+      eq(generationJobs.projectId, projectId),
+      sql`${generationJobs.createdAt} > ${currentJob.createdAt}`,
+      notInArray(generationJobs.status, ["failed", "cancelled"])
+    ))
+    .orderBy(desc(generationJobs.createdAt))
+    .limit(1)
+
+  const newerJob = newerJobResult[0]
 
   if (newerJob) {
     throw new Error(`StaleGenerationRejected: newer generation ${newerJob.id} is ${newerJob.status}/${newerJob.stage}.`)

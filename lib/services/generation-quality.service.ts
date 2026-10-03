@@ -1,4 +1,6 @@
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationQualityMetrics } from "@/lib/db/schema"
+import { eq, and, gte, desc, sql } from "drizzle-orm"
 import { log } from "@/lib/logging"
 
 export type GenerationQualityStage =
@@ -100,16 +102,25 @@ export class GenerationQualityService {
       metadataJson: safeStringify(input.metadata),
     }
 
-    const metric = await prisma.generationQualityMetric.upsert({
-      where: { jobId: input.jobId },
-      create: {
-        jobId: input.jobId,
-        ...data,
-      },
-      update: data,
-    })
+    const existing = await db.select().from(generationQualityMetrics)
+      .where(eq(generationQualityMetrics.jobId, input.jobId))
+      .limit(1)
 
-    log("info", "Generation quality metric recorded", {
+    let metric
+    if (existing.length > 0) {
+      const result = await db.update(generationQualityMetrics)
+        .set(data)
+        .where(eq(generationQualityMetrics.jobId, input.jobId))
+        .returning()
+      metric = result[0]
+    } else {
+      const result = await db.insert(generationQualityMetrics)
+        .values({ id: crypto.randomUUID(), jobId: input.jobId, ...data })
+        .returning()
+      metric = result[0]
+    }
+
+    log("info", "generation_quality_metric_recorded", {
       jobId: input.jobId,
       projectId: input.projectId,
       appType: input.appType,
@@ -127,26 +138,22 @@ export class GenerationQualityService {
 
   static async summarizeRecent(days = 7) {
     const since = new Date(Date.now() - Math.max(1, days) * 24 * 60 * 60 * 1000)
-    const metrics = await prisma.generationQualityMetric.findMany({
-      where: {
-        createdAt: { gte: since },
-      },
-      select: {
-        appType: true,
-        status: true,
-        failureStage: true,
-        failureCode: true,
-        buildPassed: true,
-        runtimePassed: true,
-        repairSucceeded: true,
-        deployValidated: true,
-        repairAttempts: true,
-        totalLatencyMs: true,
-        totalTokens: true,
-      estimatedCost: true,
-      metadataJson: true,
-    },
-    })
+    const metrics = await db.select({
+      appType: generationQualityMetrics.appType,
+      status: generationQualityMetrics.status,
+      failureStage: generationQualityMetrics.failureStage,
+      failureCode: generationQualityMetrics.failureCode,
+      buildPassed: generationQualityMetrics.buildPassed,
+      runtimePassed: generationQualityMetrics.runtimePassed,
+      repairSucceeded: generationQualityMetrics.repairSucceeded,
+      deployValidated: generationQualityMetrics.deployValidated,
+      repairAttempts: generationQualityMetrics.repairAttempts,
+      totalLatencyMs: generationQualityMetrics.totalLatencyMs,
+      totalTokens: generationQualityMetrics.totalTokens,
+      estimatedCost: generationQualityMetrics.estimatedCost,
+      metadataJson: generationQualityMetrics.metadataJson,
+    }).from(generationQualityMetrics)
+      .where(gte(generationQualityMetrics.createdAt, since))
 
     const total = metrics.length
     const completed = metrics.filter((metric) => metric.status === "completed").length
@@ -192,31 +199,29 @@ export class GenerationQualityService {
     failureCode?: string | null
     metadata?: Record<string, unknown> | null
   }) {
-    const latest = await prisma.generationQualityMetric.findFirst({
-      where: {
-        projectId: input.projectId,
-      },
-      orderBy: { createdAt: "desc" },
-    })
+    const latest = await db.select().from(generationQualityMetrics)
+      .where(eq(generationQualityMetrics.projectId, input.projectId))
+      .orderBy(desc(generationQualityMetrics.createdAt))
+      .limit(1)
 
-    if (!latest) return null
+    if (latest.length === 0) return null
 
-    return prisma.generationQualityMetric.update({
-      where: { id: latest.id },
-      data: {
+    return db.update(generationQualityMetrics)
+      .set({
         deployValidated: input.success,
-        failureStage: input.success ? latest.failureStage : "deploy",
-        failureCode: input.success ? latest.failureCode : input.failureCode || "deploy_failed",
+        failureStage: input.success ? latest[0].failureStage : "deploy",
+        failureCode: input.success ? latest[0].failureCode : input.failureCode || "deploy_failed",
         metadataJson: safeStringify({
-          previous: parseJsonObject(latest.metadataJson),
+          previous: parseJsonObject(latest[0].metadataJson),
           deploy: {
             success: input.success,
             checkedAt: new Date().toISOString(),
             ...(input.metadata || {}),
           },
         }),
-      },
-    })
+      })
+      .where(eq(generationQualityMetrics.id, latest[0].id))
+      .returning()
   }
 }
 

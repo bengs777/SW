@@ -1,4 +1,6 @@
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationJobs } from "@/lib/db/schema"
+import { and, eq, notInArray, inArray, lt, isNotNull, sql } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { MIN_GENERATION_JOB_TIMEOUT_MS, timeoutConfig } from "@/lib/timeouts"
 import { captureException } from "@/lib/observability"
@@ -38,12 +40,9 @@ function parseBillingContext(contextJson: string | null) {
 
 async function reconcileTerminalStatusDrift() {
   const now = new Date()
-  const deadLettered = await prisma.generationJob.updateMany({
-    where: {
-      deadLetteredAt: { not: null },
-      status: { not: "dead_lettered" },
-    },
-    data: {
+
+  const deadLettered = await db.update(generationJobs)
+    .set({
       status: "dead_lettered",
       orchestrationState: "dead_lettered",
       stage: "failed",
@@ -51,14 +50,15 @@ async function reconcileTerminalStatusDrift() {
       terminatedAt: now,
       leaseOwner: null,
       leaseExpiresAt: null,
-    },
-  })
-  const failed = await prisma.generationJob.updateMany({
-    where: {
-      failedAt: { not: null },
-      status: { notIn: TERMINAL_STATUS_VALUES },
-    },
-    data: {
+    })
+    .where(and(
+      isNotNull(generationJobs.deadLetteredAt),
+      sql`${generationJobs.status} != 'dead_lettered'`
+    ))
+    .returning()
+
+  const failed = await db.update(generationJobs)
+    .set({
       status: "failed",
       orchestrationState: "terminated",
       stage: "failed",
@@ -66,14 +66,15 @@ async function reconcileTerminalStatusDrift() {
       terminatedAt: now,
       leaseOwner: null,
       leaseExpiresAt: null,
-    },
-  })
-  const cancelled = await prisma.generationJob.updateMany({
-    where: {
-      cancelledAt: { not: null },
-      status: { notIn: TERMINAL_STATUS_VALUES },
-    },
-    data: {
+    })
+    .where(and(
+      isNotNull(generationJobs.failedAt),
+      notInArray(generationJobs.status, TERMINAL_STATUS_VALUES)
+    ))
+    .returning()
+
+  const cancelled = await db.update(generationJobs)
+    .set({
       status: "cancelled",
       orchestrationState: "terminated",
       stage: "cancelled",
@@ -81,14 +82,18 @@ async function reconcileTerminalStatusDrift() {
       terminatedAt: now,
       leaseOwner: null,
       leaseExpiresAt: null,
-    },
-  })
+    })
+    .where(and(
+      isNotNull(generationJobs.cancelledAt),
+      notInArray(generationJobs.status, TERMINAL_STATUS_VALUES)
+    ))
+    .returning()
 
-  if (deadLettered.count > 0 || failed.count > 0 || cancelled.count > 0) {
+  if (deadLettered.length > 0 || failed.length > 0 || cancelled.length > 0) {
     log("warn", "terminal_generation_status_drift_reconciled", {
-      deadLettered: deadLettered.count,
-      failed: failed.count,
-      cancelled: cancelled.count,
+      deadLettered: deadLettered.length,
+      failed: failed.length,
+      cancelled: cancelled.length,
     })
   }
 }
@@ -101,18 +106,13 @@ export async function reconcileStaleGenerationJobs() {
   })
   await reconcileTerminalStatusDrift()
   const cutoff = new Date(Date.now() - STALE_GENERATION_TIMEOUT_MS)
-  const staleJobs = await prisma.generationJob.findMany({
-    where: {
-      status: {
-        in: ["queued", "running", "cancelling"],
-      },
-      updatedAt: {
-        lt: cutoff,
-      },
-    },
-    take: 25,
-    orderBy: { updatedAt: "asc" },
-  })
+  const staleJobs = await db.select().from(generationJobs)
+    .where(and(
+      inArray(generationJobs.status, ["queued", "running", "cancelling"]),
+      lt(generationJobs.updatedAt, cutoff)
+    ))
+    .orderBy(generationJobs.updatedAt)
+    .limit(25)
 
   for (const job of staleJobs) {
     const message = `Generation timed out after worker recovery window (${Math.round(STALE_GENERATION_TIMEOUT_MS / 1000)}s)`

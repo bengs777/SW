@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { auth } from '@/auth'
-import { prisma } from '@/lib/db/client'
+import { getSession } from '@/auth'
+import { db } from '@/lib/db/client'
+import { users } from '@/lib/db/schema'
+import { eq } from 'drizzle-orm'
 import { WorkspaceService } from '@/lib/services/workspace.service'
+import { enforceRouteRateLimit } from '@/lib/security/rate-limit'
 
 const AddMemberSchema = z.object({
   email: z.string().trim().email(),
@@ -17,18 +20,17 @@ export async function GET(
   request: NextRequest,
   { params }: RouteContext
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   try {
     const { id: workspaceId } = await params
 
-    // Check if user is member of workspace
     const membership = await WorkspaceService.checkMembership(
       workspaceId,
-      session.user.id
+      session.userId
     )
 
     if (!membership) {
@@ -53,19 +55,24 @@ export async function POST(
   request: NextRequest,
   { params }: RouteContext
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`workspace-member-add:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429 })
   }
 
   try {
     const { id: workspaceId } = await params
     const { email, role } = AddMemberSchema.parse(await request.json())
 
-    // Check if user is admin of workspace
     const membership = await WorkspaceService.checkMembership(
       workspaceId,
-      session.user.id
+      session.userId
     )
 
     if (!membership || membership.role !== 'admin') {
@@ -75,9 +82,8 @@ export async function POST(
       )
     }
 
-    // Find user by email
-    const user = await prisma.user.findUnique({
-      where: { email },
+    const user = await db.query.users.findFirst({
+      where: eq(users.email, email),
     })
 
     if (!user) {

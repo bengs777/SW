@@ -1,4 +1,6 @@
-import { prisma } from '@/lib/db/client'
+import { db } from '@/lib/db/client'
+import { apiKeys, workspaces } from '@/lib/db/schema'
+import { eq, desc } from 'drizzle-orm'
 import crypto from 'crypto'
 
 const API_KEY_PREFIX = 'swift'
@@ -20,96 +22,95 @@ export class ApiKeyService {
     const key = this.generateKey()
     const keyHash = this.hashKey(key)
 
-    const apiKey = await prisma.apiKey.create({
-      data: {
-        workspaceId,
-        name,
-        key: keyHash,
-        expiresAt,
-      },
-    })
+    const result = await db.insert(apiKeys).values({
+      id: crypto.randomUUID(),
+      workspaceId,
+      name,
+      key: keyHash,
+      expiresAt,
+    }).returning()
 
     return {
-      ...apiKey,
+      ...result[0],
       key,
     }
   }
 
   static async getApiKeys(workspaceId: string) {
-    return prisma.apiKey.findMany({
-      where: { workspaceId },
-      select: {
-        id: true,
-        name: true,
-        key: false, // Don't return the full key
-        createdAt: true,
-        lastUsed: true,
-        expiresAt: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    })
+    return db.select({
+      id: apiKeys.id,
+      name: apiKeys.name,
+      createdAt: apiKeys.createdAt,
+      lastUsed: apiKeys.lastUsed,
+      expiresAt: apiKeys.expiresAt,
+    }).from(apiKeys)
+      .where(eq(apiKeys.workspaceId, workspaceId))
+      .orderBy(desc(apiKeys.createdAt))
   }
 
   static async getApiKeyByKey(key: string) {
     const keyHash = this.hashKey(key)
-    const hashedKey = await prisma.apiKey.findUnique({
-      where: { key: keyHash },
-      include: {
-        workspace: true,
-      },
-    })
+    const hashedKey = await db.select().from(apiKeys)
+      .where(eq(apiKeys.key, keyHash))
+      .limit(1)
 
-    if (hashedKey) {
-      return hashedKey
+    if (hashedKey.length > 0) {
+      const workspace = await db.select().from(workspaces)
+        .where(eq(workspaces.id, hashedKey[0].workspaceId))
+        .limit(1)
+      return { ...hashedKey[0], workspace: workspace[0] }
     }
 
-    return prisma.apiKey.findUnique({
-      where: { key },
-      include: {
-        workspace: true,
-      },
-    })
+    const plainKey = await db.select().from(apiKeys)
+      .where(eq(apiKeys.key, key))
+      .limit(1)
+
+    if (plainKey.length > 0) {
+      const workspace = await db.select().from(workspaces)
+        .where(eq(workspaces.id, plainKey[0].workspaceId))
+        .limit(1)
+      return { ...plainKey[0], workspace: workspace[0] }
+    }
+
+    return null
   }
 
   static async updateLastUsed(apiKeyId: string) {
-    return prisma.apiKey.update({
-      where: { id: apiKeyId },
-      data: { lastUsed: new Date() },
-    })
+    return db.update(apiKeys)
+      .set({ lastUsed: new Date() })
+      .where(eq(apiKeys.id, apiKeyId))
+      .returning()
   }
 
   static async deleteApiKey(apiKeyId: string) {
-    return prisma.apiKey.delete({
-      where: { id: apiKeyId },
-    })
+    return db.delete(apiKeys)
+      .where(eq(apiKeys.id, apiKeyId))
+      .returning()
   }
 
   static async rotateApiKey(apiKeyId: string) {
-    const oldKey = await prisma.apiKey.findUnique({
-      where: { id: apiKeyId },
-    })
+    const oldKey = await db.select().from(apiKeys)
+      .where(eq(apiKeys.id, apiKeyId))
+      .limit(1)
 
-    if (!oldKey) {
+    if (oldKey.length === 0) {
       throw new Error('API key not found')
     }
 
-    // Delete old key and create new one
-    await prisma.apiKey.delete({
-      where: { id: apiKeyId },
-    })
+    await db.delete(apiKeys)
+      .where(eq(apiKeys.id, apiKeyId))
 
     const newKey = this.generateKey()
     const newKeyHash = this.hashKey(newKey)
-    const apiKey = await prisma.apiKey.create({
-      data: {
-        workspaceId: oldKey.workspaceId,
-        name: oldKey.name,
-        key: newKeyHash,
-      },
-    })
+    const apiKey = await db.insert(apiKeys).values({
+      id: crypto.randomUUID(),
+      workspaceId: oldKey[0].workspaceId,
+      name: oldKey[0].name,
+      key: newKeyHash,
+    }).returning()
 
     return {
-      ...apiKey,
+      ...apiKey[0],
       key: newKey,
     }
   }

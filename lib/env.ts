@@ -34,6 +34,15 @@ const getEnvNumber = (fallback: number, ...keys: string[]) => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+const getEnvBoolean = (fallback: boolean, ...keys: string[]) => {
+  const value = getEnv(...keys)
+  if (!value) {
+    return fallback
+  }
+
+  return value === "true" || value === "1"
+}
+
 const normalizeTokenLimit = (value: number) => {
   const rounded = Math.round(value)
   if (!Number.isFinite(rounded)) {
@@ -94,26 +103,27 @@ const normalizeAppUrl = (value: string) => {
 }
 
 const DEV_OWNER_EMAIL = getEnv("DEV_OWNER_EMAIL") || "ibnualmugni1933@gmail.com"
-const databaseUrl = getEnv("DATABASE_URL")
-const directDatabaseUrl = getEnv("DIRECT_DATABASE_URL", "DIRECT_URL", "POSTGRES_URL_NON_POOLING")
+const tursoDatabaseUrl = getEnv("TURSO_DATABASE_URL")
+const tursoAuthToken = getEnv("TURSO_AUTH_TOKEN")
 const supabaseUrl = getEnv("NEXT_PUBLIC_SUPABASE_URL")
 const supabasePublicAnonKey = getEnv(
   "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY",
+  "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
   "NEXT_PUBLIC_SUPABASE_ANON_KEY"
 )
 const supabaseServiceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY")
 const supabaseStorageBucket = getEnv("SUPABASE_STORAGE_BUCKET")
-const sandboxServiceUrl = normalizeUrl(getEnv("SANDBOX_SERVICE_URL"))
-const sandboxServiceToken = getEnv("SANDBOX_SERVICE_TOKEN")
+const sandboxServiceUrl = normalizeUrl(getEnv("SANDBOX_API_URL", "SANDBOX_SERVICE_URL"))
+const sandboxServiceToken = getEnv("SANDBOX_API_KEY", "SANDBOX_SERVICE_TOKEN")
 const workerHealthUrl = normalizeWorkerHealthUrl(getEnv("SWIFT_WORKER_HEALTH_URL", "WORKER_HEALTH_URL"))
 const redisUrl = getEnv("REDIS_URL", "UPSTASH_REDIS_URL")
 const upstashRedisRestUrl = normalizeUrl(getEnv("UPSTASH_REDIS_REST_URL"))
 const upstashRedisRestToken = getEnv("UPSTASH_REDIS_REST_TOKEN")
 const verdiTeamId = getEnv("VERDI_TEAM")
-const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN")
-const swiftFallbackModel1 = getEnv("SWIFT_FALLBACK_MODEL_1")
+const verproDeployToken = getEnv("VERPRO_ACCES_TOKEN", "VERCEL_TOKEN")
 const aiGatewayDefaultBaseUrl = "https://openrouter.ai/api/v1"
-const openRouterModel = getEnv("OPENROUTER_MODEL") || "google/gemma-4-31b-it:free"
+const openRouterModel = getEnv("OPENROUTER_MODEL", "OPENROUTER_DEFAULT_MODEL") || "deepseek/deepseek-chat-v3.1:free"
+const openRouterFallbackModels = getEnvList("OPENROUTER_FALLBACK_MODELS", "SWIFT_AI_MODEL_CHAIN")
 const swiftAiProviderName = getEnv("SWIFT_AI_PROVIDER_NAME") || "openrouter"
 const nativeRedisUrlPattern = /^rediss?:\/\//i
 const hasNativeRedisConfig = nativeRedisUrlPattern.test(redisUrl)
@@ -142,12 +152,29 @@ export type EnvValidationReport = {
 
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
-  databaseUrl,
-  directDatabaseUrl,
-  nextAuthSecret: getEnv("NEXTAUTH_SECRET"),
-  nextAuthUrl: getEnv("NEXTAUTH_URL") || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : ""),
-  googleClientId: getEnv("GOOGLE_CLIENT_ID"),
-  googleClientSecret: getEnv("GOOGLE_CLIENT_SECRET"),
+
+  // Database (Turso)
+  tursoDatabaseUrl,
+  tursoAuthToken,
+
+  // Auth (Clerk)
+  clerkPublishableKey: getEnv("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"),
+  clerkSecretKey: getEnv("CLERK_SECRET_KEY"),
+
+  // GitHub
+  githubClientId: getEnv("GITHUB_CLIENT_ID"),
+  githubClientSecret: getEnv("GITHUB_CLIENT_SECRET"),
+  githubToken: getEnv("GITHUB_TOKEN"),
+
+  // Vercel
+  vercelToken: getEnv("VERCEL_TOKEN"),
+  vercelTeamId: getEnv("VERCEL_TEAM_ID"),
+
+  // Domain
+  rootDomain: getEnv("ROOT_DOMAIN") || "ai-swift.biz.id",
+  defaultSubdomainSuffix: getEnv("DEFAULT_SUBDOMAIN_SUFFIX") || ".ai-swift.biz.id",
+
+  // AI
   aiTimeoutMs: getEnvNumber(500_000, "AI_TIMEOUT_MS"),
   aiMaxRetries: Math.max(0, Math.round(getEnvNumber(2, "AI_MAX_RETRIES"))),
   aiMaxOutputTokens: normalizeTokenLimit(getEnvNumber(3000, "AI_MAX_OUTPUT_TOKENS", "OPENROUTER_MAX_TOKENS")),
@@ -159,36 +186,94 @@ export const env = {
   aiQueueTimeoutMs: Math.max(900_000, Math.round(getEnvNumber(900_000, "AI_QUEUE_TIMEOUT_MS"))),
   openRouterApiKey: getEnv("OPENROUTER_API_KEY"),
   openRouterModel,
+  openRouterFallbackModels,
   swiftAiProviderName,
-  swiftFallbackModel1,
   openRouterBaseUrl: normalizeUrl(getEnv("OPENROUTER_BASE_URL") || aiGatewayDefaultBaseUrl),
-  openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL") || "https://swift.biz.id"),
+  openRouterSiteUrl: normalizeAppUrl(getEnv("OPENROUTER_SITE_URL", "NEXT_PUBLIC_APP_URL", "APP_URL") || "https://ai-swift.biz.id"),
   openRouterAppName: getEnv("OPENROUTER_APP_NAME") || "Swift AI",
-  devOwnerEmail: DEV_OWNER_EMAIL,
+
+  // Supabase
   supabaseServiceRoleKey,
   supabasePublicAnonKey,
   supabaseAnonKey: getEnv("SUPABASE_ANON_KEY"),
   supabaseUrl,
   supabaseStorageBucket,
   supabaseBucket: supabaseStorageBucket,
+
+  // Redis
   redisUrl,
   upstashRedisRestUrl,
   upstashRedisRestToken,
   hasNativeRedisConfig,
   hasRedisRestConfig,
   hasRedisConfig,
+
+  // Sandbox
   sandboxServiceUrl,
   sandboxServiceToken,
-  workerHealthUrl,
   sandboxPublicBaseUrl: normalizeUrl(getEnv("SANDBOX_PUBLIC_BASE_URL")),
   sandboxRoot: getEnv("SWIFT_SANDBOX_ROOT"),
   sandboxBasePort: getEnvNumber(4300, "SWIFT_SANDBOX_BASE_PORT"),
   sandboxDatabaseUrl: getEnv("SWIFT_SANDBOX_DATABASE_URL"),
-  appUrl: normalizeAppUrl(getEnv("NEXT_PUBLIC_APP_URL", "APP_URL", "NEXTAUTH_URL", "VERCEL_URL") || "http://localhost:3000"),
+
+  // App
+  appName: getEnv("NEXT_PUBLIC_APP_NAME") || "Swift AI",
+  appUrl: normalizeAppUrl(getEnv("NEXT_PUBLIC_APP_URL", "APP_URL") || "http://localhost:3000"),
+  devOwnerEmail: DEV_OWNER_EMAIL,
+
+  // Payment
   pakasirSlug: getEnv("PAKASIR_SLUG", "PAKASIR_MERCHANT_ID"),
   pakasirApiKey: getEnv("PAKASIR_API_KEY"),
+  pakasirWebhookSecret: getEnv("PAKASIR_WEBHOOK_SECRET"),
+
+  // Email
+  resendApiKey: getEnv("RESEND_API_KEY"),
+  emailFrom: getEnv("EMAIL_FROM") || "noreply@ai-swift.biz.id",
+
+  // Deployment
+  defaultFramework: getEnv("DEFAULT_FRAMEWORK") || "nextjs",
+  defaultNodeVersion: getEnv("DEFAULT_NODE_VERSION") || "22",
+  defaultPackageManager: getEnv("DEFAULT_PACKAGE_MANAGER") || "npm",
+  buildTimeout: getEnvNumber(600, "BUILD_TIMEOUT"),
+
+  // Cache
+  cacheTtl: getEnvNumber(300, "CACHE_TTL"),
+
+  // Rate Limit
+  rateLimitPerMinute: getEnvNumber(30, "RATE_LIMIT_PER_MINUTE"),
+
+  // Security
+  encryptionKey: getEnv("ENCRYPTION_KEY"),
+  cronSecret: getEnv("CRON_SECRET"),
+
+  // Analytics
+  enableAnalytics: getEnvBoolean(true, "NEXT_PUBLIC_ENABLE_ANALYTICS"),
+
+  // Feature Flags
+  enableAiGenerate: getEnvBoolean(true, "ENABLE_AI_GENERATE"),
+  enableAiEdit: getEnvBoolean(true, "ENABLE_AI_EDIT"),
+  enableAiChat: getEnvBoolean(true, "ENABLE_AI_CHAT"),
+  enablePreview: getEnvBoolean(true, "ENABLE_PREVIEW"),
+  enableDeploy: getEnvBoolean(true, "ENABLE_DEPLOY"),
+  enableDownloadZip: getEnvBoolean(true, "ENABLE_DOWNLOAD_ZIP"),
+  enableGithubSync: getEnvBoolean(true, "ENABLE_GITHUB_SYNC"),
+  enableVersionHistory: getEnvBoolean(true, "ENABLE_VERSION_HISTORY"),
+  enableCustomDomain: getEnvBoolean(true, "ENABLE_CUSTOM_DOMAIN"),
+  enableTeams: getEnvBoolean(true, "ENABLE_TEAMS"),
+
+  // Preview
+  webcontainerEnabled: getEnvBoolean(true, "NEXT_PUBLIC_WEBCONTAINER_ENABLED"),
+
+  // Logging
+  logLevel: getEnv("LOG_LEVEL") || "info",
+
+  // Worker
+  workerHealthUrl,
+
+  // Verdi/Verpro
   verproAccessToken: verproDeployToken,
   verdiTeamId,
+
   // Crypto Payment
   cryptoPaymentPrivateKey: getEnv("CRYPTO_PAYMENT_PRIVATE_KEY"),
   cryptoPaymentAddress: getEnv("NEXT_PUBLIC_CRYPTO_PAYMENT_ADDRESS"),
@@ -204,20 +289,21 @@ export const env = {
 export function getMissingProductionEnvVars() {
   const missing: string[] = []
 
-  if (!env.databaseUrl) missing.push("DATABASE_URL")
-  if (!env.nextAuthSecret) missing.push("NEXTAUTH_SECRET")
-  if (!env.googleClientId) missing.push("GOOGLE_CLIENT_ID")
-  if (!env.googleClientSecret) missing.push("GOOGLE_CLIENT_SECRET")
+  if (!env.tursoDatabaseUrl) missing.push("TURSO_DATABASE_URL")
+  if (!env.tursoAuthToken) missing.push("TURSO_AUTH_TOKEN")
+  if (!env.clerkPublishableKey) missing.push("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY")
+  if (!env.clerkSecretKey) missing.push("CLERK_SECRET_KEY")
   if (!env.supabaseUrl) missing.push("NEXT_PUBLIC_SUPABASE_URL")
   if (!env.supabasePublicAnonKey) {
-    missing.push("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    missing.push("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY")
   }
   if (!env.supabaseServiceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY")
   if (!env.supabaseStorageBucket) missing.push("SUPABASE_STORAGE_BUCKET")
   if (!env.hasNativeRedisConfig) missing.push("REDIS_URL (native redis:// or rediss:// for BullMQ)")
-  if (!env.sandboxServiceUrl) missing.push("SANDBOX_SERVICE_URL")
-  if (!env.sandboxServiceToken) missing.push("SANDBOX_SERVICE_TOKEN")
-  if (!env.verdiTeamId) missing.push("VERDI_TEAM")
+  if (!env.sandboxServiceUrl) missing.push("SANDBOX_API_URL")
+  if (!env.sandboxServiceToken) missing.push("SANDBOX_API_KEY")
+  if (!env.vercelToken) missing.push("VERCEL_TOKEN")
+  if (!env.vercelTeamId) missing.push("VERCEL_TEAM_ID")
 
   if (!env.openRouterApiKey) missing.push("OPENROUTER_API_KEY")
 
@@ -242,51 +328,6 @@ function validateOptionalUrl(
   })
 }
 
-function validateOptionalPostgresUrl(
-  issues: EnvValidationIssue[],
-  key: string,
-  value: string,
-  isProduction: boolean,
-  options: { requirePooled?: boolean } = {}
-) {
-  if (!value) return
-
-  if (!/^postgres(?:ql)?:\/\//i.test(value)) {
-    issues.push({
-      key,
-      severity: "error",
-      message: `${key} must be a PostgreSQL connection string.`,
-    })
-    return
-  }
-
-  const parsed = urlSchema.safeParse(value)
-  if (!parsed.success) {
-    issues.push({
-      key,
-      severity: isProduction ? "error" : "warning",
-      message: `${key} must be a valid PostgreSQL URL.`,
-    })
-    return
-  }
-
-  if (options.requirePooled && isProduction && !/pooler\./i.test(new URL(value).hostname)) {
-    issues.push({
-      key,
-      severity: "warning",
-      message: `${key} should use Neon's pooled host for serverless runtime connections.`,
-    })
-  }
-
-  if (isProduction && !/[?&]sslmode=require\b/i.test(value) && !/\.neon\.tech/i.test(value)) {
-    issues.push({
-      key,
-      severity: "warning",
-      message: `${key} should require TLS for production PostgreSQL connections.`,
-    })
-  }
-}
-
 function validateSecret(
   issues: EnvValidationIssue[],
   key: string,
@@ -308,21 +349,6 @@ function validateSecret(
       key,
       severity: options.isProduction ? "error" : "warning",
       message: `${key} must be a non-placeholder secret with at least ${options.minLength} characters.`,
-    })
-  }
-}
-
-function validateLikelyGoogleClientId(
-  issues: EnvValidationIssue[],
-  value: string,
-  isProduction: boolean
-) {
-  if (!value) return
-  if (!/\.apps\.googleusercontent\.com$/i.test(value)) {
-    issues.push({
-      key: "GOOGLE_CLIENT_ID",
-      severity: isProduction ? "error" : "warning",
-      message: "GOOGLE_CLIENT_ID should be a Google OAuth client id ending in .apps.googleusercontent.com.",
     })
   }
 }
@@ -403,13 +429,11 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
     message: `${key} is required in production.`,
   }))
 
-  validateOptionalPostgresUrl(issues, "DATABASE_URL", env.databaseUrl, isProduction, { requirePooled: true })
-  validateOptionalPostgresUrl(issues, "DIRECT_DATABASE_URL / DIRECT_URL / POSTGRES_URL_NON_POOLING", env.directDatabaseUrl, isProduction)
-  validateSecret(issues, "NEXTAUTH_SECRET", env.nextAuthSecret, { minLength: 32, isProduction })
-  validateSecret(issues, "GOOGLE_CLIENT_SECRET", env.googleClientSecret, { minLength: 24, isProduction })
+  validateSecret(issues, "CLERK_SECRET_KEY", env.clerkSecretKey, { minLength: 20, isProduction })
   validateSecret(issues, "SUPABASE_SERVICE_ROLE_KEY", env.supabaseServiceRoleKey, { minLength: 32, isProduction })
   validateSecret(issues, "OPENROUTER_API_KEY", env.openRouterApiKey, { minLength: 20, isProduction })
-  validateLikelyGoogleClientId(issues, env.googleClientId, isProduction)
+  validateSecret(issues, "GITHUB_CLIENT_SECRET", env.githubClientSecret, { minLength: 20, isProduction })
+  validateSecret(issues, "VERCEL_TOKEN", env.vercelToken, { minLength: 20, isProduction })
 
   if (env.supabaseServiceRoleKey && env.supabasePublicAnonKey && env.supabaseServiceRoleKey === env.supabasePublicAnonKey) {
     issues.push({
@@ -419,12 +443,11 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
     })
   }
 
-  validateOptionalUrl(issues, "NEXTAUTH_URL", env.nextAuthUrl, isProduction)
-  validateOptionalUrl(issues, "NEXT_PUBLIC_APP_URL / APP_URL / NEXTAUTH_URL / VERCEL_URL", env.appUrl, isProduction)
+  validateOptionalUrl(issues, "NEXT_PUBLIC_APP_URL / APP_URL", env.appUrl, isProduction)
   validateOptionalUrl(issues, "OPENROUTER_BASE_URL", env.openRouterBaseUrl, isProduction)
   validateOptionalUrl(issues, "OPENROUTER_SITE_URL", env.openRouterSiteUrl, isProduction)
   validateOptionalUrl(issues, "NEXT_PUBLIC_SUPABASE_URL", env.supabaseUrl, isProduction)
-  validateOptionalUrl(issues, "SANDBOX_SERVICE_URL", env.sandboxServiceUrl, isProduction)
+  validateOptionalUrl(issues, "SANDBOX_API_URL", env.sandboxServiceUrl, isProduction)
   validateOptionalUrl(issues, "SANDBOX_PUBLIC_BASE_URL", env.sandboxPublicBaseUrl, isProduction)
   validateOptionalUrl(issues, "SWIFT_WORKER_HEALTH_URL / WORKER_HEALTH_URL", env.workerHealthUrl, isProduction)
   validateOptionalRedisUrl(issues, "REDIS_URL / UPSTASH_REDIS_URL", env.redisUrl, isProduction)
@@ -472,4 +495,4 @@ export function assertProductionEnvReady() {
   }
 }
 
-export { getEnv, getEnvList, getEnvNumber }
+export { getEnv, getEnvList, getEnvNumber, getEnvBoolean }

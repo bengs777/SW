@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects, projectFiles } from "@/lib/db/schema"
+import { eq, and, inArray } from "drizzle-orm"
 import { env } from "@/lib/env"
 import type { GeneratedFile } from "@/lib/types"
 import { UserService } from "@/lib/services/user.service"
 import { GenerationQualityService } from "@/lib/services/generation-quality.service"
 import { splitWorkspaceStateFiles, normalizeFileLanguage } from "@/lib/workspace-state"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 export const runtime = "nodejs"
 
@@ -518,24 +522,13 @@ const slugify = (value: string) =>
     .replace(/^-+|-+$/g, "") || "swift-project"
 
 const resolveProjectFiles = async (projectId: string, userId: string) => {
-  return prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: {
-            userId,
-            role: {
-              in: ["admin", "editor"],
-            },
-          },
-        },
-      },
-    },
-    include: {
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    with: {
       files: true,
     },
   })
+  return project
 }
 
 type VercelCreateDeploymentResponse = {
@@ -555,18 +548,29 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const featureCheck = assertFeatureEnabled("enableDeploy", "Deployment")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`project-deploy:${session.email}`, { maxPerMinute: 5, maxPerHour: 30 })
+  } catch {
+    return NextResponse.json({ error: "Too many deployment requests. Please wait." }, { status: 429 })
   }
 
   let projectIdForMetric: string | null = null
 
   try {
     const user = await UserService.createUserWithWorkspaceIfMissing(
-      session.user.email,
-      session.user.name ?? null,
-      session.user.image ?? null
+      session.email,
+      session.name ?? null,
+      session.image ?? null
     )
 
     if (!user) {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useSession } from "next-auth/react"
+import { useUser } from "@clerk/nextjs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -11,23 +11,23 @@ import { Spinner } from "@/components/ui/spinner"
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar"
 
 export function ProfileSettings() {
-  const { data: session } = useSession()
+  const { user } = useUser()
   const [isLoading, setIsLoading] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
   const [error, setError] = useState("")
   const [formData, setFormData] = useState({
-    name: session?.user?.name || "",
-    email: session?.user?.email || "",
+    name: user?.fullName || "",
+    email: user?.primaryEmailAddress?.emailAddress || "",
   })
 
   useEffect(() => {
-    if (session?.user) {
+    if (user) {
       setFormData({
-        name: session.user.name || "",
-        email: session.user.email || "",
+        name: user.fullName || "",
+        email: user.primaryEmailAddress?.emailAddress || "",
       })
     }
-  }, [session])
+  }, [user])
 
   const handleSave = async () => {
     if (isLoading) return // Guard against re-entry
@@ -82,12 +82,12 @@ export function ProfileSettings() {
           {/* Avatar */}
           <div className="flex items-center gap-6">
             <Avatar className="h-16 w-16">
-              <AvatarImage src={session?.user?.image || ""} />
-              <AvatarFallback>{getInitials(session?.user?.name)}</AvatarFallback>
+              <AvatarImage src={user?.imageUrl || ""} />
+              <AvatarFallback>{getInitials(user?.fullName)}</AvatarFallback>
             </Avatar>
             <div>
-              <h3 className="font-semibold">{session?.user?.name || "User"}</h3>
-              <p className="text-sm text-muted-foreground">{session?.user?.email}</p>
+              <h3 className="font-semibold">{user?.fullName || "User"}</h3>
+              <p className="text-sm text-muted-foreground">{user?.primaryEmailAddress?.emailAddress}</p>
             </div>
           </div>
 
@@ -157,7 +157,7 @@ export function ProfileSettings() {
             <div>
               <p className="text-sm text-muted-foreground">Account Created</p>
               <p className="font-semibold">
-                {session?.user?.email ? "Google OAuth" : "N/A"}
+                {user?.primaryEmailAddress?.emailAddress ? "Google OAuth" : "N/A"}
               </p>
             </div>
           </div>

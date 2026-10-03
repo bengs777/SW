@@ -1,50 +1,43 @@
-import { auth } from "@/auth"
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
 import { NextResponse } from "next/server"
 import type { NextRequest } from "next/server"
 import { hasValidObservabilityToken } from "@/lib/security/internal-observability"
 
-/**
- * Next.js 16 proxy handler (replaces middleware.ts).
- * Handles: auth enforcement, security headers, CORS, and request size limits.
- */
-
-const PUBLIC_PATH_PREFIXES = [
-  "/api/auth/",
+const isPublicRoute = createRouteMatcher([
+  "/login(.*)",
+  "/signup(.*)",
+  "/forgot-password(.*)",
+  "/auth/error",
+  "/",
+  "/api/auth(.*)",
   "/api/health",
   "/api/billing/pakasir/webhook",
   "/api/providers/status",
-  "/_next/",
-  "/favicon.ico",
-  "/public/",
-]
-
-const PUBLIC_PATHS = new Set([
-  "/login",
-  "/signup",
-  "/auth/error",
-  "/",
 ])
 
-const INTERNAL_OBSERVABILITY_PATH_PREFIXES = [
-  "/api/metrics",
-  "/api/production",
-  "/api/worker",
-]
+const isInternalObservabilityRoute = createRouteMatcher([
+  "/api/metrics(.*)",
+  "/api/production(.*)",
+  "/api/worker(.*)",
+])
 
-function isPublicPath(pathname: string): boolean {
-  if (PUBLIC_PATHS.has(pathname)) return true
-  return PUBLIC_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix))
-}
-
-function isInternalObservabilityPath(pathname: string): boolean {
-  return INTERNAL_OBSERVABILITY_PATH_PREFIXES.some((prefix) =>
-    pathname === prefix || pathname.startsWith(`${prefix}/`)
-  )
-}
-
-function isApiRoute(pathname: string): boolean {
-  return pathname.startsWith("/api/")
-}
+const isProtectedApiRoute = createRouteMatcher([
+  "/api/projects(.*)",
+  "/api/generate(.*)",
+  "/api/orchestrator(.*)",
+  "/api/orchestration(.*)",
+  "/api/system(.*)",
+  "/api/workspaces(.*)",
+  "/api/api-keys(.*)",
+  "/api/ai(.*)",
+  "/api/admin(.*)",
+  "/api/billing(.*)",
+  "/api/debug(.*)",
+  "/api/models(.*)",
+  "/api/products(.*)",
+  "/api/templates(.*)",
+  "/api/crypto(.*)",
+])
 
 function contentSecurityPolicy() {
   return [
@@ -56,9 +49,9 @@ function contentSecurityPolicy() {
     "img-src 'self' data: blob: https:",
     "font-src 'self' data: https:",
     "style-src 'self' 'unsafe-inline'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://va.vercel-scripts.com https://vercel.live",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://va.vercel-scripts.com https://vercel.live https://*.clerk.com https://*.clerk.accounts.dev",
     "connect-src 'self' https: wss:",
-    "frame-src 'self' https:",
+    "frame-src 'self' https://*.clerk.com https://*.clerk.accounts.dev",
     "worker-src 'self' blob:",
     "upgrade-insecure-requests",
   ].join("; ")
@@ -85,7 +78,7 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
 
 function applyCorsHeaders(request: NextRequest, response: NextResponse): NextResponse {
   const origin = request.headers.get("origin")
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTAUTH_URL || ""
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || ""
 
   const allowedOrigins = new Set([
     appUrl,
@@ -105,11 +98,10 @@ function applyCorsHeaders(request: NextRequest, response: NextResponse): NextRes
   return response
 }
 
-export const proxy = auth((req) => {
+const middleware = clerkMiddleware(async (auth, req) => {
   const { pathname } = req.nextUrl
   const request = req as unknown as NextRequest
 
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     const response = new NextResponse(null, { status: 204 })
     applySecurityHeaders(response)
@@ -117,8 +109,7 @@ export const proxy = auth((req) => {
     return response
   }
 
-  // Request size guard for API routes (10MB max)
-  if (isApiRoute(pathname)) {
+  if (pathname.startsWith("/api/")) {
     const contentLength = req.headers.get("content-length")
     if (contentLength && Number(contentLength) > 10 * 1024 * 1024) {
       return NextResponse.json(
@@ -128,49 +119,9 @@ export const proxy = auth((req) => {
     }
   }
 
-  if (isInternalObservabilityPath(pathname) && !req.auth && !hasValidObservabilityToken(request)) {
-    const response = NextResponse.json(
-      { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
-      { status: 401 }
-    )
-    applySecurityHeaders(response)
-    return response
-  }
-
-  // Public paths — no auth required
-  if (isPublicPath(pathname)) {
-    const response = NextResponse.next()
-    applySecurityHeaders(response)
-    applyCorsHeaders(request, response)
-    return response
-  }
-
-  // Protected routes — require authentication
-  const protectedRoutes = [
-    "/dashboard",
-    "/api/projects",
-    "/api/generate",
-    "/api/orchestrator",
-    "/api/orchestration",
-    "/api/system",
-    "/api/workspaces",
-    "/api/api-keys",
-    "/api/ai",
-    "/api/admin",
-    "/api/billing",
-    "/api/debug",
-    "/api/models",
-    "/api/products",
-    "/api/templates",
-    "/api/crypto",
-  ]
-
-  const isProtectedRoute = protectedRoutes.some((route) =>
-    pathname.startsWith(route)
-  )
-
-  if (isProtectedRoute && !req.auth) {
-    if (isApiRoute(pathname)) {
+  if (isInternalObservabilityRoute(req)) {
+    const { userId } = await auth()
+    if (!userId && !hasValidObservabilityToken(request)) {
       const response = NextResponse.json(
         { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
         { status: 401 }
@@ -178,7 +129,29 @@ export const proxy = auth((req) => {
       applySecurityHeaders(response)
       return response
     }
+  }
 
+  if (isPublicRoute(req)) {
+    const response = NextResponse.next()
+    applySecurityHeaders(response)
+    applyCorsHeaders(request, response)
+    return response
+  }
+
+  if (isProtectedApiRoute(req)) {
+    const { userId } = await auth()
+    if (!userId) {
+      const response = NextResponse.json(
+        { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
+        { status: 401 }
+      )
+      applySecurityHeaders(response)
+      return response
+    }
+  }
+
+  const { userId } = await auth()
+  if (!userId) {
     const loginUrl = new URL("/login", req.nextUrl.origin)
     loginUrl.searchParams.set("callbackUrl", `${pathname}${req.nextUrl.search}`)
     return NextResponse.redirect(loginUrl)
@@ -189,6 +162,8 @@ export const proxy = auth((req) => {
   applyCorsHeaders(request, response)
   return response
 })
+
+export default middleware
 
 export const config = {
   matcher: [

@@ -1,8 +1,11 @@
 import { NextRequest } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { GenerationJobService, GENERATION_TERMINAL_STATUSES } from "@/lib/services/generation-job.service"
 import { log } from "@/lib/logging"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -58,17 +61,22 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
 ) {
-  const session = await auth()
-  const email = session?.user?.email
+  const session = await getSession()
+  const email = session?.email
 
   if (!email) {
     return new Response("Authentication required", { status: 401 })
   }
 
+  try {
+    await enforceRouteRateLimit(`job-stream:${email}`, { maxPerMinute: 60, maxPerHour: 600 })
+  } catch {
+    return new Response("Too many requests. Please try again later.", { status: 429 })
+  }
+
   const { jobId } = await context.params
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true, isDeveloperAccount: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
   })
 
   if (!user) {

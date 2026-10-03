@@ -1,37 +1,65 @@
 import { NextResponse } from "next/server"
-import { auth } from "@/auth"
+import { getSession } from "@/auth"
 import { SIGNUP_CREDITS_AMOUNT, TOPUP_MINIMUM_IDR } from "@/lib/billing/constants"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { users, topUpOrders, billingTransactions } from "@/lib/db/schema"
+import { eq, desc } from "drizzle-orm"
 
 const TOPUP_MINIMUM = TOPUP_MINIMUM_IDR
 const WELCOME_BONUS_AMOUNT = SIGNUP_CREDITS_AMOUNT
 
 export async function GET() {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { email: session.user.email },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        balance: true,
-        welcomeBonusGrantedAt: true,
-        createdAt: true,
+    const user = await db.query.users.findFirst({
+      where: eq(users.email, session.email),
+      with: {
         topUpOrders: {
-          orderBy: { createdAt: "desc" },
-          take: 10,
+          orderBy: desc(topUpOrders.createdAt),
+          limit: 10,
         },
         billingTransactions: {
-          orderBy: { createdAt: "desc" },
-          take: 10,
+          orderBy: desc(billingTransactions.createdAt),
+          limit: 10,
         },
       },
-    })
+    }) as {
+      balance: number
+      welcomeBonusGrantedAt: Date | null
+      topUpOrders: Array<{
+        id: string
+        reference: string
+        amount: number
+        status: string
+        provider: string
+        providerReference: string | null
+        checkoutUrl: string | null
+        paymentCode: string | null
+        customerName: string | null
+        customerEmail: string | null
+        payload: string | null
+        createdAt: Date
+        paidAt: Date | null
+        expiresAt: Date | null
+      }>
+      billingTransactions: Array<{
+        id: string
+        kind: string
+        direction: string
+        amount: number
+        balanceBefore: number | null
+        balanceAfter: number | null
+        reference: string | null
+        provider: string | null
+        providerReference: string | null
+        description: string | null
+        createdAt: Date
+      }>
+    } | undefined
 
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })

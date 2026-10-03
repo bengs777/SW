@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { auth } from "@/auth"
+import { getSession } from "@/auth"
 import { TOPUP_MINIMUM_IDR } from "@/lib/billing/constants"
 import { isBillingPlanId } from "@/lib/billing/plans"
 import { env } from "@/lib/env"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { workspaceMembers } from "@/lib/db/schema"
+import { and, eq } from "drizzle-orm"
 import { BillingService } from "@/lib/services/billing.service"
 import { PakasirService } from "@/lib/services/pakasir.service"
 import { UserService } from "@/lib/services/user.service"
@@ -38,14 +40,13 @@ function buildCustomerName(name: string | null | undefined, email: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Rate limit: max 5 topup attempts per minute to prevent abuse
   try {
-    await enforceRouteRateLimit(`topup:${session.user.email}`, { maxPerMinute: 5, maxPerHour: 30 })
+    await enforceRouteRateLimit(`topup:${session.email}`, { maxPerMinute: 5, maxPerHour: 30 })
   } catch {
     return NextResponse.json({ error: "Too many top-up requests. Please wait." }, { status: 429 })
   }
@@ -54,9 +55,9 @@ export async function POST(request: NextRequest) {
     const body = TopupSchema.parse(await request.json())
 
     const user = await UserService.createUserWithWorkspaceIfMissing(
-      session.user.email,
-      session.user.name ?? null,
-      session.user.image ?? null
+      session.email,
+      session.name ?? null,
+      session.image ?? null
     )
 
     if (body.purchaseType === "subscription") {
@@ -68,16 +69,11 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "Workspace is required for plan purchases" }, { status: 400 })
       }
 
-      const membership = await prisma.workspaceMember.findUnique({
-        where: {
-          workspaceId_userId: {
-            workspaceId: body.workspaceId,
-            userId: user.id,
-          },
-        },
-        select: {
-          id: true,
-        },
+      const membership = await db.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, body.workspaceId),
+          eq(workspaceMembers.userId, user.id)
+        ),
       })
 
       if (!membership) {
@@ -153,19 +149,19 @@ export async function POST(request: NextRequest) {
         purchaseType: body.purchaseType,
         planId: body.planId || null,
         order: {
-          id: order.id,
-          reference: order.reference,
-          amount: order.amount,
-          status: order.status,
-          provider: order.provider,
-          providerReference: order.providerReference,
-          checkoutUrl: order.checkoutUrl,
-          paymentCode: order.paymentCode,
-          createdAt: order.createdAt,
-          expiresAt: order.expiresAt,
+          id: order[0].id,
+          reference: order[0].reference,
+          amount: order[0].amount,
+          status: order[0].status,
+          provider: order[0].provider,
+          providerReference: order[0].providerReference,
+          checkoutUrl: order[0].checkoutUrl,
+          paymentCode: order[0].paymentCode,
+          createdAt: order[0].createdAt,
+          expiresAt: order[0].expiresAt,
         },
-        checkoutUrl: order.checkoutUrl,
-        paymentCode: order.paymentCode,
+        checkoutUrl: order[0].checkoutUrl,
+        paymentCode: order[0].paymentCode,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create Pakasir invoice"

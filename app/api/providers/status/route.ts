@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
+import { getSession } from "@/auth"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
@@ -7,8 +7,8 @@ import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
 type PublicProviderState = "connected" | "slow" | "timeout"
 
 export async function GET(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
   }
 

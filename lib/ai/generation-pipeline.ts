@@ -84,6 +84,7 @@ export const PACKAGE_VERSION_ALLOWLIST: Record<string, string> = {
   "@prisma/client": "^5.22.0",
   prisma: "^5.22.0",
   "next-auth": "^5.0.0-beta.20",
+  "@clerk/nextjs": "^7.9.7",
   "react-hook-form": "^7.54.1",
   "@hookform/resolvers": "^3.9.1",
   "@supabase/supabase-js": "^2.104.0",

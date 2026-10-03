@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { getDatabaseSchemaHealth } from "@/lib/db/schema-health"
 
 export const runtime = "nodejs"
@@ -9,13 +11,12 @@ export const dynamic = "force-dynamic"
 async function requireSchemaHealthAccess() {
   if (process.env.NODE_ENV !== "production") return { ok: true, status: 200 }
 
-  const session = await auth()
-  const email = session?.user?.email
+  const session = await getSession()
+  const email = session?.email
   if (!email) return { ok: false, status: 401 }
 
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { isDeveloperAccount: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
   })
 
   return { ok: Boolean(user?.isDeveloperAccount), status: user?.isDeveloperAccount ? 200 : 403 }

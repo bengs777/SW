@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { auth } from "@/auth"
+import { getSession } from "@/auth"
 import { MIN_CRYPTO_PAYMENT_USD_CENTS } from "@/lib/billing/constants"
 import { isBillingPlanId } from "@/lib/billing/plans"
 import { env } from "@/lib/env"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { topUpOrders, cryptoPayments, users, workspaceMembers } from "@/lib/db/schema"
+import { eq, and } from "drizzle-orm"
 import { CryptoPaymentService } from "@/lib/services/crypto-payment.service"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
@@ -24,14 +26,13 @@ function buildReference() {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Rate limit: max 5 crypto payment creation attempts per minute
   try {
-    await enforceRouteRateLimit(`crypto-create:${session.user.email}`, { maxPerMinute: 5, maxPerHour: 30 })
+    await enforceRouteRateLimit(`crypto-create:${session.email}`, { maxPerMinute: 5, maxPerHour: 30 })
   } catch {
     return NextResponse.json({ error: "Too many payment requests. Please wait." }, { status: 429 })
   }
@@ -46,9 +47,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email: session.user.email },
-      select: { id: true, email: true, name: true },
+    const user = await db.query.users.findFirst({
+      where: eq(users.email, session.email),
     })
 
     if (!user) {
@@ -64,16 +64,11 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "Workspace is required for plan purchases" }, { status: 400 })
       }
 
-      const membership = await prisma.workspaceMember.findUnique({
-        where: {
-          workspaceId_userId: {
-            workspaceId: body.workspaceId,
-            userId: user.id,
-          },
-        },
-        select: {
-          id: true,
-        },
+      const membership = await db.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, body.workspaceId),
+          eq(workspaceMembers.userId, user.id)
+        ),
       })
 
       if (!membership) {
@@ -84,65 +79,60 @@ export async function POST(request: NextRequest) {
     const reference = buildReference()
     const chainName = body.chainId === 56 ? "BNB Chain" : "Base"
 
-    // Create payment request
     const paymentResponse = await CryptoPaymentService.createPaymentRequest({
       reference,
       amountInUsd: body.amountInUsd,
       chainId: body.chainId,
       chainName,
-      senderAddress: "", // Will be provided by user on checkout page
+      senderAddress: "",
     })
 
-    // Create TopUpOrder
-    const topUpOrder = await prisma.topUpOrder.create({
-      data: {
-        userId: user.id,
-        reference,
-        provider: "crypto",
-        amount: body.amountInUsd, // Store in cents
-        status: "pending",
-        expiresAt: new Date(Date.now() + env.cryptoPaymentTimeoutMinutes * 60 * 1000),
-        chainId: body.chainId,
-        walletAddress: null, // Will be set during checkout
-        tokenAmount: paymentResponse.amountInToken,
-        customerName: user.name || user.email,
-        customerEmail: user.email,
-        payload: JSON.stringify({
-          source: body.source,
-          note: body.note,
-          purchaseType: body.purchaseType,
-          planId: body.planId || null,
-          workspaceId: body.workspaceId || null,
-          requestedAmount: body.amountInUsd,
-        }),
-      },
-    })
+    const topUpOrder = await db.insert(topUpOrders).values({
+      id: crypto.randomUUID(),
+      userId: user.id,
+      reference,
+      provider: "crypto",
+      amount: body.amountInUsd,
+      status: "pending",
+      expiresAt: new Date(Date.now() + env.cryptoPaymentTimeoutMinutes * 60 * 1000),
+      chainId: body.chainId,
+      walletAddress: null,
+      tokenAmount: paymentResponse.amountInToken,
+      customerName: user.name || user.email,
+      customerEmail: user.email,
+      payload: JSON.stringify({
+        source: body.source,
+        note: body.note,
+        purchaseType: body.purchaseType,
+        planId: body.planId || null,
+        workspaceId: body.workspaceId || null,
+        requestedAmount: body.amountInUsd,
+      }),
+    }).returning()
 
-    // Create CryptoPayment record
-    await prisma.cryptoPayment.create({
-      data: {
-        topUpOrderId: topUpOrder.id,
-        chainId: body.chainId,
-        chainName,
-        tokenSymbol: "Native",
-        amountInUsd: body.amountInUsd,
-        amountInToken: paymentResponse.amountInToken,
-        senderAddress: "",
-        recipientAddress: env.cryptoPaymentAddress,
-        transactionHash: null, // Will be set when transaction is detected
-        status: "pending",
-      },
+    await db.insert(cryptoPayments).values({
+      id: crypto.randomUUID(),
+      topUpOrderId: topUpOrder[0].id,
+      chainId: body.chainId,
+      chainName,
+      tokenSymbol: "Native",
+      amountInUsd: body.amountInUsd,
+      amountInToken: paymentResponse.amountInToken,
+      senderAddress: "",
+      recipientAddress: env.cryptoPaymentAddress,
+      transactionHash: null,
+      status: "pending",
     })
 
     return NextResponse.json({
-      orderId: topUpOrder.id,
-      reference: topUpOrder.reference,
+      orderId: topUpOrder[0].id,
+      reference: topUpOrder[0].reference,
       checkoutUrl: paymentResponse.checkoutUrl,
       paymentAddress: paymentResponse.paymentAddress,
       amountInToken: paymentResponse.amountInToken,
       chainId: paymentResponse.chainId,
       chainName: paymentResponse.chainName,
-      expiresAt: topUpOrder.expiresAt,
+      expiresAt: topUpOrder[0].expiresAt,
       purchaseType: body.purchaseType,
       planId: body.planId || null,
     })

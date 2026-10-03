@@ -199,7 +199,7 @@ function dependenciesForIntent(intent: SwiftStructuredIntent) {
     dependencies.add("@prisma/client")
   }
   if (intent.database.provider === "turso") dependencies.add("@libsql/client")
-  if (intent.auth.provider) dependencies.add("next-auth")
+  if (intent.auth.provider) dependencies.add("@clerk/nextjs")
   if (intent.payments.provider === "stripe") dependencies.add("stripe")
   if (intent.storage.provider === "cloudflare_r2") dependencies.add("@aws-sdk/client-s3")
   return Array.from(dependencies).sort()

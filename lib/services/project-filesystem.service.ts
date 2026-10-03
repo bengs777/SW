@@ -1,6 +1,7 @@
-import type { Prisma } from "@prisma/client"
 import { createHash, randomUUID } from "node:crypto"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { projectFiles, projects } from "@/lib/db/schema"
+import { eq, and, asc, inArray } from "drizzle-orm"
 import { normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
 import type { GeneratedFile } from "@/lib/types"
 import { normalizeFileLanguage } from "@/lib/workspace-state"
@@ -28,7 +29,7 @@ export type ProjectFilesystemOperation = {
   language?: GeneratedFile["language"] | string | null
 }
 
-type DbClient = Prisma.TransactionClient | typeof prisma
+export type DbClient = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0]
 type ProjectFilesystemWriteResult = {
   files: GeneratedFile[]
   fileDiff: ProjectFileDiff
@@ -55,11 +56,10 @@ export class ProjectFilesystemService {
     return buildManifest(normalizeFiles(files))
   }
 
-  static async readFiles(projectId: string, tx: DbClient = prisma): Promise<GeneratedFile[]> {
-    const files = await tx.projectFile.findMany({
-      where: { projectId },
-      orderBy: { path: "asc" },
-    })
+  static async readFiles(projectId: string, tx: DbClient = db): Promise<GeneratedFile[]> {
+    const files = await tx.select().from(projectFiles)
+      .where(eq(projectFiles.projectId, projectId))
+      .orderBy(asc(projectFiles.path))
 
     return normalizeFiles(
       files.map((file) => ({
@@ -70,7 +70,7 @@ export class ProjectFilesystemService {
     )
   }
 
-  static async readTree(projectId: string, tx: DbClient = prisma) {
+  static async readTree(projectId: string, tx: DbClient = db) {
     const files = await this.readFiles(projectId, tx)
     return buildTree(files)
   }
@@ -81,7 +81,7 @@ export class ProjectFilesystemService {
     tx?: DbClient
   }): Promise<ProjectFilesystemWriteResult> {
     if (!input.tx) {
-      return prisma.$transaction((tx) =>
+      return db.transaction((tx) =>
         this.writeBatch({
           ...input,
           tx,
@@ -89,7 +89,7 @@ export class ProjectFilesystemService {
       )
     }
 
-    const currentFiles = await this.readFiles(input.projectId, input.tx || prisma)
+    const currentFiles = await this.readFiles(input.projectId, input.tx || db)
     const nextByPath = new Map(currentFiles.map((file) => [normalizeGeneratedPath(file.path), file]))
 
     for (const operation of input.operations) {
@@ -123,7 +123,7 @@ export class ProjectFilesystemService {
     tx?: DbClient
   }): Promise<ProjectFilesystemWriteResult> {
     if (!input.tx) {
-      return prisma.$transaction((tx) =>
+      return db.transaction((tx) =>
         this.replaceFiles({
           ...input,
           tx,
@@ -133,7 +133,7 @@ export class ProjectFilesystemService {
 
     const normalizedFiles = normalizeFiles(input.files)
     const expectedManifest = buildManifest(normalizedFiles)
-    const tx = input.tx || prisma
+    const tx = input.tx || db
 
     const fileDiff = await syncProjectFiles(tx, input.projectId, normalizedFiles)
     const actualManifest = await this.verify(input.projectId, expectedManifest, tx)
@@ -145,7 +145,7 @@ export class ProjectFilesystemService {
     }
   }
 
-  static async verify(projectId: string, expectedManifest: ProjectFileManifest, tx: DbClient = prisma) {
+  static async verify(projectId: string, expectedManifest: ProjectFileManifest, tx: DbClient = db) {
     const persistedFiles = await this.readFiles(projectId, tx)
     const actualManifest = buildManifest(persistedFiles)
 
@@ -167,15 +167,14 @@ async function syncProjectFiles(
   normalizedFiles: GeneratedFile[]
 ): Promise<ProjectFileDiff> {
   const nextPaths = normalizedFiles.map((file) => file.path)
-  const existingFiles = await tx.projectFile.findMany({
-    where: { projectId },
-    select: {
-      id: true,
-      path: true,
-      content: true,
-      language: true,
-    },
-  })
+  const existingFiles = await tx.select({
+    id: projectFiles.id,
+    path: projectFiles.path,
+    content: projectFiles.content,
+    language: projectFiles.language,
+  }).from(projectFiles)
+    .where(eq(projectFiles.projectId, projectId))
+
   const existingByPath = new Map(existingFiles.map((file) => [file.path, file]))
 
   const creates: GeneratedFile[] = []
@@ -211,40 +210,36 @@ async function syncProjectFiles(
   }
 
   if (creates.length > 0) {
-    await tx.projectFile.createMany({
-      data: creates.map((file) => ({
+    await tx.insert(projectFiles).values(
+      creates.map((file) => ({
         id: randomUUID(),
         projectId,
         path: file.path,
         content: file.content,
         language: normalizeFileLanguage(file.language),
-      })),
-    })
+      }))
+    )
   }
 
   for (const item of updates) {
-    await tx.projectFile.update({
-      where: { id: item.id },
-      data: {
+    await tx.update(projectFiles)
+      .set({
         content: item.content,
         language: item.language,
         updatedAt: new Date(),
-      },
-    })
+      })
+      .where(eq(projectFiles.id, item.id))
   }
 
   const staleFiles = existingFiles.filter((file) => !nextPaths.includes(file.path))
   const deleted = staleFiles.length
 
   if (deleted > 0) {
-    await tx.projectFile.deleteMany({
-      where: {
-        projectId,
-        path: {
-          in: staleFiles.map((file) => file.path),
-        },
-      },
-    })
+    await tx.delete(projectFiles)
+      .where(and(
+        eq(projectFiles.projectId, projectId),
+        inArray(projectFiles.path, staleFiles.map((file) => file.path))
+      ))
   }
 
   return {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { useSession } from "next-auth/react"
+import { useAuth } from "@clerk/nextjs"
 
 interface Workspace {
   id: string
@@ -41,15 +41,14 @@ function normalizeWorkspace(item: unknown): Workspace | null {
 }
 
 export function useWorkspaces() {
-  const { status: sessionStatus } = useSession()
+  const { isSignedIn, isLoaded } = useAuth()
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState("")
   const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    // Delay fetch until session is fully authenticated
-    if (sessionStatus !== "authenticated") {
+    if (!isLoaded || !isSignedIn) {
       setIsLoading(true)
       return
     }
@@ -101,7 +100,7 @@ export function useWorkspaces() {
       controller.abort()
       abortControllerRef.current = null
     }
-  }, [sessionStatus])
+  }, [isLoaded, isSignedIn])
 
   return { workspaces, isLoading, error }
 }

@@ -1,5 +1,7 @@
 import { subHours } from "date-fns"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { users, projects, workspaces, usageLogs, requestLogs, billingTransactions, generationJobs, generationAttempts, generationQualityMetrics, orchestrationFailures } from "@/lib/db/schema"
+import { eq, and, gte, desc, asc, sql, inArray, count, avg, sum } from "drizzle-orm"
 import { getProductionReadiness } from "@/lib/production/readiness"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { getRuntimeHealthDashboard } from "@/lib/observability/runtime-recovery"
@@ -82,20 +84,20 @@ function clampWindowHours(value: number) {
   return Math.min(168, Math.max(1, Math.round(value)))
 }
 
-function statusCountMap(items: Array<{ status: string; _count: { _all: number } }>) {
+function statusCountMap(items: Array<{ status: string; count: number }>) {
   return items.reduce<Record<string, number>>((acc, item) => {
-    acc[item.status] = item._count._all
+    acc[item.status] = item.count
     return acc
   }, {})
 }
 
-function successCountMap(items: Array<{ success: boolean; _count: { _all: number } }>) {
+function successCountMap(items: Array<{ success: boolean; count: number }>) {
   return items.reduce(
     (acc, item) => {
       if (item.success) {
-        acc.success += item._count._all
+        acc.success += item.count
       } else {
-        acc.failed += item._count._all
+        acc.failed += item.count
       }
       return acc
     },
@@ -346,150 +348,138 @@ export class AdminMonitoringService {
       operationalFailures,
       runtimeHealth,
     ] = await Promise.all([
-      prisma.user.count(),
-      prisma.project.count(),
-      prisma.workspace.count(),
-      prisma.usageLog.groupBy({
-        by: ["status"],
-        where: { createdAt: { gte: since } },
-        _count: { _all: true },
-      }),
-      prisma.requestLog.groupBy({
-        by: ["success"],
-        where: { createdAt: { gte: since } },
-        _count: { _all: true },
-      }),
-      prisma.usageLog.aggregate({
-        where: {
-          status: "completed",
-          createdAt: { gte: since },
-        },
-        _sum: { cost: true },
-      }),
-      prisma.usageLog.aggregate({
-        where: {
-          status: "refunded",
-          createdAt: { gte: since },
-        },
-        _sum: { cost: true },
-      }),
-      prisma.billingTransaction.aggregate({
-        where: {
-          kind: "topup",
-          direction: "credit",
-          createdAt: { gte: since },
-        },
-        _sum: { amount: true },
-      }),
-      prisma.usageLog.findMany({
-        orderBy: { createdAt: "desc" },
-        take: 12,
-        select: {
-          id: true,
-          user: { select: { email: true } },
-          model: true,
-          provider: true,
-          cost: true,
-          status: true,
-          errorMessage: true,
-          createdAt: true,
-        },
-      }),
-      prisma.requestLog.findMany({
-        orderBy: { createdAt: "desc" },
-        take: 12,
-        include: {
-          project: {
-            select: {
-              id: true,
-              name: true,
-              workspace: {
-                select: {
-                  name: true,
-                },
-              },
-            },
-          },
-        },
-      }),
-      prisma.requestLog.findMany({
-        where: {
-          success: false,
-          createdAt: { gte: since },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 8,
-        include: {
-          project: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      }),
-      prisma.usageLog.count({
-        where: {
-          status: "reserved",
-          createdAt: { gte: since },
-        },
-      }),
-      prisma.generationJob.groupBy({
-        by: ["status"],
-        where: { createdAt: { gte: since } },
-        _count: { _all: true },
-      }),
-      prisma.generationAttempt.groupBy({
-        by: ["status"],
-        where: { startedAt: { gte: since } },
-        _count: { _all: true },
-      }),
-      prisma.generationQualityMetric.aggregate({
-        where: { createdAt: { gte: since } },
-        _avg: {
-          providerLatencyMs: true,
-          validationLatencyMs: true,
-          totalLatencyMs: true,
-        },
-        _count: { _all: true },
-      }),
-      prisma.generationJob.findMany({
-        where: { createdAt: { gte: since } },
-        orderBy: { createdAt: "asc" },
-        select: {
-          id: true,
-          status: true,
-          createdAt: true,
-          startedAt: true,
-          completedAt: true,
-          failedAt: true,
-          attemptCount: true,
-          retryCount: true,
-          recoveryCount: true,
-          deadLetteredAt: true,
-          timedOutAt: true,
-          error: true,
-        },
-      }),
-      prisma.generationJob.findMany({
-        orderBy: { createdAt: "desc" },
-        take: 12,
-        select: {
-          id: true,
-          projectId: true,
-          status: true,
-          stage: true,
-          label: true,
-          progress: true,
-          queueJobId: true,
-          error: true,
-          createdAt: true,
-          updatedAt: true,
-          startedAt: true,
-          completedAt: true,
-          failedAt: true,
-        },
-      }),
+      db.select({ count: sql<number>`count(*)` }).from(users).then(r => r[0]?.count || 0),
+      db.select({ count: sql<number>`count(*)` }).from(projects).then(r => r[0]?.count || 0),
+      db.select({ count: sql<number>`count(*)` }).from(workspaces).then(r => r[0]?.count || 0),
+      db.select({
+        status: usageLogs.status,
+        count: sql<number>`count(*)`
+      }).from(usageLogs)
+        .where(gte(usageLogs.createdAt, since))
+        .groupBy(usageLogs.status),
+      db.select({
+        success: requestLogs.success,
+        count: sql<number>`count(*)`
+      }).from(requestLogs)
+        .where(gte(requestLogs.createdAt, since))
+        .groupBy(requestLogs.success),
+      db.select({ total: sql<number>`coalesce(sum(${usageLogs.cost}), 0)` }).from(usageLogs)
+        .where(and(
+          eq(usageLogs.status, "completed"),
+          gte(usageLogs.createdAt, since)
+        )),
+      db.select({ total: sql<number>`coalesce(sum(${usageLogs.cost}), 0)` }).from(usageLogs)
+        .where(and(
+          eq(usageLogs.status, "refunded"),
+          gte(usageLogs.createdAt, since)
+        )),
+      db.select({ total: sql<number>`coalesce(sum(${billingTransactions.amount}), 0)` }).from(billingTransactions)
+        .where(and(
+          eq(billingTransactions.kind, "topup"),
+          eq(billingTransactions.direction, "credit"),
+          gte(billingTransactions.createdAt, since)
+        )),
+      db.select({
+        id: usageLogs.id,
+        model: usageLogs.model,
+        provider: usageLogs.provider,
+        cost: usageLogs.cost,
+        status: usageLogs.status,
+        errorMessage: usageLogs.errorMessage,
+        createdAt: usageLogs.createdAt,
+        userId: usageLogs.userId,
+      }).from(usageLogs)
+        .orderBy(desc(usageLogs.createdAt))
+        .limit(12),
+      db.select({
+        id: requestLogs.id,
+        projectId: requestLogs.projectId,
+        taskType: requestLogs.taskType,
+        modelUsed: requestLogs.modelUsed,
+        provider: requestLogs.provider,
+        latencyMs: requestLogs.latencyMs,
+        tokens: requestLogs.tokens,
+        success: requestLogs.success,
+        errorMessage: requestLogs.errorMessage,
+        createdAt: requestLogs.createdAt,
+      }).from(requestLogs)
+        .orderBy(desc(requestLogs.createdAt))
+        .limit(12),
+      db.select({
+        id: requestLogs.id,
+        projectId: requestLogs.projectId,
+        taskType: requestLogs.taskType,
+        modelUsed: requestLogs.modelUsed,
+        provider: requestLogs.provider,
+        latencyMs: requestLogs.latencyMs,
+        tokens: requestLogs.tokens,
+        success: requestLogs.success,
+        errorMessage: requestLogs.errorMessage,
+        createdAt: requestLogs.createdAt,
+      }).from(requestLogs)
+        .where(and(
+          eq(requestLogs.success, false),
+          gte(requestLogs.createdAt, since)
+        ))
+        .orderBy(desc(requestLogs.createdAt))
+        .limit(8),
+      db.select({ count: sql<number>`count(*)` }).from(usageLogs)
+        .where(and(
+          eq(usageLogs.status, "reserved"),
+          gte(usageLogs.createdAt, since)
+        )),
+      db.select({
+        status: generationJobs.status,
+        count: sql<number>`count(*)`
+      }).from(generationJobs)
+        .where(gte(generationJobs.createdAt, since))
+        .groupBy(generationJobs.status),
+      db.select({
+        status: generationAttempts.status,
+        count: sql<number>`count(*)`
+      }).from(generationAttempts)
+        .where(gte(generationAttempts.startedAt, since))
+        .groupBy(generationAttempts.status),
+      db.select({
+        providerLatencyMs: sql<number>`coalesce(avg(${generationQualityMetrics.providerLatencyMs}), 0)`,
+        validationLatencyMs: sql<number>`coalesce(avg(${generationQualityMetrics.validationLatencyMs}), 0)`,
+        totalLatencyMs: sql<number>`coalesce(avg(${generationQualityMetrics.totalLatencyMs}), 0)`,
+        count: sql<number>`count(*)`
+      }).from(generationQualityMetrics)
+        .where(gte(generationQualityMetrics.createdAt, since)),
+      db.select({
+        id: generationJobs.id,
+        status: generationJobs.status,
+        createdAt: generationJobs.createdAt,
+        startedAt: generationJobs.startedAt,
+        completedAt: generationJobs.completedAt,
+        failedAt: generationJobs.failedAt,
+        attemptCount: generationJobs.attemptCount,
+        retryCount: generationJobs.retryCount,
+        recoveryCount: generationJobs.recoveryCount,
+        deadLetteredAt: generationJobs.deadLetteredAt,
+        timedOutAt: generationJobs.timedOutAt,
+        error: generationJobs.error,
+      }).from(generationJobs)
+        .where(gte(generationJobs.createdAt, since))
+        .orderBy(asc(generationJobs.createdAt)),
+      db.select({
+        id: generationJobs.id,
+        projectId: generationJobs.projectId,
+        status: generationJobs.status,
+        stage: generationJobs.stage,
+        label: generationJobs.label,
+        progress: generationJobs.progress,
+        queueJobId: generationJobs.queueJobId,
+        error: generationJobs.error,
+        createdAt: generationJobs.createdAt,
+        updatedAt: generationJobs.updatedAt,
+        startedAt: generationJobs.startedAt,
+        completedAt: generationJobs.completedAt,
+        failedAt: generationJobs.failedAt,
+      }).from(generationJobs)
+        .orderBy(desc(generationJobs.createdAt))
+        .limit(12),
       getGenerationQueueHealth().catch((error) => ({
         enabled: false,
         status: "unhealthy",
@@ -519,12 +509,16 @@ export class AdminMonitoringService {
         },
         error: error instanceof Error ? error.message : String(error),
       })),
-      measureLatency(() => prisma.$queryRaw`SELECT 1`).catch(() => 0),
-      prisma.orchestrationFailure.groupBy({
-        by: ["eventType", "terminationReason"],
-        where: { createdAt: { gte: since } },
-        _count: { _all: true },
-      }),
+      measureLatency(async () => {
+        await db.select({ result: sql<number>`1` }).from(users).limit(1)
+      }).catch(() => 0),
+      db.select({
+        eventType: orchestrationFailures.eventType,
+        terminationReason: orchestrationFailures.terminationReason,
+        count: sql<number>`count(*)`
+      }).from(orchestrationFailures)
+        .where(gte(orchestrationFailures.createdAt, since))
+        .groupBy(orchestrationFailures.eventType, orchestrationFailures.terminationReason),
       getRuntimeHealthDashboard(hours).catch((error) => ({
         status: "unhealthy",
         error: error instanceof Error ? error.message : String(error),
@@ -589,7 +583,7 @@ export class AdminMonitoringService {
           item.eventType === eventType &&
           (terminationReason ? item.terminationReason === terminationReason : true)
         )
-        .reduce((sum, item) => sum + item._count._all, 0)
+        .reduce((sum, item) => sum + item.count, 0)
     const completedJobsInWindow = generationJobsInWindow.filter((job) => job.status === "completed")
     const terminalJobsInWindow = generationJobsInWindow.filter((job) =>
       ["completed", "failed", "cancelled", "dead_lettered"].includes(job.status)
@@ -613,19 +607,17 @@ export class AdminMonitoringService {
         const raw = [failure.eventType, failure.terminationReason || ""].join(" ").toLowerCase()
         return /stalled|dead.?letter|timeout|timed out|validator_deadlock|corrupt|corruption|max_retries/.test(raw)
       })
-      .reduce((sum, failure) => sum + failure._count._all, 0)
+      .reduce((sum, failure) => sum + failure.count, 0)
     const fatalCorruptionStuckCount = Math.max(fatalJobIds.size, fatalOperationalEvents)
-    const qualitySummary = await prisma.generationQualityMetric.findMany({
-      where: { createdAt: { gte: since } },
-      select: {
-        status: true,
-        failureStage: true,
-        repairSucceeded: true,
-        repairAttempts: true,
-        deployValidated: true,
-        metadataJson: true,
-      },
-    })
+    const qualitySummary = await db.select({
+      status: generationQualityMetrics.status,
+      failureStage: generationQualityMetrics.failureStage,
+      repairSucceeded: generationQualityMetrics.repairSucceeded,
+      repairAttempts: generationQualityMetrics.repairAttempts,
+      deployValidated: generationQualityMetrics.deployValidated,
+      metadataJson: generationQualityMetrics.metadataJson,
+    }).from(generationQualityMetrics)
+      .where(gte(generationQualityMetrics.createdAt, since))
     const deployAttempted = qualitySummary.filter((metric) =>
       metric.deployValidated ||
       metric.failureStage === "deploy" ||
@@ -693,10 +685,10 @@ export class AdminMonitoringService {
       previewFailures: failureCount("preview_failed"),
       orchestrationDeadlocks: operationalFailures
         .filter((item) => item.terminationReason === "validator_deadlock")
-        .reduce((sum, item) => sum + item._count._all, 0),
+        .reduce((sum, item) => sum + item.count, 0),
       excessiveRetryLoops: operationalFailures
         .filter((item) => item.terminationReason === "max_retries_exceeded")
-        .reduce((sum, item) => sum + item._count._all, 0),
+        .reduce((sum, item) => sum + item.count, 0),
       sandboxCrashes: failureCount("preview_failed"),
     })
 
@@ -708,10 +700,10 @@ export class AdminMonitoringService {
         users: totalUsers,
         workspaces: totalWorkspaces,
         projects: totalProjects,
-        completedUsageCost: completedUsageCost._sum.cost || 0,
-        refundedUsageCost: refundedUsageCost._sum.cost || 0,
-        topupVolume: topupVolume._sum.amount || 0,
-        pendingReservations,
+        completedUsageCost: completedUsageCost || 0,
+        refundedUsageCost: refundedUsageCost || 0,
+        topupVolume: topupVolume || 0,
+        pendingReservations: pendingReservations[0]?.count || 0,
       },
       usage: {
         byStatus: usage,
@@ -728,10 +720,10 @@ export class AdminMonitoringService {
         attemptsByStatus: statusCountMap(generationAttemptStatus),
         reliability: reliabilityMetrics,
         latency: {
-          sampleCount: generationLatency._count._all,
-          providerAvgMs: Math.round(generationLatency._avg.providerLatencyMs || 0),
-          validationAvgMs: Math.round(generationLatency._avg.validationLatencyMs || 0),
-          totalAvgMs: Math.round(generationLatency._avg.totalLatencyMs || 0),
+          sampleCount: generationLatency[0]?.count || 0,
+          providerAvgMs: Math.round(generationLatency[0]?.providerLatencyMs || 0),
+          validationAvgMs: Math.round(generationLatency[0]?.validationLatencyMs || 0),
+          totalAvgMs: Math.round(generationLatency[0]?.totalLatencyMs || 0),
         },
         recentJobs: recentGenerationJobs,
         history: hourlyGeneration,

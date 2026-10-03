@@ -81,7 +81,7 @@ install_dependencies() {
   cd "$SWIFT_RUNTIME_DIR"
   npm ci
   npm --prefix services/sandbox-runtime ci --omit=dev
-  npx prisma generate
+  node scripts/drizzle-migrate.js
 }
 
 ensure_env_files() {

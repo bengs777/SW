@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import dns from "dns"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 export const runtime = "nodejs"
 
@@ -15,26 +19,18 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const featureCheck = assertFeatureEnabled("enableCustomDomain", "Custom domain")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
   try {
     const { id } = await params
-    const project = await prisma.project.findFirst({
-      where: {
-        id,
-        workspace: {
-          members: {
-            some: { userId: session.user.id },
-          },
-        },
-      },
-      select: {
-        id: true,
-        name: true,
-        customDomain: true,
-        domainVerified: true,
-      },
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
     })
 
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
@@ -50,8 +46,19 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const featureCheck = assertFeatureEnabled("enableCustomDomain", "Custom domain")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  try {
+    await enforceRouteRateLimit(`project-domain:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
+  }
 
   try {
     const { id } = await params
@@ -66,24 +73,20 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid domain format" }, { status: 400 })
     }
 
-    // Check permissions
-    const project = await prisma.project.findFirst({
-      where: {
-        id,
-        workspace: { members: { some: { userId: session.user.id } } },
-      },
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
     })
 
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
 
-    const updated = await prisma.project.update({
-      where: { id },
-      data: {
+    const updated = await db.update(projects)
+      .set({
         customDomain: domainRaw,
         domainVerified: false,
-      },
-      select: { id: true, customDomain: true, domainVerified: true },
-    })
+        updatedAt: new Date(),
+      })
+      .where(eq(projects.id, id))
+      .returning()
 
     // Provide DNS instructions (Vercel-style)
     const parts = domainRaw.split('.')
@@ -105,7 +108,7 @@ export async function PATCH(
           ],
         }
 
-    return NextResponse.json({ success: true, project: updated, instructions })
+    return NextResponse.json({ success: true, project: updated[0], instructions })
   } catch (err) {
     console.error('[v0] Error saving domain:', err)
     return NextResponse.json({ error: 'Failed to save domain' }, { status: 500 })
@@ -116,18 +119,27 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // POST will be used to verify DNS propagation for the saved domain
-  const session = await auth()
-  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const featureCheck = assertFeatureEnabled("enableCustomDomain", "Custom domain")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  try {
+    await enforceRouteRateLimit(`project-domain-verify:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
+  }
 
   try {
     const { id } = await params
     const body = await request.json().catch(() => ({}))
     const domainFromBody = typeof body?.domain === 'string' ? body.domain.trim().toLowerCase() : null
 
-    const project = await prisma.project.findFirst({
-      where: { id, workspace: { members: { some: { userId: session.user.id } } } },
-      select: { id: true, customDomain: true },
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
     })
 
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
@@ -167,7 +179,6 @@ export async function POST(
         }
       } catch (e) {
         details.cname = { error: String(e) }
-        // Some providers don't return CNAME; try A records as fallback
         try {
           const aRecords = await resolver.resolve4(domain)
           details.a = aRecords
@@ -179,7 +190,7 @@ export async function POST(
     }
 
     if (verified) {
-      await prisma.project.update({ where: { id }, data: { domainVerified: true } })
+      await db.update(projects).set({ domainVerified: true, updatedAt: new Date() }).where(eq(projects.id, id))
     }
 
     return NextResponse.json({ success: true, verified, details })

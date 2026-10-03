@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { auth } from '@/auth'
+import { getSession } from '@/auth'
 import { isMissingRequiredTableError, shouldSoftFailMissingTable } from '@/lib/db/errors'
-import { prisma } from '@/lib/db/client'
+import { db } from '@/lib/db/client'
+import { workspaces } from '@/lib/db/schema'
+import { eq } from 'drizzle-orm'
 import { WorkspaceService } from '@/lib/services/workspace.service'
+import { assertFeatureEnabled } from '@/lib/feature-flags'
+import { enforceRouteRateLimit } from '@/lib/security/rate-limit'
 
 const CreateWorkspaceSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -17,13 +21,18 @@ const CreateWorkspaceSchema = z.object({
 
 export async function GET() {
   try {
-    const session = await auth()
+    const featureCheck = assertFeatureEnabled("enableTeams", "Teams")
+    if (featureCheck) {
+      return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+    }
 
-    if (!session?.user?.id) {
+    const session = await getSession()
+
+    if (!session?.userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const workspaces = await WorkspaceService.getUserWorkspaces(session.user.id)
+    const workspaces = await WorkspaceService.getUserWorkspaces(session.userId)
     return NextResponse.json(workspaces)
   } catch (error) {
     if (isMissingRequiredTableError(error) && shouldSoftFailMissingTable()) {
@@ -41,17 +50,27 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const featureCheck = assertFeatureEnabled("enableTeams", "Teams")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`workspaces-create:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429 })
   }
 
   try {
     const { name, slug } = CreateWorkspaceSchema.parse(await request.json())
 
-    // Check if slug already exists
-    const existingWorkspace = await prisma.workspace.findUnique({
-      where: { slug },
+    const existingWorkspace = await db.query.workspaces.findFirst({
+      where: eq(workspaces.slug, slug),
     })
 
     if (existingWorkspace) {
@@ -64,7 +83,7 @@ export async function POST(request: NextRequest) {
     const workspace = await WorkspaceService.createWorkspace(
       name,
       slug,
-      session.user.id
+      session.userId
     )
 
     return NextResponse.json(workspace, { status: 201 })

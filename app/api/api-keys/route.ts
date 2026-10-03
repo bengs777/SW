@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { auth } from '@/auth'
+import { getSession } from '@/auth'
 import { WorkspaceService } from '@/lib/services/workspace.service'
 import { ApiKeyService } from '@/lib/services/api-key.service'
+import { enforceRouteRateLimit } from '@/lib/security/rate-limit'
 
 const CreateApiKeySchema = z.object({
   workspaceId: z.string().trim().min(1).max(120),
@@ -10,8 +11,8 @@ const CreateApiKeySchema = z.object({
 })
 
 export async function GET(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -25,10 +26,9 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Check if user is member of workspace
     const membership = await WorkspaceService.checkMembership(
       workspaceId,
-      session.user.id
+      session.userId
     )
 
     if (!membership) {
@@ -47,18 +47,23 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`api-key-create:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429 })
   }
 
   try {
     const { workspaceId, name } = CreateApiKeySchema.parse(await request.json())
 
-    // Check if user is admin of workspace
     const membership = await WorkspaceService.checkMembership(
       workspaceId,
-      session.user.id
+      session.userId
     )
 
     if (!membership || membership.role !== 'admin') {

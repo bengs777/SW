@@ -2,13 +2,16 @@ import { NextRequest, NextResponse } from "next/server"
 import { revalidatePath } from "next/cache"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects, projectFiles, generationHistory, artifacts, artifactFiles, generationJobs, workspaces, workspaceMembers } from "@/lib/db/schema"
+import { eq, and, desc, lt, notInArray, sql } from "drizzle-orm"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import type { GeneratedFile } from "@/lib/types"
 import { readWorkspaceStateFile, splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { log } from "@/lib/logging"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 function historyFileCount(result: string) {
   try {
@@ -39,32 +42,23 @@ export async function GET(
   const startedAt = Date.now()
   const requestId = request.headers.get("x-request-id") || request.headers.get("x-vercel-id") || randomUUID()
   const refreshReason = request.nextUrl.searchParams.get("reason") || "project-load"
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   try {
     const { id } = await params
 
-    const project = await prisma.project.findFirst({
-      where: {
-        id,
-        workspace: {
-          members: {
-            some: {
-              userId: session.user.id,
-            },
-          },
-        },
-      },
-      include: {
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
+      with: {
         history: {
-          orderBy: { createdAt: "desc" },
-          take: 10,
+          orderBy: desc(generationHistory.createdAt),
+          limit: 10,
         },
         workspace: {
-          include: {
+          with: {
             subscription: true,
           },
         },
@@ -78,52 +72,31 @@ export async function GET(
       )
     }
 
-    const projectFiles = await ProjectFilesystemService.readFiles(id)
-    const manifest = ProjectFilesystemService.buildManifest(projectFiles)
-    const { files: visibleFiles, stateFile } = splitWorkspaceStateFiles(projectFiles)
+    const projectFilesData = await ProjectFilesystemService.readFiles(id)
+    const manifest = ProjectFilesystemService.buildManifest(projectFilesData)
+    const { files: visibleFiles, stateFile } = splitWorkspaceStateFiles(projectFilesData)
     const workspaceState = readWorkspaceStateFile(stateFile)
-    const latestFileUpdatedAt = await prisma.projectFile.findFirst({
-      where: {
-        projectId: id,
-        path: { not: ".swift/workspace-state.json" },
-      },
-      orderBy: { updatedAt: "desc" },
-      select: { updatedAt: true },
+    const latestFileUpdatedAt = await db.query.projectFiles.findFirst({
+      where: and(
+        eq(projectFiles.projectId, id),
+        sql`${projectFiles.path} != '.swift/workspace-state.json'`
+      ),
+      orderBy: desc(projectFiles.updatedAt),
     })
     const latestUpdatedAt = latestFileUpdatedAt?.updatedAt.toISOString() || null
-    const latestHistoryId = project.history[0]?.id || null
+    const latestHistoryId = (project as unknown as { history: Array<{ id: string }> }).history[0]?.id || null
     const latestDraftArtifact = visibleFiles.length === 0
-      ? await prisma.artifact.findFirst({
-          where: {
-            projectId: id,
-            source: "generation_draft",
-            status: "draft",
-            files: { some: {} },
-            generationJob: {
-              is: {
-                userId: session.user.id,
-                resultHistoryId: null,
-                status: { notIn: ["completed", "cancelled"] },
-              },
-            },
-          },
-          orderBy: { updatedAt: "desc" },
-          select: {
-            id: true,
-            updatedAt: true,
-            metadataJson: true,
-            _count: {
-              select: { files: true },
-            },
-            generationJob: {
-              select: {
-                id: true,
-                status: true,
-                stage: true,
-                error: true,
-                resultHistoryId: true,
-              },
-            },
+      ? await db.query.artifacts.findFirst({
+          where: and(
+            eq(artifacts.projectId, id),
+            eq(artifacts.source, "generation_draft"),
+            eq(artifacts.status, "draft"),
+            sql`exists (select 1 from artifact_files where artifact_files.artifact_id = artifacts.id)`,
+            sql`exists (select 1 from generation_jobs where generation_jobs.id = artifacts.generation_job_id and generation_jobs.user_id = ${session.userId} and generation_jobs.result_history_id is null and generation_jobs.status not in ('completed', 'cancelled'))`
+          ),
+          orderBy: desc(artifacts.updatedAt),
+          with: {
+            generationJob: true,
           },
         })
       : null
@@ -131,17 +104,28 @@ export async function GET(
     const latestDraftManifest = latestDraftMetadata?.manifest && typeof latestDraftMetadata.manifest === "object"
       ? latestDraftMetadata.manifest
       : null
-    const latestDraft = latestDraftArtifact?.generationJob
+    const latestDraft = (latestDraftArtifact as unknown as {
+      id: string
+      updatedAt: Date
+      _count?: { files?: number }
+      generationJob: {
+        id: string
+        status: string
+        stage: string
+        error: string | null
+        resultHistoryId: string | null
+      }
+    } | null | undefined)?.generationJob
       ? {
           status: "draft",
-          jobId: latestDraftArtifact.generationJob.id,
-          artifactId: latestDraftArtifact.id,
-          updatedAt: latestDraftArtifact.updatedAt.toISOString(),
-          fileCount: latestDraftArtifact._count.files,
-          jobStatus: latestDraftArtifact.generationJob.status,
-          jobStage: latestDraftArtifact.generationJob.stage,
-          jobError: latestDraftArtifact.generationJob.error || null,
-          resultHistoryId: latestDraftArtifact.generationJob.resultHistoryId || null,
+          jobId: (latestDraftArtifact as unknown as { generationJob: { id: string } }).generationJob.id,
+          artifactId: (latestDraftArtifact as unknown as { id: string }).id,
+          updatedAt: (latestDraftArtifact as unknown as { updatedAt: Date }).updatedAt.toISOString(),
+          fileCount: (latestDraftArtifact as unknown as { _count?: { files?: number } })._count?.files || 0,
+          jobStatus: (latestDraftArtifact as unknown as { generationJob: { status: string } }).generationJob.status,
+          jobStage: (latestDraftArtifact as unknown as { generationJob: { stage: string } }).generationJob.stage,
+          jobError: (latestDraftArtifact as unknown as { generationJob: { error: string | null } }).generationJob.error || null,
+          resultHistoryId: (latestDraftArtifact as unknown as { generationJob: { resultHistoryId: string | null } }).generationJob.resultHistoryId || null,
           manifest: latestDraftManifest,
         }
       : null
@@ -149,7 +133,7 @@ export async function GET(
     log("info", "project_state_loaded", {
       requestId,
       projectId: id,
-      userId: session.user.id,
+      userId: session.userId,
       fileCount: visibleFiles.length,
       draftFileCount: latestDraft?.fileCount || 0,
       draftJobId: latestDraft?.jobId || null,
@@ -162,7 +146,7 @@ export async function GET(
       log("error", "project_state_empty_after_generation", {
         requestId,
         projectId: id,
-        userId: session.user.id,
+        userId: session.userId,
         latestHistoryId,
         manifest,
         reason: refreshReason,
@@ -176,7 +160,7 @@ export async function GET(
         requestId,
         jobId: request.nextUrl.searchParams.get("jobId"),
         projectId: id,
-        userId: session.user.id,
+        userId: session.userId,
         startedAt: new Date(startedAt).toISOString(),
         endedAt: new Date(endedAt).toISOString(),
         durationMs: endedAt - startedAt,
@@ -190,13 +174,20 @@ export async function GET(
     return NextResponse.json({
       project: {
         ...project,
-        history: project.history.map((entry) => ({
+        history: (project.history as unknown as Array<{
+          id: string
+          prompt: string
+          intent: string
+          usedAutoRepair: boolean
+          createdAt: Date
+          result: string | null
+        }>).map((entry) => ({
           id: entry.id,
           prompt: entry.prompt,
           intent: entry.intent,
           usedAutoRepair: entry.usedAutoRepair,
           createdAt: entry.createdAt.toISOString(),
-          fileCount: historyFileCount(entry.result),
+          fileCount: historyFileCount(entry.result || ""),
         })),
         files: visibleFiles,
         workspaceState,
@@ -232,16 +223,22 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`project-update:${session.userId}`, { maxPerMinute: 30, maxPerHour: 300 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
   }
 
   const UpdateProjectSchema = z.object({
     name: z.string().trim().min(1).max(200).optional(),
     description: z.string().trim().max(2000).optional(),
     prompt: z.string().trim().max(12000).optional(),
-  }).strict() // SECURITY: reject unknown fields to prevent mass assignment
+  }).strict()
 
   try {
     const { id } = await params
@@ -257,18 +254,8 @@ export async function PATCH(
 
     const { name, description, prompt } = parsed.data
 
-    // Check if user has access
-    const project = await prisma.project.findFirst({
-      where: {
-        id,
-        workspace: {
-          members: {
-            some: {
-              userId: session.user.id,
-            },
-          },
-        },
-      },
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
     })
 
     if (!project) {
@@ -278,19 +265,17 @@ export async function PATCH(
       )
     }
 
-    const updatedProject = await prisma.project.update({
-      where: { id },
-      data: {
+    const updatedProject = await db.update(projects)
+      .set({
         ...(name ? { name } : {}),
         ...(description !== undefined ? { description } : {}),
         ...(prompt !== undefined ? { prompt } : {}),
-      },
-      include: {
-        files: true,
-      },
-    })
+        updatedAt: new Date(),
+      })
+      .where(eq(projects.id, id))
+      .returning()
 
-    return NextResponse.json({ project: updatedProject })
+    return NextResponse.json({ project: updatedProject[0] })
   } catch (error) {
     console.error("[v0] Error updating project:", error)
     return NextResponse.json(
@@ -304,39 +289,36 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`project-delete:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
   }
 
   try {
     const { id } = await params
 
-    // Check if user has access and is admin
-    const project = await prisma.project.findFirst({
-      where: {
-        id,
-        workspace: {
-          members: {
-            some: {
-              userId: session.user.id,
-              role: "admin",
-            },
-          },
-        },
-      },
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
     })
 
     if (!project) {
       return NextResponse.json(
-        { error: "Project not found or unauthorized" },
+        { error: "Project not found" },
         { status: 404 }
       )
     }
 
-    await prisma.project.delete({
-      where: { id },
-    })
+    const projectWithHistory = project as typeof project & {
+      history: Array<{ id: string }>
+    }
+
+    await db.delete(projects).where(eq(projects.id, id))
 
     revalidatePath("/dashboard")
     revalidatePath("/dashboard/projects")
@@ -352,14 +334,19 @@ export async function DELETE(
   }
 }
 
-// Save generation
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`project-save:${session.userId}`, { maxPerMinute: 30, maxPerHour: 300 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
   }
 
   try {
@@ -375,18 +362,8 @@ export async function POST(
       return NextResponse.json({ error: "Invalid project save payload" }, { status: 400 })
     }
 
-    // Check if user has access
-    const project = await prisma.project.findFirst({
-      where: {
-        id,
-        workspace: {
-          members: {
-            some: {
-              userId: session.user.id,
-            },
-          },
-        },
-      },
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, id),
     })
 
     if (!project) {

@@ -18,7 +18,7 @@ function assert(name, condition, detail) {
 const sandboxPreview = read("components/editor/sandbox-preview.tsx")
 const generationOrchestrator = read("lib/services/generation-orchestrator.service.ts")
 const emitGeneratedFilesUpdateSource =
-  generationOrchestrator.match(/async function emitGeneratedFilesUpdate[\s\S]*?\n}\n\nfunction createAgentWorkflowTools/)?.[0] || ""
+  generationOrchestrator.match(/async function emitGeneratedFilesUpdate[\s\S]*?\r?\n\}\r?\n\r?\nfunction createAgentWorkflowTools/)?.[0] || ""
 const sandboxRuntime = read("lib/sandbox/runtime.ts")
 const generationJobService = read("lib/services/generation-job.service.ts")
 const generationJobStream = read("app/api/generate/jobs/[jobId]/stream/route.ts")
@@ -35,6 +35,7 @@ const vercelBuild = read("scripts/vercel-build.js")
 const productService = read("lib/services/product.service.ts")
 const productApi = read("app/api/products/route.ts")
 const dbClient = read("lib/db/client.ts")
+const dbRuntimeClient = read("src/lib/db/client.ts")
 const authRuntime = read("lib/auth/runtime.ts")
 const authConfig = read("auth.ts")
 const adminGuard = read("lib/admin.ts")
@@ -128,8 +129,9 @@ assert(
   /GenerationDraftArtifactService\.upsert/.test(generationOrchestrator) &&
     /draftAvailable/.test(generationOrchestrator) &&
     /status:\s*"draft"/.test(generationDraftService) &&
-    /artifact\.upsert/.test(generationDraftService) &&
-    /artifactFile\.createMany/.test(generationDraftService) &&
+    /tx\.(update|insert)\(artifacts\)/.test(generationDraftService) &&
+    /tx\.insert\(artifactFiles\)\.values\(/.test(generationDraftService) &&
+    /tx\.delete\(artifactFiles\)/.test(generationDraftService) &&
     /GenerationDraftArtifactService\.readForJob/.test(generationDraftRoute) &&
     /applyGenerationDraft/.test(projectPage) &&
     /writeWorkspaceDraftToStorage\(projectId,\s*draft\)/.test(projectPage) &&
@@ -217,8 +219,8 @@ assert(
 
 assert(
   "job transitions lock terminal and cancelling states",
-  /GENERATION_TERMINAL_STATUSES\.has\(existing\.status\)/.test(generationJobService) &&
-    /existing\.cancelRequested/.test(generationJobService) &&
+  /GENERATION_TERMINAL_STATUSES\.has\(existing\[0\]\.status\)/.test(generationJobService) &&
+    /existing\[0\]\.cancelRequested/.test(generationJobService) &&
     /requestedStatus !== "cancelled"/.test(generationJobService),
   "late completion/failure must not overwrite terminal or cancellation-locked jobs"
 )
@@ -261,17 +263,18 @@ assert(
 )
 
 assert(
-  "vercel build deploys prisma migrations safely",
-  /runPrismaGenerateWithRetry\(\)[\s\S]*runMigrationDeployment\(\)/.test(vercelBuild) &&
-    /npx prisma migrate deploy/.test(vercelBuild) &&
-    !/npx prisma migrate status/.test(vercelBuild) &&
-    /diagnoseDatabaseUrl/.test(vercelBuild) &&
+  "vercel build deploys turso migrations safely",
+  /runMigrationDeployment\(\)[\s\S]*runSchemaHealthCheck\(\)/.test(vercelBuild) &&
+    /scripts\/drizzle-migrate\.js/.test(vercelBuild) &&
+    !/prisma migrate deploy/.test(vercelBuild) &&
+    !/prisma migrate status/.test(vercelBuild) &&
+    /classifyMigrationFailure/.test(vercelBuild) &&
     /isStrictPreflight/.test(vercelBuild) &&
-    /engine_binary_failure/.test(vercelBuild) &&
-    /schema_parsing_failure/.test(vercelBuild) &&
-    /migration_baseline_required/.test(vercelBuild) &&
+    /database_unreachable/.test(vercelBuild) &&
+    /schema_failure/.test(vercelBuild) &&
+    /missing_env/.test(vercelBuild) &&
     /schema compatibility check skipped in local fallback mode/.test(vercelBuild),
-  "builds must generate Prisma first, deploy pending migrations, diagnose deploy failures, and skip unavailable DB checks locally"
+  "builds must deploy Drizzle/Turso migrations, classify deploy failures, and skip unavailable DB checks locally"
 )
 
 assert(
@@ -498,8 +501,8 @@ assert(
 assert(
   "runtime db crud is hardened",
   /getDatabaseRuntimeDiagnostic/.test(dbClient) &&
-    /DATABASE_URL is required/.test(dbClient) &&
-    /Prisma client is not generated/.test(dbClient) &&
+    /DATABASE_URL is required/.test(dbRuntimeClient) &&
+    /getDb|createDb/.test(dbRuntimeClient) &&
     /createProduct/.test(productService) &&
     /updateProduct/.test(productService) &&
     /deleteProduct/.test(productService) &&
@@ -507,20 +510,20 @@ assert(
     /CreateProductSchema/.test(productService) &&
     /requireAdminActorResponse/.test(productApi) &&
     /getDatabaseRuntimeDiagnostic/.test(productApi),
-  "product CRUD must use Prisma, zod, admin write guards, and clear DB runtime diagnostics"
+  "product CRUD must use Drizzle, zod, admin write guards, and clear DB runtime diagnostics"
 )
 
 assert(
   "auth runtime has diagnostics and graceful provider fallback",
   /getAuthRuntimeDiagnostic/.test(authRuntime) &&
-    /NEXTAUTH_SECRET/.test(authRuntime) &&
-    /GOOGLE_CLIENT_ID/.test(authRuntime) &&
-    /GOOGLE_CLIENT_SECRET/.test(authRuntime) &&
+    /CLERK_SECRET_KEY/.test(authRuntime) &&
+    /NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY/.test(authRuntime) &&
     /provider_unavailable/.test(authRuntime) &&
     /createNormalizedAuthError/.test(authRuntime) &&
-    /providers:\s*authProviders/.test(authConfig) &&
-    /session:\s*\{[\s\S]*strategy:\s*"jwt"/.test(authConfig),
-  "Auth.js must expose explicit diagnostics, skip unavailable providers gracefully, and use persistent JWT sessions"
+    /sessionStrategy:\s*"clerk"/.test(authRuntime) &&
+    /from "@clerk\/nextjs\/server"/.test(authConfig) &&
+    /getAuthRuntimeDiagnostic\(\)/.test(authConfig),
+  "Auth runtime must expose explicit Clerk diagnostics, report unavailable providers, and normalize auth errors"
 )
 
 assert(
@@ -530,7 +533,7 @@ assert(
     /requireAdminActorResponse/.test(adminGuard) &&
     /requireDeveloperActorResponse/.test(adminGuard) &&
     /canAccessRole/.test(adminGuard) &&
-    /memberships:\s*\{\s*select:\s*\{\s*role:\s*true/.test(adminGuard) &&
+    /memberships:\s*\{\s*columns:\s*\{\s*role:\s*true/.test(adminGuard) &&
     /normalizeAdminEmail\(user\.email\) === normalizeAdminEmail\(env\.devOwnerEmail\)/.test(adminGuard),
   "privileged routes must derive roles from the server database and keep developer access owner-scoped"
 )
@@ -540,7 +543,7 @@ assert(
   /checkAuth/.test(healthApi) &&
     /auth:\s*okLabel\(authCheck\)/.test(healthApi) &&
     /authCheck\.status !== "unhealthy"/.test(healthApi) &&
-    /"\/api\/products"/.test(proxy) &&
+    /"\/api\/products\(\.\*\)"/.test(proxy) &&
     /AUTH_REQUIRED/.test(proxy),
   "health must report auth runtime state and proxy must protect product API routes"
 )

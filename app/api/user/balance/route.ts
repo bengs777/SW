@@ -1,23 +1,20 @@
 import { NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { SWIFT_PUBLIC_PRICE_IDR } from "@/lib/ai/model-tiers"
 
 export async function GET() {
-  const session = await auth()
+  const session = await getSession()
 
-  if (!session?.user?.email) {
+  if (!session?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { email: session.user.email },
-      select: {
-        id: true,
-        balance: true,
-        email: true,
-      },
+    const user = await db.query.users.findFirst({
+      where: eq(users.email, session.email),
     })
 
     if (!user) {

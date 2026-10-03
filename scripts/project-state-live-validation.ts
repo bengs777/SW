@@ -3,7 +3,8 @@ import fs from "node:fs"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
 import { spawn, spawnSync } from "node:child_process"
-import { disconnectPrisma, getDatabasePoolUsage, getPrismaRuntimeStats, prisma } from "@/lib/db/client"
+import { db, disconnectDb, getDbRuntimeStats, schema } from "@/lib/db/client"
+import { sql, eq } from "drizzle-orm"
 import { getDatabaseMetricsSnapshot } from "@/lib/db/metrics"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
@@ -181,24 +182,23 @@ async function runBatch() {
   await writeFile(path.join(reportDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   await writeFile(path.join(REPORT_ROOT, "latest.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8")
   console.log(JSON.stringify(summary, null, 2))
-  await disconnectPrisma()
+  await disconnectDb()
   process.exit(summary.finalStatus === "NOT_READY" ? 2 : 0)
 }
 
 async function cleanupAfterChildBatch() {
-  await getDatabasePoolUsage().catch(() => null)
+  await Promise.resolve()
 }
 
 async function collectDbRuntimeMetrics() {
-  const pool = await getDatabasePoolUsage()
   const dbMetrics = getDatabaseMetricsSnapshot()
-  const prismaStats = getPrismaRuntimeStats()
+  const dbStats = getDbRuntimeStats()
   return {
-    ...prismaStats,
-    activeDbConnections: pool.activeConnections,
-    dbPoolUsage: pool.usagePct,
-    dbMaxConnections: pool.maxConnections,
-    dbPoolError: "error" in pool ? pool.error : null,
+    ...dbStats,
+    activeDbConnections: 0,
+    dbPoolUsage: 0,
+    dbMaxConnections: 0,
+    dbPoolError: null,
     dbConnectionFailures: dbMetrics.db_connection_failures,
     dbRetryCount: dbMetrics.db_retry_count,
     averageQueryTime: dbMetrics.average_query_time,
@@ -267,14 +267,14 @@ async function runCaseChild(input: { runId: string; reportDir: string; promptCas
     const result = parseJson(fs.readFileSync(resultPath, "utf8")) as CaseResult | null
     if (result) return result
   }
-  const status = parseJson(fs.existsSync(path.join(caseDir, "status.json")) ? fs.readFileSync(path.join(caseDir, "status.json"), "utf8") : null) as any
+  const status = parseJson(fs.existsSync(path.join(caseDir, "status.json")) ? fs.readFileSync(path.join(caseDir, "status.json"), "utf8") : null) as Record<string, unknown> | null
   const timedOutJob = status?.jobId
-    ? await readJobAudit(status.jobId).catch(() => ({ metrics: null, lifecycleEvents: [], artifactEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }))
+    ? await readJobAudit(String(status.jobId)).catch(() => ({ metrics: null, lifecycleEvents: [], artifactEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }))
     : { metrics: null, lifecycleEvents: [], artifactEvents: [], lifecycleBreakdown: null, bottleneckStage: null, taskgraphFailureReason: null, taskgraphFailureReportPath: null }
   const executorTimeoutReportPath = exit.timedOut && status?.jobId && status?.projectId && timedOutJob.bottleneckStage === "executor"
     ? await persistChildExecutorTimeoutReport({
-        jobId: status.jobId,
-        projectId: status.projectId,
+        jobId: String(status.jobId),
+        projectId: String(status.projectId),
         lifecycleEvents: timedOutJob.executorEvents || [],
       }).catch(() => null)
     : null
@@ -343,36 +343,38 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
   }, null, 2)}\n`, "utf8")
 
   try {
-    const user = await prisma.user.upsert({
-      where: { email: "project-state-live@swift.local" },
-      update: {},
-      create: {
-        email: "project-state-live@swift.local",
-        name: "Project State Live Validation",
-        isDeveloperAccount: true,
-        balance: 0,
-      },
-    })
+    const existingUser = await db.query.users.findFirst({ where: eq(schema.users.email, "project-state-live@swift.local") })
+    const user = existingUser || (await db.insert(schema.users).values({
+      id: crypto.randomUUID(),
+      email: "project-state-live@swift.local",
+      name: "Project State Live Validation",
+      isDeveloperAccount: true,
+      balance: 0,
+    }).returning())[0]
     userId = user.id
-    const workspace = await prisma.workspace.upsert({
-      where: { slug: "project-state-live-validation" },
-      update: {},
-      create: {
-        name: "Project State Live Validation",
-        slug: "project-state-live-validation",
-        createdBy: user.id,
-        members: { create: { userId: user.id, role: "admin" } },
-      },
-    })
-    const project = await prisma.project.create({
-      data: {
+    const existingWorkspace = await db.query.workspaces.findFirst({ where: eq(schema.workspaces.slug, "project-state-live-validation") })
+    const workspace = existingWorkspace || (await db.insert(schema.workspaces).values({
+      id: crypto.randomUUID(),
+      name: "Project State Live Validation",
+      slug: "project-state-live-validation",
+      createdBy: user.id,
+    }).returning())[0]
+    if (!existingWorkspace) {
+      await db.insert(schema.workspaceMembers).values({
+        id: crypto.randomUUID(),
         workspaceId: workspace.id,
-        name: `Live ${promptCase.id}`,
-        description: promptCase.category,
-        framework: "next",
-        prompt: promptCase.prompt,
-      },
-    })
+        userId: user.id,
+        role: "admin",
+      })
+    }
+    const project = (await db.insert(schema.projects).values({
+      id: crypto.randomUUID(),
+      workspaceId: workspace.id,
+      name: `Live ${promptCase.id}`,
+      description: promptCase.category,
+      framework: "next",
+      prompt: promptCase.prompt,
+    }).returning())[0]
     projectId = project.id
     await ProjectFilesystemService.replaceFiles({
       projectId: project.id,
@@ -410,9 +412,12 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
         signal: controller.signal,
       }, {
         loadProjectFiles: async (projectId) => splitWorkspaceStateFiles(await ProjectFilesystemService.readFiles(projectId)).files,
-        loadGenerationHistoryCount: async (projectId) => prisma.generationHistory.count({ where: { projectId } }),
+        loadGenerationHistoryCount: async (projectId) => {
+          const rows = await db.select({ count: sql<number>`count(*)` }).from(schema.generationHistory).where(eq(schema.generationHistory.projectId, projectId))
+          return Number(rows[0]?.count || 0)
+        },
         loadProjectMemoryJson: async (projectId) => {
-          const row = await prisma.project.findUnique({ where: { id: projectId }, select: { memoryJson: true } })
+          const row = await db.query.projects.findFirst({ where: eq(schema.projects.id, projectId) })
           return row?.memoryJson || null
         },
       })
@@ -426,9 +431,8 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
       clearTimeout(timeout)
     }
 
-    const finalJob = await prisma.generationJob.findUnique({
-      where: { id: job.id },
-      select: { status: true, stage: true, error: true, metricsJson: true, resultHistoryId: true },
+    const finalJob = await db.query.generationJobs.findFirst({
+      where: eq(schema.generationJobs.id, job.id),
     })
     const audit = await readJobAudit(job.id)
     const metrics = {
@@ -469,7 +473,7 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
     }
     await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
     await cleanupDedicatedUserSandbox({ userId: user.id, projectId: project.id }).catch(() => null)
-    await disconnectPrisma()
+    await disconnectDb()
     process.exit(result.success ? 0 : 2)
   } catch (error) {
     if (userId && projectId) {
@@ -491,12 +495,12 @@ async function runSingleCase(input: { runId: string; caseId: string; reportDir: 
     }
     await writeFile(result.artifactPath!, `${JSON.stringify({ promptCase, error: result.error }, null, 2)}\n`, "utf8")
     await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8")
-    await disconnectPrisma().catch(() => null)
+    await disconnectDb().catch(() => null)
     process.exit(2)
   }
 }
 
-function summarize(runId: string, durationMs: number, results: any[], dbRuntime: {
+function summarize(runId: string, durationMs: number, results: CaseResult[], dbRuntime: {
   before: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
   after: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
   maxConcurrentChildren: number
@@ -570,15 +574,15 @@ function summarize(runId: string, durationMs: number, results: any[], dbRuntime:
 
 async function readJobAudit(jobId: string) {
   const [job, events] = await Promise.all([
-    prisma.generationJob.findUnique({
-      where: { id: jobId },
-      select: { metricsJson: true },
+    db.query.generationJobs.findFirst({
+      where: eq(schema.generationJobs.id, jobId),
     }),
-    prisma.generationEvent.findMany({
-      where: { jobId },
-      orderBy: { sequence: "asc" },
-      select: { type: true, stage: true, dataJson: true, createdAt: true },
-    }),
+    db.select({
+      type: schema.generationEvents.type,
+      stage: schema.generationEvents.stage,
+      dataJson: schema.generationEvents.dataJson,
+      createdAt: schema.generationEvents.createdAt,
+    }).from(schema.generationEvents).where(eq(schema.generationEvents.jobId, jobId)),
   ])
   const metrics = parseJson(job?.metricsJson)
   const lifecycleEvents = events
@@ -647,7 +651,7 @@ async function readJobAudit(jobId: string) {
 async function persistChildExecutorTimeoutReport(input: {
   jobId: string
   projectId: string
-  lifecycleEvents: Array<{ type: string; data: any; createdAt: string }>
+  lifecycleEvents: Array<{ type: string; data: Record<string, unknown>; createdAt: string }>
 }) {
   const dir = path.join(getReportStoragePath(), "executor-timeouts", input.jobId)
   await mkdir(dir, { recursive: true })
@@ -692,10 +696,10 @@ async function persistChildExecutorTimeoutReport(input: {
   return dir
 }
 
-function buildExecutorOperationQueue(events: Array<{ type: string; data: any; createdAt: string }>) {
-  const queue = new Map<string, any>()
+function buildExecutorOperationQueue(events: Array<{ type: string; data: Record<string, unknown>; createdAt: string }>) {
+  const queue = new Map<string, { id: string; operation: string; file: string; status: string; startedAt: string; completedAt?: string; durationMs?: number }>()
   for (const event of events) {
-    const data = event.data || {}
+    const data = (event.data || {}) as Record<string, unknown>
     const id = String(data.operationId || "")
     if (!id || id === "build_operation_queue" || id === "dependency_install") continue
     if (event.type === "executor_operation_started") {
@@ -708,12 +712,18 @@ function buildExecutorOperationQueue(events: Array<{ type: string; data: any; cr
       })
     }
     if (event.type === "executor_operation_completed") {
-      const existing = queue.get(id) || { id }
+      const existing = queue.get(id) || {
+        id,
+        operation: String(data.operation || ""),
+        file: String(data.file || ""),
+        status: "completed",
+        startedAt: event.createdAt,
+      }
       queue.set(id, {
         ...existing,
-        status: data.status || "completed",
+        status: String(data.status || "completed"),
         completedAt: event.createdAt,
-        durationMs: data.durationMs,
+        durationMs: typeof data.durationMs === "number" ? data.durationMs : undefined,
       })
     }
   }
@@ -728,7 +738,7 @@ function latestLifecycleFromEvents(events: Array<{ dataJson: string | null }>) {
   return null
 }
 
-function summarizeLifecycle(results: any[]) {
+function summarizeLifecycle(results: CaseResult[]) {
   const values = results.map((item) => item.lifecycleBreakdown || item.metrics?.generationLifecycle).filter(Boolean)
   return {
     providerLatencyMs: avg(values.map((item) => Number(item.providerLatencyMs || 0)).filter((value) => value > 0)),
@@ -739,7 +749,7 @@ function summarizeLifecycle(results: any[]) {
   }
 }
 
-function summarizeDbMetrics(results: any[], dbRuntime: {
+function summarizeDbMetrics(results: CaseResult[], dbRuntime: {
   before: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
   after: Awaited<ReturnType<typeof collectDbRuntimeMetrics>>
   maxConcurrentChildren: number
@@ -749,13 +759,13 @@ function summarizeDbMetrics(results: any[], dbRuntime: {
     .filter(Boolean)
   const childConnectionFailures = childSnapshots.reduce((sum, item) => sum + Number(item.dbConnectionFailures || 0), 0)
   const childRetryCount = childSnapshots.reduce((sum, item) => sum + Number(item.dbRetryCount || 0), 0)
-  const childPrismaClients = childSnapshots.reduce((sum, item) => sum + Number(item.prisma_client_count || 0), 0)
-  const childActivePrismaClients = childSnapshots.reduce((sum, item) => sum + Number(item.activePrismaClients || 0), 0)
+  const childPrismaClients = childSnapshots.reduce((sum, item) => sum + Number(item?.db_client_count || 0), 0)
+  const childActivePrismaClients = childSnapshots.reduce((sum, item) => sum + Number(item?.activeDbClients || 0), 0)
   return {
     maxConcurrentChildren: dbRuntime.maxConcurrentChildren,
-    prisma_client_count: dbRuntime.after.prisma_client_count + childPrismaClients,
-    activePrismaClients: dbRuntime.after.activePrismaClients + childActivePrismaClients,
-    activePrismaClientsAfterRun: dbRuntime.after.activePrismaClients,
+    db_client_count: dbRuntime.after.db_client_count + childPrismaClients,
+    activeDbClients: dbRuntime.after.activeDbClients + childActivePrismaClients,
+    activeDbClientsAfterRun: dbRuntime.after.activeDbClients,
     activeDbConnectionsBefore: dbRuntime.before.activeDbConnections,
     activeDbConnectionsAfter: dbRuntime.after.activeDbConnections,
     dbPoolUsageBefore: dbRuntime.before.dbPoolUsage,
@@ -767,7 +777,7 @@ function summarizeDbMetrics(results: any[], dbRuntime: {
   }
 }
 
-function summarizeArtifactAudit(results: any[]) {
+function summarizeArtifactAudit(results: CaseResult[]) {
   let attempts = 0
   let completed = 0
   let malformed = 0
@@ -809,7 +819,7 @@ function summarizeArtifactAudit(results: any[]) {
   }
 }
 
-function summarizeExecutor(results: any[]) {
+function summarizeExecutor(results: CaseResult[]) {
   const started = results.filter((item) => item.lifecycleEvents?.includes("executor_started")).length
   const completed = results.filter((item) => item.lifecycleEvents?.includes("executor_completed")).length
   const operationStarted = results.reduce((sum, item) =>
@@ -828,7 +838,7 @@ function summarizeExecutor(results: any[]) {
   }
 }
 
-function summarizeTimeouts(results: any[]) {
+function summarizeTimeouts(results: CaseResult[]) {
   const counts = new Map<string, number>()
   for (const item of results) {
     if (item.success) continue
@@ -842,7 +852,7 @@ function summarizeTimeouts(results: any[]) {
   return Object.fromEntries(Array.from(counts.entries()).sort((left, right) => right[1] - left[1]))
 }
 
-function summarizeBottleneck(results: any[]) {
+function summarizeBottleneck(results: CaseResult[]) {
   const counts = new Map<string, number>()
   for (const item of results) {
     const stage = item.bottleneckStage || bottleneckFromBreakdown(item.lifecycleBreakdown || item.metrics?.generationLifecycle)
@@ -852,7 +862,7 @@ function summarizeBottleneck(results: any[]) {
   return Array.from(counts.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] || null
 }
 
-function summarizeFailures(results: any[]) {
+function summarizeFailures(results: CaseResult[]) {
   const counts = new Map<string, number>()
   for (const item of results) {
     if (item.success) continue
@@ -866,7 +876,7 @@ function summarizeFailures(results: any[]) {
   return Object.fromEntries(Array.from(counts.entries()).sort((left, right) => right[1] - left[1]))
 }
 
-function bottleneckFromBreakdown(breakdown: any) {
+function bottleneckFromBreakdown(breakdown: Record<string, unknown> | null) {
   if (!breakdown) return null
   if (breakdown.providerCalledAt && !breakdown.taskgraphStartedAt) return "provider_artifact_completion"
   if (breakdown.taskgraphStartedAt && !breakdown.taskgraphCompletedAt) return "taskgraph"
@@ -929,6 +939,6 @@ function parseJson(value: string | null | undefined) {
 
 main().catch(async (error) => {
   console.error(error)
-  await disconnectPrisma().catch(() => null)
+  await disconnectDb().catch(() => null)
   process.exit(1)
 })

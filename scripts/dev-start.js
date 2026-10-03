@@ -23,20 +23,26 @@ function loadDotEnv(filePath) {
   )
 }
 
-const env = { ...loadDotEnv(path.join(process.cwd(), ".env")), ...process.env }
+const env = { ...loadDotEnv(path.join(process.cwd(), ".env")), ...loadDotEnv(path.join(process.cwd(), ".env.local")), ...process.env }
 env.NODE_ENV = "development"
-env.DATABASE_URL = env.DATABASE_URL || ""
 
-if (!/^postgres(?:ql)?:\/\//i.test(env.DATABASE_URL)) {
-  console.error("[dev] DATABASE_URL must be a PostgreSQL connection string. Use a Neon development branch or local Postgres database.")
+const databaseUrl = (env.TURSO_DATABASE_URL || "").trim()
+
+if (databaseUrl && !/^(libsql|https?):\/\//i.test(databaseUrl)) {
+  console.error("[dev] TURSO_DATABASE_URL must be a libsql:// or https:// connection string.")
   process.exit(1)
 }
 
 const nextCli = path.normalize(require.resolve("next/dist/bin/next"))
 
-function runPrismaDbPush() {
+function runMigrations() {
+  if (!databaseUrl) {
+    console.warn("[dev] TURSO_DATABASE_URL not set; skipping schema migration (local fallback).")
+    return
+  }
+
   try {
-    const output = execSync("node scripts/db-push.js local", {
+    const output = execSync("node scripts/drizzle-migrate.js", {
       env,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -56,7 +62,7 @@ function runPrismaDbPush() {
       })
       .join("\n")
 
-    console.error("[dev] Prisma schema sync failed before starting Next dev.")
+    console.error("[dev] Drizzle schema migration failed before starting Next dev.")
     console.error(message)
     process.exit(1)
   }
@@ -83,5 +89,5 @@ function startNextDev() {
   })
 }
 
-runPrismaDbPush()
+runMigrations()
 startNextDev()

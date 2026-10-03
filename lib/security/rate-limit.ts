@@ -1,10 +1,13 @@
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { users, subscriptions, usageLogs } from "@/lib/db/schema"
+import { eq, and, gte, inArray, sql } from "drizzle-orm"
 import { env, getEnvNumber } from "@/lib/env"
 
 /**
  * Redis-backed rate limiting for serverless/multi-instance deployments.
- * Uses sliding window counter pattern with Redis INCR + EXPIRE.
- * Falls back to database count verification as defense-in-depth.
+ * Uses a fixed window counter kept in Redis (admitted requests only) and
+ * falls back to database count verification as defense-in-depth.
+ * Failed generations are refunded and release their daily quota again.
  */
 
 const WINDOW_MS = 60_000
@@ -28,6 +31,11 @@ const FREE_GENERATIONS_PER_DAY = Math.max(
   1,
   Math.round(getEnvNumber(3, "FREE_GENERATE_LIMIT_PER_DAY", "FREE_GENERATIONS_PER_DAY"))
 )
+
+// Usage log states that consume a generation slot: an attempt that is still
+// in flight or that finished successfully. Refunded/failed attempts are excluded
+// so a provider outage never burns the free daily quota.
+const QUOTA_CONSUMING_STATUSES = ["reserved", "pending", "completed", "direct"]
 
 // --- Redis connection for rate limiting ---
 
@@ -69,7 +77,25 @@ async function getRateLimitRedis(): Promise<import("ioredis").default | null> {
   }
 }
 
-// --- Redis-based sliding window rate limiter ---
+// --- Redis-based fixed window rate limiter ---
+
+// Atomically admits a request only while the counter is below the limit.
+// Rejected requests must not increment the counter and must not refresh the
+// TTL: otherwise retries caused by a provider outage keep inflating the counter
+// and sliding the block window forward.
+const ADMIT_BELOW_LIMIT_SCRIPT = `
+local limit = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local current = tonumber(redis.call("get", KEYS[1]) or "0")
+if current >= limit then
+  return -1
+end
+current = redis.call("incr", KEYS[1])
+if current == 1 then
+  redis.call("expire", KEYS[1], ttl)
+end
+return current
+`
 
 async function redisRateCheck(
   key: string,
@@ -84,20 +110,20 @@ async function redisRateCheck(
 
   try {
     const fullKey = `swift:ratelimit:${key}`
-    const multi = redis.multi()
-    multi.incr(fullKey)
-    multi.expire(fullKey, windowSeconds)
-    const results = await multi.exec()
+    const result = Number(
+      await redis.eval(ADMIT_BELOW_LIMIT_SCRIPT, 1, fullKey, String(limit), String(windowSeconds))
+    )
 
-    if (!results || !results[0]) {
-      return { allowed: true, current: 0, remaining: limit }
+    if (result === -1) {
+      return { allowed: false, current: limit, remaining: 0 }
     }
 
-    const current = (results[0][1] as number) || 0
-    const allowed = current <= limit
-    const remaining = Math.max(0, limit - current)
-
-    return { allowed, current, remaining }
+    const current = Number.isFinite(result) && result > 0 ? result : 0
+    return {
+      allowed: true,
+      current,
+      remaining: Math.max(0, limit - current),
+    }
   } catch (error) {
     console.warn("[rate-limit] Redis rate check failed:", error instanceof Error ? error.message : String(error))
     // Graceful degradation: allow on Redis failure
@@ -108,7 +134,7 @@ async function redisRateCheck(
 // --- Public API ---
 
 /**
- * Enforce per-minute rate limit using Redis sliding window.
+ * Enforce per-minute rate limit using a Redis fixed window counter.
  * Replaces the old in-memory Map-based approach that didn't work in serverless.
  */
 export async function enforceUserRateLimit(userId: string) {
@@ -130,23 +156,17 @@ export async function enforceAiUsageRateLimit(userId: string) {
   await enforceGenerationHourlyRateLimit(userId)
 
   const [user, activePaidSubscription] = await Promise.all([
-    prisma.user.findUnique({
-      where: { id: userId },
-      select: { isDeveloperAccount: true },
+    db.query.users.findFirst({
+      where: eq(users.id, userId),
+      columns: { isDeveloperAccount: true },
     }),
-    prisma.subscription.findFirst({
-      where: {
-        status: "active",
-        plan: { not: "free" },
-        workspace: {
-          members: {
-            some: {
-              userId,
-            },
-          },
-        },
-      },
-      select: { id: true },
+    db.query.subscriptions.findFirst({
+      where: and(
+        eq(subscriptions.status, "active"),
+        sql`${subscriptions.plan} != 'free'`,
+        sql`exists (select 1 from workspace_members wm where wm.workspace_id = ${subscriptions.workspaceId} and wm.user_id = ${userId})`
+      ),
+      columns: { id: true },
     }),
   ])
 
@@ -172,22 +192,20 @@ export async function enforceAiUsageRateLimit(userId: string) {
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
 
   const [minuteCount, dayCount] = await Promise.all([
-    prisma.usageLog.count({
-      where: {
-        userId,
-        createdAt: {
-          gte: oneMinuteAgo,
-        },
-      },
-    }),
-    prisma.usageLog.count({
-      where: {
-        userId,
-        createdAt: {
-          gte: oneDayAgo,
-        },
-      },
-    }),
+    db.select({ count: sql<number>`count(*)` }).from(usageLogs).where(
+      and(
+        eq(usageLogs.userId, userId),
+        gte(usageLogs.createdAt, oneMinuteAgo),
+        inArray(usageLogs.status, QUOTA_CONSUMING_STATUSES)
+      )
+    ).then((rows) => rows[0]?.count ?? 0),
+    db.select({ count: sql<number>`count(*)` }).from(usageLogs).where(
+      and(
+        eq(usageLogs.userId, userId),
+        gte(usageLogs.createdAt, oneDayAgo),
+        inArray(usageLogs.status, QUOTA_CONSUMING_STATUSES)
+      )
+    ).then((rows) => rows[0]?.count ?? 0),
   ])
 
   if (minuteCount >= MAX_REQUESTS_PER_MINUTE) {
@@ -195,6 +213,9 @@ export async function enforceAiUsageRateLimit(userId: string) {
   }
 
   if (dayCount >= dailyLimit) {
+    // The database is the source of truth. Hand back the slot this request just
+    // reserved in Redis so the fast path mirrors real usage instead of drifting.
+    await releaseAiUsageQuota(userId, now)
     throw new Error(
       hasPremiumAccess
         ? `Daily fair usage limit exceeded. Maximum ${dailyLimit} paid prompts per day.`
@@ -209,6 +230,33 @@ export async function enforceGenerationHourlyRateLimit(userId: string) {
 
   if (!hourResult.allowed) {
     throw new Error(`Generation rate limit exceeded. Maximum ${MAX_GENERATIONS_PER_HOUR} generations per hour.`)
+  }
+}
+
+/**
+ * Give the daily generation quota back after a failed attempt is refunded.
+ *
+ * The day counter is incremented when the request starts, before the provider
+ * is called, so the refund path must release it again. Otherwise a provider
+ * outage silently burns the free daily quota of every user.
+ *
+ * Only the daily quota is released: the per-minute and per-hour counters are
+ * abuse protection and must keep bounding how often the provider can be hit.
+ * Best effort on purpose, a lost release only postpones the next attempt.
+ */
+export async function releaseAiUsageQuota(userId: string, attemptedAt: Date = new Date()) {
+  const redis = await getRateLimitRedis()
+  if (!redis) return
+
+  const counter = `swift:ratelimit:user:${userId}:day:${attemptedAt.toISOString().slice(0, 10)}`
+
+  try {
+    const current = Number(await redis.get(counter))
+    if (Number.isFinite(current) && current > 0) {
+      await redis.decr(counter)
+    }
+  } catch (error) {
+    console.warn("[rate-limit] Failed to release quota counter:", error instanceof Error ? error.message : String(error))
   }
 }
 

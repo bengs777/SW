@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq, sql } from "drizzle-orm"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import { getConfiguredSwiftModelIds } from "@/lib/ai/provider-health"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
@@ -15,12 +17,11 @@ export const dynamic = "force-dynamic"
 
 async function requireDebugAccess() {
   if (process.env.NODE_ENV !== "production") return { ok: true, status: 200 }
-  const session = await auth()
-  const email = session?.user?.email
+  const session = await getSession()
+  const email = session?.email
   if (!email) return { ok: false, status: 401 }
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { isDeveloperAccount: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
   })
   return { ok: Boolean(user?.isDeveloperAccount), status: user?.isDeveloperAccount ? 200 : 403 }
 }
@@ -28,9 +29,8 @@ async function requireDebugAccess() {
 async function checkPrisma() {
   const startedAt = Date.now()
   try {
-    await monitorOperation("prisma", "debug_prisma_health", () => prisma.$queryRaw`SELECT 1`)
+    await db.select({ result: sql<number>`1` }).from(sql`(SELECT 1) as t`)
     const latencyMs = Date.now() - startedAt
-    recordPrismaDuration(latencyMs, { operation: "debugRuntimeHealth" })
     return { status: "healthy", latencyMs }
   } catch (error) {
     return {

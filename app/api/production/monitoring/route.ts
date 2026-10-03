@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDatabasePoolUsage, prisma } from "@/lib/db/client"
+import { getDatabasePoolUsage, db } from "@/lib/db/client"
+import { generationJobs } from "@/lib/db/schema"
+import { gte, sql } from "drizzle-orm"
 import { getDatabaseMetricsSnapshot } from "@/lib/db/metrics"
 import { getDatabaseCircuitState } from "@/lib/db/circuit-breaker"
 import { ProviderRouter } from "@/lib/ai/provider-router"
@@ -33,21 +35,23 @@ export async function GET(request: NextRequest) {
       status: "unhealthy",
       error: error instanceof Error ? error.message : String(error),
     })),
-    prisma.generationJob.groupBy({
-      by: ["status"],
-      where: { createdAt: { gte: since } },
-      _count: { _all: true },
-    }).catch(() => []),
+    db.select({
+      status: generationJobs.status,
+      count: sql<number>`count(*)`,
+    }).from(generationJobs)
+      .where(gte(generationJobs.createdAt, since))
+      .groupBy(generationJobs.status)
+      .catch(() => []),
     Promise.resolve(getRuntimeMetricsSnapshot()),
   ])
 
-  const totalGenerations = generationCounts.reduce((sum, item) => sum + item._count._all, 0)
+  const totalGenerations = generationCounts.reduce((sum, item) => sum + item.count, 0)
   const completedGenerations = generationCounts
     .filter((item) => item.status === "completed")
-    .reduce((sum, item) => sum + item._count._all, 0)
+    .reduce((sum, item) => sum + item.count, 0)
   const failedGenerations = generationCounts
     .filter((item) => ["failed", "dead_lettered", "cancelled"].includes(item.status))
-    .reduce((sum, item) => sum + item._count._all, 0)
+    .reduce((sum, item) => sum + item.count, 0)
 
   return NextResponse.json({
     status:

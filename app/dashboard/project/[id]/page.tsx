@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { DEFAULT_MODEL_KEY, DEFAULT_MODEL_OPTIONS } from "@/lib/ai/models"
-import type { CollaborationMode } from "@/lib/ai/collaboration-mode"
+import { isMutatingCollaborationMode, type CollaborationMode } from "@/lib/ai/collaboration-mode"
 import { buildPreviewContextPacket } from "@/lib/ai/preview-context"
 import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
 import type { PromptLanguage } from "@/lib/ai/prompt-templates"
@@ -53,6 +53,8 @@ function readGenerationTimeoutMs() {
 const GENERATE_BACKEND_TIMEOUT_MS = readGenerationTimeoutMs()
 const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
 const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
+const CHAT_ANSWER_TIMEOUT_MS = 60_000
+const DIRECT_FALLBACK_ACTIVE_STATUSES = ["queued", "running", "processing", "retrying", "stalled", "orphaned"]
 
 function buildClientWorkPlan(prompt: string, mode: CollaborationMode, language: PromptLanguage) {
   const shortPrompt = prompt.replace(/\s+/g, " ").trim().slice(0, 120)
@@ -291,7 +293,7 @@ export type Message = {
 
 export type ProviderStatus = {
   status: "connected" | "slow" | "error"
-  issue?: "healthy" | "latency" | "auth" | "quota" | "config" | "unknown"
+  issue?: "healthy" | "latency" | "auth" | "quota" | "limit" | "config" | "unknown"
   reason?: string
   action?: string
   responseTimeMs?: number
@@ -440,6 +442,24 @@ export default function EditorPage() {
   const generatedFilesRef = useRef<GeneratedFile[]>([])
   const workspaceArtifactStatusRef = useRef<WorkspaceArtifactStatus>("empty")
   const projectRefreshSequenceRef = useRef(0)
+  const directFallbackAttemptedRef = useRef(false)
+  const directFallbackPromiseRef = useRef<Promise<boolean> | null>(null)
+  const directFallbackRunnerRef = useRef<
+    ((reason: "create_503" | "client_timeout" | "sse_failed") => Promise<boolean>) | null
+  >(null)
+  const clientTimedOutRef = useRef(false)
+  const pendingGenerateRequestRef = useRef<{
+    assistantId: string
+    projectId: string
+    prompt: string
+    model: string
+    plan: string[]
+    attachments: PromptAttachment[]
+    promptLanguage: PromptLanguage
+    idempotencyKey: string
+    previewContext: PreviewContext | null
+    collaborationMode: CollaborationMode
+  } | null>(null)
 
   useEffect(() => {
     generatedFilesRef.current = generatedFiles
@@ -1447,8 +1467,26 @@ export default function EditorPage() {
     }
 
     if (
+      normalized.includes("free limit exceeded") ||
+      normalized.includes("generations per 24 hours") ||
+      normalized.includes("daily fair usage limit exceeded") ||
+      normalized.includes("paid prompts per day") ||
+      normalized.includes("kuota generate harian")
+    ) {
+      return {
+        status: "error",
+        issue: "limit",
+        reason: "Kuota generate harian kamu sudah habis",
+        action: "Generate yang gagal otomatis dikembalikan dan tidak mengurangi kuota. Tunggu jendela 24 jam berikutnya atau upgrade paket untuk melanjutkan.",
+        checkedAt: new Date().toISOString(),
+      }
+    }
+
+    if (
       normalized.includes("rate-limit") ||
       normalized.includes("rate limited") ||
+      normalized.includes("rate limit exceeded") ||
+      normalized.includes("terlalu banyak permintaan") ||
       normalized.includes("max_tokens")
     ) {
       return {
@@ -1648,6 +1686,166 @@ export default function EditorPage() {
     }
   }, [activeFileIndex, currentVersion, generatedFiles, isDirty, isLoadingProject, latestUserPrompt, persistWorkspaceDraft, pushErrorLog, saveFiles, workspaceArtifactStatus])
 
+  const attemptDirectFallback = useCallback(async (reason: "create_503" | "client_timeout" | "sse_failed"): Promise<boolean> => {
+    if (directFallbackAttemptedRef.current) {
+      return false
+    }
+    if (activeGenerateWasCancelledRef.current) {
+      return false
+    }
+    const pending = pendingGenerateRequestRef.current
+    if (!pending) {
+      return false
+    }
+    directFallbackAttemptedRef.current = true
+    try {
+      const controller = new AbortController()
+      const response = await fetch("/api/generate/direct", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          projectId: pending.projectId,
+          prompt: pending.prompt,
+          model: pending.model,
+          provider: "swift",
+          plan: pending.plan,
+          attachments: pending.attachments,
+          promptLanguage: pending.promptLanguage,
+          idempotencyKey: pending.idempotencyKey,
+          previewContext: pending.previewContext,
+          collaborationMode: pending.collaborationMode,
+        }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.job?.id) {
+        pushErrorLog("generate", `Mode fallback OpenRouter free gagal (HTTP ${response.status}).`)
+        return false
+      }
+      const jobId = String(data.job.id)
+      activeGenerateControllerRef.current = controller
+      activeGenerationJobIdRef.current = jobId
+      activeGenerationLastEventIdRef.current = "0"
+      applyJobProgress(data.job)
+      startGenerationStream(jobId)
+      console.log("direct_fallback_started", { reason, jobId })
+      setGenerationProgress((current) =>
+        current
+          ? {
+              ...current,
+              stage: "request",
+              label: "Mode fallback OpenRouter free aktif",
+              progressPercent: Math.max(current.progressPercent || 0, 12),
+            }
+          : current
+      )
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === pending.assistantId
+            ? {
+                ...msg,
+                content: "Job utama tidak tersedia. Swift menggunakan mode fallback OpenRouter free untuk melanjutkan generation.",
+                isGenerating: true,
+              }
+            : msg
+        )
+      )
+      return true
+    } catch (error) {
+      pushErrorLog("generate", `Mode fallback OpenRouter free gagal: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }, [applyJobProgress, pushErrorLog, startGenerationStream])
+
+  useEffect(() => {
+    directFallbackRunnerRef.current = attemptDirectFallback
+  })
+
+  const sendChatAnswer = useCallback(async (input: {
+    prompt: string
+    modelKey: string
+    promptLanguage: PromptLanguage
+    mode: "ask" | "review"
+    previewContext: PreviewContext
+  }) => {
+    const assistantId = Math.random().toString(36).substring(7)
+    setMessages((prev) => [
+      ...prev,
+      { id: assistantId, role: "assistant", content: "", timestamp: new Date(), isGenerating: true },
+    ])
+
+    activeGenerateWasCancelledRef.current = false
+    setIsGenerating(true)
+    setProviderStatus(null)
+    setGenerationProgress({
+      stage: "context",
+      label: input.mode === "review" ? "Swift sedang me-review project" : "Swift sedang menjawab pertanyaan",
+      startedAt: new Date(),
+      timeoutMs: CHAT_ANSWER_TIMEOUT_MS,
+      modelKey: input.modelKey,
+      prompt: input.prompt,
+      progressPercent: 20,
+    })
+
+    const controller = new AbortController()
+    activeGenerateControllerRef.current = controller
+    const timeoutId = window.setTimeout(() => controller.abort(), CHAT_ANSWER_TIMEOUT_MS)
+
+    const finish = (content: string, model?: string) => {
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content,
+                isGenerating: false,
+                metadata: { mode: input.mode, ...(model ? { model } : {}) },
+              }
+            : message
+        )
+      )
+    }
+
+    try {
+      const response = await fetch("/api/ai/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          projectId,
+          prompt: input.prompt,
+          model: input.modelKey,
+          promptLanguage: input.promptLanguage,
+          mode: input.mode,
+          previewContext: input.previewContext,
+        }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || typeof data?.answer !== "string") {
+        finish(typeof data?.error === "string" ? data.error : "Swift gagal menjawab pertanyaan. Coba lagi.")
+        return
+      }
+      finish(data.answer, typeof data.model === "string" ? data.model : undefined)
+    } catch (error) {
+      const wasCancelled = activeGenerateWasCancelledRef.current
+      const isAbort = error instanceof DOMException && error.name === "AbortError"
+      finish(
+        wasCancelled && isAbort
+          ? "Jawaban dihentikan. Tidak ada perubahan file pada project."
+          : isAbort
+            ? `Swift timeout setelah ${Math.round(CHAT_ANSWER_TIMEOUT_MS / 1000)} detik. Coba kirim ulang pertanyaannya.`
+            : "Gagal mengirim pertanyaan. Periksa koneksi lalu coba lagi."
+      )
+    } finally {
+      window.clearTimeout(timeoutId)
+      if (activeGenerateControllerRef.current === controller) {
+        activeGenerateControllerRef.current = null
+      }
+      setIsGenerating(false)
+      window.setTimeout(() => setGenerationProgress(null), 800)
+    }
+  }, [projectId])
+
   const handleSendMessage = useCallback(async (
     content: string,
     modelKey: string,
@@ -1692,20 +1890,7 @@ export default function EditorPage() {
     }
 
     setMessages((prev) => [...prev, userMessage])
-    setIsGenerating(true)
-    streamedGenerationFilesSeenRef.current = false
-    activeGenerateWasCancelledRef.current = false
-    setProviderStatus(null)
-    setGenerationProgress({
-      stage: "context",
-      label: "Membaca konteks project",
-      startedAt: new Date(),
-      timeoutMs: GENERATE_CLIENT_TIMEOUT_MS,
-      modelKey,
-      prompt: trimmedContent,
-      workPlan,
-      progressPercent: 4,
-    })
+
     const activeFile = generatedFiles[activeFileIndex] || null
     const previewContext = buildPreviewContextPacket({
       source: "editor",
@@ -1723,7 +1908,37 @@ export default function EditorPage() {
       notes: ["Preview context captured from the editor before sending the request."],
     })
 
+    if (!isMutatingCollaborationMode(collaborationMode)) {
+      await sendChatAnswer({
+        prompt: trimmedContent,
+        modelKey,
+        promptLanguage,
+        mode: collaborationMode === "review" ? "review" : "ask",
+        previewContext,
+      })
+      return
+    }
+
+    setIsGenerating(true)
+    streamedGenerationFilesSeenRef.current = false
+    activeGenerateWasCancelledRef.current = false
+    directFallbackAttemptedRef.current = false
+    directFallbackPromiseRef.current = null
+    clientTimedOutRef.current = false
+    setProviderStatus(null)
+    setGenerationProgress({
+      stage: "context",
+      label: "Membaca konteks project",
+      startedAt: new Date(),
+      timeoutMs: GENERATE_CLIENT_TIMEOUT_MS,
+      modelKey,
+      prompt: trimmedContent,
+      workPlan,
+      progressPercent: 4,
+    })
+
     const promptForGeneration = trimmedContent
+    const idempotencyKey = createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext)
 
     // Add assistant message placeholder
     const assistantId = Math.random().toString(36).substring(7)
@@ -1737,11 +1952,24 @@ export default function EditorPage() {
 
     setMessages((prev) => [...prev, assistantMessage])
     let handoffToJobStream = false
+    pendingGenerateRequestRef.current = {
+      assistantId,
+      projectId,
+      prompt: promptForGeneration,
+      model: modelKey,
+      plan: workPlan,
+      attachments,
+      promptLanguage,
+      idempotencyKey,
+      previewContext,
+      collaborationMode,
+    }
     clearGenerateDeadline()
     const generateController = new AbortController()
     activeGenerateControllerRef.current = generateController
     activeGenerateTimeoutRef.current = window.setTimeout(() => {
       console.log("client_timeout_triggered")
+      clientTimedOutRef.current = true
       const jobId = activeGenerationJobIdRef.current
       if (jobId) {
         void fetch(`/api/generate/jobs/${jobId}/cancel`, {
@@ -1753,36 +1981,51 @@ export default function EditorPage() {
 
       generateController.abort()
       closeGenerationStream()
-      setIsGenerating(false)
-      setGenerationProgress((current) =>
-        current
-          ? {
-              ...current,
-              stage: "timeout",
-              label: "Swift timeout",
-              progressPercent: 100,
-            }
-          : current
-      )
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantId
-            ? {
-                ...msg,
-                content: `Swift timeout setelah ${GENERATE_CLIENT_TIMEOUT_SECONDS} detik. Request dihentikan otomatis dan saldo akan dikembalikan jika job gagal.`,
-                isGenerating: false,
-              }
-            : msg
-        )
-      )
       activeGenerateTimeoutRef.current = null
       activeGenerateControllerRef.current = null
       activeGenerationJobIdRef.current = null
       activeGenerateWasCancelledRef.current = false
+
+      const showTimeoutState = () => {
+        setIsGenerating(false)
+        setGenerationProgress((current) =>
+          current
+            ? {
+                ...current,
+                stage: "timeout",
+                label: "Swift timeout",
+                progressPercent: 100,
+              }
+            : current
+        )
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId
+              ? {
+                  ...msg,
+                  content: `Swift timeout setelah ${GENERATE_CLIENT_TIMEOUT_SECONDS} detik. Request dihentikan otomatis dan saldo akan dikembalikan jika job gagal.`,
+                  isGenerating: false,
+                }
+              : msg
+          )
+        )
+      }
+
+      if (directFallbackAttemptedRef.current || activeGenerateWasCancelledRef.current) {
+        showTimeoutState()
+        return
+      }
+
+      const fallbackPromise = attemptDirectFallback("client_timeout")
+      directFallbackPromiseRef.current = fallbackPromise
+      void fallbackPromise.then((fallbackSucceeded) => {
+        if (!fallbackSucceeded) {
+          showTimeoutState()
+        }
+      })
     }, GENERATE_CLIENT_TIMEOUT_MS)
 
     try {
-      const idempotencyKey = createIdempotencyKey(promptForGeneration, modelKey, attachments, previewContext)
       const jobResponse = await fetch("/api/generate/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1924,6 +2167,7 @@ export default function EditorPage() {
     projectTemplateId,
     pushErrorLog,
     applyJobProgress,
+    sendChatAnswer,
     startGenerationStream,
   ])
 

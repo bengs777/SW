@@ -1,6 +1,7 @@
-import { Prisma } from "@prisma/client"
+import { db } from "@/lib/db/client"
+import { products } from "@/lib/db/schema"
+import { eq, desc } from "drizzle-orm"
 import { z } from "zod"
-import { prisma } from "@/lib/db/client"
 import { withDatabaseWriteRetry } from "@/lib/db/errors"
 import { log } from "@/lib/logging"
 
@@ -24,14 +25,6 @@ export type CreateProductInput = z.infer<typeof CreateProductSchema>
 export type UpdateProductInput = z.infer<typeof UpdateProductSchema>
 
 function classifyDatabaseError(error: unknown) {
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    return {
-      code: error.code,
-      message: error.message,
-      meta: error.meta || null,
-    }
-  }
-
   return {
     code: "UNKNOWN_DB_ERROR",
     message: error instanceof Error ? error.message : String(error),
@@ -52,11 +45,15 @@ export class ProductService {
       const limit = Math.min(Math.max(input.limit || 50, 1), 100)
       const status = input.status ? ProductStatusSchema.safeParse(input.status) : null
 
-      return await prisma.product.findMany({
-        where: status?.success ? { status: status.data } : undefined,
-        orderBy: { createdAt: "desc" },
-        take: limit,
-      })
+      const query = db.select().from(products)
+        .orderBy(desc(products.createdAt))
+        .limit(limit)
+
+      if (status?.success) {
+        return query.where(eq(products.status, status.data))
+      }
+
+      return query
     } catch (error) {
       logProductDbFailure("listProducts", error)
       throw error
@@ -67,9 +64,7 @@ export class ProductService {
     const parsed = CreateProductSchema.parse(input)
     try {
       return await withDatabaseWriteRetry(() =>
-        prisma.product.create({
-          data: parsed,
-        })
+        db.insert(products).values({ id: crypto.randomUUID(), ...parsed }).returning()
       )
     } catch (error) {
       logProductDbFailure("createProduct", error)
@@ -82,10 +77,10 @@ export class ProductService {
     const parsed = UpdateProductSchema.parse(input)
     try {
       return await withDatabaseWriteRetry(() =>
-        prisma.product.update({
-          where: { id: productId },
-          data: parsed,
-        })
+        db.update(products)
+          .set(parsed)
+          .where(eq(products.id, productId))
+          .returning()
       )
     } catch (error) {
       logProductDbFailure("updateProduct", error)
@@ -97,9 +92,9 @@ export class ProductService {
     const productId = z.string().trim().min(1).parse(id)
     try {
       return await withDatabaseWriteRetry(() =>
-        prisma.product.delete({
-          where: { id: productId },
-        })
+        db.delete(products)
+          .where(eq(products.id, productId))
+          .returning()
       )
     } catch (error) {
       logProductDbFailure("deleteProduct", error)

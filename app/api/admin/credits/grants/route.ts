@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import {
   CreditGrantService,
@@ -64,25 +66,19 @@ function mapGrantError(error: unknown) {
 }
 
 async function requireDeveloperTreasuryActor() {
-  const session = await auth()
+  const session = await getSession()
 
-  if (!session?.user?.email) {
+  if (!session?.email) {
     return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) }
   }
 
-  const sessionEmail = normalizeEmail(session.user.email)
+  const sessionEmail = normalizeEmail(session.email)
   if (sessionEmail !== normalizeEmail(env.devOwnerEmail)) {
     return { error: NextResponse.json({ error: "Developer access required" }, { status: 403 }) }
   }
 
-  const actor = await prisma.user.findUnique({
-    where: { email: sessionEmail },
-    select: {
-      id: true,
-      email: true,
-      balance: true,
-      isDeveloperAccount: true,
-    },
+  const actor = await db.query.users.findFirst({
+    where: eq(users.email, sessionEmail),
   })
 
   if (!actor || !actor.isDeveloperAccount) {
@@ -173,13 +169,11 @@ export async function POST(request: NextRequest) {
     const body = GrantSchema.parse(await request.json())
 
     const recipient = body.recipientUserId
-      ? await prisma.user.findUnique({
-          where: { id: body.recipientUserId },
-          select: { id: true, email: true },
+      ? await db.query.users.findFirst({
+          where: eq(users.id, body.recipientUserId),
         })
-      : await prisma.user.findUnique({
-          where: { email: normalizeEmail(body.recipientEmail || "") },
-          select: { id: true, email: true },
+      : await db.query.users.findFirst({
+          where: eq(users.email, normalizeEmail(body.recipientEmail || "")),
         })
 
     if (!recipient) {

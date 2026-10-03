@@ -11,7 +11,9 @@ import {
 } from "@/lib/queue/generation-queue"
 import { registerGenerationAbortController } from "@/lib/ai/generation-job-runtime"
 import { executeGenerationJob } from "@/lib/services/generation-orchestrator.service"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationHistory, projects } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobCancelledError, GenerationJobService } from "@/lib/services/generation-job.service"
 import { OrchestrationRuntimeService, classifyRetryReason } from "@/lib/services/orchestration-runtime.service"
@@ -49,15 +51,13 @@ async function loadProjectFiles(projectId: string) {
 }
 
 async function loadGenerationHistoryCount(projectId: string) {
-  return prisma.generationHistory.count({
-    where: { projectId },
-  })
+  return db.$count(generationHistory, eq(generationHistory.projectId, projectId))
 }
 
 async function loadProjectMemoryJson(projectId: string) {
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { memoryJson: true },
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    columns: { memoryJson: true },
   })
   return project?.memoryJson || null
 }

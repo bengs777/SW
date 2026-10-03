@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { db } from "@/lib/db/client"
+import { projects } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { getRuntimeSandbox, resetRuntimeSandbox, startRuntimeSandbox } from "@/lib/sandbox/runtime"
 import { normalizeFileLanguage, type ValidLanguage } from "@/lib/workspace-state"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -23,16 +27,9 @@ function readSandboxProxyTimeoutMs() {
 const SANDBOX_PROXY_TIMEOUT_MS = readSandboxProxyTimeoutMs()
 
 async function assertProjectAccess(projectId: string, userId: string) {
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: { userId },
-        },
-      },
-    },
-    include: {
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    with: {
       files: true,
     },
   })
@@ -179,13 +176,17 @@ export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   const { id } = await params
-  const project = await assertProjectAccess(id, session.user.id)
+  const previewFeatureCheck = assertFeatureEnabled("enablePreview", "Preview")
+  if (previewFeatureCheck) {
+    return NextResponse.json({ error: previewFeatureCheck.error }, { status: previewFeatureCheck.status })
+  }
+  const project = await assertProjectAccess(id, session.userId)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }
@@ -208,13 +209,23 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  try {
+    await enforceRouteRateLimit(`project-sandbox:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
+  }
+
   const { id } = await params
-  const project = await assertProjectAccess(id, session.user.id)
+  const previewFeatureCheck = assertFeatureEnabled("enablePreview", "Preview")
+  if (previewFeatureCheck) {
+    return NextResponse.json({ error: previewFeatureCheck.error }, { status: previewFeatureCheck.status })
+  }
+  const project = await assertProjectAccess(id, session.userId)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }
@@ -230,7 +241,7 @@ export async function POST(
           content: String(file.content || ""),
           language: normalizeLanguage(file.path, file.language),
         }))
-      : project.files.map((file) => ({
+      : (project.files as unknown as Array<{ path: string; content: string; language: string }>).map((file) => ({
           path: file.path,
           content: file.content,
           language: normalizeLanguage(file.path, file.language),
@@ -280,13 +291,23 @@ export async function DELETE(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  try {
+    await enforceRouteRateLimit(`project-sandbox-stop:${session.userId}`, { maxPerMinute: 20, maxPerHour: 120 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
+  }
+
   const { id } = await params
-  const project = await assertProjectAccess(id, session.user.id)
+  const previewFeatureCheck = assertFeatureEnabled("enablePreview", "Preview")
+  if (previewFeatureCheck) {
+    return NextResponse.json({ error: previewFeatureCheck.error }, { status: previewFeatureCheck.status })
+  }
+  const project = await assertProjectAccess(id, session.userId)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }

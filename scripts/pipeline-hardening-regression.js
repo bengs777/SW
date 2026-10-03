@@ -128,9 +128,9 @@ function main() {
 
   assert(
     "stale-generation.guard",
-    /pg_advisory_xact_lock\(hashtext/.test(persistenceService) &&
-      /assertLatestProjectGeneration/.test(persistenceService) &&
-      /createdAt:\s*\{\s*gt:\s*currentJob\.createdAt\s*\}/.test(persistenceService) &&
+    /assertLatestProjectGeneration\(\s*tx/.test(persistenceService) &&
+      /db\.transaction\(async \(tx\)/.test(persistenceService) &&
+      /sql`.*generationJobs\.createdAt\} > \$\{currentJob\.createdAt/.test(persistenceService) &&
       /StaleGenerationRejected/.test(persistenceService) &&
       /generationJobId:\s*input\.jobId/.test(orchestrator),
     "persistence rejects older jobs when newer project generation exists"
@@ -244,16 +244,17 @@ function main() {
     "deploy.preflight-schema",
     /"schema:health":\s*"node scripts\/schema-health-check\.js"/.test(JSON.stringify(packageJson)) &&
       /"deploy:preflight":/.test(JSON.stringify(packageJson)) &&
-      /prisma migrate deploy/.test(vercelBuild) &&
-      !/prisma migrate status/.test(vercelBuild) &&
+      /scripts\/drizzle-migrate\.js/.test(vercelBuild) &&
+      !/prisma migrate deploy/.test(vercelBuild) &&
       /schema-health-check\.js/.test(vercelBuild) &&
-      /assertPrismaClientUnderstandsRuntimeSchema/.test(schemaHealthCheck),
-    "deployment applies pending migrations, checks generated Prisma client compatibility, and verifies runtime schema health"
+      /assertRuntimeSchemaQueries/.test(schemaHealthCheck) &&
+      /sqlite_master/.test(schemaHealthCheck),
+    "deployment applies pending Drizzle migrations, verifies runtime schema queries, and runs schema health"
   )
 
   assert(
     "deploy.migrate-unreachable-nonfatal",
-    /prismaMigrationStatus/.test(vercelBuild) &&
+    /migrationStatus/.test(vercelBuild) &&
       /emitMigrationStatus\("skipped"/.test(vercelBuild) &&
       /database_unreachable/.test(vercelBuild) &&
       /continuing to next build/.test(vercelBuild) &&

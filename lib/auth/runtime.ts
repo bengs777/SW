@@ -13,9 +13,9 @@ export type AuthRuntimeIssue = {
 export type AuthRuntimeDiagnostic = {
   ok: boolean
   status: "healthy" | "degraded" | "unhealthy"
-  sessionStrategy: "jwt"
+  sessionStrategy: "clerk"
   providers: {
-    google: {
+    clerk: {
       configured: boolean
       missing: string[]
     }
@@ -50,10 +50,10 @@ export function canAccessRole(currentRole: AuthRole, requiredRole: AuthRole) {
   return appRoleRank[currentRole] >= appRoleRank[requiredRole]
 }
 
-export function getGoogleAuthMissingEnv() {
+export function getClerkAuthMissingEnv() {
   const missing: string[] = []
-  if (!env.googleClientId) missing.push("GOOGLE_CLIENT_ID")
-  if (!env.googleClientSecret) missing.push("GOOGLE_CLIENT_SECRET")
+  if (!env.clerkPublishableKey) missing.push("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY")
+  if (!env.clerkSecretKey) missing.push("CLERK_SECRET_KEY")
   return missing
 }
 
@@ -61,37 +61,13 @@ export function getAuthRuntimeDiagnostic(): AuthRuntimeDiagnostic {
   const isProduction = env.nodeEnv === "production"
   const issues: AuthRuntimeIssue[] = []
 
-  if (!env.nextAuthSecret) {
+  const clerkMissing = getClerkAuthMissingEnv()
+  if (clerkMissing.length > 0) {
     issues.push({
-      key: "NEXTAUTH_SECRET",
-      code: "missing_env",
-      severity: isProduction ? "error" : "warning",
-      message: isProduction
-        ? "NEXTAUTH_SECRET is required for production session signing."
-        : "NEXTAUTH_SECRET is missing; development auth can start, but sessions are not production-ready.",
-    })
-  }
-
-  try {
-    if (env.nextAuthUrl) {
-      new URL(env.nextAuthUrl)
-    }
-  } catch {
-    issues.push({
-      key: "NEXTAUTH_URL",
-      code: "invalid_env",
-      severity: isProduction ? "error" : "warning",
-      message: "NEXTAUTH_URL must be a valid absolute URL.",
-    })
-  }
-
-  const googleMissing = getGoogleAuthMissingEnv()
-  if (googleMissing.length > 0) {
-    issues.push({
-      key: googleMissing.join(", "),
+      key: clerkMissing.join(", "),
       code: "provider_unavailable",
       severity: isProduction ? "error" : "warning",
-      message: `Google OAuth is unavailable because ${googleMissing.join(" and ")} ${googleMissing.length === 1 ? "is" : "are"} missing.`,
+      message: `Clerk auth is unavailable because ${clerkMissing.join(" and ")} ${clerkMissing.length === 1 ? "is" : "are"} missing.`,
     })
   }
 
@@ -101,11 +77,11 @@ export function getAuthRuntimeDiagnostic(): AuthRuntimeDiagnostic {
   return {
     ok: !hasError,
     status: hasError ? "unhealthy" : hasWarning ? "degraded" : "healthy",
-    sessionStrategy: "jwt",
+    sessionStrategy: "clerk",
     providers: {
-      google: {
-        configured: googleMissing.length === 0,
-        missing: googleMissing,
+      clerk: {
+        configured: clerkMissing.length === 0,
+        missing: clerkMissing,
       },
     },
     issues,

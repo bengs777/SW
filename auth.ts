@@ -1,9 +1,7 @@
-import NextAuth, { type Session } from "next-auth"
-import Google from "next-auth/providers/google"
-import type { JWT } from "next-auth/jwt"
-import { prisma } from "@/lib/db/client"
-import { isMissingRequiredTableError, shouldSoftFailMissingTable } from "@/lib/db/errors"
-import { UserService } from "@/lib/services/user.service"
+import { auth, currentUser } from "@clerk/nextjs/server"
+import { db } from "@/lib/db/client"
+import { users, workspaces, workspaceMembers } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { log } from "@/lib/logging"
 import {
@@ -12,48 +10,24 @@ import {
   type AuthRole,
 } from "@/lib/auth/runtime"
 
-type CachedAuthUser = {
-  id: string | null
-  isDeveloperAccount: boolean | null
+export type AuthSession = {
+  userId: string
+  email: string
+  name: string | null
+  image: string | null
   roles: AuthRole[]
   role: AuthRole
+  isDeveloperAccount: boolean
 }
 
-const userCache = new Map<string, CachedAuthUser>()
-const userLookupInflight = new Map<string, Promise<CachedAuthUser | null>>()
+const userCache = new Map<string, AuthSession>()
+const userLookupInflight = new Map<string, Promise<AuthSession | null>>()
 const creditGrantCache = new Map<string, number>()
 const creditGrantInflight = new Map<string, Promise<void>>()
 const authDebugEnabled = process.env.SWIFT_AUTH_DEBUG === "true"
 const CREDIT_GRANT_SESSION_TTL_MS = 10 * 60 * 1000
 
-type AuthToken = JWT & {
-  id?: string | null
-  email?: string | null
-  roles?: AuthRole[]
-  role?: AuthRole
-  isDeveloperAccount?: boolean | null
-}
-
-type AuthSession = Session & {
-  user: NonNullable<Session["user"]> & {
-    id?: string | null
-    isDeveloperAccount?: boolean | null
-    roles?: AuthRole[]
-    role?: AuthRole
-  }
-}
-
 const authRuntime = getAuthRuntimeDiagnostic()
-const authProviders = authRuntime.providers.google.configured
-  ? [
-      Google({
-        clientId: env.googleClientId,
-        clientSecret: env.googleClientSecret,
-        // SECURITY: Removed allowDangerousEmailAccountLinking to prevent account takeover
-        // via email address reuse across OAuth providers.
-      }),
-    ]
-  : []
 
 if (!authRuntime.ok || authRuntime.status === "degraded") {
   log(authRuntime.ok ? "warn" : "error", "auth_runtime_configuration", {
@@ -81,11 +55,7 @@ function deriveRoles(input: {
   return Array.from(roles)
 }
 
-async function resolveDatabaseUserId(email?: string | null) {
-  return (await resolveDatabaseUser(email))?.id ?? null
-}
-
-async function resolveDatabaseUser(email?: string | null): Promise<CachedAuthUser | null> {
+async function resolveDatabaseUser(email?: string | null): Promise<AuthSession | null> {
   if (!email) return null
 
   const normalizedEmail = email.trim().toLowerCase()
@@ -104,27 +74,38 @@ async function resolveDatabaseUser(email?: string | null): Promise<CachedAuthUse
   }
 
   const lookup = (async () => {
-    const dbUser = await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-      select: {
-        id: true,
-        isDeveloperAccount: true,
-        workspaces: { select: { id: true }, take: 1 },
-        memberships: { select: { role: true } },
+    const dbUser = await db.query.users.findFirst({
+      where: eq(users.email, normalizedEmail),
+      with: {
+        workspaces: { limit: 1 },
+        memberships: { columns: { role: true } },
       },
-    })
+    }) as unknown as {
+      id: string
+      email: string
+      name: string | null
+      image: string | null
+      isDeveloperAccount: boolean
+      workspaces: Array<{ id: string }>
+      memberships: Array<{ role: string }>
+    } | undefined
+
     const roles = deriveRoles({
       isDeveloperAccount: dbUser?.isDeveloperAccount,
       ownsWorkspace: Boolean(dbUser?.workspaces.length),
-      workspaceRoles: dbUser?.memberships.map((membership) => membership.role) ?? [],
+      workspaceRoles: dbUser?.memberships.map((m) => m.role) ?? [],
     })
 
-    const authUser = {
-      id: dbUser?.id ?? null,
-      isDeveloperAccount: dbUser?.isDeveloperAccount ?? null,
+    const authUser: AuthSession = {
+      userId: dbUser?.id ?? "",
+      email: normalizedEmail,
+      name: dbUser?.name ?? null,
+      image: dbUser?.image ?? null,
       roles,
       role: derivePrimaryRole(roles),
+      isDeveloperAccount: dbUser?.isDeveloperAccount ?? false,
     }
+
     userCache.set(normalizedEmail, authUser)
     return authUser
   })()
@@ -134,16 +115,6 @@ async function resolveDatabaseUser(email?: string | null): Promise<CachedAuthUse
   try {
     return await lookup
   } catch (error) {
-    if (isMissingRequiredTableError(error)) {
-      if (shouldSoftFailMissingTable()) {
-        log("warn", "auth_database_tables_missing", { action: "skip_user_lookup" })
-        userCache.set(normalizedEmail, { id: null, isDeveloperAccount: null, roles: ["user"], role: "user" })
-        return null
-      }
-
-      throw error
-    }
-
     log("error", "auth_user_id_resolve_failed", { error: error instanceof Error ? error.message : String(error) })
     return null
   } finally {
@@ -159,8 +130,29 @@ async function grantMonthlyFreeCreditsFromSession(email: string) {
   const inflight = creditGrantInflight.get(normalizedEmail)
   if (inflight) return inflight
 
-  const grant = UserService.grantMonthlyFreeCreditsIfNeeded(normalizedEmail)
-    .then(() => {
+  const grant = Promise.resolve()
+    .then(async () => {
+      const existing = await db.query.users.findFirst({
+        where: eq(users.email, normalizedEmail),
+        columns: { id: true, balance: true },
+      })
+      if (!existing) return
+
+      const now = new Date()
+      const lastGrant = await db.query.billingTransactions.findFirst({
+        where: eq(users.id, existing.id),
+        columns: { createdAt: true },
+      })
+
+      if (lastGrant) {
+        const daysSinceLastGrant = (now.getTime() - lastGrant.createdAt.getTime()) / (1000 * 60 * 60 * 24)
+        if (daysSinceLastGrant < 30) return
+      }
+
+      await db.update(users)
+        .set({ balance: existing.balance + 10000 })
+        .where(eq(users.id, existing.id))
+
       creditGrantCache.set(normalizedEmail, Date.now())
     })
     .finally(() => {
@@ -175,151 +167,56 @@ setInterval(() => {
   userCache.clear()
 }, 5 * 60 * 1000)
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
-  // SECURITY: Trust host on Vercel (VERCEL=1) or non-production or when explicitly configured
-  trustHost: process.env.VERCEL === "1" || process.env.NODE_ENV !== "production" || Boolean(process.env.NEXTAUTH_URL),
-  secret: env.nextAuthSecret || (process.env.NODE_ENV === "production" ? undefined : "swift-development-auth-secret"),
-  providers: authProviders,
-  session: {
-    strategy: "jwt",
-    maxAge: 30 * 24 * 60 * 60,
-    updateAge: 24 * 60 * 60,
-  },
-  pages: {
-    signIn: "/login",
-    error: "/auth/error",
-  },
-  cookies: {
-    // SECURITY: Enforce secure cookie settings in production
-    sessionToken: {
-      name: process.env.NODE_ENV === "production" ? "__Secure-authjs.session-token" : "authjs.session-token",
-      options: {
-        httpOnly: true,
-        sameSite: "lax" as const,
-        path: "/",
-        secure: process.env.NODE_ENV === "production",
-      },
-    },
-    csrfToken: {
-      name: process.env.NODE_ENV === "production" ? "__Host-authjs.csrf-token" : "authjs.csrf-token",
-      options: {
-        httpOnly: true,
-        sameSite: "lax" as const,
-        path: "/",
-        secure: process.env.NODE_ENV === "production",
-      },
-    },
-  },
-  callbacks: {
-    async jwt({ token, user }) {
-      const currentToken = token as AuthToken
+export async function getSession(): Promise<AuthSession | null> {
+  const { userId } = await auth()
+  if (!userId) return null
 
-      if (user?.email) {
-        currentToken.email = user.email
-      }
+  const clerkUser = await currentUser()
+  if (!clerkUser) return null
 
-      const databaseUserId = await resolveDatabaseUserId(
-        user?.email ?? currentToken.email
-      )
+  const email = clerkUser.emailAddresses[0]?.emailAddress
+  if (!email) return null
 
-      if (databaseUserId) {
-        currentToken.id = databaseUserId
-      } else if (user?.id) {
-        currentToken.id = user.id
-      }
+  const dbUser = await resolveDatabaseUser(email)
 
-      const databaseUser = await resolveDatabaseUser(user?.email ?? currentToken.email)
-      if (databaseUser) {
-        currentToken.roles = databaseUser.roles
-        currentToken.role = databaseUser.role
-        currentToken.isDeveloperAccount = databaseUser.isDeveloperAccount
-      }
+  if (dbUser) {
+    try {
+      await grantMonthlyFreeCreditsFromSession(email)
+    } catch (error) {
+      log("warn", "auth_session_credit_sync_failed", { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
 
-      return currentToken
-    },
-    async session({ session, token }) {
-      if (session.user) {
-        const currentToken = token as AuthToken
-        const currentSession = session as AuthSession
-        const sessionUser = currentSession.user
-        const userEmail = sessionUser.email ?? currentToken.email
+  const roles = dbUser?.roles ?? ["user"]
+  const session: AuthSession = {
+    userId: dbUser?.userId ?? userId,
+    email,
+    name: clerkUser.fullName,
+    image: clerkUser.imageUrl,
+    roles,
+    role: dbUser?.role ?? derivePrimaryRole(roles),
+    isDeveloperAccount: dbUser?.isDeveloperAccount ?? false,
+  }
 
-        if (userEmail) {
-          try {
-            await grantMonthlyFreeCreditsFromSession(userEmail)
-          } catch (error) {
-            if (isMissingRequiredTableError(error) && !shouldSoftFailMissingTable()) {
-              throw error
-            }
+  if (authDebugEnabled) {
+    log("info", "auth_session", {
+      email: session.email,
+      userId: session.userId,
+      isDeveloperAccount: session.isDeveloperAccount,
+      role: session.role,
+      roles: session.roles,
+    })
+  }
 
-            log("warn", "auth_session_credit_sync_failed", { error: error instanceof Error ? error.message : String(error) })
-          }
-        }
+  return session
+}
 
-        const databaseUser = await resolveDatabaseUser(userEmail)
-        const databaseUserId = databaseUser?.id ?? null
+export async function requireAuth(): Promise<AuthSession> {
+  const session = await getSession()
+  if (!session) {
+    throw new Error("Unauthorized")
+  }
+  return session
+}
 
-        sessionUser.id = databaseUserId ?? currentToken.id ?? undefined
-        sessionUser.email = currentToken.email ?? sessionUser.email ?? null
-        sessionUser.isDeveloperAccount = databaseUser?.isDeveloperAccount ?? null
-        sessionUser.roles = databaseUser?.roles ?? currentToken.roles ?? ["user"]
-        sessionUser.role = databaseUser?.role ?? currentToken.role ?? derivePrimaryRole(sessionUser.roles)
-
-        if (authDebugEnabled) {
-          log("info", "auth_session", {
-            email: sessionUser.email,
-            id: sessionUser.id,
-            isDeveloperAccount: sessionUser.isDeveloperAccount,
-            role: sessionUser.role,
-            roles: sessionUser.roles,
-          })
-        }
-      }
-
-      return session
-    },
-    async redirect({ url, baseUrl }) {
-      if (url.startsWith("/")) return `${baseUrl}${url}`
-      if (url.startsWith(baseUrl)) return url
-      return baseUrl
-    },
-    async signIn({ user, account }) {
-      try {
-        if (account?.provider === "google" && user.email) {
-          await UserService.createUserWithWorkspaceIfMissing(
-            user.email,
-            user.name || user.email.split("@")[0],
-            user.image || null
-          )
-          await UserService.grantWelcomeBonusIfNeeded(user.email)
-
-          userCache.delete(user.email.trim().toLowerCase())
-        }
-      } catch (error) {
-        if (isMissingRequiredTableError(error) && !shouldSoftFailMissingTable()) {
-          log("error", "auth_signin_blocked_missing_tables", { error: error instanceof Error ? error.message : String(error) })
-          return false
-        }
-
-        log("warn", "auth_signin_sync_failed", { error: error instanceof Error ? error.message : String(error) })
-      }
-
-      return true
-    },
-  },
-  events: {
-    async signIn({ user, account }) {
-      if (authDebugEnabled) {
-        log("info", "auth_signin", { email: user.email, provider: account?.provider })
-      }
-    },
-    async signOut(message) {
-      if (authDebugEnabled) {
-        log("info", "auth_signout", {
-          tokenEmail: "token" in message ? message.token?.email : null,
-          sessionUserId: "session" in message ? message.session?.userId : null,
-        })
-      }
-    },
-  },
-})
+export { auth, currentUser }

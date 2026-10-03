@@ -1,4 +1,6 @@
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { users, billingTransactions, modelConfigs, usageLogs } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { SWIFT_PUBLIC_PRICE_IDR } from "@/lib/ai/model-tiers"
 
 interface BalanceCheckResult {
@@ -22,17 +24,13 @@ interface CostBreakdown {
 }
 
 export class GenerateBillingService {
-  /**
-   * Check if user has sufficient balance for a generation request
-   */
   static async checkBalance(userId: string, requiredAmount: number): Promise<BalanceCheckResult> {
     try {
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { balance: true },
-      })
+      const result = await db.select({ balance: users.balance }).from(users)
+        .where(eq(users.id, userId))
+        .limit(1)
 
-      const currentBalance = user?.balance || 0
+      const currentBalance = result[0]?.balance || 0
       const hasBalance = currentBalance >= requiredAmount
 
       return {
@@ -50,9 +48,6 @@ export class GenerateBillingService {
     }
   }
 
-  /**
-   * Deduct balance from user account for successful generation
-   */
   static async deductBalance(
     userId: string,
     amount: number,
@@ -60,7 +55,6 @@ export class GenerateBillingService {
     metadata?: Record<string, unknown>
   ): Promise<DeductResult> {
     try {
-      // Check balance first
       const balanceCheck = await this.checkBalance(userId, amount)
       if (!balanceCheck.hasBalance) {
         return {
@@ -69,34 +63,28 @@ export class GenerateBillingService {
         }
       }
 
-      // Get current user balance
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { balance: true },
-      })
+      const userResult = await db.select({ balance: users.balance }).from(users)
+        .where(eq(users.id, userId))
+        .limit(1)
 
-      const currentBalance = user?.balance || 0
+      const currentBalance = userResult[0]?.balance || 0
       const newBalance = currentBalance - amount
 
-      // Create billing transaction
-      await prisma.billingTransaction.create({
-        data: {
-          userId,
-          kind: "deduction",
-          direction: "out",
-          amount,
-          balanceBefore: currentBalance,
-          balanceAfter: newBalance,
-          description,
-          metadata: metadata ? JSON.stringify(metadata) : null,
-        },
+      await db.insert(billingTransactions).values({
+          id: crypto.randomUUID(),
+        userId,
+        kind: "deduction",
+        direction: "out",
+        amount,
+        balanceBefore: currentBalance,
+        balanceAfter: newBalance,
+        description,
+        metadata: metadata ? JSON.stringify(metadata) : null,
       })
 
-      // Update user balance
-      await prisma.user.update({
-        where: { id: userId },
-        data: { balance: newBalance },
-      })
+      await db.update(users)
+        .set({ balance: newBalance })
+        .where(eq(users.id, userId))
 
       return {
         success: true,
@@ -111,9 +99,6 @@ export class GenerateBillingService {
     }
   }
 
-  /**
-   * Get cost breakdown for a model/provider combination
-   */
   static getCostBreakdown(provider: string, model: string): CostBreakdown {
     if (provider === "v0") {
       return {
@@ -135,7 +120,6 @@ export class GenerateBillingService {
       }
     }
 
-    // Default for other providers
     return {
       provider,
       model,
@@ -145,9 +129,6 @@ export class GenerateBillingService {
     }
   }
 
-  /**
-   * Log generation usage for tracking and analytics
-   */
   static async logUsage(
     userId: string,
     provider: string,
@@ -156,34 +137,34 @@ export class GenerateBillingService {
     errorMessage?: string
   ): Promise<void> {
     try {
-      // Find a model config that matches the provider and model
-      const modelConfig = await prisma.modelConfig.findFirst({
-        where: {
-          provider,
-          modelName: model,
-        },
-      })
+      const modelConfig = await db.select().from(modelConfigs)
+        .where(eq(modelConfigs.provider, provider))
+        .limit(1)
 
-      if (!modelConfig) {
+      const matchingConfig = modelConfig.length > 0
+        ? modelConfig
+        : await db.select().from(modelConfigs)
+            .where(eq(modelConfigs.modelName, model))
+            .limit(1)
+
+      if (matchingConfig.length === 0) {
         console.warn("[GenerateBillingService] No model config found for", { provider, model })
         return
       }
 
-      await prisma.usageLog.create({
-        data: {
-          userId,
-          provider,
-          model,
-          status,
-          modelConfigId: modelConfig.id,
-          cost: 0, // Will be set by billing operations
-          prompt: "", // Not tracking full prompt in logs
-          errorMessage: errorMessage || undefined,
-        },
+      await db.insert(usageLogs).values({
+          id: crypto.randomUUID(),
+        userId,
+        provider,
+        model,
+        status,
+        modelConfigId: matchingConfig[0].id,
+        cost: 0,
+        prompt: "",
+        errorMessage: errorMessage || null,
       })
     } catch (error) {
       console.error("[GenerateBillingService] Error logging usage:", error)
-      // Silently fail - don't break the flow if logging fails
     }
   }
 }

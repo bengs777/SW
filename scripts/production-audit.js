@@ -166,11 +166,11 @@ function staticChecks() {
     check("ai.runtime-smoke-required", /runtime-smoke/.test(generationOrchestrator) && /verifyRuntimeSmoke/.test(sandboxRuntime), "Generation success requires runtime smoke validation"),
     check("ai.atomic-generation-billing", /reserveGenerationJob/.test(generateJobsRoute) && /reserveGenerationJob/.test(billingService), "Generation job creation and billing reservation are atomic"),
     check("ai.request-hash-dedupe", /requestHash/.test(prisma) && /@@unique\(\[userId,\s*projectId,\s*requestHash\]\)/.test(prisma), "Request hash dedupe is enforced at the database level"),
-    check("ai.persistence-idempotency", /@@unique\(\[projectId,\s*idempotencyKey\]\)/.test(prisma) && /upsert/.test(persistenceService), "Generation persistence is replay-safe"),
+    check("ai.persistence-idempotency", /@@unique\(\[projectId,\s*idempotencyKey\]\)/.test(prisma) && /eq\(generationHistory\.idempotencyKey/.test(persistenceService) && /tx\.insert\(generationHistory\)/.test(persistenceService), "Generation persistence is replay-safe"),
     check("ai.canonical-filesystem", /class ProjectFilesystemService/.test(filesystemService) && /replaceFiles/.test(persistenceService) && /ProjectFilesystemService\.readFiles/.test(generationWorker), "Project files flow through the canonical filesystem service"),
     check("ai.manifest-verification", /fileHashes/.test(filesystemService) && /PersistenceIntegrityError/.test(filesystemService) && /verify\(input\.projectId/.test(filesystemService), "Persisted project files are verified with content-hash manifests"),
     check("ai.taskgraph-hardening", /collapseOperations/.test(taskGraphExecutor) && /Dependency is not allowed by Swift policy/.test(taskGraphExecutor) && /MAX_OPERATIONS\s*=\s*100/.test(taskGraphExecutor), "TaskGraph execution has merge semantics, dependency policy, and resource limits"),
-    check("ai.stale-generation-guard", /pg_advisory_xact_lock/.test(persistenceService) && /StaleGenerationRejected/.test(persistenceService), "Older project generations are rejected during persistence"),
+    check("ai.stale-generation-guard", /assertLatestProjectGeneration/.test(persistenceService) && /StaleGenerationRejected/.test(persistenceService), "Older project generations are rejected during persistence"),
     check("sandbox.path-guard", /assertSafeFilePath/.test(sandboxRuntime) && /startsWith\(`\$\{root\}\$\{path\.sep\}`\)/.test(sandboxRuntime), "Sandbox rejects path traversal writes"),
     check(
       "sandbox.command-timeout",

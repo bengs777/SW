@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { Prisma } from "@prisma/client"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { creditGrants, users, billingTransactions } from "@/lib/db/schema"
+import { eq, and, desc, gte, lte, sql } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { BillingService } from "@/lib/services/billing.service"
 
@@ -21,6 +22,13 @@ const USER_SUMMARY_SELECT = {
   email: true,
   name: true,
   image: true,
+} as const satisfies Record<string, true>
+
+const USER_SUMMARY_COLUMNS = {
+  id: users.id,
+  email: users.email,
+  name: users.name,
+  image: users.image,
 } as const
 
 export const CREDIT_GRANT_INCLUDE = {
@@ -51,9 +59,46 @@ export const CREDIT_GRANT_INCLUDE = {
   },
 } as const
 
-export type CreditGrantRecord = Prisma.CreditGrantGetPayload<{
-  include: typeof CREDIT_GRANT_INCLUDE
-}>
+export type CreditGrantRecord = {
+  id: string
+  reference: string
+  fromUserId: string
+  toUserId: string
+  amount: number
+  reason: string
+  note: string | null
+  status: string
+  createdByUserId: string
+  reversedByUserId: string | null
+  idempotencyKey: string | null
+  postedAt: Date | null
+  reversedAt: Date | null
+  metadata: string | null
+  createdAt: Date
+  updatedAt: Date
+  fromUser: { id: string; email: string; name: string | null; image: string | null } | null
+  toUser: { id: string; email: string; name: string | null; image: string | null } | null
+  createdBy: { id: string; email: string; name: string | null; image: string | null } | null
+  reversedBy: { id: string; email: string; name: string | null; image: string | null } | null
+  billingTransactions: Array<{
+    id: string
+    userId: string
+    grantId: string | null
+    actorUserId: string | null
+    counterpartyUserId: string | null
+    kind: string
+    direction: string
+    amount: number
+    balanceBefore: number
+    balanceAfter: number
+    reference: string | null
+    provider: string | null
+    providerReference: string | null
+    description: string | null
+    metadata: string | null
+    createdAt: Date
+  }>
+}
 
 export type DeveloperTreasuryActor = {
   id: string
@@ -96,15 +141,16 @@ export type ListDeveloperCreditGrantsInput = {
 
 export class CreditGrantService {
   static async getDeveloperTreasuryActor(actorUserId: string): Promise<DeveloperTreasuryActor> {
-    const actor = await prisma.user.findUnique({
-      where: { id: actorUserId },
-      select: {
-        id: true,
-        email: true,
-        balance: true,
-        isDeveloperAccount: true,
-      },
-    })
+    const result = await db.select({
+      id: users.id,
+      email: users.email,
+      balance: users.balance,
+      isDeveloperAccount: users.isDeveloperAccount,
+    }).from(users)
+      .where(eq(users.id, actorUserId))
+      .limit(1)
+
+    const actor = result[0]
 
     if (!actor) {
       throw new Error("DEVELOPER_ACCOUNT_NOT_FOUND")
@@ -120,28 +166,65 @@ export class CreditGrantService {
   static async createGrant(
     input: CreateDeveloperCreditGrantInput
   ): Promise<{ grant: CreditGrantRecord; alreadyProcessed: boolean }> {
-    return prisma.$transaction(async (tx) => {
-      const existingGrant = await tx.creditGrant.findUnique({
-        where: { idempotencyKey: input.idempotencyKey },
-        include: CREDIT_GRANT_INCLUDE,
-      })
+    return db.transaction(async (tx) => {
+      const existingGrantResult = await tx.select().from(creditGrants)
+        .where(eq(creditGrants.idempotencyKey, input.idempotencyKey))
+        .limit(1)
 
-      if (existingGrant) {
+      if (existingGrantResult.length > 0) {
+        const grant = existingGrantResult[0]
+        const [fromUser, toUser, createdBy, reversedBy, billingTxs] = await Promise.all([
+          tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.fromUserId)).limit(1),
+          tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.toUserId)).limit(1),
+          tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.createdByUserId)).limit(1),
+          grant.reversedByUserId
+            ? tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.reversedByUserId)).limit(1)
+            : Promise.resolve([]),
+          tx.select({
+            id: billingTransactions.id,
+            userId: billingTransactions.userId,
+            grantId: billingTransactions.grantId,
+            actorUserId: billingTransactions.actorUserId,
+            counterpartyUserId: billingTransactions.counterpartyUserId,
+            kind: billingTransactions.kind,
+            direction: billingTransactions.direction,
+            amount: billingTransactions.amount,
+            balanceBefore: billingTransactions.balanceBefore,
+            balanceAfter: billingTransactions.balanceAfter,
+            reference: billingTransactions.reference,
+            provider: billingTransactions.provider,
+            providerReference: billingTransactions.providerReference,
+            description: billingTransactions.description,
+            metadata: billingTransactions.metadata,
+            createdAt: billingTransactions.createdAt,
+          }).from(billingTransactions)
+            .where(eq(billingTransactions.grantId, grant.id))
+            .orderBy(billingTransactions.createdAt),
+        ])
+
         return {
-          grant: existingGrant,
+          grant: {
+            ...grant,
+            fromUser: fromUser[0] || null,
+            toUser: toUser[0] || null,
+            createdBy: createdBy[0] || null,
+            reversedBy: reversedBy[0] || null,
+            billingTransactions: billingTxs,
+          },
           alreadyProcessed: true,
         }
       }
 
-      const actor = await tx.user.findUnique({
-        where: { id: input.actorUserId },
-        select: {
-          id: true,
-          email: true,
-          balance: true,
-          isDeveloperAccount: true,
-        },
-      })
+      const actorResult = await tx.select({
+        id: users.id,
+        email: users.email,
+        balance: users.balance,
+        isDeveloperAccount: users.isDeveloperAccount,
+      }).from(users)
+        .where(eq(users.id, input.actorUserId))
+        .limit(1)
+
+      const actor = actorResult[0]
 
       if (!actor) {
         throw new Error("DEVELOPER_ACCOUNT_NOT_FOUND")
@@ -155,14 +238,15 @@ export class CreditGrantService {
         throw new Error("INVALID_GRANT_AMOUNT")
       }
 
-      const recipient = await tx.user.findUnique({
-        where: { id: input.recipientUserId },
-        select: {
-          id: true,
-          email: true,
-          balance: true,
-        },
-      })
+      const recipientResult = await tx.select({
+        id: users.id,
+        email: users.email,
+        balance: users.balance,
+      }).from(users)
+        .where(eq(users.id, input.recipientUserId))
+        .limit(1)
+
+      const recipient = recipientResult[0]
 
       if (!recipient) {
         throw new Error("RECIPIENT_NOT_FOUND")
@@ -179,57 +263,48 @@ export class CreditGrantService {
       const now = new Date()
       const reference = `DEV-GRANT-${randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`
 
-      const grant = await tx.creditGrant.create({
-        data: {
-          reference,
-          fromUserId: actor.id,
-          toUserId: recipient.id,
+      const grantResult = await tx.insert(creditGrants).values({
+        id: crypto.randomUUID(),
+        reference,
+        fromUserId: actor.id,
+        toUserId: recipient.id,
+        amount: input.amount,
+        reason: input.reason,
+        note: input.note ?? undefined,
+        status: "posted",
+        createdByUserId: actor.id,
+        idempotencyKey: input.idempotencyKey,
+        postedAt: now,
+        metadata: JSON.stringify({
+          ...input.metadata,
+          source: "developer_admin_grant",
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          recipientUserId: recipient.id,
+          recipientEmail: recipient.email,
           amount: input.amount,
           reason: input.reason,
-          note: input.note ?? undefined,
-          status: "posted",
-          createdByUserId: actor.id,
+          note: input.note ?? null,
           idempotencyKey: input.idempotencyKey,
-          postedAt: now,
-          metadata: JSON.stringify({
-            ...input.metadata,
-            source: "developer_admin_grant",
-            actorUserId: actor.id,
-            actorEmail: actor.email,
-            recipientUserId: recipient.id,
-            recipientEmail: recipient.email,
-            amount: input.amount,
-            reason: input.reason,
-            note: input.note ?? null,
-            idempotencyKey: input.idempotencyKey,
-          }),
-        },
-      })
+        }),
+      }).returning()
+
+      const grant = grantResult[0]
 
       const actorBalanceBefore = actor.balance
       const actorBalanceAfter = actorBalanceBefore - input.amount
       const recipientBalanceBefore = recipient.balance
       const recipientBalanceAfter = recipientBalanceBefore + input.amount
 
-      await tx.user.update({
-        where: { id: actor.id },
-        data: {
-          balance: {
-            decrement: input.amount,
-          },
-        },
-      })
+      await tx.update(users)
+        .set({ balance: sql`${users.balance} - ${input.amount}` })
+        .where(eq(users.id, actor.id))
 
-      await tx.user.update({
-        where: { id: recipient.id },
-        data: {
-          balance: {
-            increment: input.amount,
-          },
-        },
-      })
+      await tx.update(users)
+        .set({ balance: sql`${users.balance} + ${input.amount}` })
+        .where(eq(users.id, recipient.id))
 
-      await BillingService.recordBalanceTransaction(tx, {
+      await BillingService.recordBalanceTransaction({
         userId: actor.id,
         kind: "developer_grant",
         direction: "debit",
@@ -253,9 +328,9 @@ export class CreditGrantService {
         grantId: grant.id,
         actorUserId: actor.id,
         counterpartyUserId: recipient.id,
-      })
+      }, tx)
 
-      await BillingService.recordBalanceTransaction(tx, {
+      await BillingService.recordBalanceTransaction({
         userId: recipient.id,
         kind: "developer_grant",
         direction: "credit",
@@ -279,15 +354,28 @@ export class CreditGrantService {
         grantId: grant.id,
         actorUserId: actor.id,
         counterpartyUserId: recipient.id,
-      })
+      }, tx)
 
-      const createdGrant = await tx.creditGrant.findUnique({
-        where: { id: grant.id },
-        include: CREDIT_GRANT_INCLUDE,
-      })
+      const createdGrantResult = await tx.select().from(creditGrants)
+        .where(eq(creditGrants.id, grant.id))
+        .limit(1)
+
+      const createdGrant = createdGrantResult[0]
+      const [fromUser, toUser, createdBy] = await Promise.all([
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, createdGrant.fromUserId)).limit(1),
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, createdGrant.toUserId)).limit(1),
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, createdGrant.createdByUserId)).limit(1),
+      ])
 
       return {
-        grant: (createdGrant ?? grant) as CreditGrantRecord,
+        grant: {
+          ...createdGrant,
+          fromUser: fromUser[0] || null,
+          toUser: toUser[0] || null,
+          createdBy: createdBy[0] || null,
+          reversedBy: null,
+          billingTransactions: [],
+        },
         alreadyProcessed: false,
       }
     })
@@ -296,16 +384,17 @@ export class CreditGrantService {
   static async reverseGrant(
     input: ReverseDeveloperCreditGrantInput
   ): Promise<{ grant: CreditGrantRecord; alreadyProcessed: boolean }> {
-    return prisma.$transaction(async (tx) => {
-      const actor = await tx.user.findUnique({
-        where: { id: input.actorUserId },
-        select: {
-          id: true,
-          email: true,
-          balance: true,
-          isDeveloperAccount: true,
-        },
-      })
+    return db.transaction(async (tx) => {
+      const actorResult = await tx.select({
+        id: users.id,
+        email: users.email,
+        balance: users.balance,
+        isDeveloperAccount: users.isDeveloperAccount,
+      }).from(users)
+        .where(eq(users.id, input.actorUserId))
+        .limit(1)
+
+      const actor = actorResult[0]
 
       if (!actor) {
         throw new Error("DEVELOPER_ACCOUNT_NOT_FOUND")
@@ -315,18 +404,55 @@ export class CreditGrantService {
         throw new Error("DEVELOPER_ACCOUNT_FORBIDDEN")
       }
 
-      const grant = await tx.creditGrant.findUnique({
-        where: { id: input.grantId },
-        include: CREDIT_GRANT_INCLUDE,
-      })
+      const grantResult = await tx.select().from(creditGrants)
+        .where(eq(creditGrants.id, input.grantId))
+        .limit(1)
+
+      const grant = grantResult[0]
 
       if (!grant) {
         throw new Error("GRANT_NOT_FOUND")
       }
 
       if (grant.status === "reversed") {
+        const [fromUser, toUser, createdBy, reversedBy, billingTxs] = await Promise.all([
+          tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.fromUserId)).limit(1),
+          tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.toUserId)).limit(1),
+          tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.createdByUserId)).limit(1),
+          grant.reversedByUserId
+            ? tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.reversedByUserId)).limit(1)
+            : Promise.resolve([]),
+          tx.select({
+            id: billingTransactions.id,
+            userId: billingTransactions.userId,
+            grantId: billingTransactions.grantId,
+            actorUserId: billingTransactions.actorUserId,
+            counterpartyUserId: billingTransactions.counterpartyUserId,
+            kind: billingTransactions.kind,
+            direction: billingTransactions.direction,
+            amount: billingTransactions.amount,
+            balanceBefore: billingTransactions.balanceBefore,
+            balanceAfter: billingTransactions.balanceAfter,
+            reference: billingTransactions.reference,
+            provider: billingTransactions.provider,
+            providerReference: billingTransactions.providerReference,
+            description: billingTransactions.description,
+            metadata: billingTransactions.metadata,
+            createdAt: billingTransactions.createdAt,
+          }).from(billingTransactions)
+            .where(eq(billingTransactions.grantId, grant.id))
+            .orderBy(billingTransactions.createdAt),
+        ])
+
         return {
-          grant,
+          grant: {
+            ...grant,
+            fromUser: fromUser[0] || null,
+            toUser: toUser[0] || null,
+            createdBy: createdBy[0] || null,
+            reversedBy: reversedBy[0] || null,
+            billingTransactions: billingTxs,
+          },
           alreadyProcessed: true,
         }
       }
@@ -335,14 +461,15 @@ export class CreditGrantService {
         throw new Error("GRANT_NOT_REVERSIBLE")
       }
 
-      const recipient = await tx.user.findUnique({
-        where: { id: grant.toUserId },
-        select: {
-          id: true,
-          email: true,
-          balance: true,
-        },
-      })
+      const recipientResult = await tx.select({
+        id: users.id,
+        email: users.email,
+        balance: users.balance,
+      }).from(users)
+        .where(eq(users.id, grant.toUserId))
+        .limit(1)
+
+      const recipient = recipientResult[0]
 
       if (!recipient) {
         throw new Error("RECIPIENT_NOT_FOUND")
@@ -358,27 +485,16 @@ export class CreditGrantService {
       const recipientBalanceAfter = recipientBalanceBefore - grant.amount
       const now = new Date()
 
-      await tx.user.update({
-        where: { id: recipient.id },
-        data: {
-          balance: {
-            decrement: grant.amount,
-          },
-        },
-      })
+      await tx.update(users)
+        .set({ balance: sql`${users.balance} - ${grant.amount}` })
+        .where(eq(users.id, recipient.id))
 
-      await tx.user.update({
-        where: { id: actor.id },
-        data: {
-          balance: {
-            increment: grant.amount,
-          },
-        },
-      })
+      await tx.update(users)
+        .set({ balance: sql`${users.balance} + ${grant.amount}` })
+        .where(eq(users.id, actor.id))
 
-      await tx.creditGrant.update({
-        where: { id: grant.id },
-        data: {
+      await tx.update(creditGrants)
+        .set({
           status: "reversed",
           reversedAt: now,
           reversedByUserId: actor.id,
@@ -392,10 +508,10 @@ export class CreditGrantService {
               note: input.note ?? null,
             },
           }),
-        },
-      })
+        })
+        .where(eq(creditGrants.id, grant.id))
 
-      await BillingService.recordBalanceTransaction(tx, {
+      await BillingService.recordBalanceTransaction({
         userId: recipient.id,
         kind: "developer_grant_reversal",
         direction: "debit",
@@ -419,9 +535,9 @@ export class CreditGrantService {
         grantId: grant.id,
         actorUserId: actor.id,
         counterpartyUserId: recipient.id,
-      })
+      }, tx)
 
-      await BillingService.recordBalanceTransaction(tx, {
+      await BillingService.recordBalanceTransaction({
         userId: actor.id,
         kind: "developer_grant_reversal",
         direction: "credit",
@@ -445,15 +561,29 @@ export class CreditGrantService {
         grantId: grant.id,
         actorUserId: actor.id,
         counterpartyUserId: recipient.id,
-      })
+      }, tx)
 
-      const updatedGrant = await tx.creditGrant.findUnique({
-        where: { id: grant.id },
-        include: CREDIT_GRANT_INCLUDE,
-      })
+      const updatedGrantResult = await tx.select().from(creditGrants)
+        .where(eq(creditGrants.id, grant.id))
+        .limit(1)
+
+      const updatedGrant = updatedGrantResult[0]
+      const [fromUser, toUser, createdBy, reversedBy] = await Promise.all([
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, updatedGrant.fromUserId)).limit(1),
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, updatedGrant.toUserId)).limit(1),
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, updatedGrant.createdByUserId)).limit(1),
+        tx.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, updatedGrant.reversedByUserId ?? "")).limit(1),
+      ])
 
       return {
-        grant: (updatedGrant ?? grant) as CreditGrantRecord,
+        grant: {
+          ...updatedGrant,
+          fromUser: fromUser[0] || null,
+          toUser: toUser[0] || null,
+          createdBy: createdBy[0] || null,
+          reversedBy: reversedBy[0] || null,
+          billingTransactions: [],
+        },
         alreadyProcessed: false,
       }
     })
@@ -462,57 +592,70 @@ export class CreditGrantService {
   static async listGrants(filters: ListDeveloperCreditGrantsInput = {}) {
     const limit = Math.min(Math.max(Math.trunc(filters.limit ?? 50), 1), 100)
 
-    const where: Prisma.CreditGrantWhereInput = {}
+    const conditions = []
+    if (filters.status) conditions.push(eq(creditGrants.status, filters.status))
+    if (filters.fromUserId) conditions.push(eq(creditGrants.fromUserId, filters.fromUserId))
+    if (filters.toUserId) conditions.push(eq(creditGrants.toUserId, filters.toUserId))
+    if (filters.createdByUserId) conditions.push(eq(creditGrants.createdByUserId, filters.createdByUserId))
+    if (filters.reference) conditions.push(eq(creditGrants.reference, filters.reference))
+    if (filters.idempotencyKey) conditions.push(eq(creditGrants.idempotencyKey, filters.idempotencyKey))
+    if (filters.dateFrom) conditions.push(gte(creditGrants.createdAt, filters.dateFrom))
+    if (filters.dateTo) conditions.push(lte(creditGrants.createdAt, filters.dateTo))
 
-    if (filters.status) {
-      where.status = filters.status
-    }
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined
 
-    if (filters.fromUserId) {
-      where.fromUserId = filters.fromUserId
-    }
-
-    if (filters.toUserId) {
-      where.toUserId = filters.toUserId
-    }
-
-    if (filters.createdByUserId) {
-      where.createdByUserId = filters.createdByUserId
-    }
-
-    if (filters.reference) {
-      where.reference = filters.reference
-    }
-
-    if (filters.idempotencyKey) {
-      where.idempotencyKey = filters.idempotencyKey
-    }
-
-    if (filters.dateFrom || filters.dateTo) {
-      where.createdAt = {}
-
-      if (filters.dateFrom) {
-        where.createdAt.gte = filters.dateFrom
-      }
-
-      if (filters.dateTo) {
-        where.createdAt.lte = filters.dateTo
-      }
-    }
-
-    const grants = await prisma.creditGrant.findMany({
-      where,
-      include: CREDIT_GRANT_INCLUDE,
-      orderBy: {
-        createdAt: "desc",
-      },
-      take: limit + 1,
-    })
+    const grants = await db.select().from(creditGrants)
+      .where(whereClause)
+      .orderBy(desc(creditGrants.createdAt))
+      .limit(limit + 1)
 
     const hasMore = grants.length > limit
+    const limitedGrants = hasMore ? grants.slice(0, limit) : grants
+
+    const enrichedGrants: CreditGrantRecord[] = await Promise.all(
+      limitedGrants.map(async (grant) => {
+        const [fromUser, toUser, createdBy, reversedBy, billingTxs] = await Promise.all([
+          db.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.fromUserId)).limit(1),
+          db.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.toUserId)).limit(1),
+          db.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.createdByUserId)).limit(1),
+          grant.reversedByUserId
+            ? db.select(USER_SUMMARY_COLUMNS).from(users).where(eq(users.id, grant.reversedByUserId)).limit(1)
+            : Promise.resolve([]),
+          db.select({
+            id: billingTransactions.id,
+            userId: billingTransactions.userId,
+            grantId: billingTransactions.grantId,
+            actorUserId: billingTransactions.actorUserId,
+            counterpartyUserId: billingTransactions.counterpartyUserId,
+            kind: billingTransactions.kind,
+            direction: billingTransactions.direction,
+            amount: billingTransactions.amount,
+            balanceBefore: billingTransactions.balanceBefore,
+            balanceAfter: billingTransactions.balanceAfter,
+            reference: billingTransactions.reference,
+            provider: billingTransactions.provider,
+            providerReference: billingTransactions.providerReference,
+            description: billingTransactions.description,
+            metadata: billingTransactions.metadata,
+            createdAt: billingTransactions.createdAt,
+          }).from(billingTransactions)
+            .where(eq(billingTransactions.grantId, grant.id))
+            .orderBy(billingTransactions.createdAt),
+        ])
+
+        return {
+          ...grant,
+          fromUser: fromUser[0] || null,
+          toUser: toUser[0] || null,
+          createdBy: createdBy[0] || null,
+          reversedBy: reversedBy[0] || null,
+          billingTransactions: billingTxs,
+        }
+      })
+    )
 
     return {
-      grants: hasMore ? grants.slice(0, limit) : grants,
+      grants: enrichedGrants,
       hasMore,
       limit,
     }

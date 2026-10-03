@@ -7,6 +7,27 @@ let storageAdminClient: SupabaseClient | null = null
 const STORAGE_SAFE_SEGMENT_PATTERN = /[^a-zA-Z0-9._-]+/g
 const IMAGE_MIME_PREFIX = "image/"
 
+function readStorageTimeoutMs() {
+  const value = Number(process.env.SWIFT_SUPABASE_STORAGE_TIMEOUT_MS || 30_000)
+  return Number.isFinite(value) ? Math.max(1_000, value) : 30_000
+}
+
+const STORAGE_TIMEOUT_MS = readStorageTimeoutMs()
+
+async function storageFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(STORAGE_TIMEOUT_MS)
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal
+
+  try {
+    return await fetch(input, { ...init, signal })
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new Error(`Supabase storage timed out after ${STORAGE_TIMEOUT_MS}ms`)
+    }
+    throw error
+  }
+}
+
 const TEXT_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -97,6 +118,9 @@ export function createSupabaseStorageAdminClient() {
       auth: {
         autoRefreshToken: false,
         persistSession: false,
+      },
+      global: {
+        fetch: storageFetch,
       },
     })
   }

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users, workspaces, workspaceMembers } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import {
   canAccessRole,
@@ -57,8 +59,8 @@ export async function getCurrentAuthActor(): Promise<CurrentActor | null> {
     return null
   }
 
-  const session = await auth()
-  const email = session?.user?.email
+  const session = await getSession()
+  const email = session?.email
 
   if (!email) {
     return null
@@ -66,17 +68,20 @@ export async function getCurrentAuthActor(): Promise<CurrentActor | null> {
 
   const sessionEmail = normalizeAdminEmail(email)
 
-  const user = await prisma.user.findUnique({
-    where: { email: sessionEmail },
-    select: {
-      id: true,
-      email: true,
-      balance: true,
-      isDeveloperAccount: true,
-      workspaces: { select: { id: true }, take: 1 },
-      memberships: { select: { role: true } },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, sessionEmail),
+    with: {
+      workspaces: { limit: 1 },
+      memberships: { columns: { role: true } },
     },
-  })
+  }) as unknown as {
+    id: string
+    email: string
+    balance: number
+    isDeveloperAccount: boolean
+    workspaces: Array<{ id: string }>
+    memberships: Array<{ role: string }>
+  } | undefined
 
   if (!user) return null
 

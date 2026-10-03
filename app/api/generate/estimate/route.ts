@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import type { PromptAttachment } from "@/lib/types"
 import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 import { z } from "zod"
 
 const MAX_PROMPT_LENGTH = 12000
@@ -35,11 +38,20 @@ const EstimateSchema = z.object({
 })
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
-  const email = session?.user?.email
+  const session = await getSession()
+  const email = session?.email
 
   if (!email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`estimate:${email}`, { maxPerMinute: 30, maxPerHour: 300 })
+  } catch {
+    return NextResponse.json(
+      { error: "Too many estimate requests. Please try again shortly." },
+      { status: 429 }
+    )
   }
 
   try {
@@ -68,9 +80,8 @@ export async function POST(request: NextRequest) {
 
     const [modelConfig, user] = await Promise.all([
       ModelConfigService.getActiveModelByKey(routingDecision.modelName),
-      prisma.user.findUnique({
-        where: { email },
-        select: { balance: true },
+      db.query.users.findFirst({
+        where: eq(users.email, email),
       }),
     ])
 

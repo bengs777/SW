@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { topUpOrders, cryptoPayments, users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { CryptoPaymentService } from "@/lib/services/crypto-payment.service"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
@@ -11,14 +13,13 @@ const VerifySchema = z.object({
 })
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Rate limit: max 10 verification attempts per minute per user
   try {
-    await enforceRouteRateLimit(`crypto-verify:${session.user.email}`, { maxPerMinute: 10, maxPerHour: 60 })
+    await enforceRouteRateLimit(`crypto-verify:${session.email}`, { maxPerMinute: 10, maxPerHour: 60 })
   } catch {
     return NextResponse.json({ error: "Too many verification attempts. Please wait." }, { status: 429 })
   }
@@ -26,12 +27,15 @@ export async function POST(request: NextRequest) {
   try {
     const body = VerifySchema.parse(await request.json())
 
-    const topUpOrder = await prisma.topUpOrder.findUnique({
-      where: { id: body.topUpOrderId },
-      include: { user: true, cryptoPayment: true },
-    })
+    const topUpOrder = await db.query.topUpOrders.findFirst({
+      where: eq(topUpOrders.id, body.topUpOrderId),
+      with: {
+        user: true,
+        cryptoPayment: true,
+      },
+    }) as { user: { email: string }; cryptoPayment: unknown } | undefined
 
-    if (!topUpOrder || topUpOrder.user.email !== session.user.email) {
+    if (!topUpOrder || topUpOrder.user.email !== session.email) {
       return NextResponse.json({ error: "TopUpOrder not found" }, { status: 404 })
     }
 
@@ -39,13 +43,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "CryptoPayment not found" }, { status: 404 })
     }
 
-    // Verify the transaction
     const result = await CryptoPaymentService.finalizePayment(body.topUpOrderId, body.transactionHash)
 
-    const updatedOrder = await prisma.topUpOrder.findUnique({
-      where: { id: body.topUpOrderId },
-      include: { cryptoPayment: true },
-    })
+    const updatedOrder = await db.query.topUpOrders.findFirst({
+      where: eq(topUpOrders.id, body.topUpOrderId),
+      with: {
+        cryptoPayment: true,
+      },
+    }) as { status: string; cryptoPayment: { status: string; confirmations: number } | null } | undefined
 
     return NextResponse.json({
       success: result,

@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { auth } from '@/auth'
-import { prisma } from '@/lib/db/client'
+import { getSession } from '@/auth'
+import { db } from '@/lib/db/client'
+import { apiKeys } from '@/lib/db/schema'
+import { eq } from 'drizzle-orm'
 import { WorkspaceService } from '@/lib/services/workspace.service'
 import { ApiKeyService } from '@/lib/services/api-key.service'
+import { enforceRouteRateLimit } from '@/lib/security/rate-limit'
 
 const ApiKeyActionSchema = z.object({
   action: z.literal('rotate'),
@@ -17,27 +20,31 @@ export async function DELETE(
   request: NextRequest,
   { params }: RouteContext
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`api-key-delete:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429 })
   }
 
   try {
     const { id: apiKeyId } = await params
 
-    // Get the API key to find workspace
-    const apiKey = await prisma.apiKey.findUnique({
-      where: { id: apiKeyId },
+    const apiKey = await db.query.apiKeys.findFirst({
+      where: eq(apiKeys.id, apiKeyId),
     })
 
     if (!apiKey) {
       return NextResponse.json({ error: 'API key not found' }, { status: 404 })
     }
 
-    // Check if user is admin of workspace
     const membership = await WorkspaceService.checkMembership(
       apiKey.workspaceId,
-      session.user.id
+      session.userId
     )
 
     if (!membership || membership.role !== 'admin') {
@@ -62,9 +69,15 @@ export async function POST(
   request: NextRequest,
   { params }: RouteContext
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`api-key-rotate:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429 })
   }
 
   try {
@@ -72,9 +85,8 @@ export async function POST(
     const { action } = ApiKeyActionSchema.parse(await request.json())
 
     if (action === 'rotate') {
-      // Get the API key to find workspace
-      const apiKey = await prisma.apiKey.findUnique({
-        where: { id: apiKeyId },
+      const apiKey = await db.query.apiKeys.findFirst({
+        where: eq(apiKeys.id, apiKeyId),
       })
 
       if (!apiKey) {
@@ -84,10 +96,9 @@ export async function POST(
         )
       }
 
-      // Check if user is admin of workspace
       const membership = await WorkspaceService.checkMembership(
         apiKey.workspaceId,
-        session.user.id
+        session.userId
       )
 
       if (!membership || membership.role !== 'admin') {

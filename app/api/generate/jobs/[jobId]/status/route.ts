@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { getGenerationQueue } from "@/lib/queue/generation-queue"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
@@ -36,17 +38,16 @@ export async function GET(
   _request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
 ) {
-  const session = await auth()
-  const email = session?.user?.email
+  const session = await getSession()
+  const email = session?.email
 
   if (!email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
   }
 
   const { jobId } = await context.params
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
   })
 
   if (!user) {

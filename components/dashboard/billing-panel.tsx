@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { useSession } from "next-auth/react"
+import { useAuth } from "@clerk/nextjs"
 import {
   AlertCircle,
   ArrowRight,
@@ -119,7 +119,7 @@ function statusVariant(status: string) {
 }
 
 export function BillingPanel() {
-  const { status: sessionStatus } = useSession()
+  const { isLoaded, isSignedIn } = useAuth()
   const { toast } = useToast()
   const { createPaymentRequest: createCryptoCheckout, openCheckout: openCryptoCheckout, isLoading: isCryptoLoading } = useCryptoPayment()
   
@@ -229,17 +229,17 @@ export function BillingPanel() {
   }, [])
 
   useEffect(() => {
-    if (sessionStatus === "authenticated") {
+    if (isLoaded && isSignedIn) {
       void loadOverview()
       void loadWorkspaces()
     }
 
-    if (sessionStatus === "unauthenticated") {
+    if (isLoaded && !isSignedIn) {
       setIsLoading(false)
       setIsWorkspaceLoading(false)
       setError("Silakan login untuk melihat billing dan top up.")
     }
-  }, [loadOverview, loadWorkspaces, sessionStatus])
+  }, [isLoaded, isSignedIn, loadOverview, loadWorkspaces])
 
   const handleCreateTopup = async () => {
     const parsedAmount = Number(amount)

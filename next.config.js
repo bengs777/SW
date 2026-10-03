@@ -10,6 +10,8 @@ const nextConfig = {
     'localhost:3000',
     '*.vusercontent.net',
     'vusercontent.net',
+    '*.clerk.com',
+    '*.clerk.accounts.dev',
   ],
   reactCompiler: false,
   // Security headers as defense-in-depth (also enforced by middleware)

@@ -1,29 +1,22 @@
-import { Prisma } from "@prisma/client"
-
 const REQUIRED_TABLES = [
-  "User",
-  "Workspace",
-  "WorkspaceMember",
-  "Project",
-  "UsageLog",
-  "BillingTransaction",
-  "Subscription",
+  "users",
+  "workspaces",
+  "workspace_members",
+  "projects",
+  "usage_logs",
+  "billing_transactions",
+  "subscriptions",
 ]
 
 export function isMissingRequiredTableError(error: unknown) {
-  const message =
-    error instanceof Prisma.PrismaClientKnownRequestError
-      ? `${error.message} ${error.meta ? JSON.stringify(error.meta) : ""}`
-      : error instanceof Error
-        ? error.message
-        : String(error)
+  const message = error instanceof Error ? error.message : String(error)
 
   if (!/no such table/i.test(message)) {
     return false
   }
 
   return REQUIRED_TABLES.some((table) =>
-    new RegExp(`main\\.${table}\\b`, "i").test(message)
+    new RegExp(`no such table.*${table}`, "i").test(message)
   )
 }
 
@@ -32,12 +25,7 @@ export function shouldSoftFailMissingTable() {
 }
 
 function isTransientDatabaseWriteError(error: unknown) {
-  const message =
-    error instanceof Prisma.PrismaClientKnownRequestError
-      ? `${error.message} ${error.meta ? JSON.stringify(error.meta) : ""}`
-      : error instanceof Error
-        ? error.message
-        : String(error)
+  const message = error instanceof Error ? error.message : String(error)
 
   return /SQLITE_BUSY|database is locked|deadlock detected|could not serialize access|canceling statement due to statement timeout|connection terminated|ECONNRESET|ETIMEDOUT/i.test(message)
 }

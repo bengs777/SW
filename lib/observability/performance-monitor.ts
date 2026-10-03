@@ -16,6 +16,7 @@ export type SlowOperationType =
   | "generation"
   | "build"
   | "prisma"
+  | "db"
   | "redis"
   | "openrouter"
   | "validation"
@@ -25,6 +26,7 @@ const SLOW_THRESHOLDS_MS: Record<SlowOperationType, number> = {
   generation: 30_000,
   build: 60_000,
   prisma: 2_000,
+  db: 2_000,
   redis: 500,
   openrouter: 10_000,
   validation: 30_000,
@@ -95,6 +97,15 @@ export async function monitorOperation<T>(
 }
 
 export function getMemoryUsageSnapshot() {
+  if (typeof process === "undefined" || !process.memoryUsage) {
+    return {
+      rssBytes: 0,
+      heapTotalBytes: 0,
+      heapUsedBytes: 0,
+      externalBytes: 0,
+      arrayBuffersBytes: 0,
+    }
+  }
   const memory = process.memoryUsage()
   return {
     rssBytes: memory.rss,

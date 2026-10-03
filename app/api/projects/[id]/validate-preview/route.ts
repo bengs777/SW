@@ -1,23 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { db } from "@/lib/db/client"
+import { projects } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import { compileProject } from "@/lib/preview/module-resolution"
 import { validateRuntimeImports, validateRuntimeSyntax } from "@/lib/ai/runtime-tsx-validator"
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import type { GeneratedFile } from "@/lib/types"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 async function canAccessProject(projectId: string, userId: string) {
-  const project = await prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: { userId },
-        },
-      },
-    },
-    select: { id: true },
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
   })
   return Boolean(project)
 }
@@ -26,13 +22,24 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  try {
+    await enforceRouteRateLimit(`validate-preview:${session.userId}`, { maxPerMinute: 30, maxPerHour: 300 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
+  }
+
+  const previewFeatureCheck = assertFeatureEnabled("enablePreview", "Preview")
+  if (previewFeatureCheck) {
+    return NextResponse.json({ error: previewFeatureCheck.error }, { status: previewFeatureCheck.status })
+  }
+
   const { id } = await params
-  if (!(await canAccessProject(id, session.user.id))) {
+  if (!(await canAccessProject(id, session.userId))) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }
 

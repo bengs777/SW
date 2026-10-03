@@ -1,4 +1,6 @@
-import { prisma } from '@/lib/db/client'
+import { db } from '@/lib/db/client'
+import { generationHistory } from '@/lib/db/schema'
+import { and, eq } from 'drizzle-orm'
 import type { ProviderName } from './provider-router'
 import type { GeneratedFile } from '@/lib/types'
 import { normalizeFileLanguage } from '@/lib/workspace-state'
@@ -64,11 +66,11 @@ export async function orchestrateGeneration(opts: OrchestratorOpts): Promise<Orc
   const { projectId, idempotencyKey, prompt } = opts
 
   if (idempotencyKey) {
-    const existing = await prisma.generationHistory.findFirst({
-      where: {
-        projectId,
-        idempotencyKey,
-      },
+    const existing = await db.query.generationHistory.findFirst({
+      where: and(
+        eq(generationHistory.projectId, projectId),
+        eq(generationHistory.idempotencyKey, idempotencyKey)
+      ),
     })
 
     if (existing && existing.result) {

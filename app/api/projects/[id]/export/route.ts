@@ -1,9 +1,13 @@
 import JSZip from "jszip"
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects, projectFiles } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import type { GeneratedFile } from "@/lib/types"
 import { splitWorkspaceStateFiles, normalizeFileLanguage } from "@/lib/workspace-state"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 export const runtime = "nodejs"
 
@@ -59,21 +63,13 @@ const slugify = (value: string) =>
     .replace(/^-+|-+$/g, "") || "swift-project"
 
 const resolveProjectFiles = async (projectId: string, userId: string) => {
-  return prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: {
-            userId,
-          },
-        },
-      },
-    },
-    include: {
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    with: {
       files: true,
     },
   })
+  return project
 }
 
 const buildZip = async (projectName: string, files: GeneratedFile[]) => {
@@ -122,14 +118,19 @@ export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const featureCheck = assertFeatureEnabled("enableDownloadZip", "ZIP download")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   try {
     const { id } = await params
-    const project = await resolveProjectFiles(id, session.user.id)
+    const project = await resolveProjectFiles(id, session.userId)
 
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 })
@@ -159,14 +160,25 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const featureCheck = assertFeatureEnabled("enableDownloadZip", "ZIP download")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   try {
+    await enforceRouteRateLimit(`project-export:${session.userId}`, { maxPerMinute: 10, maxPerHour: 60 })
+  } catch {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 })
+  }
+
+  try {
     const { id } = await params
-    const project = await resolveProjectFiles(id, session.user.id)
+    const project = await resolveProjectFiles(id, session.userId)
 
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 })

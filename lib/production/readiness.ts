@@ -1,7 +1,8 @@
 import { env } from "@/lib/env"
 import { aiRateLimitConfig } from "@/lib/security/rate-limit"
 import { getAuthRuntimeDiagnostic } from "@/lib/auth/runtime"
-import { getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
+import { getDatabaseRuntimeDiagnostic, db } from "@/lib/db/client"
+import { sql } from "drizzle-orm"
 import { getDatabaseSchemaHealth, type DatabaseSchemaHealth } from "@/lib/db/schema-health"
 import {
   getExternalSandboxRuntimeHealth,
@@ -72,13 +73,13 @@ export function getProductionReadiness() {
   const generationExecutionReady = !generationExecutionMode || generationExecutionMode === "queue"
   const checks: ReadinessCheck[] = [
     check("DATABASE_URL", "PostgreSQL runtime URL", database.ok, "critical", "database", database.message),
-    check("DATABASE_URL_POOLING", "Neon pooled serverless connection", isNeonPooledUrl(env.databaseUrl), "optional", "database", env.databaseUrl ? "Use the Neon pooler host for app runtime traffic." : undefined, true),
-    check("DIRECT_DATABASE_URL", "Direct database URL for rollback-safe migrations", isPostgresUrl(env.directDatabaseUrl), "required", "rollback", "Use for migration status, rollback checks, and administrative scripts."),
-    check("NEXTAUTH_SECRET", "Auth session signing secret", env.nextAuthSecret && env.nextAuthSecret.length >= 32, "critical", "auth", "Must be present and non-placeholder."),
-    check("NEXTAUTH_URL", "Canonical auth URL", isProductionUrl(env.nextAuthUrl) || isPreviewDeployment, "required", "auth", env.nextAuthUrl ? "Must be an https production URL, not localhost." : undefined),
+    check("DATABASE_URL_POOLING", "Turso database connection", Boolean(env.tursoDatabaseUrl), "optional", "database", env.tursoDatabaseUrl ? "Turso database URL is configured." : undefined, true),
+    check("DIRECT_DATABASE_URL", "Turso auth token for migrations", Boolean(env.tursoAuthToken), "required", "rollback", "Use for migration status, rollback checks, and administrative scripts."),
+    check("CLERK_SECRET_KEY", "Auth session signing secret", env.clerkSecretKey && env.clerkSecretKey.length >= 32, "critical", "auth", "Must be present and non-placeholder."),
+    check("NEXT_PUBLIC_APP_URL", "Canonical auth URL", isProductionUrl(env.appUrl) || isPreviewDeployment, "required", "auth", env.appUrl ? "Must be an https production URL, not localhost." : undefined),
     check("NEXT_PUBLIC_APP_URL", "Public app URL", isProductionUrl(env.appUrl) || isPreviewDeployment, "required", "preview", env.appUrl ? "Must be an https URL for production and preview deployments." : undefined),
-    check("GOOGLE_CLIENT_ID", "Google OAuth client ID", env.googleClientId, "critical", "auth"),
-    check("GOOGLE_CLIENT_SECRET", "Google OAuth client secret", env.googleClientSecret, "critical", "auth"),
+    check("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", "Clerk publishable key", env.clerkPublishableKey, "critical", "auth"),
+    check("CLERK_SECRET_KEY", "Clerk secret key", env.clerkSecretKey, "critical", "auth"),
     check("AUTH_PROVIDER_HEALTH", "Auth provider runtime health", auth.ok, "critical", "auth", auth.issues.map((issue) => issue.message).join(" ") || "Auth provider configured."),
     check("OPENROUTER_API_KEY", "Swift AI OpenRouter gateway key", env.openRouterApiKey, "required", "service"),
     check("OPENROUTER_BASE_URL", "OpenRouter compatible API base URL", env.openRouterBaseUrl, "optional", "service", undefined, true),
@@ -201,7 +202,7 @@ export async function getDeploymentRuntimeReadiness() {
   if (base.database.ok) {
     try {
       const startedAt = Date.now()
-      await prisma.$queryRaw`SELECT 1`
+      await db.all(sql`SELECT 1`)
       dbConnectivity = { ok: true, latencyMs: Date.now() - startedAt }
     } catch (error) {
       dbConnectivity = { ok: false, error: error instanceof Error ? error.message : String(error) }

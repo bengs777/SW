@@ -1,4 +1,6 @@
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationHistory, projects } from "@/lib/db/schema"
+import { eq, desc } from "drizzle-orm"
 import type { GeneratedFile } from "@/lib/types"
 import { ProjectFilesystemService, type ProjectFileManifest } from "@/lib/services/project-filesystem.service"
 import { buildProjectDependencyGraph, type ProjectDependencyGraph } from "@/lib/project-state/dependency-graph"
@@ -44,15 +46,15 @@ export async function loadProjectState(input: {
 }): Promise<SwiftProjectState> {
   const [files, histories, project] = await Promise.all([
     ProjectFilesystemService.readFiles(input.projectId),
-    prisma.generationHistory.findMany({
-      where: { projectId: input.projectId },
-      orderBy: { createdAt: "desc" },
-      take: 20,
-      select: { id: true, prompt: true, intent: true, result: true, createdAt: true },
+    db.query.generationHistory.findMany({
+      where: eq(generationHistory.projectId, input.projectId),
+      orderBy: [desc(generationHistory.createdAt)],
+      limit: 20,
+      columns: { id: true, prompt: true, intent: true, result: true, createdAt: true },
     }),
-    prisma.project.findUnique({
-      where: { id: input.projectId },
-      select: { id: true, memoryJson: true, updatedAt: true },
+    db.query.projects.findFirst({
+      where: eq(projects.id, input.projectId),
+      columns: { id: true, memoryJson: true, updatedAt: true },
     }),
   ])
 
@@ -160,10 +162,7 @@ export async function persistProjectStateMetadata(input: {
     },
   })
 
-  await prisma.project.update({
-    where: { id: input.projectId },
-    data: { memoryJson },
-  })
+  await db.update(projects).set({ memoryJson }).where(eq(projects.id, input.projectId))
 }
 
 function readBuildStatus(memoryJson: string | null | undefined): ProjectBuildStatus {

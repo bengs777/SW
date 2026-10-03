@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { randomUUID } from "node:crypto"
-import { getDatabasePoolUsage, getDatabaseRuntimeDiagnostic, prisma } from "@/lib/db/client"
+import { getDatabasePoolUsage, getDatabaseRuntimeDiagnostic, db } from "@/lib/db/client"
+import { sql } from "drizzle-orm"
 import { getDatabaseCircuitState } from "@/lib/db/circuit-breaker"
 import { getDatabaseMetricsSnapshot } from "@/lib/db/metrics"
 import { env, getMissingProductionEnvVars, validateEnv } from "@/lib/env"
@@ -62,7 +63,9 @@ async function checkDatabase(): Promise<HealthCheck> {
 
   try {
     const { latencyMs } = await timed(() =>
-      withHealthTimeout("database health check", 2_000, () => prisma.$queryRaw`SELECT 1`)
+      withHealthTimeout("database health check", 2_000, async () => {
+        await db.select({ result: sql<number>`1` }).from(sql`(SELECT 1) as t`)
+      })
     )
     return {
       status: "healthy",

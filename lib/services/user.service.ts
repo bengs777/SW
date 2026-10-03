@@ -1,9 +1,8 @@
-import { prisma } from '@/lib/db/client'
-import { isMissingRequiredTableError, shouldSoftFailMissingTable } from '@/lib/db/errors'
+import { db } from '@/lib/db/client'
+import { users, workspaces, workspaceMembers, subscriptions, billingTransactions } from '@/lib/db/schema'
+import { eq } from 'drizzle-orm'
 import { env } from '@/lib/env'
 import { MONTHLY_FREE_CREDITS_AMOUNT, SIGNUP_CREDITS_AMOUNT } from '@/lib/billing/constants'
-import { Prisma } from '@prisma/client'
-import bcrypt from 'bcryptjs'
 
 const DEVELOPER_TREASURY_CREDITS = 1_000_000
 
@@ -37,73 +36,89 @@ export class UserService {
     image?: string | null
   ) {
     const accountState = buildInitialAccountState(email)
+    const normalizedEmail = normalizeEmail(email)
 
-    return prisma.user.upsert({
-      where: { email },
-      update: {
-        name: name || undefined,
-        image: image || undefined,
-        ...(accountState.isDeveloperAccount ? { isDeveloperAccount: true } : {}),
-      },
-      create: {
-        email,
-        name,
-        image,
-        balance: accountState.balance,
-        isDeveloperAccount: accountState.isDeveloperAccount,
-        welcomeBonusGrantedAt: accountState.welcomeBonusGrantedAt,
-      },
+    const existing = await db.query.users.findFirst({
+      where: eq(users.email, normalizedEmail),
     })
+
+    if (existing) {
+      await db.update(users)
+        .set({
+          name: name || undefined,
+          image: image || undefined,
+          ...(accountState.isDeveloperAccount ? { isDeveloperAccount: true } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, existing.id))
+      return existing
+    }
+
+    const userId = crypto.randomUUID()
+    await db.insert(users).values({
+      id: userId,
+      email: normalizedEmail,
+      name,
+      image,
+      balance: accountState.balance,
+      isDeveloperAccount: accountState.isDeveloperAccount,
+      welcomeBonusGrantedAt: accountState.welcomeBonusGrantedAt,
+    })
+
+    return { id: userId, email: normalizedEmail, name, image }
   }
 
-  static async findOrCreateUser(email: string, data: Prisma.UserCreateInput) {
+  static async findOrCreateUser(email: string, data: { name?: string | null; image?: string | null }) {
     const accountState = buildInitialAccountState(email)
+    const normalizedEmail = normalizeEmail(email)
 
-    const user = await prisma.user.upsert({
-      where: { email },
-      create: {
-        email,
-        name: data.name ?? null,
-        image: data.image ?? null,
-        balance: accountState.balance,
-        isDeveloperAccount: accountState.isDeveloperAccount,
-        welcomeBonusGrantedAt: accountState.welcomeBonusGrantedAt,
-      },
-      update: {
-        name: data.name || undefined,
-        image: data.image || undefined,
-        ...(accountState.isDeveloperAccount ? { isDeveloperAccount: true } : {}),
-      },
-      include: {
-        workspaces: {
-          include: {
-            members: true,
-          },
-        },
+    const existing = await db.query.users.findFirst({
+      where: eq(users.email, normalizedEmail),
+      with: {
+        workspaces: { with: { members: true } },
       },
     })
 
-    return user
+    if (existing) {
+      await db.update(users)
+        .set({
+          name: data.name || undefined,
+          image: data.image || undefined,
+          ...(accountState.isDeveloperAccount ? { isDeveloperAccount: true } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, existing.id))
+      return existing
+    }
+
+    const userId = crypto.randomUUID()
+    await db.insert(users).values({
+      id: userId,
+      email: normalizedEmail,
+      name: data.name ?? null,
+      image: data.image ?? null,
+      balance: accountState.balance,
+      isDeveloperAccount: accountState.isDeveloperAccount,
+      welcomeBonusGrantedAt: accountState.welcomeBonusGrantedAt,
+    })
+
+    return { id: userId, email: normalizedEmail, name: data.name ?? null, image: data.image ?? null }
   }
 
   static async getUserWithWorkspaces(userId: string) {
-    return prisma.user.findUnique({
-      where: { id: userId },
-      include: {
+    return db.query.users.findFirst({
+      where: eq(users.id, userId),
+      with: {
         workspaces: {
-          include: {
-            members: {
-              include: {
-                user: true,
-              },
-            },
+          with: {
+            members: { with: { user: true } },
             subscription: true,
           },
         },
         memberships: {
-          include: {
+          with: {
             workspace: {
-              include: {
+              with: {
                 members: true,
                 subscription: true,
               },
@@ -117,76 +132,69 @@ export class UserService {
   static async createUserWithWorkspace(
     email: string,
     name: string | null,
-    image: string | null,
-    passwordHash?: string
+    image: string | null
   ) {
     const accountState = buildInitialAccountState(email)
+    const normalizedEmail = normalizeEmail(email)
+    const userId = crypto.randomUUID()
+    const workspaceId = crypto.randomUUID()
+    const welcomeBonus = accountState.balance
+    const billingKind = accountState.isDeveloperAccount ? "developer_seed" : "welcome_bonus"
+    const billingReference = accountState.isDeveloperAccount
+      ? `developer-seed:${normalizedEmail}`
+      : `welcome-bonus:${normalizedEmail}`
 
-    return prisma.$transaction(async (tx) => {
-      const welcomeBonus = accountState.balance
-      const billingKind = accountState.isDeveloperAccount ? "developer_seed" : "welcome_bonus"
-      const billingReference = accountState.isDeveloperAccount
-        ? `developer-seed:${normalizeEmail(email)}`
-        : `welcome-bonus:${normalizeEmail(email)}`
-
-      const user = await tx.user.create({
-        data: {
-          email,
-          name,
-          image,
-          passwordHash,
-          balance: welcomeBonus,
-          isDeveloperAccount: accountState.isDeveloperAccount,
-          welcomeBonusGrantedAt: accountState.welcomeBonusGrantedAt,
-        },
-      })
-
-      await tx.billingTransaction.create({
-        data: {
-          userId: user.id,
-          kind: billingKind,
-          direction: "credit",
-          amount: welcomeBonus,
-          balanceBefore: 0,
-          balanceAfter: welcomeBonus,
-          reference: billingReference,
-          provider: "internal",
-          description: accountState.isDeveloperAccount
-            ? "Developer treasury seed"
-            : "One-time welcome balance for new account",
-          metadata: JSON.stringify({
-            source: accountState.isDeveloperAccount ? "developer_seed" : "signup",
-            amount: welcomeBonus,
-            isDeveloperAccount: accountState.isDeveloperAccount,
-          }),
-        },
-      })
-
-      const workspace = await tx.workspace.create({
-        data: {
-          name: `${name || 'My'} Workspace`,
-          slug: `workspace-${user.id.slice(0, 8)}`,
-          createdBy: user.id,
-        },
-      })
-
-      await tx.workspaceMember.create({
-        data: {
-          workspaceId: workspace.id,
-          userId: user.id,
-          role: 'admin',
-        },
-      })
-
-      await tx.subscription.create({
-        data: {
-          workspaceId: workspace.id,
-          plan: 'free',
-        },
-      })
-
-      return user
+    await db.insert(users).values({
+      id: userId,
+      email: normalizedEmail,
+      name,
+      image,
+      balance: welcomeBonus,
+      isDeveloperAccount: accountState.isDeveloperAccount,
+      welcomeBonusGrantedAt: accountState.welcomeBonusGrantedAt,
     })
+
+    await db.insert(billingTransactions).values({
+      id: crypto.randomUUID(),
+      userId,
+      kind: billingKind,
+      direction: "credit",
+      amount: welcomeBonus,
+      balanceBefore: 0,
+      balanceAfter: welcomeBonus,
+      reference: billingReference,
+      provider: "internal",
+      description: accountState.isDeveloperAccount
+        ? "Developer treasury seed"
+        : "One-time welcome balance for new account",
+      metadata: JSON.stringify({
+        source: accountState.isDeveloperAccount ? "developer_seed" : "signup",
+        amount: welcomeBonus,
+        isDeveloperAccount: accountState.isDeveloperAccount,
+      }),
+    })
+
+    await db.insert(workspaces).values({
+      id: workspaceId,
+      name: `${name || 'My'} Workspace`,
+      slug: `workspace-${userId.slice(0, 8)}`,
+      createdBy: userId,
+    })
+
+    await db.insert(workspaceMembers).values({
+      id: crypto.randomUUID(),
+      workspaceId,
+      userId,
+      role: 'admin',
+    })
+
+    await db.insert(subscriptions).values({
+      id: crypto.randomUUID(),
+      workspaceId,
+      plan: 'free',
+    })
+
+    return { id: userId, email: normalizedEmail, name, image }
   }
 
   static async grantMonthlyFreeCreditsIfNeeded(email: string) {
@@ -198,9 +206,9 @@ export class UserService {
         return
       }
 
-      const user = await prisma.user.findUnique({
-        where: { email: normalizedEmail },
-        select: {
+      const user = await db.query.users.findFirst({
+        where: eq(users.email, normalizedEmail),
+        columns: {
           id: true,
           balance: true,
           welcomeBonusGrantedAt: true,
@@ -220,70 +228,36 @@ export class UserService {
         return
       }
 
-      await prisma.$transaction(async (tx) => {
-        const latestUser = await tx.user.findUnique({
-          where: { id: user.id },
-          select: {
-            id: true,
-            balance: true,
-            welcomeBonusGrantedAt: true,
-            isDeveloperAccount: true,
-          },
+      const balanceBefore = user.balance
+      const balanceAfter = balanceBefore + MONTHLY_FREE_CREDITS_AMOUNT
+      const grantedAt = new Date()
+
+      await db.update(users)
+        .set({
+          balance: balanceAfter,
+          welcomeBonusGrantedAt: grantedAt,
+          updatedAt: new Date(),
         })
+        .where(eq(users.id, user.id))
 
-        if (!latestUser) {
-          return
-        }
-
-        if (latestUser.isDeveloperAccount) {
-          return
-        }
-
-        if (latestUser.welcomeBonusGrantedAt && latestUser.welcomeBonusGrantedAt >= currentMonthStart) {
-          return
-        }
-
-        const balanceBefore = latestUser.balance
-        const balanceAfter = balanceBefore + MONTHLY_FREE_CREDITS_AMOUNT
-        const grantedAt = new Date()
-
-        await tx.user.update({
-          where: { id: latestUser.id },
-          data: {
-            balance: {
-              increment: MONTHLY_FREE_CREDITS_AMOUNT,
-            },
-            welcomeBonusGrantedAt: grantedAt,
-          },
-        })
-
-        await tx.billingTransaction.create({
-          data: {
-            userId: latestUser.id,
-            kind: "free_balance",
-            direction: "credit",
-            amount: MONTHLY_FREE_CREDITS_AMOUNT,
-            balanceBefore,
-            balanceAfter,
-            reference: `free-balance:${currentMonthStart.toISOString().slice(0, 7)}:${latestUser.id}`,
-            provider: "internal",
-            description: "Monthly free Rupiah balance for the Free plan",
-            metadata: JSON.stringify({
-              source: "monthly_free_plan",
-              amount: MONTHLY_FREE_CREDITS_AMOUNT,
-              period: currentMonthStart.toISOString(),
-            }),
-          },
-        })
+      await db.insert(billingTransactions).values({
+        id: crypto.randomUUID(),
+        userId: user.id,
+        kind: "free_balance",
+        direction: "credit",
+        amount: MONTHLY_FREE_CREDITS_AMOUNT,
+        balanceBefore,
+        balanceAfter,
+        reference: `free-balance:${currentMonthStart.toISOString().slice(0, 7)}:${user.id}`,
+        provider: "internal",
+        description: "Monthly free Rupiah balance for the Free plan",
+        metadata: JSON.stringify({
+          source: "monthly_free_plan",
+          amount: MONTHLY_FREE_CREDITS_AMOUNT,
+          period: currentMonthStart.toISOString(),
+        }),
       })
     } catch (error) {
-      if (isMissingRequiredTableError(error)) {
-        if (shouldSoftFailMissingTable()) {
-          console.warn("[user] Required database tables are not ready yet; skipping monthly free balance sync.")
-          return
-        }
-      }
-
       throw error
     }
   }
@@ -297,9 +271,9 @@ export class UserService {
       }
 
       const reference = `welcome-bonus:${normalizedEmail}`
-      const user = await prisma.user.findUnique({
-        where: { email: normalizedEmail },
-        select: {
+      const user = await db.query.users.findFirst({
+        where: eq(users.email, normalizedEmail),
+        columns: {
           id: true,
           balance: true,
           welcomeBonusGrantedAt: true,
@@ -311,74 +285,47 @@ export class UserService {
         return
       }
 
-      await prisma.$transaction(async (tx) => {
-        const latestUser = await tx.user.findUnique({
-          where: { id: user.id },
-          select: {
-            id: true,
-            balance: true,
-            welcomeBonusGrantedAt: true,
-            isDeveloperAccount: true,
-          },
-        })
-
-        if (!latestUser || latestUser.isDeveloperAccount || latestUser.welcomeBonusGrantedAt) {
-          return
-        }
-
-        const existingBonus = await tx.billingTransaction.findUnique({
-          where: { reference },
-          select: { id: true },
-        })
-
-        if (existingBonus) {
-          await tx.user.update({
-            where: { id: latestUser.id },
-            data: { welcomeBonusGrantedAt: new Date() },
-          })
-          return
-        }
-
-        const balanceBefore = latestUser.balance
-        const balanceAfter = balanceBefore + SIGNUP_CREDITS_AMOUNT
-        const grantedAt = new Date()
-
-        await tx.user.update({
-          where: { id: latestUser.id },
-          data: {
-            balance: {
-              increment: SIGNUP_CREDITS_AMOUNT,
-            },
-            welcomeBonusGrantedAt: grantedAt,
-          },
-        })
-
-        await tx.billingTransaction.create({
-          data: {
-            userId: latestUser.id,
-            kind: "welcome_bonus",
-            direction: "credit",
-            amount: SIGNUP_CREDITS_AMOUNT,
-            balanceBefore,
-            balanceAfter,
-            reference,
-            provider: "internal",
-            description: "One-time welcome balance for new account",
-            metadata: JSON.stringify({
-              source: "signup",
-              amount: SIGNUP_CREDITS_AMOUNT,
-            }),
-          },
-        })
+      const existingBonus = await db.query.billingTransactions.findFirst({
+        where: eq(billingTransactions.reference, reference),
+        columns: { id: true },
       })
-    } catch (error) {
-      if (isMissingRequiredTableError(error)) {
-        if (shouldSoftFailMissingTable()) {
-          console.warn("[user] Required database tables are not ready yet; skipping welcome balance sync.")
-          return
-        }
+
+      if (existingBonus) {
+        await db.update(users)
+          .set({ welcomeBonusGrantedAt: new Date(), updatedAt: new Date() })
+          .where(eq(users.id, user.id))
+        return
       }
 
+      const balanceBefore = user.balance
+      const balanceAfter = balanceBefore + SIGNUP_CREDITS_AMOUNT
+      const grantedAt = new Date()
+
+      await db.update(users)
+        .set({
+          balance: balanceAfter,
+          welcomeBonusGrantedAt: grantedAt,
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, user.id))
+
+      await db.insert(billingTransactions).values({
+        id: crypto.randomUUID(),
+        userId: user.id,
+        kind: "welcome_bonus",
+        direction: "credit",
+        amount: SIGNUP_CREDITS_AMOUNT,
+        balanceBefore,
+        balanceAfter,
+        reference,
+        provider: "internal",
+        description: "One-time welcome balance for new account",
+        metadata: JSON.stringify({
+          source: "signup",
+          amount: SIGNUP_CREDITS_AMOUNT,
+        }),
+      })
+    } catch (error) {
       throw error
     }
   }
@@ -389,24 +336,11 @@ export class UserService {
     image: string | null
   ) {
     const normalizedEmail = email.trim().toLowerCase()
-    const existingUser = await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        image: true,
-        isDeveloperAccount: true,
-        memberships: {
-          select: {
-            id: true,
-          },
-        },
-        workspaces: {
-          select: {
-            id: true,
-          },
-        },
+    const existingUser = await db.query.users.findFirst({
+      where: eq(users.email, normalizedEmail),
+      with: {
+        memberships: { columns: { id: true } },
+        workspaces: { columns: { id: true } },
       },
     })
 
@@ -422,113 +356,62 @@ export class UserService {
         return existingUser
       }
 
-      return prisma.$transaction(async (tx) => {
-        if (shouldUpdateProfile || shouldMarkDeveloper) {
-          await tx.user.update({
-            where: { id: existingUser.id },
-            data: {
-              ...(typeof name === 'string' && name.trim().length > 0 && name !== existingUser.name
-                ? { name }
-                : {}),
-              ...(typeof image === 'string' && image !== existingUser.image
-                ? { image }
-                : {}),
-              ...(shouldMarkDeveloper ? { isDeveloperAccount: true } : {}),
-            },
+      if (shouldUpdateProfile || shouldMarkDeveloper) {
+        await db.update(users)
+          .set({
+            ...(typeof name === 'string' && name.trim().length > 0 && name !== existingUser.name
+              ? { name }
+              : {}),
+            ...(typeof image === 'string' && image !== existingUser.image
+              ? { image }
+              : {}),
+            ...(shouldMarkDeveloper ? { isDeveloperAccount: true } : {}),
+            updatedAt: new Date(),
           })
-        }
+          .where(eq(users.id, existingUser.id))
+      }
 
-        if (shouldCreateWorkspace) {
-          const workspaceName = `${name || existingUser.name || normalizedEmail.split('@')[0]} Workspace`
+      if (shouldCreateWorkspace) {
+        const workspaceName = `${name || existingUser.name || normalizedEmail.split('@')[0]} Workspace`
+        const workspaceId = crypto.randomUUID()
 
-          const workspace = await tx.workspace.create({
-            data: {
-              name: workspaceName,
-              slug: `workspace-${existingUser.id.slice(0, 8)}`,
-              createdBy: existingUser.id,
-            },
-          })
-
-          await tx.workspaceMember.create({
-            data: {
-              workspaceId: workspace.id,
-              userId: existingUser.id,
-              role: 'admin',
-            },
-          })
-
-          await tx.subscription.create({
-            data: {
-              workspaceId: workspace.id,
-              plan: 'free',
-            },
-          })
-        }
-
-        const refreshedUser = await tx.user.findUnique({
-          where: { id: existingUser.id },
+        await db.insert(workspaces).values({
+          id: workspaceId,
+          name: workspaceName,
+          slug: `workspace-${existingUser.id.slice(0, 8)}`,
+          createdBy: existingUser.id,
         })
 
-        return refreshedUser ?? existingUser
+        await db.insert(workspaceMembers).values({
+          id: crypto.randomUUID(),
+          workspaceId,
+          userId: existingUser.id,
+          role: 'admin',
+        })
+
+        await db.insert(subscriptions).values({
+          id: crypto.randomUUID(),
+          workspaceId,
+          plan: 'free',
+        })
+      }
+
+      const refreshedUser = await db.query.users.findFirst({
+        where: eq(users.id, existingUser.id),
       })
+
+      return refreshedUser ?? existingUser
     }
 
     return this.createUserWithWorkspace(normalizedEmail, name, image)
   }
 
-  static async createCredentialsUserWithWorkspace(
-    email: string,
-    name: string,
-    password: string
-  ) {
-    const normalizedEmail = email.trim().toLowerCase()
-
-    if (isDeveloperTreasuryEmail(normalizedEmail)) {
-      throw new Error('DEVELOPER_ACCOUNT_RESERVED')
-    }
-
-    const existingUser = await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-      select: { id: true },
-    })
-
-    if (existingUser) {
-      throw new Error('USER_EXISTS')
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12)
-    return this.createUserWithWorkspace(
-      normalizedEmail,
-      name,
-      null,
-      passwordHash
-    )
-  }
-
-  static async validateCredentials(email: string, password: string) {
-    const normalizedEmail = email.trim().toLowerCase()
-    const user = await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-    })
-
-    if (!user?.passwordHash) {
-      return null
-    }
-
-    const isValid = await bcrypt.compare(password, user.passwordHash)
-    if (!isValid) {
-      return null
-    }
-
-    return user
-  }
-
   static async getUserById(userId: string) {
-    return prisma.user.findUnique({
-      where: { id: userId },
-      include: {
+    return db.query.users.findFirst({
+      where: eq(users.id, userId),
+      with: {
         memberships: {
-          include: {
+          with: {
             workspace: true,
           },
         },

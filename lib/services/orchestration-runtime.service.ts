@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto"
 import { subHours, subMinutes } from "date-fns"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { generationJobs, generationEvents, repairAttempts, previewSessions, workerHeartbeats, orchestrationFailures, artifacts, generationQualityMetrics } from "@/lib/db/schema"
+import { eq, and, desc, asc, gte, lt, inArray, notInArray, isNotNull, sql, or, count } from "drizzle-orm"
 import { renderProviderPrometheusMetrics } from "@/lib/ai/provider-metrics"
 import { renderDatabasePrometheusMetrics } from "@/lib/db/metrics"
 import { log } from "@/lib/logging"
@@ -231,15 +233,16 @@ export class OrchestrationRuntimeService {
     lease?: Record<string, unknown> | null
     traceId?: string | null
   }) {
-    const existing = await prisma.generationJob.findUnique({
-      where: { id: input.jobId },
-      select: {
-        diagnosticsJson: true,
-        metricsJson: true,
-        stage: true,
-        progress: true,
-      },
-    }).catch(() => null)
+    const existingResult = await db.select({
+      diagnosticsJson: generationJobs.diagnosticsJson,
+      metricsJson: generationJobs.metricsJson,
+      stage: generationJobs.stage,
+      progress: generationJobs.progress,
+    }).from(generationJobs)
+      .where(eq(generationJobs.id, input.jobId))
+      .limit(1)
+
+    const existing = existingResult[0]
     if (!existing) return null
 
     const existingDiagnostics = parseJson(existing.diagnosticsJson) || {}
@@ -285,20 +288,24 @@ export class OrchestrationRuntimeService {
     }
 
     const stage = asGenerationJobStage(input.currentPhase)
-    await prisma.generationJob.updateMany({
-      where: { id: input.jobId, status: { notIn: ["completed", "failed", "cancelled"] } },
-      data: {
-        orchestrationState: input.orchestrationState,
-        ...(stage ? { stage } : {}),
-        ...(typeof input.generationProgress === "number"
-          ? { progress: Math.max(0, Math.min(100, Math.round(input.generationProgress))) }
-          : {}),
-        ...(input.workerId ? { workerId: input.workerId } : {}),
-        ...(input.traceId ? { traceId: input.traceId } : {}),
-        diagnosticsJson: safeStringify(diagnostics),
-        version: { increment: 1 },
-      },
-    })
+    const setClause: Record<string, unknown> = {
+      orchestrationState: input.orchestrationState,
+      ...(stage ? { stage } : {}),
+      ...(typeof input.generationProgress === "number"
+        ? { progress: Math.max(0, Math.min(100, Math.round(input.generationProgress))) }
+        : {}),
+      ...(input.workerId ? { workerId: input.workerId } : {}),
+      ...(input.traceId ? { traceId: input.traceId } : {}),
+      diagnosticsJson: safeStringify(diagnostics),
+      version: sql`${generationJobs.version} + 1`,
+    }
+
+    await db.update(generationJobs)
+      .set(setClause)
+      .where(and(
+        eq(generationJobs.id, input.jobId),
+        notInArray(generationJobs.status, ["completed", "failed", "cancelled"])
+      ))
     return snapshot
   }
 
@@ -345,19 +352,18 @@ export class OrchestrationRuntimeService {
     trace?: TraceIds
     metadata?: Record<string, unknown> | null
   }) {
-    await prisma.orchestrationFailure.create({
-      data: {
-        jobId: input.jobId,
-        traceId: input.trace?.traceId || null,
-        workerId: input.trace?.workerId || null,
-        eventType: input.eventType,
-        stage: input.stage,
-        severity: input.severity || "error",
-        reason: input.reason,
-        retryCount: Math.max(0, input.retryCount || 0),
-        terminationReason: input.terminationReason || null,
-        metadataJson: safeStringify(input.metadata),
-      },
+    await db.insert(orchestrationFailures).values({
+          id: crypto.randomUUID(),
+      jobId: input.jobId,
+      traceId: input.trace?.traceId || null,
+      workerId: input.trace?.workerId || null,
+      eventType: input.eventType,
+      stage: input.stage,
+      severity: input.severity || "error",
+      reason: input.reason,
+      retryCount: Math.max(0, input.retryCount || 0),
+      terminationReason: input.terminationReason || null,
+      metadataJson: safeStringify(input.metadata),
     })
   }
 
@@ -376,17 +382,8 @@ export class OrchestrationRuntimeService {
       workerId: input.workerId,
       queueJobId: input.queueJobId || input.jobId,
     }).slice(0, 24)}`
-    const result = await prisma.generationJob.updateMany({
-      where: {
-        id: input.jobId,
-        status: { notIn: ["completed", "failed", "cancelled"] },
-        OR: [
-          { leaseOwner: null },
-          { leaseOwner: input.workerId },
-          { leaseExpiresAt: { lt: now } },
-        ],
-      },
-      data: {
+    const result = await db.update(generationJobs)
+      .set({
         orchestrationState: "assigned",
         status: "running",
         workerId: input.workerId,
@@ -395,11 +392,20 @@ export class OrchestrationRuntimeService {
         leaseExpiresAt,
         lastHeartbeatAt: now,
         queueJobId: input.queueJobId ? String(input.queueJobId) : undefined,
-        version: { increment: 1 },
-      },
-    })
+        version: sql`${generationJobs.version} + 1`,
+      })
+      .where(and(
+        eq(generationJobs.id, input.jobId),
+        notInArray(generationJobs.status, ["completed", "failed", "cancelled"]),
+        or(
+          sql`${generationJobs.leaseOwner} IS NULL`,
+          eq(generationJobs.leaseOwner, input.workerId),
+          lt(generationJobs.leaseExpiresAt, now)
+        )
+      ))
+      .returning()
 
-    const acquired = result.count === 1
+    const acquired = result.length === 1
     if (acquired) {
       await this.persistDurableState({
         jobId: input.jobId,
@@ -442,21 +448,22 @@ export class OrchestrationRuntimeService {
   }) {
     const now = new Date()
     const leaseExpiresAt = new Date(now.getTime() + Math.max(10_000, input.leaseMs || DEFAULT_LEASE_MS))
-    const updated = await prisma.generationJob.updateMany({
-      where: {
-        id: input.jobId,
-        leaseOwner: input.workerId,
-        status: { notIn: ["completed", "failed", "cancelled"] },
-      },
-      data: {
+    const updated = await db.update(generationJobs)
+      .set({
         workerId: input.workerId,
         leaseExpiresAt,
         lastHeartbeatAt: now,
         stage: input.currentStage || undefined,
-        version: { increment: 1 },
-      },
-    })
-    if (updated.count === 1) {
+        version: sql`${generationJobs.version} + 1`,
+      })
+      .where(and(
+        eq(generationJobs.id, input.jobId),
+        eq(generationJobs.leaseOwner, input.workerId),
+        notInArray(generationJobs.status, ["completed", "failed", "cancelled"])
+      ))
+      .returning()
+
+    if (updated.length === 1) {
       await this.persistDurableState({
         jobId: input.jobId,
         orchestrationState: "running",
@@ -474,39 +481,39 @@ export class OrchestrationRuntimeService {
         },
       }).catch(() => null)
     }
-    return updated.count === 1
+    return updated.length === 1
   }
 
   static async releaseLease(jobId: string, workerId: string, state: OrchestrationRecoveryState = "terminated") {
-    const terminalRelease = await prisma.generationJob.updateMany({
-      where: {
-        id: jobId,
-        leaseOwner: workerId,
-        status: { in: TERMINAL_JOB_STATUSES },
-      },
-      data: {
+    const terminalRelease = await db.update(generationJobs)
+      .set({
         leaseOwner: null,
         leaseExpiresAt: null,
         lastHeartbeatAt: new Date(),
-        version: { increment: 1 },
-      },
-    })
-    if (terminalRelease.count > 0) return
+        version: sql`${generationJobs.version} + 1`,
+      })
+      .where(and(
+        eq(generationJobs.id, jobId),
+        eq(generationJobs.leaseOwner, workerId),
+        inArray(generationJobs.status, TERMINAL_JOB_STATUSES)
+      ))
+      .returning()
 
-    await prisma.generationJob.updateMany({
-      where: {
-        id: jobId,
-        leaseOwner: workerId,
-        status: { notIn: TERMINAL_JOB_STATUSES },
-      },
-      data: {
+    if (terminalRelease.length > 0) return
+
+    await db.update(generationJobs)
+      .set({
         orchestrationState: state,
         leaseOwner: null,
         leaseExpiresAt: null,
         lastHeartbeatAt: new Date(),
-        version: { increment: 1 },
-      },
-    })
+        version: sql`${generationJobs.version} + 1`,
+      })
+      .where(and(
+        eq(generationJobs.id, jobId),
+        eq(generationJobs.leaseOwner, workerId),
+        notInArray(generationJobs.status, TERMINAL_JOB_STATUSES)
+      ))
   }
 
   static async recordWorkerHeartbeat(input: {
@@ -525,20 +532,27 @@ export class OrchestrationRuntimeService {
         ? new Date(input.leaseExpiresAt)
         : input.leaseExpiresAt
       : null
-    await prisma.workerHeartbeat.upsert({
-      where: { workerId: input.workerId },
-      update: {
-        traceId: input.traceId || null,
-        currentJobId: input.currentJobId || null,
-        currentStage: input.currentStage || null,
-        lastSuccessfulTransition: input.lastSuccessfulTransition || null,
-        leaseOwner: input.leaseOwner || null,
-        leaseExpiresAt,
-        runtimeInfoJson: safeStringify(input.runtimeInfo),
-        metadataJson: safeStringify(input.metadata),
-        heartbeatAt: new Date(),
-      },
-      create: {
+
+    const existing = await db.select().from(workerHeartbeats)
+      .where(eq(workerHeartbeats.workerId, input.workerId))
+      .limit(1)
+
+    if (existing.length > 0) {
+      await db.update(workerHeartbeats)
+        .set({
+          traceId: input.traceId || null,
+          currentJobId: input.currentJobId || null,
+          currentStage: input.currentStage || null,
+          lastSuccessfulTransition: input.lastSuccessfulTransition || null,
+          leaseOwner: input.leaseOwner || null,
+          leaseExpiresAt,
+          runtimeInfoJson: safeStringify(input.runtimeInfo),
+          metadataJson: safeStringify(input.metadata),
+          heartbeatAt: new Date(),
+        })
+        .where(eq(workerHeartbeats.workerId, input.workerId))
+    } else {
+      await db.insert(workerHeartbeats).values({
         id: randomUUID(),
         workerId: input.workerId,
         traceId: input.traceId || null,
@@ -549,28 +563,22 @@ export class OrchestrationRuntimeService {
         leaseExpiresAt,
         runtimeInfoJson: safeStringify(input.runtimeInfo),
         metadataJson: safeStringify(input.metadata),
-      },
-    })
+      })
+    }
   }
 
   static async getRecentWorkerHeartbeats(maxAgeMs = 90_000): Promise<RecentWorkerHeartbeat[]> {
-    const rows = await prisma.workerHeartbeat.findMany({
-      where: {
-        heartbeatAt: {
-          gte: new Date(Date.now() - Math.max(1_000, maxAgeMs)),
-        },
-      },
-      orderBy: { heartbeatAt: "desc" },
-      take: 20,
-      select: {
-        workerId: true,
-        currentJobId: true,
-        currentStage: true,
-        lastSuccessfulTransition: true,
-        heartbeatAt: true,
-        runtimeInfoJson: true,
-      },
-    })
+    const rows = await db.select({
+      workerId: workerHeartbeats.workerId,
+      currentJobId: workerHeartbeats.currentJobId,
+      currentStage: workerHeartbeats.currentStage,
+      lastSuccessfulTransition: workerHeartbeats.lastSuccessfulTransition,
+      heartbeatAt: workerHeartbeats.heartbeatAt,
+      runtimeInfoJson: workerHeartbeats.runtimeInfoJson,
+    }).from(workerHeartbeats)
+      .where(gte(workerHeartbeats.heartbeatAt, new Date(Date.now() - Math.max(1_000, maxAgeMs))))
+      .orderBy(desc(workerHeartbeats.heartbeatAt))
+      .limit(20)
 
     return rows.map((row) => {
       const runtimeInfo = parseJson(row.runtimeInfoJson) as Record<string, unknown> | null
@@ -604,36 +612,45 @@ export class OrchestrationRuntimeService {
     idempotencyKey?: string | null
     metadata?: Record<string, unknown> | null
   }) {
-    return prisma.repairAttempt.upsert({
-      where: {
-        jobId_attempt: {
-          jobId: input.jobId,
-          attempt: input.attempt,
-        },
-      },
-      update: {
-        status: "running",
-        reason: input.reason || null,
-        traceId: input.trace?.traceId || null,
-        spanId: input.trace?.spanId || null,
-        workerId: input.trace?.workerId || null,
-        inputHash: input.input === undefined ? undefined : hashPayload(input.input),
-        idempotencyKey: input.idempotencyKey || null,
-        metadataJson: safeStringify(input.metadata),
-      },
-      create: {
-        jobId: input.jobId,
-        traceId: input.trace?.traceId || null,
-        spanId: input.trace?.spanId || null,
-        workerId: input.trace?.workerId || null,
-        attempt: input.attempt,
-        status: "running",
-        reason: input.reason || null,
-        inputHash: input.input === undefined ? null : hashPayload(input.input),
-        idempotencyKey: input.idempotencyKey || null,
-        metadataJson: safeStringify(input.metadata),
-      },
-    })
+    const existing = await db.select().from(repairAttempts)
+      .where(and(
+        eq(repairAttempts.jobId, input.jobId),
+        eq(repairAttempts.attempt, input.attempt)
+      ))
+      .limit(1)
+
+    if (existing.length > 0) {
+      return db.update(repairAttempts)
+        .set({
+          status: "running",
+          reason: input.reason || null,
+          traceId: input.trace?.traceId || null,
+          spanId: input.trace?.spanId || null,
+          workerId: input.trace?.workerId || null,
+          inputHash: input.input === undefined ? undefined : hashPayload(input.input),
+          idempotencyKey: input.idempotencyKey || null,
+          metadataJson: safeStringify(input.metadata),
+        })
+        .where(and(
+          eq(repairAttempts.jobId, input.jobId),
+          eq(repairAttempts.attempt, input.attempt)
+        ))
+        .returning()
+    }
+
+    return db.insert(repairAttempts).values({
+      id: crypto.randomUUID(),
+      jobId: input.jobId,
+      traceId: input.trace?.traceId || null,
+      spanId: input.trace?.spanId || null,
+      workerId: input.trace?.workerId || null,
+      attempt: input.attempt,
+      status: "running",
+      reason: input.reason || null,
+      inputHash: input.input === undefined ? null : hashPayload(input.input),
+      idempotencyKey: input.idempotencyKey || null,
+      metadataJson: safeStringify(input.metadata),
+    }).returning()
   }
 
   static async finishRepairAttempt(input: {
@@ -645,17 +662,19 @@ export class OrchestrationRuntimeService {
     output?: unknown
     metadata?: Record<string, unknown> | null
   }) {
-    await prisma.repairAttempt.updateMany({
-      where: { jobId: input.jobId, attempt: input.attempt },
-      data: {
+    await db.update(repairAttempts)
+      .set({
         status: input.status,
         terminationReason: input.terminationReason || null,
         validatorError: input.validatorError || null,
         outputHash: input.output === undefined ? undefined : hashPayload(input.output),
         metadataJson: safeStringify(input.metadata),
         completedAt: new Date(),
-      },
-    })
+      })
+      .where(and(
+        eq(repairAttempts.jobId, input.jobId),
+        eq(repairAttempts.attempt, input.attempt)
+      ))
   }
 
   static async upsertPreviewSession(input: {
@@ -681,41 +700,50 @@ export class OrchestrationRuntimeService {
       ...(input.mark === "terminated" ? { terminatedAt: now } : {}),
     }
 
-    return prisma.previewSession.upsert({
-      where: {
-        jobId_idempotencyKey: {
-          jobId: input.jobId,
-          idempotencyKey: input.idempotencyKey || `preview:${input.jobId}`,
-        },
-      },
-      update: {
-        status: input.status,
-        previewUrl: input.previewUrl || undefined,
-        traceId: input.trace?.traceId || undefined,
-        spanId: input.trace?.spanId || undefined,
-        workerId: input.trace?.workerId || undefined,
-        sandboxId: input.trace?.sandboxId || undefined,
-        terminationReason: input.terminationReason || undefined,
-        expiresAt,
-        diagnosticsJson: safeStringify(input.diagnostics),
-        ...markData,
-      },
-      create: {
-        jobId: input.jobId,
-        projectId: input.projectId,
-        traceId: input.trace?.traceId || null,
-        spanId: input.trace?.spanId || null,
-        workerId: input.trace?.workerId || null,
-        sandboxId: input.trace?.sandboxId || null,
-        previewUrl: input.previewUrl || null,
-        status: input.status,
-        terminationReason: input.terminationReason || null,
-        expiresAt,
-        idempotencyKey: input.idempotencyKey || `preview:${input.jobId}`,
-        diagnosticsJson: safeStringify(input.diagnostics),
-        ...markData,
-      },
-    })
+    const existing = await db.select().from(previewSessions)
+      .where(and(
+        eq(previewSessions.jobId, input.jobId),
+        eq(previewSessions.idempotencyKey, input.idempotencyKey || `preview:${input.jobId}`)
+      ))
+      .limit(1)
+
+    if (existing.length > 0) {
+      return db.update(previewSessions)
+        .set({
+          status: input.status,
+          previewUrl: input.previewUrl || undefined,
+          traceId: input.trace?.traceId || undefined,
+          spanId: input.trace?.spanId || undefined,
+          workerId: input.trace?.workerId || undefined,
+          sandboxId: input.trace?.sandboxId || undefined,
+          terminationReason: input.terminationReason || undefined,
+          expiresAt,
+          diagnosticsJson: safeStringify(input.diagnostics),
+          ...markData,
+        })
+        .where(and(
+          eq(previewSessions.jobId, input.jobId),
+          eq(previewSessions.idempotencyKey, input.idempotencyKey || `preview:${input.jobId}`)
+        ))
+        .returning()
+    }
+
+    return db.insert(previewSessions).values({
+      id: crypto.randomUUID(),
+      jobId: input.jobId,
+      projectId: input.projectId,
+      traceId: input.trace?.traceId || null,
+      spanId: input.trace?.spanId || null,
+      workerId: input.trace?.workerId || null,
+      sandboxId: input.trace?.sandboxId || null,
+      previewUrl: input.previewUrl || null,
+      status: input.status,
+      terminationReason: input.terminationReason || null,
+      expiresAt,
+      idempotencyKey: input.idempotencyKey || `preview:${input.jobId}`,
+      diagnosticsJson: safeStringify(input.diagnostics),
+      ...markData,
+    }).returning()
   }
 
   static async markDeadLettered(input: {
@@ -725,9 +753,8 @@ export class OrchestrationRuntimeService {
     retryClass?: RetryClass
     metadata?: Record<string, unknown> | null
   }) {
-    await prisma.generationJob.updateMany({
-      where: { id: input.jobId },
-      data: {
+    await db.update(generationJobs)
+      .set({
         orchestrationState: "dead_lettered",
         status: "dead_lettered",
         workerId: input.workerId || undefined,
@@ -737,9 +764,10 @@ export class OrchestrationRuntimeService {
         terminatedAt: new Date(),
         leaseOwner: null,
         leaseExpiresAt: null,
-        version: { increment: 1 },
-      },
-    })
+        version: sql`${generationJobs.version} + 1`,
+      })
+      .where(eq(generationJobs.id, input.jobId))
+
     await this.persistFailure({
       jobId: input.jobId,
       trace: { workerId: input.workerId || null },
@@ -756,17 +784,16 @@ export class OrchestrationRuntimeService {
     const now = new Date()
     const recoveryStartedAt = Date.now()
     const orphanCutoff = subMinutes(now, ORPHANED_JOB_MINUTES)
-    const expired = await prisma.generationJob.findMany({
-      where: {
-        status: { in: ["queued", "running", "processing", "retrying", "stalled", "orphaned"] },
-        OR: [
-          { leaseExpiresAt: { lt: now } },
-          { lastHeartbeatAt: { lt: orphanCutoff } },
-        ],
-      },
-      take: limit,
-      orderBy: { updatedAt: "asc" },
-    })
+    const expired = await db.select().from(generationJobs)
+      .where(and(
+        inArray(generationJobs.status, ["queued", "running", "processing", "retrying", "stalled", "orphaned"]),
+        or(
+          lt(generationJobs.leaseExpiresAt, now),
+          lt(generationJobs.lastHeartbeatAt, orphanCutoff)
+        )
+      ))
+      .orderBy(asc(generationJobs.updatedAt))
+      .limit(limit)
 
     let recovered = 0
     let abandoned = 0
@@ -781,9 +808,8 @@ export class OrchestrationRuntimeService {
       if (shouldDeadLetter) abandoned += 1
       else recovered += 1
       if (!canRetry) retryContained += 1
-      await prisma.generationJob.update({
-        where: { id: job.id },
-        data: shouldDeadLetter
+      await db.update(generationJobs)
+        .set(shouldDeadLetter
           ? {
               status: "dead_lettered",
               orchestrationState: "abandoned",
@@ -803,8 +829,8 @@ export class OrchestrationRuntimeService {
               recoveryCount: nextRecoveryCount,
               leaseOwner: null,
               leaseExpiresAt: null,
-            },
-      })
+            })
+        .where(eq(generationJobs.id, job.id))
       await this.persistDurableState({
         jobId: job.id,
         orchestrationState: shouldDeadLetter ? "abandoned" : "recovering",
@@ -854,42 +880,40 @@ export class OrchestrationRuntimeService {
     const now = new Date()
     const staleCutoff = subMinutes(now, ORPHANED_JOB_MINUTES)
     const [stuckJobs, duplicateJobs, zombieWorkers, orphanLeases, abandonedCheckpoints] = await Promise.all([
-      prisma.generationJob.findMany({
-        where: {
-          status: { in: ["queued", "running", "processing", "retrying", "stalled", "orphaned"] },
-          updatedAt: { lt: staleCutoff },
-        },
-        take: limit,
-        orderBy: { updatedAt: "asc" },
-      }),
-      prisma.generationJob.groupBy({
-        by: ["idempotencyKey"],
-        where: {
-          idempotencyKey: { not: null },
-          status: { in: ["queued", "running", "processing", "retrying"] },
-        },
-        _count: { _all: true },
-        having: { idempotencyKey: { _count: { gt: 1 } } },
-      }).catch(() => []),
-      prisma.workerHeartbeat.findMany({
-        where: { heartbeatAt: { lt: staleCutoff } },
-        take: limit,
-        orderBy: { heartbeatAt: "asc" },
-      }),
-      prisma.generationJob.findMany({
-        where: {
-          leaseOwner: { not: null },
-          leaseExpiresAt: { lt: now },
-          status: { notIn: ["completed", "failed", "cancelled"] },
-        },
-        take: limit,
-      }),
-      prisma.generationJob.count({
-        where: {
-          orchestrationState: { in: ["recovering", "orphaned", "stalled"] },
-          updatedAt: { lt: staleCutoff },
-        },
-      }),
+      db.select().from(generationJobs)
+        .where(and(
+          inArray(generationJobs.status, ["queued", "running", "processing", "retrying", "stalled", "orphaned"]),
+          lt(generationJobs.updatedAt, staleCutoff)
+        ))
+        .orderBy(asc(generationJobs.updatedAt))
+        .limit(limit),
+      db.select({
+        idempotencyKey: generationJobs.idempotencyKey,
+        count: sql<number>`count(*)`
+      }).from(generationJobs)
+        .where(and(
+          isNotNull(generationJobs.idempotencyKey),
+          inArray(generationJobs.status, ["queued", "running", "processing", "retrying"])
+        ))
+        .groupBy(generationJobs.idempotencyKey)
+        .having(sql`count(*) > 1`)
+        .catch(() => []),
+      db.select().from(workerHeartbeats)
+        .where(lt(workerHeartbeats.heartbeatAt, staleCutoff))
+        .orderBy(asc(workerHeartbeats.heartbeatAt))
+        .limit(limit),
+      db.select().from(generationJobs)
+        .where(and(
+          isNotNull(generationJobs.leaseOwner),
+          lt(generationJobs.leaseExpiresAt, now),
+          notInArray(generationJobs.status, ["completed", "failed", "cancelled"])
+        ))
+        .limit(limit),
+      db.select({ count: sql<number>`count(*)` }).from(generationJobs)
+        .where(and(
+          inArray(generationJobs.orchestrationState, ["recovering", "orphaned", "stalled"]),
+          lt(generationJobs.updatedAt, staleCutoff)
+        )),
     ])
 
     const recovery = await this.recoverOrphanedJobs(Math.min(limit, Math.max(stuckJobs.length, orphanLeases.length, 1)))
@@ -913,10 +937,10 @@ export class OrchestrationRuntimeService {
     return {
       checkedAt: now.toISOString(),
       stuckJobs: stuckJobs.length,
-      duplicateJobs: duplicateJobs.reduce((sum, item) => sum + item._count._all, 0),
+      duplicateJobs: duplicateJobs.reduce((sum, item) => sum + item.count, 0),
       zombieWorkers: zombieWorkers.length,
       orphanLeases: orphanLeases.length,
-      abandonedCheckpoints,
+      abandonedCheckpoints: abandonedCheckpoints[0]?.count || 0,
       cleanup: recovery,
     }
   }
@@ -924,45 +948,45 @@ export class OrchestrationRuntimeService {
   static async cleanupExpiredLifecycle() {
     const now = new Date()
     const staleSseCutoff = subMinutes(now, STALE_SSE_MINUTES)
-    const expiredPreview = await prisma.previewSession.updateMany({
-      where: {
-        status: { in: ["starting", "running", "ready"] },
-        expiresAt: { lt: now },
-      },
-      data: {
+    const expiredPreview = await db.update(previewSessions)
+      .set({
         status: "terminated",
         terminatedAt: now,
         terminationReason: "ttl_expired",
-      },
-    })
-    const orphanedArtifacts = await prisma.artifact.updateMany({
-      where: {
-        status: "candidate",
-        generationJobId: null,
-        generationHistoryId: null,
-        createdAt: { lt: subHours(now, 24) },
-      },
-      data: { status: "orphaned" },
-    })
+      })
+      .where(and(
+        inArray(previewSessions.status, ["starting", "running", "ready"]),
+        lt(previewSessions.expiresAt, now)
+      ))
+      .returning()
+    const orphanedArtifacts = await db.update(artifacts)
+      .set({ status: "orphaned" })
+      .where(and(
+        eq(artifacts.status, "candidate"),
+        sql`${artifacts.generationJobId} IS NULL`,
+        sql`${artifacts.generationHistoryId} IS NULL`,
+        lt(artifacts.createdAt, sql`${subHours(now, 24)}`)
+      ))
+      .returning()
     log("info", "orchestration_cleanup_completed", {
-      expiredPreviewSessions: expiredPreview.count,
+      expiredPreviewSessions: expiredPreview.length,
       staleSseCutoff: staleSseCutoff.toISOString(),
-      orphanedArtifacts: orphanedArtifacts.count,
+      orphanedArtifacts: orphanedArtifacts.length,
     })
     return {
-      expiredPreviewSessions: expiredPreview.count,
+      expiredPreviewSessions: expiredPreview.length,
       staleSseCutoff: staleSseCutoff.toISOString(),
-      orphanedArtifacts: orphanedArtifacts.count,
+      orphanedArtifacts: orphanedArtifacts.length,
     }
   }
 
   static async replay(jobId: string) {
     const [job, events, repairs, previews, failures] = await Promise.all([
-      prisma.generationJob.findUnique({ where: { id: jobId } }),
-      prisma.generationEvent.findMany({ where: { jobId }, orderBy: { sequence: "asc" } }),
-      prisma.repairAttempt.findMany({ where: { jobId }, orderBy: { attempt: "asc" } }),
-      prisma.previewSession.findMany({ where: { jobId }, orderBy: { createdAt: "asc" } }),
-      prisma.orchestrationFailure.findMany({ where: { jobId }, orderBy: { createdAt: "asc" } }),
+      db.select().from(generationJobs).where(eq(generationJobs.id, jobId)).limit(1).then(r => r[0] || null),
+      db.select().from(generationEvents).where(eq(generationEvents.jobId, jobId)).orderBy(asc(generationEvents.sequence)),
+      db.select().from(repairAttempts).where(eq(repairAttempts.jobId, jobId)).orderBy(asc(repairAttempts.attempt)),
+      db.select().from(previewSessions).where(eq(previewSessions.jobId, jobId)).orderBy(asc(previewSessions.createdAt)),
+      db.select().from(orchestrationFailures).where(eq(orchestrationFailures.jobId, jobId)).orderBy(asc(orchestrationFailures.createdAt)),
     ])
 
     return {
@@ -1002,29 +1026,30 @@ export class OrchestrationRuntimeService {
   }
 
   static async getStatus(jobId: string) {
-    const job = await prisma.generationJob.findUnique({
-      where: { id: jobId },
-      select: {
-        id: true,
-        status: true,
-        orchestrationState: true,
-        stage: true,
-        progress: true,
-        queueJobId: true,
-        createdAt: true,
-        startedAt: true,
-        updatedAt: true,
-        diagnosticsJson: true,
-        metricsJson: true,
-        retryReason: true,
-        retryClass: true,
-        recoveryCount: true,
-        workerId: true,
-        leaseOwner: true,
-        leaseExpiresAt: true,
-        lastHeartbeatAt: true,
-      },
-    })
+    const jobResult = await db.select({
+      id: generationJobs.id,
+      status: generationJobs.status,
+      orchestrationState: generationJobs.orchestrationState,
+      stage: generationJobs.stage,
+      progress: generationJobs.progress,
+      queueJobId: generationJobs.queueJobId,
+      createdAt: generationJobs.createdAt,
+      startedAt: generationJobs.startedAt,
+      updatedAt: generationJobs.updatedAt,
+      diagnosticsJson: generationJobs.diagnosticsJson,
+      metricsJson: generationJobs.metricsJson,
+      retryReason: generationJobs.retryReason,
+      retryClass: generationJobs.retryClass,
+      recoveryCount: generationJobs.recoveryCount,
+      workerId: generationJobs.workerId,
+      leaseOwner: generationJobs.leaseOwner,
+      leaseExpiresAt: generationJobs.leaseExpiresAt,
+      lastHeartbeatAt: generationJobs.lastHeartbeatAt,
+    }).from(generationJobs)
+      .where(eq(generationJobs.id, jobId))
+      .limit(1)
+
+    const job = jobResult[0]
     if (!job) return null
 
     const diagnostics = parseJson(job.diagnosticsJson) as Record<string, unknown> | null
@@ -1082,26 +1107,30 @@ export class OrchestrationRuntimeService {
   static async getWorkerPressure(windowHours = 1) {
     const since = subHours(new Date(), Math.max(1, Math.min(24, Math.round(windowHours))))
     const [workers, recoveryEvents, retryEvents, dequeuedEvents] = await Promise.all([
-      prisma.workerHeartbeat.findMany({
-        where: { heartbeatAt: { gte: since } },
-        select: { workerId: true, currentJobId: true, heartbeatAt: true },
-      }),
-      prisma.orchestrationFailure.count({
-        where: {
-          createdAt: { gte: since },
-          eventType: { in: ["worker_stalled", "worker_unhealthy", "worker_timeout"] },
-        },
-      }),
-      prisma.generationJob.count({
-        where: {
-          updatedAt: { gte: since },
-          status: { in: ["retrying", "dead_lettered"] },
-        },
-      }),
-      prisma.generationEvent.findMany({
-        where: { createdAt: { gte: since }, type: "lease_acquired" },
-        select: { createdAt: true, metadataJson: true },
-      }),
+      db.select({
+        workerId: workerHeartbeats.workerId,
+        currentJobId: workerHeartbeats.currentJobId,
+        heartbeatAt: workerHeartbeats.heartbeatAt,
+      }).from(workerHeartbeats)
+        .where(gte(workerHeartbeats.heartbeatAt, since)),
+      db.select({ count: sql<number>`count(*)` }).from(orchestrationFailures)
+        .where(and(
+          gte(orchestrationFailures.createdAt, since),
+          inArray(orchestrationFailures.eventType, ["worker_stalled", "worker_unhealthy", "worker_timeout"])
+        )),
+      db.select({ count: sql<number>`count(*)` }).from(generationJobs)
+        .where(and(
+          gte(generationJobs.updatedAt, since),
+          inArray(generationJobs.status, ["retrying", "dead_lettered"])
+        )),
+      db.select({
+        createdAt: generationEvents.createdAt,
+        metadataJson: generationEvents.metadataJson,
+      }).from(generationEvents)
+        .where(and(
+          gte(generationEvents.createdAt, since),
+          eq(generationEvents.type, "lease_acquired")
+        )),
     ])
     const activeWorkers = new Set(workers.map((worker) => worker.workerId)).size
     const busyWorkers = new Set(workers.filter((worker) => worker.currentJobId).map((worker) => worker.workerId)).size
@@ -1123,8 +1152,8 @@ export class OrchestrationRuntimeService {
       workerUtilization,
       queueGrowthRate: 0,
       averageDequeueLatency,
-      recoveryFrequency: recoveryEvents,
-      retryFrequency: retryEvents,
+      recoveryFrequency: recoveryEvents[0]?.count || 0,
+      retryFrequency: retryEvents[0]?.count || 0,
       scalingRecommendation: {
         recommendedWorkerCount,
         saturationTrend: workerUtilization >= 90 ? "rising" : workerUtilization >= 70 ? "watch" : "stable",
@@ -1141,18 +1170,63 @@ export class OrchestrationRuntimeService {
       repairStatus,
       repairReasons,
       previewStatus,
-      workerHeartbeats,
+      workerHeartbeatRows,
       failures,
       sseDisconnects,
     ] = await Promise.all([
-      prisma.generationJob.groupBy({ by: ["status"], where: { createdAt: { gte: since } }, _count: { _all: true } }),
-      prisma.generationQualityMetric.findMany({ where: { createdAt: { gte: since } }, select: { status: true, repairSucceeded: true, repairAttempts: true, totalLatencyMs: true, validationLatencyMs: true } }),
-      prisma.repairAttempt.groupBy({ by: ["status"], where: { createdAt: { gte: since } }, _count: { _all: true } }),
-      prisma.repairAttempt.groupBy({ by: ["terminationReason"], where: { createdAt: { gte: since }, terminationReason: { not: null } }, _count: { _all: true } }),
-      prisma.previewSession.groupBy({ by: ["status"], where: { createdAt: { gte: since } }, _count: { _all: true } }),
-      prisma.workerHeartbeat.findMany({ where: { heartbeatAt: { gte: since } }, select: { workerId: true, heartbeatAt: true, currentStage: true } }),
-      prisma.orchestrationFailure.groupBy({ by: ["eventType", "severity"], where: { createdAt: { gte: since } }, _count: { _all: true } }),
-      prisma.generationEvent.count({ where: { type: "stream_terminated", createdAt: { gte: since } } }),
+      db.select({
+        status: generationJobs.status,
+        count: sql<number>`count(*)`
+      }).from(generationJobs)
+        .where(gte(generationJobs.createdAt, since))
+        .groupBy(generationJobs.status),
+      db.select({
+        status: generationQualityMetrics.status,
+        repairSucceeded: generationQualityMetrics.repairSucceeded,
+        repairAttempts: generationQualityMetrics.repairAttempts,
+        totalLatencyMs: generationQualityMetrics.totalLatencyMs,
+        validationLatencyMs: generationQualityMetrics.validationLatencyMs,
+      }).from(generationQualityMetrics)
+        .where(gte(generationQualityMetrics.createdAt, since)),
+      db.select({
+        status: repairAttempts.status,
+        count: sql<number>`count(*)`
+      }).from(repairAttempts)
+        .where(gte(repairAttempts.createdAt, since))
+        .groupBy(repairAttempts.status),
+      db.select({
+        terminationReason: repairAttempts.terminationReason,
+        count: sql<number>`count(*)`
+      }).from(repairAttempts)
+        .where(and(
+          gte(repairAttempts.createdAt, since),
+          isNotNull(repairAttempts.terminationReason)
+        ))
+        .groupBy(repairAttempts.terminationReason),
+      db.select({
+        status: previewSessions.status,
+        count: sql<number>`count(*)`
+      }).from(previewSessions)
+        .where(gte(previewSessions.createdAt, since))
+        .groupBy(previewSessions.status),
+      db.select({
+        workerId: workerHeartbeats.workerId,
+        heartbeatAt: workerHeartbeats.heartbeatAt,
+        currentStage: workerHeartbeats.currentStage,
+      }).from(workerHeartbeats)
+        .where(gte(workerHeartbeats.heartbeatAt, since)),
+      db.select({
+        eventType: orchestrationFailures.eventType,
+        severity: orchestrationFailures.severity,
+        count: sql<number>`count(*)`
+      }).from(orchestrationFailures)
+        .where(gte(orchestrationFailures.createdAt, since))
+        .groupBy(orchestrationFailures.eventType, orchestrationFailures.severity),
+      db.select({ count: sql<number>`count(*)` }).from(generationEvents)
+        .where(and(
+          eq(generationEvents.type, "stream_terminated"),
+          gte(generationEvents.createdAt, since)
+        )),
     ])
 
     const lines: string[] = []
@@ -1163,12 +1237,12 @@ export class OrchestrationRuntimeService {
       lines.push(`${name}{${labelText}} ${value}`)
     }
 
-    for (const item of jobStatus) metric("swift_generation_jobs_total", { status: item.status }, item._count._all)
-    for (const item of repairStatus) metric("swift_repair_attempts_total", { status: item.status }, item._count._all)
-    for (const item of repairReasons) metric("swift_repair_termination_total", { reason: item.terminationReason || "unknown" }, item._count._all)
-    for (const item of previewStatus) metric("swift_preview_sessions_total", { status: item.status }, item._count._all)
-    for (const item of failures) metric("swift_orchestration_failures_total", { event_type: item.eventType, severity: item.severity }, item._count._all)
-    metric("swift_sse_disconnects_total", { window: "24h" }, sseDisconnects)
+    for (const item of jobStatus) metric("swift_generation_jobs_total", { status: item.status }, item.count)
+    for (const item of repairStatus) metric("swift_repair_attempts_total", { status: item.status }, item.count)
+    for (const item of repairReasons) metric("swift_repair_termination_total", { reason: item.terminationReason || "unknown" }, item.count)
+    for (const item of previewStatus) metric("swift_preview_sessions_total", { status: item.status }, item.count)
+    for (const item of failures) metric("swift_orchestration_failures_total", { event_type: item.eventType, severity: item.severity }, item.count)
+    metric("swift_sse_disconnects_total", { window: "24h" }, sseDisconnects[0]?.count || 0)
 
     const successCount = quality.filter((item) => item.status === "completed").length
     const totalQuality = quality.length
@@ -1179,7 +1253,7 @@ export class OrchestrationRuntimeService {
       metric("swift_generation_latency_ms_bucket", { le: String(millisBucket(item.totalLatencyMs, [5000, 15000, 30000, 60000, 120000, 300000])) }, 1)
       metric("swift_repair_retry_count", { status: item.status }, item.repairAttempts)
     }
-    for (const heartbeat of workerHeartbeats) {
+    for (const heartbeat of workerHeartbeatRows) {
       metric("swift_worker_heartbeat_age_ms", { worker_id: heartbeat.workerId, stage: heartbeat.currentStage || "unknown" }, Date.now() - heartbeat.heartbeatAt.getTime())
     }
 

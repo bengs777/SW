@@ -1458,19 +1458,9 @@ model BpjsVerification {
     {
       path: "lib/services/clinic.service.ts",
       language: "ts",
-      content: `import { PrismaClient } from "@prisma/client"
-
-const globalForPrisma = globalThis as unknown as { swiftClinicPrisma?: PrismaClient }
-
-export const prisma =
-  globalForPrisma.swiftClinicPrisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  })
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.swiftClinicPrisma = prisma
-}
+      content: `import { db } from "@/lib/db/client"
+import { patients, doctors, appointments } from "@/lib/db/schema"
+import { desc, asc } from "drizzle-orm"
 
 type PatientInput = {
   name: string
@@ -1501,7 +1491,7 @@ function databaseConfigured() {
 export async function listPatients() {
   if (!databaseConfigured()) return []
   try {
-    return await prisma.patient.findMany({ orderBy: { createdAt: "desc" }, take: 50 })
+    return await db.query.patients.findMany({ orderBy: [desc(patients.createdAt)], limit: 50 })
   } catch {
     return []
   }
@@ -1511,21 +1501,19 @@ export async function createPatient(input: PatientInput) {
   if (!databaseConfigured()) {
     return { status: "database_required", input }
   }
-  return prisma.patient.create({
-    data: {
-      name: input.name,
-      medicalRecordNo: input.medicalRecordNo || \`MR-\${Date.now()}\`,
-      nationalId: input.nationalId || null,
-      bpjsNumber: input.bpjsNumber || null,
-      phone: input.phone || null,
-    },
-  })
+  return db.insert(patients).values({
+    name: input.name,
+    medicalRecordNo: input.medicalRecordNo || \`MR-\${Date.now()}\`,
+    nationalId: input.nationalId || null,
+    bpjsNumber: input.bpjsNumber || null,
+    phone: input.phone || null,
+  }).returning().then((rows) => rows[0])
 }
 
 export async function listDoctors() {
   if (!databaseConfigured()) return []
   try {
-    return await prisma.doctor.findMany({ orderBy: { name: "asc" }, take: 50 })
+    return await db.query.doctors.findMany({ orderBy: [asc(doctors.name)], limit: 50 })
   } catch {
     return []
   }
@@ -1535,23 +1523,20 @@ export async function createDoctor(input: DoctorInput) {
   if (!databaseConfigured()) {
     return { status: "database_required", input }
   }
-  return prisma.doctor.create({
-    data: {
-      name: input.name,
-      specialty: input.specialty,
-      licenseNo: input.licenseNo || null,
-      scheduleNote: input.scheduleNote || null,
-    },
-  })
+  return db.insert(doctors).values({
+    name: input.name,
+    specialty: input.specialty,
+    licenseNo: input.licenseNo || null,
+    scheduleNote: input.scheduleNote || null,
+  }).returning().then((rows) => rows[0])
 }
 
 export async function listAppointments() {
   if (!databaseConfigured()) return []
   try {
-    return await prisma.appointment.findMany({
-      include: { patient: true, doctor: true },
-      orderBy: { startsAt: "asc" },
-      take: 50,
+    return await db.query.appointments.findMany({
+      orderBy: [asc(appointments.startsAt)],
+      limit: 50,
     })
   } catch {
     return []
@@ -1562,14 +1547,12 @@ export async function createAppointment(input: AppointmentInput) {
   if (!databaseConfigured()) {
     return { status: "database_required", input }
   }
-  return prisma.appointment.create({
-    data: {
-      patientId: input.patientId,
-      doctorId: input.doctorId,
-      startsAt: new Date(input.startsAt),
-      notes: input.notes || null,
-    },
-  })
+  return db.insert(appointments).values({
+    patientId: input.patientId,
+    doctorId: input.doctorId,
+    startsAt: new Date(input.startsAt),
+    notes: input.notes || null,
+  }).returning().then((rows) => rows[0])
 }
 `,
     },

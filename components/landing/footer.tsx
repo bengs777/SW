@@ -22,6 +22,7 @@ const navigation = {
   legal: [
     { name: "Privasi", href: "/privacy" },
     { name: "Syarat", href: "/terms" },
+    { name: "Refund", href: "/refund" },
     { name: "Keamanan", href: "/security" },
   ],
 }

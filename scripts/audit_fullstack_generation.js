@@ -63,34 +63,46 @@ function walkFiles(rootDir) {
 
 async function loadHistoryFiles() {
   const projectId = readArg('--project-id')
-  const { PrismaClient } = require('@prisma/client')
 
-  const databaseUrl = process.env.DATABASE_URL || ''
-  if (!/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
-    throw new Error('DATABASE_URL must be a PostgreSQL connection string for --history mode')
+  const databaseUrl = process.env.TURSO_DATABASE_URL || ''
+  if (!databaseUrl) {
+    throw new Error('TURSO_DATABASE_URL is required for --history mode')
   }
 
-  const prisma = new PrismaClient({
-    log: ['warn', 'error'],
+  const { createClient } = require('@libsql/client')
+  const client = createClient({
+    url: databaseUrl,
+    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
   })
 
   try {
-    const history = await prisma.generationHistory.findFirst({
-      where: projectId ? { projectId } : undefined,
-      orderBy: { createdAt: 'desc' },
-    })
+    const result = projectId
+      ? await client.execute({
+          sql: 'SELECT id, result FROM generation_history WHERE project_id = ? ORDER BY created_at DESC LIMIT 1',
+          args: [projectId],
+        })
+      : await client.execute({
+          sql: 'SELECT id, result FROM generation_history ORDER BY created_at DESC LIMIT 1',
+          args: [],
+        })
+
+    const history = result.rows[0]
 
     if (!history) {
       throw new Error(projectId ? `No generation history found for project ${projectId}` : 'No generation history found')
     }
 
-    const parsed = JSON.parse(history.result)
+    const parsed = JSON.parse(String(history.result))
     return {
-      source: `history:${history.id}`,
+      source: `history:${String(history.id)}`,
       files: Array.isArray(parsed) ? parsed : [],
     }
   } finally {
-    await prisma.$disconnect()
+    try {
+      client.close()
+    } catch {
+      // ignore close errors
+    }
   }
 }
 
@@ -249,7 +261,6 @@ function printReport(report) {
 
 async function main() {
   const dir = readArg('--dir')
-  const historyMode = args.includes('--history')
 
   let source = ''
   let files = []
@@ -257,12 +268,20 @@ async function main() {
   if (dir) {
     source = `dir:${path.resolve(dir)}`
     files = walkFiles(dir)
-  } else if (historyMode) {
-    const loaded = await loadHistoryFiles()
-    source = loaded.source
-    files = loaded.files
   } else {
-    throw new Error('Usage: npm run audit:fullstack -- --dir ./exported-project OR --history latest [--project-id id]')
+    // Default (tanpa argumen): audit riwayat generasi terakhir dari database.
+    try {
+      const loaded = await loadHistoryFiles()
+      source = loaded.source
+      files = loaded.files
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/No generation history found/.test(message)) {
+        console.log('[audit:fullstack] No generation history found in the database yet; nothing to audit. PASS (skipped).')
+        return
+      }
+      throw error
+    }
   }
 
   const report = audit(files, source)

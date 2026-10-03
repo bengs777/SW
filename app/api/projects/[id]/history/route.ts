@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects, generationHistory } from "@/lib/db/schema"
+import { eq, and, desc } from "drizzle-orm"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import type { GeneratedFile } from "@/lib/types"
+import { assertFeatureEnabled } from "@/lib/feature-flags"
 
 const RollbackSchema = z.object({
   historyId: z.string().min(1),
@@ -16,19 +19,8 @@ function parseHistoryFiles(result: string): GeneratedFile[] {
 }
 
 async function getAccessibleProject(projectId: string, userId: string) {
-  return prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: { userId },
-        },
-      },
-    },
-    select: {
-      id: true,
-      name: true,
-    },
+  return db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
   })
 }
 
@@ -36,29 +28,26 @@ export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const featureCheck = assertFeatureEnabled("enableVersionHistory", "Version history")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   const { id } = await params
-  const project = await getAccessibleProject(id, session.user.id)
+  const project = await getAccessibleProject(id, session.userId)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }
 
-  const history = await prisma.generationHistory.findMany({
-    where: { projectId: id },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: {
-      id: true,
-      prompt: true,
-      intent: true,
-      usedAutoRepair: true,
-      createdAt: true,
-      result: true,
-    },
+  const history = await db.query.generationHistory.findMany({
+    where: eq(generationHistory.projectId, id),
+    orderBy: desc(generationHistory.createdAt),
+    limit: 20,
   })
 
   return NextResponse.json({
@@ -86,8 +75,13 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.id) {
+  const featureCheck = assertFeatureEnabled("enableVersionHistory", "Version history")
+  if (featureCheck) {
+    return NextResponse.json({ error: featureCheck.error }, { status: featureCheck.status })
+  }
+
+  const session = await getSession()
+  if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
@@ -100,22 +94,16 @@ export async function POST(
     )
   }
 
-  const project = await getAccessibleProject(id, session.user.id)
+  const project = await getAccessibleProject(id, session.userId)
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 })
   }
 
-  const target = await prisma.generationHistory.findFirst({
-    where: {
-      id: parsed.data.historyId,
-      projectId: id,
-    },
-    select: {
-      id: true,
-      prompt: true,
-      result: true,
-      createdAt: true,
-    },
+  const target = await db.query.generationHistory.findFirst({
+    where: and(
+      eq(generationHistory.id, parsed.data.historyId),
+      eq(generationHistory.projectId, id)
+    ),
   })
 
   if (!target) {

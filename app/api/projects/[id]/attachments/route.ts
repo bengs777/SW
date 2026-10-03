@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { projects, projectAssets } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import {
   buildProjectAssetStoragePath,
@@ -17,20 +19,8 @@ const MAX_ATTACHMENTS = 5
 const MAX_ATTACHMENT_SIZE_BYTES = 3 * 1024 * 1024
 
 async function resolveProject(projectId: string, userId: string) {
-  return prisma.project.findFirst({
-    where: {
-      id: projectId,
-      workspace: {
-        members: {
-          some: {
-            userId,
-          },
-        },
-      },
-    },
-    select: {
-      id: true,
-    },
+  return db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
   })
 }
 
@@ -54,8 +44,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth()
-  const userId = session?.user?.id
+  const session = await getSession()
+  const userId = session?.userId
   const cleanupTargets: Array<{ bucket: string; storagePath: string }> = []
   const uploadedAssetIds: string[] = []
 
@@ -125,32 +115,31 @@ export async function POST(
         file,
       })
 
-      const asset = await prisma.projectAsset.create({
-        data: {
-          projectId: project.id,
-          userId,
-          originalName,
-          mimeType: file.type || "application/octet-stream",
-          size: file.size,
-          kind,
-          storageBucket: env.supabaseStorageBucket,
-          storagePath,
-        },
-      })
+      const asset = await db.insert(projectAssets).values({
+        id: crypto.randomUUID(),
+        projectId: project.id,
+        userId,
+        originalName,
+        mimeType: file.type || "application/octet-stream",
+        size: file.size,
+        kind,
+        storageBucket: env.supabaseStorageBucket,
+        storagePath,
+      }).returning()
 
-      uploadedAssetIds.push(asset.id)
+      uploadedAssetIds.push(asset[0].id)
 
       uploadedAssets.push({
-        id: asset.id,
-        projectId: asset.projectId,
-        userId: asset.userId,
-        originalName: asset.originalName,
-        mimeType: asset.mimeType,
-        size: asset.size,
-        kind: asset.kind as StoredProjectAsset["kind"],
-        storageBucket: asset.storageBucket,
-        storagePath: asset.storagePath,
-        createdAt: asset.createdAt.toISOString(),
+        id: asset[0].id,
+        projectId: asset[0].projectId,
+        userId: asset[0].userId,
+        originalName: asset[0].originalName,
+        mimeType: asset[0].mimeType,
+        size: asset[0].size,
+        kind: asset[0].kind as StoredProjectAsset["kind"],
+        storageBucket: asset[0].storageBucket,
+        storagePath: asset[0].storagePath,
+        createdAt: asset[0].createdAt.toISOString(),
       })
     }
 
@@ -161,7 +150,7 @@ export async function POST(
     await Promise.allSettled([
       ...cleanupTargets.map((target) => deleteProjectAssetFromStorage(target)),
       ...uploadedAssetIds.map(async (assetId) => {
-        await prisma.projectAsset.delete({ where: { id: assetId } }).catch(() => null)
+        await db.delete(projectAssets).where(eq(projectAssets.id, assetId)).catch(() => null)
       }),
     ])
 

@@ -1,6 +1,7 @@
-import { Prisma } from "@prisma/client"
+import { db } from "@/lib/db/client"
+import { generationJobs, generationEvents, generationAttempts } from "@/lib/db/schema"
+import { eq, and, desc, asc, gt, inArray, sql, or } from "drizzle-orm"
 import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
-import { prisma } from "@/lib/db/client"
 
 export const GENERATION_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"])
 
@@ -119,27 +120,17 @@ function safeStringify(value: unknown) {
   return JSON.stringify(value)
 }
 
-async function nextEventSequence(tx: Prisma.TransactionClient, jobId: string) {
-  const aggregate = await tx.generationEvent.aggregate({
-    where: { jobId },
-    _max: { sequence: true },
-  })
+async function nextEventSequence(jobId: string) {
+  const result = await db.select({ max: sql<number>`max(${generationEvents.sequence})` })
+    .from(generationEvents)
+    .where(eq(generationEvents.jobId, jobId))
 
-  return (aggregate._max.sequence || 0) + 1
+  return (result[0]?.max || 0) + 1
 }
 
 function isDuplicateGenerationEventSequenceError(error: unknown) {
-  const target = error instanceof Prisma.PrismaClientKnownRequestError
-    ? error.meta?.target
-    : null
-  const targetText = Array.isArray(target) ? target.map(String).join(",") : String(target || "")
-
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === "P2002" &&
-    /jobId/i.test(targetText) &&
-    /sequence/i.test(targetText)
-  )
+  const message = error instanceof Error ? error.message : String(error)
+  return /UNIQUE constraint failed.*generation_events.*job_id.*sequence/i.test(message)
 }
 
 function sleep(ms: number) {
@@ -256,44 +247,44 @@ function retryHintForFailureKind(kind: PublicGenerationFailureKind) {
 
 export class GenerationJobService {
   static async create(input: CreateGenerationJobInput) {
-    return prisma.$transaction(async (tx) => {
-      const job = await tx.generationJob.create({
-        data: {
-          userId: input.userId,
-          projectId: input.projectId,
-          prompt: input.prompt,
-          model: input.model,
-          provider: input.provider || "swift",
-          intent: input.intent || null,
-          usedAutoRepair: Boolean(input.usedAutoRepair),
-          idempotencyKey: input.idempotencyKey || null,
-          requestHash: input.requestHash || null,
-          status: "queued",
-          orchestrationState: "queued",
-          stage: "queued",
-          label: "Prompt diterima",
-          progress: 0,
-          maxRetries: Math.max(0, input.maxRetries ?? 2),
-          planJson: safeStringify(input.plan),
-          contextJson: safeStringify(input.context),
-        },
-      })
+    return db.transaction(async (tx) => {
+      const jobResult = await tx.insert(generationJobs).values({
+        id: crypto.randomUUID(),
+        userId: input.userId,
+        projectId: input.projectId,
+        prompt: input.prompt,
+        model: input.model,
+        provider: input.provider || "swift",
+        intent: input.intent || null,
+        usedAutoRepair: Boolean(input.usedAutoRepair),
+        idempotencyKey: input.idempotencyKey || null,
+        requestHash: input.requestHash || null,
+        status: "queued",
+        orchestrationState: "queued",
+        stage: "queued",
+        label: "Prompt diterima",
+        progress: 0,
+        maxRetries: Math.max(0, input.maxRetries ?? 2),
+        planJson: safeStringify(input.plan),
+        contextJson: safeStringify(input.context),
+      }).returning()
 
-      await tx.generationEvent.create({
-        data: {
-          jobId: job.id,
-          sequence: 1,
-          type: "job.created",
-          eventType: "job.created",
-          stage: "queued",
-          status: "queued",
-          message: "Generation job queued",
-          dataJson: safeStringify({
-            projectId: job.projectId,
-            provider: job.provider,
-            model: job.model,
-          }),
-        },
+      const job = jobResult[0]
+
+      await tx.insert(generationEvents).values({
+          id: crypto.randomUUID(),
+        jobId: job.id,
+        sequence: 1,
+        type: "job.created",
+        eventType: "job.created",
+        stage: "queued",
+        status: "queued",
+        message: "Generation job queued",
+        dataJson: safeStringify({
+          projectId: job.projectId,
+          provider: job.provider,
+          model: job.model,
+        }),
       })
 
       return job
@@ -307,18 +298,22 @@ export class GenerationJobService {
   }
 
   static async findForUser(jobId: string, userId: string) {
-    return prisma.generationJob.findFirst({
-      where: {
-        id: jobId,
-        userId,
-      },
-    })
+    const result = await db.select().from(generationJobs)
+      .where(and(
+        eq(generationJobs.id, jobId),
+        eq(generationJobs.userId, userId)
+      ))
+      .limit(1)
+
+    return result[0] || null
   }
 
   static async findById(jobId: string) {
-    return prisma.generationJob.findUnique({
-      where: { id: jobId },
-    })
+    const result = await db.select().from(generationJobs)
+      .where(eq(generationJobs.id, jobId))
+      .limit(1)
+
+    return result[0] || null
   }
 
   static async findIdempotentJob(input: {
@@ -327,42 +322,46 @@ export class GenerationJobService {
     idempotencyKey?: string | null
     requestHash?: string | null
   }) {
-    const clauses = [
-      input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : null,
-      input.requestHash ? { requestHash: input.requestHash } : null,
-    ].filter((clause): clause is { idempotencyKey: string } | { requestHash: string } => Boolean(clause))
+    const conditions = []
+    if (input.idempotencyKey) {
+      conditions.push(eq(generationJobs.idempotencyKey, input.idempotencyKey))
+    }
+    if (input.requestHash) {
+      conditions.push(eq(generationJobs.requestHash, input.requestHash))
+    }
 
-    if (clauses.length === 0) return null
+    if (conditions.length === 0) return null
 
-    return prisma.generationJob.findFirst({
-      where: {
-        userId: input.userId,
-        projectId: input.projectId,
-        OR: clauses,
-      },
-      orderBy: { createdAt: "desc" },
-    })
+    const result = await db.select().from(generationJobs)
+      .where(and(
+        eq(generationJobs.userId, input.userId),
+        eq(generationJobs.projectId, input.projectId),
+        or(...conditions)
+      ))
+      .orderBy(desc(generationJobs.createdAt))
+      .limit(1)
+
+    return result[0] || null
   }
 
   static async countActiveForUser(userId: string) {
-    return prisma.generationJob.count({
-      where: {
-        userId,
-        status: {
-          in: ["queued", "running", "processing", "retrying", "stalled", "orphaned", "cancelling"],
-        },
-      },
-    })
+    const result = await db.select({ count: sql<number>`count(*)` })
+      .from(generationJobs)
+      .where(and(
+        eq(generationJobs.userId, userId),
+        inArray(generationJobs.status, ["queued", "running", "processing", "retrying", "stalled", "orphaned", "cancelling"])
+      ))
+
+    return result[0]?.count || 0
   }
 
   static async listEvents(jobId: string, afterSequence = 0) {
-    return prisma.generationEvent.findMany({
-      where: {
-        jobId,
-        sequence: { gt: afterSequence },
-      },
-      orderBy: { sequence: "asc" },
-    })
+    return db.select().from(generationEvents)
+      .where(and(
+        eq(generationEvents.jobId, jobId),
+        gt(generationEvents.sequence, afterSequence)
+      ))
+      .orderBy(asc(generationEvents.sequence))
   }
 
   static async appendEvent(input: AppendGenerationEventInput) {
@@ -370,29 +369,29 @@ export class GenerationJobService {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await prisma.$transaction(async (tx) => {
-          const sequence = await nextEventSequence(tx, input.jobId)
-          return tx.generationEvent.create({
-            data: {
-              jobId: input.jobId,
-              traceId: input.traceId || null,
-              spanId: input.spanId || null,
-              parentSpanId: input.parentSpanId || null,
-              workerId: input.workerId || null,
-              sandboxId: input.sandboxId || null,
-              previewId: input.previewId || null,
-              sequence,
-              type: input.type,
-              eventType: input.eventType || input.type,
-              stage: input.stage,
-              status: input.status,
-              message: input.message,
-              dataJson: safeStringify(input.data),
-              metadataJson: safeStringify(input.metadata),
-              retryCount: Math.max(0, input.retryCount || 0),
-              terminationReason: input.terminationReason || null,
-            },
-          })
+        return await db.transaction(async (tx) => {
+          const sequence = await nextEventSequence(input.jobId)
+          const result = await tx.insert(generationEvents).values({
+            id: crypto.randomUUID(),
+            jobId: input.jobId,
+            traceId: input.traceId || null,
+            spanId: input.spanId || null,
+            parentSpanId: input.parentSpanId || null,
+            workerId: input.workerId || null,
+            sandboxId: input.sandboxId || null,
+            previewId: input.previewId || null,
+            sequence,
+            type: input.type,
+            eventType: input.eventType || input.type,
+            stage: input.stage,
+            status: input.status,
+            message: input.message,
+            dataJson: safeStringify(input.data),
+            metadataJson: safeStringify(input.metadata),
+            retryCount: Math.max(0, input.retryCount || 0),
+            terminationReason: input.terminationReason || null,
+          }).returning()
+          return result[0]
         })
       } catch (error) {
         if (!isDuplicateGenerationEventSequenceError(error) || attempt === maxAttempts) {
@@ -409,16 +408,20 @@ export class GenerationJobService {
   static async update(jobId: string | null | undefined, input: UpdateGenerationJobInput) {
     if (!jobId) return null
 
-    const existing = await prisma.generationJob.findUnique({
-      where: { id: jobId },
-      select: { version: true, status: true, cancelRequested: true },
-    })
-    if (!existing) return null
-    if (GENERATION_TERMINAL_STATUSES.has(existing.status)) return null
+    const existing = await db.select({
+      version: generationJobs.version,
+      status: generationJobs.status,
+      cancelRequested: generationJobs.cancelRequested,
+    }).from(generationJobs)
+      .where(eq(generationJobs.id, jobId))
+      .limit(1)
+
+    if (existing.length === 0) return null
+    if (GENERATION_TERMINAL_STATUSES.has(existing[0].status)) return null
 
     const requestedStatus = input.status
     if (
-      existing.cancelRequested &&
+      existing[0].cancelRequested &&
       requestedStatus &&
       requestedStatus !== "cancelled" &&
       requestedStatus !== "cancelling"
@@ -426,48 +429,52 @@ export class GenerationJobService {
       return null
     }
 
-    return prisma.generationJob.updateMany({
-      where: { id: jobId, version: existing.version },
-      data: {
-        ...(input.status ? { status: input.status } : {}),
-        ...(input.orchestrationState ? { orchestrationState: input.orchestrationState } : {}),
-        ...(input.stage ? { stage: input.stage } : {}),
-        ...(input.label ? { label: input.label } : {}),
-        ...(typeof input.progress === "number"
-          ? { progress: Math.max(0, Math.min(100, Math.round(input.progress))) }
-          : {}),
-        ...(typeof input.retryCount === "number" ? { retryCount: Math.max(0, input.retryCount) } : {}),
-        ...(typeof input.attemptCount === "number" ? { attemptCount: Math.max(0, input.attemptCount) } : {}),
-        ...(input.plan !== undefined ? { planJson: safeStringify(input.plan) } : {}),
-        ...(input.context !== undefined ? { contextJson: safeStringify(input.context) } : {}),
-        ...(input.diagnostics !== undefined ? { diagnosticsJson: safeStringify(input.diagnostics) } : {}),
-        ...(input.metrics !== undefined ? { metricsJson: safeStringify(input.metrics) } : {}),
-        ...(input.intent !== undefined ? { intent: input.intent } : {}),
-        ...(input.usedAutoRepair !== undefined ? { usedAutoRepair: input.usedAutoRepair } : {}),
-        ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
-        ...(input.error !== undefined ? { error: input.error } : {}),
-        ...(input.resultHistoryId !== undefined ? { resultHistoryId: input.resultHistoryId } : {}),
-        ...(input.queueJobId !== undefined ? { queueJobId: input.queueJobId } : {}),
-        ...(input.traceId !== undefined ? { traceId: input.traceId } : {}),
-        ...(input.workerId !== undefined ? { workerId: input.workerId } : {}),
-        ...(input.leaseOwner !== undefined ? { leaseOwner: input.leaseOwner } : {}),
-        ...(input.leaseExpiresAt !== undefined ? { leaseExpiresAt: input.leaseExpiresAt } : {}),
-        ...(input.lastHeartbeatAt !== undefined ? { lastHeartbeatAt: input.lastHeartbeatAt } : {}),
-        ...(input.retryReason !== undefined ? { retryReason: input.retryReason } : {}),
-        ...(input.retryClass !== undefined ? { retryClass: input.retryClass } : {}),
-        ...(typeof input.recoveryCount === "number" ? { recoveryCount: Math.max(0, input.recoveryCount) } : {}),
-        ...(input.deadLetteredAt !== undefined ? { deadLetteredAt: input.deadLetteredAt } : {}),
-        ...(input.terminatedAt !== undefined ? { terminatedAt: input.terminatedAt } : {}),
-        ...(typeof input.cancelRequested === "boolean" ? { cancelRequested: input.cancelRequested } : {}),
-        ...(input.cancelReason !== undefined ? { cancelReason: input.cancelReason } : {}),
-        ...(input.startedAt !== undefined ? { startedAt: input.startedAt } : {}),
-        ...(input.completedAt !== undefined ? { completedAt: input.completedAt } : {}),
-        ...(input.cancelledAt !== undefined ? { cancelledAt: input.cancelledAt } : {}),
-        ...(input.failedAt !== undefined ? { failedAt: input.failedAt } : {}),
-        ...(input.timedOutAt !== undefined ? { timedOutAt: input.timedOutAt } : {}),
-        version: { increment: 1 },
-      },
-    })
+    const setClause: Record<string, unknown> = {}
+    if (input.status) setClause.status = input.status
+    if (input.orchestrationState) setClause.orchestrationState = input.orchestrationState
+    if (input.stage) setClause.stage = input.stage
+    if (input.label) setClause.label = input.label
+    if (typeof input.progress === "number") setClause.progress = Math.max(0, Math.min(100, Math.round(input.progress)))
+    if (typeof input.retryCount === "number") setClause.retryCount = Math.max(0, input.retryCount)
+    if (typeof input.attemptCount === "number") setClause.attemptCount = Math.max(0, input.attemptCount)
+    if (input.plan !== undefined) setClause.planJson = safeStringify(input.plan)
+    if (input.context !== undefined) setClause.contextJson = safeStringify(input.context)
+    if (input.diagnostics !== undefined) setClause.diagnosticsJson = safeStringify(input.diagnostics)
+    if (input.metrics !== undefined) setClause.metricsJson = safeStringify(input.metrics)
+    if (input.intent !== undefined) setClause.intent = input.intent
+    if (input.usedAutoRepair !== undefined) setClause.usedAutoRepair = input.usedAutoRepair
+    if (input.previewUrl !== undefined) setClause.previewUrl = input.previewUrl
+    if (input.error !== undefined) setClause.error = input.error
+    if (input.resultHistoryId !== undefined) setClause.resultHistoryId = input.resultHistoryId
+    if (input.queueJobId !== undefined) setClause.queueJobId = input.queueJobId
+    if (input.traceId !== undefined) setClause.traceId = input.traceId
+    if (input.workerId !== undefined) setClause.workerId = input.workerId
+    if (input.leaseOwner !== undefined) setClause.leaseOwner = input.leaseOwner
+    if (input.leaseExpiresAt !== undefined) setClause.leaseExpiresAt = input.leaseExpiresAt
+    if (input.lastHeartbeatAt !== undefined) setClause.lastHeartbeatAt = input.lastHeartbeatAt
+    if (input.retryReason !== undefined) setClause.retryReason = input.retryReason
+    if (input.retryClass !== undefined) setClause.retryClass = input.retryClass
+    if (typeof input.recoveryCount === "number") setClause.recoveryCount = Math.max(0, input.recoveryCount)
+    if (input.deadLetteredAt !== undefined) setClause.deadLetteredAt = input.deadLetteredAt
+    if (input.terminatedAt !== undefined) setClause.terminatedAt = input.terminatedAt
+    if (typeof input.cancelRequested === "boolean") setClause.cancelRequested = input.cancelRequested
+    if (input.cancelReason !== undefined) setClause.cancelReason = input.cancelReason
+    if (input.startedAt !== undefined) setClause.startedAt = input.startedAt
+    if (input.completedAt !== undefined) setClause.completedAt = input.completedAt
+    if (input.cancelledAt !== undefined) setClause.cancelledAt = input.cancelledAt
+    if (input.failedAt !== undefined) setClause.failedAt = input.failedAt
+    if (input.timedOutAt !== undefined) setClause.timedOutAt = input.timedOutAt
+    setClause.version = sql`${generationJobs.version} + 1`
+
+    const result = await db.update(generationJobs)
+      .set(setClause)
+      .where(and(
+        eq(generationJobs.id, jobId),
+        eq(generationJobs.version, existing[0].version)
+      ))
+      .returning()
+
+    return { count: result.length }
   }
 
   static async transition(
@@ -611,12 +618,14 @@ export class GenerationJobService {
   static async assertNotCancelled(jobId: string | null | undefined) {
     if (!jobId) return
 
-    const job = await prisma.generationJob.findUnique({
-      where: { id: jobId },
-      select: { cancelRequested: true, status: true },
-    })
+    const job = await db.select({
+      cancelRequested: generationJobs.cancelRequested,
+      status: generationJobs.status,
+    }).from(generationJobs)
+      .where(eq(generationJobs.id, jobId))
+      .limit(1)
 
-    if (job?.cancelRequested || job?.status === "cancelled" || job?.status === "cancelling") {
+    if (job.length > 0 && (job[0].cancelRequested || job[0].status === "cancelled" || job[0].status === "cancelling")) {
       throw new GenerationJobCancelledError()
     }
   }
@@ -628,23 +637,23 @@ export class GenerationJobService {
     purpose: string
     metadata?: Record<string, unknown>
   }) {
-    const aggregate = await prisma.generationAttempt.aggregate({
-      where: { jobId: input.jobId },
-      _max: { sequence: true },
-    })
-    const sequence = (aggregate._max.sequence || 0) + 1
+    const aggregate = await db.select({ max: sql<number>`max(${generationAttempts.sequence})` })
+      .from(generationAttempts)
+      .where(eq(generationAttempts.jobId, input.jobId))
+    const sequence = (aggregate[0]?.max || 0) + 1
 
-    return prisma.generationAttempt.create({
-      data: {
-        jobId: input.jobId,
-        sequence,
-        provider: input.provider,
-        model: input.model,
-        purpose: input.purpose,
-        status: "running",
-        metadataJson: safeStringify(input.metadata),
-      },
-    })
+    const result = await db.insert(generationAttempts).values({
+      id: crypto.randomUUID(),
+      jobId: input.jobId,
+      sequence,
+      provider: input.provider,
+      model: input.model,
+      purpose: input.purpose,
+      status: "running",
+      metadataJson: safeStringify(input.metadata),
+    }).returning()
+
+    return result[0]
   }
 
   static async finishAttempt(input: {
@@ -658,12 +667,8 @@ export class GenerationJobService {
     error?: string | null
     metadata?: Record<string, unknown>
   }) {
-    return prisma.generationAttempt.updateMany({
-      where: {
-        jobId: input.jobId,
-        sequence: input.sequence,
-      },
-      data: {
+    return db.update(generationAttempts)
+      .set({
         status: input.status,
         completedAt: new Date(),
         latencyMs: Math.max(0, Math.round(input.latencyMs)),
@@ -672,8 +677,12 @@ export class GenerationJobService {
         totalTokens: Math.max(0, input.totalTokens || 0),
         error: input.error || null,
         metadataJson: safeStringify(input.metadata),
-      },
-    })
+      })
+      .where(and(
+        eq(generationAttempts.jobId, input.jobId),
+        eq(generationAttempts.sequence, input.sequence)
+      ))
+      .returning()
   }
 
   static toPublicJob(job: {

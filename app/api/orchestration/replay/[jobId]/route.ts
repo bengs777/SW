@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
-import { prisma } from "@/lib/db/client"
+import { getSession } from "@/auth"
+import { db } from "@/lib/db/client"
+import { users, generationJobs } from "@/lib/db/schema"
+import { eq, and } from "drizzle-orm"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 
 export const runtime = "nodejs"
@@ -10,24 +12,24 @@ export async function GET(
   _request: NextRequest,
   context: { params: Promise<{ jobId: string }> }
 ) {
-  const session = await auth()
-  if (!session?.user?.email) {
+  const session = await getSession()
+  if (!session?.email) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 })
   }
 
   const { jobId } = await context.params
-  const user = await prisma.user.findUnique({
-    where: { email: session.user.email },
-    select: { id: true, isDeveloperAccount: true },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, session.email),
   })
 
   if (!user) {
     return NextResponse.json({ error: "Authenticated user not found" }, { status: 404 })
   }
 
-  const job = await prisma.generationJob.findFirst({
-    where: user.isDeveloperAccount ? { id: jobId } : { id: jobId, userId: user.id },
-    select: { id: true },
+  const job = await db.query.generationJobs.findFirst({
+    where: user.isDeveloperAccount
+      ? eq(generationJobs.id, jobId)
+      : and(eq(generationJobs.id, jobId), eq(generationJobs.userId, user.id)),
   })
 
   if (!job) {

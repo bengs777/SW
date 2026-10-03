@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { useSession } from "next-auth/react"
+import { useAuth, useUser } from "@clerk/nextjs"
 import Link from "next/link"
 import { Activity, AlertTriangle, CheckCircle2, Clock3, Server, Zap } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -97,32 +97,31 @@ function normalizeMonitoringData(payload: unknown): MonitoringData {
 }
 
 export default function AdminPage() {
-  const { data: session, status: sessionStatus } = useSession()
+  const { isSignedIn, isLoaded } = useAuth()
+  const { user } = useUser()
   const [monitoringData, setMonitoringData] = useState<MonitoringData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState("")
   const [isDevAccount, setIsDevAccount] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const canAccessAdmin = isDevAccount || Boolean(
-    session?.user?.isDeveloperAccount || session?.user?.email?.endsWith("@swift.local")
+    user?.publicMetadata?.isDeveloperAccount || user?.primaryEmailAddress?.emailAddress?.endsWith("@swift.local")
   )
 
   useEffect(() => {
-    // Wait until session is fully resolved before checking dev status
-    if (sessionStatus !== "authenticated" || !session) return
+    if (!isLoaded || !isSignedIn) return
 
-    const isDev = session.user?.isDeveloperAccount || session.user?.email?.endsWith("@swift.local")
+    const email = user?.primaryEmailAddress?.emailAddress
+    const isDev = user?.publicMetadata?.isDeveloperAccount || email?.endsWith("@swift.local")
     setIsDevAccount(Boolean(isDev))
     console.log("[admin] Session resolved", {
-      email: session.user?.email,
-      isDeveloperAccount: session.user?.isDeveloperAccount,
-      sessionStatus,
+      email,
+      isDeveloperAccount: user?.publicMetadata?.isDeveloperAccount,
     })
-  }, [session, sessionStatus])
+  }, [isLoaded, isSignedIn, user])
 
   useEffect(() => {
-    // Delay fetch until session is authenticated AND user is dev
-    if (sessionStatus !== "authenticated" || !canAccessAdmin) return
+    if (!isLoaded || !isSignedIn || !canAccessAdmin) return
 
     const controller = new AbortController()
     abortControllerRef.current = controller
@@ -165,9 +164,9 @@ export default function AdminPage() {
       abortControllerRef.current = null
       clearInterval(interval)
     }
-  }, [canAccessAdmin, sessionStatus])
+  }, [canAccessAdmin, isLoaded, isSignedIn])
 
-  if (sessionStatus === "loading") {
+  if (!isLoaded) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <Card className="w-full max-w-md">
@@ -225,7 +224,6 @@ export default function AdminPage() {
 
   return (
     <div className="flex min-h-screen flex-col gap-6">
-      {/* Header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
         <p className="mt-2 text-sm text-muted-foreground">
@@ -248,7 +246,6 @@ export default function AdminPage() {
         </Card>
       ) : monitoringData ? (
         <>
-          {/* Overall Status */}
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
@@ -273,7 +270,6 @@ export default function AdminPage() {
             </CardContent>
           </Card>
 
-          {/* Key Metrics */}
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <Card>
               <CardHeader>
@@ -317,7 +313,6 @@ export default function AdminPage() {
             </Card>
           </div>
 
-          {/* Service Status */}
           <Card>
             <CardHeader>
               <CardTitle>Service Status</CardTitle>
@@ -359,7 +354,6 @@ export default function AdminPage() {
             </CardContent>
           </Card>
 
-          {/* Admin Actions */}
           <Card>
             <CardHeader>
               <CardTitle>Admin Actions</CardTitle>

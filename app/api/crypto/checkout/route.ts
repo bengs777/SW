@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { env } from "@/lib/env"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
 const REFERENCE_PATTERN = /^[A-Za-z0-9_-]{1,120}$/
 const EVM_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/
@@ -44,6 +45,14 @@ function normalizeAmount(value: string | null) {
 }
 
 export async function GET(request: NextRequest) {
+  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "anon"
+
+  try {
+    await enforceRouteRateLimit(`crypto-checkout:${clientIp}`, { maxPerMinute: 20, maxPerHour: 120 })
+  } catch {
+    return new NextResponse("Too many requests. Please try again later.", { status: 429 })
+  }
+
   const searchParams = request.nextUrl.searchParams
   const ref = searchParams.get("ref")
   const chain = searchParams.get("chain")

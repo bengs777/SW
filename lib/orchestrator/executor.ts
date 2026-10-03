@@ -1,5 +1,7 @@
 import type { GeneratedFile } from "@/lib/types"
-import { prisma } from "@/lib/db/client"
+import { db } from "@/lib/db/client"
+import { projectFiles } from "@/lib/db/schema"
+import { eq, asc } from "drizzle-orm"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { validateFullStackFiles } from "@/lib/ai/fullstack-validator"
 
@@ -34,9 +36,9 @@ export async function applyFiles(
   files: GeneratedFile[]
 ): Promise<ApplyFilesResult> {
   const op = async () => {
-    const existingFiles = await prisma.projectFile.findMany({
-      where: { projectId },
-      orderBy: { path: "asc" },
+    const existingFiles = await db.query.projectFiles.findMany({
+      where: eq(projectFiles.projectId, projectId),
+      orderBy: [asc(projectFiles.path)],
     })
     const merged = new Map<string, GeneratedFile>()
 

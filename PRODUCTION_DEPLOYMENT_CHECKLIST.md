@@ -1,3 +1,12 @@
+> **⚠️ DOKUMEN INI BELUM DISESUAIKAN — baca dulu.**
+> Disusun sebelum migrasi besar berikut: **Prisma/PostgreSQL → Drizzle/Turso (libsql)**,
+> **NextAuth → Clerk**, dan runbook deploy pindah ke `planproduction.md`.
+> Langkah yang menyebut `prisma migrate`, `DATABASE_URL` Neon, NextAuth, atau Google OAuth
+> **sudah tidak berlaku**. Sumber kebenaran saat ini:
+> - `planproduction.md` — runbook deploy VPS
+> - `PRODUCTION_FIX_PLAN.md` — status perbaikan & sisa pekerjaan
+> - `npm run deploy:readiness` / `npm run audit:production` — gate otomatis
+>
 # Production Deployment Checklist for Swift (Reddy)
 
 ## Pre-Deployment (Days 1-6)

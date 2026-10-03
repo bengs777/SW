@@ -134,7 +134,7 @@ const MAX_ROUTE_FILES = 60
 const FORBIDDEN_PATH_RE = /(^|\/)(node_modules|\.git|\.next|dist|build|coverage)(\/|$)|(^|\/)\.env($|\.)|(^|\/)package-lock\.json$/i
 const FORBIDDEN_RUNTIME_WRITE_RE = /(?:writeFile(?:Sync)?|appendFile(?:Sync)?|mkdir(?:Sync)?|createWriteStream)\s*\([^)]*["'](?:\/var\/task|\.swift-reports|\.next|node_modules|package-lock\.json)/i
 const UNSAFE_EXECUTION_RE = /\b(?:eval|new\s+Function|child_process|execSync|spawnSync|execFileSync|spawn\s*\(|exec\s*\(|curl\s+|wget\s+|postinstall|coinhive|xmrig)\b/i
-const CREDENTIAL_LEAK_RE = /\b(?:OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|DATABASE_URL|NEXTAUTH_SECRET|process\.env\.[A-Z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD))\b/
+const CREDENTIAL_LEAK_RE = /\b(?:OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|DATABASE_URL|CLERK_SECRET_KEY|process\.env\.[A-Z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD))\b/
 
 // Dependency source of truth, in precedence order:
 // 1. Blueprint-required runtime files and capabilities.
@@ -275,12 +275,12 @@ export function assertGenerationInvariants(input: {
     })
   }
 
-  const authActive = input.authActive || scannedDependencies.includes("next-auth")
-  if (authActive && !hasNextAuthConfig(files)) {
+  const authActive = input.authActive || scannedDependencies.includes("@clerk/nextjs")
+  if (authActive && !hasClerkConfig(files)) {
     hardFailures.push({
       category: "hard",
       code: "invalid_auth_configuration",
-      message: "NextAuth is active but no auth configuration file or auth route exists.",
+      message: "Clerk is active but no auth configuration file or auth route exists.",
     })
   }
 
@@ -450,7 +450,7 @@ export function runDeterministicAutomatedRepair(input: {
     })
   }
 
-  const authRepair = reconcileNextAuth(files)
+  const authRepair = reconcileClerk(files)
   if (authRepair.changed && diagnostics.repairAttempts < MAX_REPAIR_ITERATIONS) {
     const repairHash = stableHash({ type: "auth_dependency_reconciliation", stateHash: previousStateHash, dependencies: authRepair.injected })
     if (executedRepairHashes.has(repairHash)) {
@@ -464,7 +464,7 @@ export function runDeterministicAutomatedRepair(input: {
     diagnostics.repairActions.push(...authRepair.injected.map((dependency) => ({
       type: "auth_dependency_reconciliation",
       dependency,
-      reason: "next_auth_artifact_detected",
+      reason: "clerk_artifact_detected",
     })))
       previousStateHash = stableHash(summarizeFiles(files))
       diagnostics.iterations.push(buildRepairIterationDiagnostic(diagnostics.repairAttempts, previousStateHash, invariants, diagnostics.repairActions))
@@ -1006,16 +1006,16 @@ function maybeDowngradePrisma(files: GeneratedFile[], blueprint: ControlledAppBl
   }
 }
 
-function reconcileNextAuth(files: GeneratedFile[]) {
+function reconcileClerk(files: GeneratedFile[]) {
   const hasAuthArtifact = stableFiles(files).some((file) =>
-    /\bnext-auth\b|NextAuth\s*\(/.test(`${file.path}\n${file.content}`)
+    /@clerk\/nextjs|ClerkProvider/.test(`${file.path}\n${file.content}`)
   )
   if (!hasAuthArtifact) {
     return { files, changed: false, injected: [] as string[] }
   }
   const repaired = synthesizePackageJson(files, {
-    injectDependencies: ["next-auth"],
-    reason: "next_auth_artifact_detected",
+    injectDependencies: ["@clerk/nextjs"],
+    reason: "clerk_artifact_detected",
   })
   return {
     files: repaired.files,
@@ -1093,7 +1093,7 @@ function dependenciesForBlueprint(
     required.add("prisma")
   }
   if (hasAuth || blueprintRequiredPaths.has("app/api/auth/route.ts")) {
-    required.add("next-auth")
+    required.add("@clerk/nextjs")
   }
   if (Array.from(input.paths).some((filePath) => filePath.startsWith("app/api/"))) {
     required.add("zod")
@@ -1102,12 +1102,12 @@ function dependenciesForBlueprint(
   return stableUnique(Array.from(required))
 }
 
-function hasNextAuthConfig(files: GeneratedFile[]) {
+function hasClerkConfig(files: GeneratedFile[]) {
   const paths = new Set(files.map((file) => normalizePath(file.path)))
   if (paths.has("auth.ts")) return true
   if (paths.has("lib/auth.ts") || paths.has("lib/auth/config.ts")) return true
   if (Array.from(paths).some((filePath) => filePath.startsWith("app/api/auth/"))) return true
-  return files.some((file) => /NextAuth\s*\(|from\s+["']next-auth/.test(String(file.content || "")))
+  return files.some((file) => /ClerkProvider|from\s+['"]@clerk\/nextjs['"]/.test(String(file.content || "")))
 }
 
 function isSafeGeneratedPath(filePath: string) {
