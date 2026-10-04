@@ -1,7 +1,7 @@
 import { subHours } from "date-fns"
 import { db } from "@/lib/db/client"
 import { users, projects, workspaces, usageLogs, requestLogs, billingTransactions, generationJobs, generationAttempts, generationQualityMetrics, orchestrationFailures } from "@/lib/db/schema"
-import { eq, and, gte, desc, asc, sql, inArray, count, avg, sum } from "drizzle-orm"
+import { eq, and, gte, desc, asc, sql } from "drizzle-orm"
 import { getProductionReadiness } from "@/lib/production/readiness"
 import { getGenerationQueueHealth } from "@/lib/queue/generation-queue"
 import { getRuntimeHealthDashboard } from "@/lib/observability/runtime-recovery"

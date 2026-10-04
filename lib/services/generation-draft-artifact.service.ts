@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { db } from "@/lib/db/client"
 import { artifacts, artifactFiles, projects, workspaces, workspaceMembers } from "@/lib/db/schema"
-import { eq, and, asc, inArray } from "drizzle-orm"
+import { eq, and, asc } from "drizzle-orm"
 import { log } from "@/lib/logging"
 import { ProjectFilesystemService, type ProjectFileManifest } from "@/lib/services/project-filesystem.service"
 import type { GeneratedFile } from "@/lib/types"

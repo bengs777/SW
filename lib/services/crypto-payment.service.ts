@@ -1,7 +1,7 @@
 import { ethers } from "ethers"
 import { env } from "@/lib/env"
 import { db } from "@/lib/db/client"
-import { topUpOrders, cryptoPayments, users } from "@/lib/db/schema"
+import { topUpOrders, cryptoPayments } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { BillingService } from "@/lib/services/billing.service"
 

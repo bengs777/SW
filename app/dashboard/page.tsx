@@ -20,7 +20,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { db } from "@/lib/db/client"
-import { users, usageLogs as usageLogsTable, workspaceMembers, workspaces } from "@/lib/db/schema"
+import { users, usageLogs as usageLogsTable, workspaceMembers } from "@/lib/db/schema"
 import { eq, desc } from "drizzle-orm"
 import { cn } from "@/lib/utils"
 

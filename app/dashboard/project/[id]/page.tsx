@@ -54,7 +54,6 @@ const GENERATE_BACKEND_TIMEOUT_MS = readGenerationTimeoutMs()
 const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
 const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
 const CHAT_ANSWER_TIMEOUT_MS = 60_000
-const DIRECT_FALLBACK_ACTIVE_STATUSES = ["queued", "running", "processing", "retrying", "stalled", "orphaned"]
 
 function buildClientWorkPlan(prompt: string, mode: CollaborationMode, language: PromptLanguage) {
   const shortPrompt = prompt.replace(/\s+/g, " ").trim().slice(0, 120)
@@ -2016,7 +2015,8 @@ export default function EditorPage() {
         return
       }
 
-      const fallbackPromise = attemptDirectFallback("client_timeout")
+      const fallbackPromise =
+        directFallbackRunnerRef.current?.("client_timeout") ?? Promise.resolve(false)
       directFallbackPromiseRef.current = fallbackPromise
       void fallbackPromise.then((fallbackSucceeded) => {
         if (!fallbackSucceeded) {
