@@ -7,6 +7,8 @@ import { eq, and, desc } from "drizzle-orm"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import type { GeneratedFile } from "@/lib/types"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 const RollbackSchema = z.object({
   historyId: z.string().min(1),
@@ -19,6 +21,9 @@ function parseHistoryFiles(result: string): GeneratedFile[] {
 }
 
 async function getAccessibleProject(projectId: string, userId: string) {
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) return null
+
   return db.query.projects.findFirst({
     where: eq(projects.id, projectId),
   })
@@ -83,6 +88,18 @@ export async function POST(
   const session = await getSession()
   if (!session?.userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    await enforceRouteRateLimit(`project-history-rollback:${session.userId}`, {
+      maxPerMinute: 10,
+      maxPerHour: 60,
+    })
+  } catch {
+    return NextResponse.json(
+      { error: "Too many requests. Please try again later." },
+      { status: 429 }
+    )
   }
 
   const { id } = await params

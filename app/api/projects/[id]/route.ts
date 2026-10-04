@@ -4,14 +4,15 @@ import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import { getSession } from "@/auth"
 import { db } from "@/lib/db/client"
-import { projects, projectFiles, generationHistory, artifacts, artifactFiles, generationJobs, workspaces, workspaceMembers } from "@/lib/db/schema"
-import { eq, and, desc, lt, notInArray, sql } from "drizzle-orm"
+import { projects, projectFiles, generationHistory, artifacts } from "@/lib/db/schema"
+import { eq, and, desc, sql } from "drizzle-orm"
 import { ProjectFilePersistenceService } from "@/lib/services/project-file-persistence.service"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import type { GeneratedFile } from "@/lib/types"
 import { readWorkspaceStateFile, splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import { log } from "@/lib/logging"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess, type ProjectAccessRef } from "@/lib/auth/project-access"
 
 function historyFileCount(result: string) {
   try {
@@ -20,6 +21,21 @@ function historyFileCount(result: string) {
   } catch {
     return 0
   }
+}
+
+async function assertProjectAccess(
+  projectId: string,
+  ref: ProjectAccessRef
+): Promise<{ ok: true } | { ok: false; status: 403 | 404 }> {
+  const access = await getProjectAccess(projectId, ref)
+  if (!access) {
+    const exists = await db.query.projects.findFirst({
+      where: eq(projects.id, projectId),
+      columns: { id: true },
+    })
+    return { ok: false, status: exists ? 403 : 404 }
+  }
+  return { ok: true }
 }
 
 function parseJsonObject(value?: string | null): Record<string, unknown> | null {
@@ -49,6 +65,14 @@ export async function GET(
 
   try {
     const { id } = await params
+
+    const access = await assertProjectAccess(id, { userId: session.userId, email: session.email })
+    if (!access.ok) {
+      return NextResponse.json(
+        { error: access.status === 403 ? "Forbidden" : "Project not found" },
+        { status: access.status }
+      )
+    }
 
     const project = await db.query.projects.findFirst({
       where: eq(projects.id, id),
@@ -254,6 +278,14 @@ export async function PATCH(
 
     const { name, description, prompt } = parsed.data
 
+    const access = await assertProjectAccess(id, { userId: session.userId, email: session.email })
+    if (!access.ok) {
+      return NextResponse.json(
+        { error: access.status === 403 ? "Forbidden" : "Project not found" },
+        { status: access.status }
+      )
+    }
+
     const project = await db.query.projects.findFirst({
       where: eq(projects.id, id),
     })
@@ -303,6 +335,14 @@ export async function DELETE(
   try {
     const { id } = await params
 
+    const access = await assertProjectAccess(id, { userId: session.userId, email: session.email })
+    if (!access.ok) {
+      return NextResponse.json(
+        { error: access.status === 403 ? "Forbidden" : "Project not found" },
+        { status: access.status }
+      )
+    }
+
     const project = await db.query.projects.findFirst({
       where: eq(projects.id, id),
     })
@@ -312,10 +352,6 @@ export async function DELETE(
         { error: "Project not found" },
         { status: 404 }
       )
-    }
-
-    const projectWithHistory = project as typeof project & {
-      history: Array<{ id: string }>
     }
 
     await db.delete(projects).where(eq(projects.id, id))
@@ -360,6 +396,14 @@ export async function POST(
 
     if (!Array.isArray(files) || typeof prompt !== "string") {
       return NextResponse.json({ error: "Invalid project save payload" }, { status: 400 })
+    }
+
+    const access = await assertProjectAccess(id, { userId: session.userId, email: session.email })
+    if (!access.ok) {
+      return NextResponse.json(
+        { error: access.status === 403 ? "Forbidden" : "Project not found" },
+        { status: access.status }
+      )
     }
 
     const project = await db.query.projects.findFirst({

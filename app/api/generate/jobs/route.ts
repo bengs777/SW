@@ -15,13 +15,13 @@ import { enforceAiUsageRateLimit, releaseAiUsageQuota } from "@/lib/security/rat
 import { log } from "@/lib/logging"
 import { createCorrelationIds, traceExecution } from "@/lib/observability/execution-tracer"
 import { monitorOperation, warnIfSlow } from "@/lib/observability/performance-monitor"
-import { recordPrismaDuration } from "@/lib/observability/runtime-metrics"
 import { BillingService } from "@/lib/services/billing.service"
 import { GenerationJobService } from "@/lib/services/generation-job.service"
 import { byteSize, generationRequestHash, previewContextAudit } from "@/lib/services/generation-job-request.service"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -302,9 +302,11 @@ export async function POST(request: NextRequest) {
   currentStage = "auth_success"
   logEarlyStage("auth_success", requestId)
   const email = session?.email
-  developerDiagnosticsAllowed =
-    Boolean(email && email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()) ||
-    Boolean(email?.endsWith("@swift.local"))
+  developerDiagnosticsAllowed = Boolean(
+    email &&
+      env.devOwnerEmail &&
+      email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()
+  )
 
   if (!email) {
     auditSummary()
@@ -459,6 +461,12 @@ export async function POST(request: NextRequest) {
   warnIfSlow("db", projectLookupDurationMs, { operation: "project.findFirst", requestId })
 
   if (!project) {
+    auditSummary()
+    return NextResponse.json({ error: "Project not found", requestId }, { status: 404 })
+  }
+
+  const projectAccess = await getProjectAccess(project.id, { userId: user.id, email })
+  if (!projectAccess) {
     auditSummary()
     return NextResponse.json({ error: "Project not found", requestId }, { status: 404 })
   }

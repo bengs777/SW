@@ -20,6 +20,7 @@ import { ModelConfigService } from "@/lib/services/model-config.service"
 import { BillingService } from "@/lib/services/billing.service"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { getProjectAccess } from "@/lib/auth/project-access"
 import { timeoutConfig } from "@/lib/timeouts"
 
 export const runtime = "nodejs"
@@ -252,9 +253,11 @@ export async function POST(request: NextRequest) {
     currentStage = "auth_success"
     logEarlyStage("auth_success", requestId)
     const email = session?.email
-    developerDiagnosticsAllowed =
-      Boolean(email && email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()) ||
-      Boolean(email?.endsWith("@swift.local"))
+    developerDiagnosticsAllowed = Boolean(
+      email &&
+        env.devOwnerEmail &&
+        email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()
+    )
 
     if (!email) {
       auditSummary()
@@ -386,6 +389,15 @@ export async function POST(request: NextRequest) {
     warnIfSlow("db", projectLookupDurationMs, { operation: "project.findFirst", requestId })
 
     if (!project) {
+      auditSummary()
+      return NextResponse.json(
+        { error: "Project not found", stage: "project_lookup", retryable: false, requestId },
+        { status: 404 }
+      )
+    }
+
+    const projectAccess = await getProjectAccess(project.id, { userId: user.id, email })
+    if (!projectAccess) {
       auditSummary()
       return NextResponse.json(
         { error: "Project not found", stage: "project_lookup", retryable: false, requestId },

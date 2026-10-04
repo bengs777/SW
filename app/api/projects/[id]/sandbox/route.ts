@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm"
 import { getRuntimeSandbox, resetRuntimeSandbox, startRuntimeSandbox } from "@/lib/sandbox/runtime"
 import { normalizeFileLanguage, type ValidLanguage } from "@/lib/workspace-state"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -27,6 +28,9 @@ function readSandboxProxyTimeoutMs() {
 const SANDBOX_PROXY_TIMEOUT_MS = readSandboxProxyTimeoutMs()
 
 async function assertProjectAccess(projectId: string, userId: string) {
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) return null
+
   const project = await db.query.projects.findFirst({
     where: eq(projects.id, projectId),
     with: {

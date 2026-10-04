@@ -10,8 +10,12 @@ import { validateRuntimeImports, validateRuntimeSyntax } from "@/lib/ai/runtime-
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import type { GeneratedFile } from "@/lib/types"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 async function canAccessProject(projectId: string, userId: string) {
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) return false
+
   const project = await db.query.projects.findFirst({
     where: eq(projects.id, projectId),
   })

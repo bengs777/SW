@@ -3,7 +3,7 @@ import { revalidatePath } from "next/cache"
 import { z } from "zod"
 import { getSession } from "@/auth"
 import { db } from "@/lib/db/client"
-import { projects, projectFiles, workspaces, workspaceMembers } from "@/lib/db/schema"
+import { projects, workspaces, workspaceMembers } from "@/lib/db/schema"
 import { eq, and, desc } from "drizzle-orm"
 import { UserService } from "@/lib/services/user.service"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
@@ -58,16 +58,6 @@ async function resolveAccessibleWorkspaceId(workspaceId: string, userId: string)
     .where(eq(workspaceMembers.userId, userId))
 
   if (userWorkspaces.some((w) => w.workspaceId === workspaceId)) {
-    return workspaceId
-  }
-
-  if (userWorkspaces.length === 0 && workspace) {
-    await db.insert(workspaceMembers).values({
-      id: crypto.randomUUID(),
-      workspaceId,
-      userId,
-      role: "admin",
-    }).onConflictDoNothing().catch(() => null)
     return workspaceId
   }
 

@@ -31,6 +31,10 @@ const FREE_GENERATIONS_PER_DAY = Math.max(
   1,
   Math.round(getEnvNumber(3, "FREE_GENERATE_LIMIT_PER_DAY", "FREE_GENERATIONS_PER_DAY"))
 )
+const MAX_AI_CHAT_PER_DAY = Math.max(
+  1,
+  Math.round(getEnvNumber(100, "AI_CHAT_RATE_LIMIT_PER_DAY", "AI_ASSIST_RATE_LIMIT_PER_DAY"))
+)
 
 // Usage log states that consume a generation slot: an attempt that is still
 // in flight or that finished successfully. Refunded/failed attempts are excluded
@@ -224,6 +228,21 @@ export async function enforceAiUsageRateLimit(userId: string) {
   }
 }
 
+/**
+ * Daily cap for paid assistant endpoints (AI chat / auto-repair) that do not
+ * reserve usage-log quota. Bounds provider spend when Redis is available.
+ */
+export async function enforceAiChatDailyRateLimit(userId: string) {
+  const dayKey = `user:${userId}:ai-chat-day:${new Date().toISOString().slice(0, 10)}`
+  const result = await redisRateCheck(dayKey, MAX_AI_CHAT_PER_DAY, 86400)
+
+  if (!result.allowed) {
+    throw new Error(
+      `Daily AI assistant limit exceeded. Maximum ${MAX_AI_CHAT_PER_DAY} requests per day.`
+    )
+  }
+}
+
 export async function enforceGenerationHourlyRateLimit(userId: string) {
   const hourKey = `user:${userId}:generation-hour:${Math.floor(Date.now() / 3_600_000)}`
   const hourResult = await redisRateCheck(hourKey, MAX_GENERATIONS_PER_HOUR, 3600)
@@ -303,4 +322,5 @@ export const aiRateLimitConfig = {
   perDay: MAX_REQUESTS_PER_DAY,
   uploadPerDay: MAX_UPLOADS_PER_DAY,
   freePerDay: FREE_GENERATIONS_PER_DAY,
+  aiChatPerDay: MAX_AI_CHAT_PER_DAY,
 }
