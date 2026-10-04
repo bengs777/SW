@@ -6,11 +6,12 @@ import { users, workspaces, workspaceMembers, subscriptions, billingTransactions
 import { eq } from 'drizzle-orm'
 import { env } from '@/lib/env'
 
-const webhookSecret = env.clerkSecretKey
+const webhookSecret = env.clerkWebhookSecret
 
 async function ensureUserExists(email: string, name: string | null, image: string | null) {
+  const normalizedEmail = email.trim().toLowerCase()
   const existing = await db.query.users.findFirst({
-    where: eq(users.email, email),
+    where: eq(users.email, normalizedEmail),
   })
 
   if (existing) {
@@ -26,7 +27,7 @@ async function ensureUserExists(email: string, name: string | null, image: strin
 
   await db.insert(users).values({
     id: userId,
-    email,
+    email: normalizedEmail,
     name,
     image,
     balance: 10000,
@@ -74,7 +75,10 @@ async function ensureUserExists(email: string, name: string | null, image: strin
 
 export async function POST(req: Request) {
   if (!webhookSecret) {
-    return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 500 })
+    return NextResponse.json(
+      { error: 'CLERK_WEBHOOK_SECRET is not configured' },
+      { status: 503 }
+    )
   }
 
   const svix_id = req.headers.get('svix-id')
@@ -95,7 +99,8 @@ export async function POST(req: Request) {
       'svix-timestamp': svix_timestamp,
       'svix-signature': svix_signature,
     }) as WebhookEvent | undefined
-  } catch (err) {
+  } catch (error) {
+    console.warn('[clerk-webhook] signature verification failed:', error instanceof Error ? error.message : String(error))
     return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 400 })
   }
 
@@ -120,9 +125,20 @@ export async function POST(req: Request) {
         break
       }
       case 'user.deleted': {
-        const id = data.id
-        if (id) {
-          await db.delete(users).where(eq(users.id, id))
+        const payload = data as {
+          id?: string
+          email_address?: string
+          email_addresses?: Array<{ email_address?: string }>
+        }
+        const email =
+          payload.email_addresses?.[0]?.email_address || payload.email_address || null
+
+        if (email) {
+          await db.delete(users).where(eq(users.email, email.trim().toLowerCase()))
+        } else {
+          console.warn('[clerk-webhook] user.deleted ignored: no resolvable email', {
+            clerkUserId: payload.id,
+          })
         }
         break
       }

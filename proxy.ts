@@ -12,6 +12,7 @@ const isPublicRoute = createRouteMatcher([
   "/api/auth(.*)",
   "/api/health",
   "/api/billing/pakasir/webhook",
+  "/api/webhooks(.*)",
   "/api/providers/status",
 ])
 
@@ -121,12 +122,19 @@ const middleware = clerkMiddleware(async (auth, req) => {
 
   if (isInternalObservabilityRoute(req)) {
     const { userId } = await auth()
-    if (!userId && !hasValidObservabilityToken(request)) {
-      const response = NextResponse.json(
-        { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
-        { status: 401 }
-      )
+    if (!userId) {
+      if (!hasValidObservabilityToken(request)) {
+        const response = NextResponse.json(
+          { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
+          { status: 401 }
+        )
+        applySecurityHeaders(response)
+        return response
+      }
+
+      const response = NextResponse.next()
       applySecurityHeaders(response)
+      applyCorsHeaders(request, response)
       return response
     }
   }
@@ -152,6 +160,15 @@ const middleware = clerkMiddleware(async (auth, req) => {
 
   const { userId } = await auth()
   if (!userId) {
+    if (pathname.startsWith("/api/")) {
+      const response = NextResponse.json(
+        { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
+        { status: 401 }
+      )
+      applySecurityHeaders(response)
+      return response
+    }
+
     const loginUrl = new URL("/login", req.nextUrl.origin)
     loginUrl.searchParams.set("callbackUrl", `${pathname}${req.nextUrl.search}`)
     return NextResponse.redirect(loginUrl)

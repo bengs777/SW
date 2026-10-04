@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getSession } from "@/auth"
 import { db } from "@/lib/db/client"
-import { users, workspaces, workspaceMembers } from "@/lib/db/schema"
+import { users } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import {
@@ -27,13 +27,8 @@ type CurrentActor = {
 
 function deriveActorRoles(input: {
   isDeveloperAccount: boolean
-  workspaceRoles: string[]
-  ownsWorkspace: boolean
 }): AuthRole[] {
   const roles = new Set<AuthRole>(["user"])
-  if (input.ownsWorkspace || input.workspaceRoles.some((role) => role === "admin")) {
-    roles.add("admin")
-  }
   if (input.isDeveloperAccount) {
     roles.add("admin")
     roles.add("developer")
@@ -70,28 +65,19 @@ export async function getCurrentAuthActor(): Promise<CurrentActor | null> {
 
   const user = await db.query.users.findFirst({
     where: eq(users.email, sessionEmail),
-    with: {
-      workspaces: { limit: 1 },
-      memberships: { columns: { role: true } },
-    },
   }) as unknown as {
     id: string
     email: string
     balance: number
     isDeveloperAccount: boolean
-    workspaces: Array<{ id: string }>
-    memberships: Array<{ role: string }>
   } | undefined
 
   if (!user) return null
 
-  const isOwnerDeveloper =
-    user.isDeveloperAccount &&
+  const isOwnerDeveloper = Boolean(env.devOwnerEmail) && user.isDeveloperAccount &&
     normalizeAdminEmail(user.email) === normalizeAdminEmail(env.devOwnerEmail)
   const roles = deriveActorRoles({
     isDeveloperAccount: isOwnerDeveloper,
-    ownsWorkspace: Boolean(user.workspaces.length),
-    workspaceRoles: user.memberships.map((membership) => membership.role),
   })
 
   return {

@@ -17,7 +17,10 @@ const client = createClient({
 })
 
 async function main() {
-  const email = "ibnualmugni1933@gmail.com"
+  const email = process.env.DEV_OWNER_EMAIL?.trim()
+  if (!email) {
+    throw new Error("DEV_OWNER_EMAIL must be set to target the developer account")
+  }
   const tokenCredit = 100000
 
   console.log(`\n🔧 Admin: Enabling all features and adding credits for ${email}...`)

@@ -102,7 +102,7 @@ const normalizeAppUrl = (value: string) => {
   return `https://${normalized}`
 }
 
-const DEV_OWNER_EMAIL = getEnv("DEV_OWNER_EMAIL") || "ibnualmugni1933@gmail.com"
+const DEV_OWNER_EMAIL = getEnv("DEV_OWNER_EMAIL")
 const tursoDatabaseUrl = getEnv("TURSO_DATABASE_URL")
 const tursoAuthToken = getEnv("TURSO_AUTH_TOKEN")
 const supabaseUrl = getEnv("NEXT_PUBLIC_SUPABASE_URL")
@@ -160,6 +160,7 @@ export const env = {
   // Auth (Clerk)
   clerkPublishableKey: getEnv("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"),
   clerkSecretKey: getEnv("CLERK_SECRET_KEY"),
+  clerkWebhookSecret: getEnv("CLERK_WEBHOOK_SECRET"),
 
   // GitHub
   githubClientId: getEnv("GITHUB_CLIENT_ID"),
@@ -451,6 +452,24 @@ export function validateEnv(options: { nodeEnv?: string } = {}): EnvValidationRe
   validateOptionalUrl(issues, "SANDBOX_PUBLIC_BASE_URL", env.sandboxPublicBaseUrl, isProduction)
   validateOptionalUrl(issues, "SWIFT_WORKER_HEALTH_URL / WORKER_HEALTH_URL", env.workerHealthUrl, isProduction)
   validateOptionalRedisUrl(issues, "REDIS_URL / UPSTASH_REDIS_URL", env.redisUrl, isProduction)
+
+  if (!process.env.DEV_OWNER_EMAIL?.trim()) {
+    issues.push({
+      key: "DEV_OWNER_EMAIL",
+      severity: isProduction ? "error" : "warning",
+      message:
+        "DEV_OWNER_EMAIL is not set. The developer/admin role is disabled until it is configured (no built-in fallback email).",
+    })
+  }
+
+  if (!env.clerkWebhookSecret) {
+    issues.push({
+      key: "CLERK_WEBHOOK_SECRET",
+      severity: "warning",
+      message:
+        "CLERK_WEBHOOK_SECRET is not set; the Clerk user sync webhook stays disabled and users are provisioned lazily on first sign-in.",
+    })
+  }
 
   validateOptionalNumber(issues, "AI_TIMEOUT_MS", { min: 1_000, integer: true, isProduction })
   validateOptionalNumber(issues, "AI_MAX_RETRIES", { min: 0, integer: true, isProduction })
