@@ -6,10 +6,13 @@ loadEnvConfig(process.cwd())
 const env = { ...process.env }
 env.NODE_ENV = "production"
 
-const isStrictPreflight =
-  process.env.SWIFT_STRICT_MIGRATIONS === "true" ||
-  process.env.VERCEL === "1" ||
-  process.env.CI === "true"
+function isStrictPreflight() {
+  return (
+    process.env.SWIFT_STRICT_MIGRATIONS === "true" ||
+    process.env.VERCEL === "1" ||
+    process.env.CI === "true"
+  )
+}
 const MAX_MIGRATE_ATTEMPTS = 3
 let migrationStatus = "skipped"
 
