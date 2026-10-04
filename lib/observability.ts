@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs"
-import type { Event } from "@sentry/nextjs"
+import type { ErrorEvent } from "@sentry/nextjs"
 
 let sentryInitialized = false
 
@@ -15,7 +15,7 @@ function initSentryForNonNextRuntime() {
     dsn,
     environment: process.env.VERCEL_ENV || process.env.NODE_ENV,
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE || 0.02),
-    beforeSend(event: Event) {
+    beforeSend(event: ErrorEvent) {
       if (event.request?.cookies) {
         delete event.request.cookies
       }
