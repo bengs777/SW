@@ -1,5 +1,5 @@
 import { db } from "@/lib/db/client"
-import { users, subscriptions, usageLogs } from "@/lib/db/schema"
+import { usageLogs } from "@/lib/db/schema"
 import { eq, and, gte, inArray, sql } from "drizzle-orm"
 import { env, getEnvNumber } from "@/lib/env"
 
@@ -30,6 +30,10 @@ const MAX_UPLOADS_PER_DAY = Math.max(
 const FREE_GENERATIONS_PER_DAY = Math.max(
   1,
   Math.round(getEnvNumber(3, "FREE_GENERATE_LIMIT_PER_DAY", "FREE_GENERATIONS_PER_DAY"))
+)
+const MAX_AI_CHAT_PER_DAY = Math.max(
+  1,
+  Math.round(getEnvNumber(100, "AI_CHAT_RATE_LIMIT_PER_DAY", "AI_ASSIST_RATE_LIMIT_PER_DAY"))
 )
 
 // Usage log states that consume a generation slot: an attempt that is still
@@ -151,75 +155,38 @@ export async function enforceUserRateLimit(userId: string) {
  * This provides defense-in-depth: Redis for fast rejection, DB for accurate counts.
  */
 export async function enforceAiUsageRateLimit(userId: string) {
-  // Fast path: Redis-based rate limiting
+  // Fast path: Redis-based rate limiting (per-minute and per-hour security rate limits)
   await enforceUserRateLimit(userId)
   await enforceGenerationHourlyRateLimit(userId)
 
-  const [user, activePaidSubscription] = await Promise.all([
-    db.query.users.findFirst({
-      where: eq(users.id, userId),
-      columns: { isDeveloperAccount: true },
-    }),
-    db.query.subscriptions.findFirst({
-      where: and(
-        eq(subscriptions.status, "active"),
-        sql`${subscriptions.plan} != 'free'`,
-        sql`exists (select 1 from workspace_members wm where wm.workspace_id = ${subscriptions.workspaceId} and wm.user_id = ${userId})`
-      ),
-      columns: { id: true },
-    }),
-  ])
-
-  const hasPremiumAccess = Boolean(user?.isDeveloperAccount || activePaidSubscription)
-  const dailyLimit = hasPremiumAccess ? MAX_REQUESTS_PER_DAY : FREE_GENERATIONS_PER_DAY
-
-  // Check daily limit via Redis
-  const dayKey = `user:${userId}:day:${new Date().toISOString().slice(0, 10)}`
-  const dayResult = await redisRateCheck(dayKey, dailyLimit, 86400)
-
-  if (!dayResult.allowed) {
-    throw new Error(
-      hasPremiumAccess
-        ? `Daily fair usage limit exceeded. Maximum ${dailyLimit} paid prompts per day.`
-        : `Free limit exceeded. Maximum ${FREE_GENERATIONS_PER_DAY} generations per 24 hours.`
-    )
-  }
-
-  // Defense-in-depth: Verify against database for accurate billing counts
-  // This catches any Redis failures/resets but only on borderline cases
+  // Defense-in-depth: Verify against database for per-minute rate limit
   const now = new Date()
   const oneMinuteAgo = new Date(now.getTime() - WINDOW_MS)
-  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
 
-  const [minuteCount, dayCount] = await Promise.all([
-    db.select({ count: sql<number>`count(*)` }).from(usageLogs).where(
-      and(
-        eq(usageLogs.userId, userId),
-        gte(usageLogs.createdAt, oneMinuteAgo),
-        inArray(usageLogs.status, QUOTA_CONSUMING_STATUSES)
-      )
-    ).then((rows) => rows[0]?.count ?? 0),
-    db.select({ count: sql<number>`count(*)` }).from(usageLogs).where(
-      and(
-        eq(usageLogs.userId, userId),
-        gte(usageLogs.createdAt, oneDayAgo),
-        inArray(usageLogs.status, QUOTA_CONSUMING_STATUSES)
-      )
-    ).then((rows) => rows[0]?.count ?? 0),
-  ])
+  const minuteCount = await db.select({ count: sql<number>`count(*)` }).from(usageLogs).where(
+    and(
+      eq(usageLogs.userId, userId),
+      gte(usageLogs.createdAt, oneMinuteAgo),
+      inArray(usageLogs.status, QUOTA_CONSUMING_STATUSES)
+    )
+  ).then((rows) => rows[0]?.count ?? 0)
 
   if (minuteCount >= MAX_REQUESTS_PER_MINUTE) {
     throw new Error(`Rate limit exceeded. Maximum ${MAX_REQUESTS_PER_MINUTE} paid prompts per minute.`)
   }
+}
 
-  if (dayCount >= dailyLimit) {
-    // The database is the source of truth. Hand back the slot this request just
-    // reserved in Redis so the fast path mirrors real usage instead of drifting.
-    await releaseAiUsageQuota(userId, now)
+/**
+ * Daily cap for paid assistant endpoints (AI chat / auto-repair) that do not
+ * reserve usage-log quota. Bounds provider spend when Redis is available.
+ */
+export async function enforceAiChatDailyRateLimit(userId: string) {
+  const dayKey = `user:${userId}:ai-chat-day:${new Date().toISOString().slice(0, 10)}`
+  const result = await redisRateCheck(dayKey, MAX_AI_CHAT_PER_DAY, 86400)
+
+  if (!result.allowed) {
     throw new Error(
-      hasPremiumAccess
-        ? `Daily fair usage limit exceeded. Maximum ${dailyLimit} paid prompts per day.`
-        : `Free limit exceeded. Maximum ${FREE_GENERATIONS_PER_DAY} generations per 24 hours.`
+      `Daily AI assistant limit exceeded. Maximum ${MAX_AI_CHAT_PER_DAY} requests per day.`
     )
   }
 }
@@ -303,4 +270,5 @@ export const aiRateLimitConfig = {
   perDay: MAX_REQUESTS_PER_DAY,
   uploadPerDay: MAX_UPLOADS_PER_DAY,
   freePerDay: FREE_GENERATIONS_PER_DAY,
+  aiChatPerDay: MAX_AI_CHAT_PER_DAY,
 }

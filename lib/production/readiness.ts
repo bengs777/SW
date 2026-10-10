@@ -29,20 +29,6 @@ function isProductionUrl(value: string | null | undefined) {
   return /^https:\/\//i.test(value) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(value)
 }
 
-function isPostgresUrl(value: string | null | undefined) {
-  return Boolean(value && /^postgres(?:ql)?:\/\//i.test(value))
-}
-
-function isNeonPooledUrl(value: string | null | undefined) {
-  if (!isPostgresUrl(value)) return false
-
-  try {
-    return /pooler\./i.test(new URL(String(value)).hostname)
-  } catch {
-    return false
-  }
-}
-
 function check(
   key: string,
   label: string,

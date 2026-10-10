@@ -1,6 +1,39 @@
-import { env } from "@/lib/env"
+import { env, isConfiguredSecret } from "@/lib/env"
 
 const PAKASIR_BASE_URL = "https://app.pakasir.com"
+
+export class PakasirConfigurationError extends Error {
+  readonly status = 503
+  constructor(message = "Payment provider is not configured.") {
+    super(message)
+    this.name = "PakasirConfigurationError"
+  }
+}
+
+export class PakasirTimeoutError extends Error {
+  readonly status = 504
+  constructor(message = "Payment provider request timed out.") {
+    super(message)
+    this.name = "PakasirTimeoutError"
+  }
+}
+
+export class PakasirUnavailableError extends Error {
+  readonly status = 503
+  constructor(message = "Payment provider is currently unavailable.") {
+    super(message)
+    this.name = "PakasirUnavailableError"
+  }
+}
+
+export class PakasirUpstreamError extends Error {
+  readonly upstreamStatus: number
+  constructor(message: string, upstreamStatus: number) {
+    super(message)
+    this.name = "PakasirUpstreamError"
+    this.upstreamStatus = upstreamStatus
+  }
+}
 
 type CreatePakasirInvoiceInput = {
   reference: string
@@ -96,8 +129,51 @@ function parseJson(raw: string) {
   }
 }
 
+function getPakasirConfig() {
+  let slug = env.pakasirSlug
+  let apiKey = env.pakasirApiKey
+  let webhookSecret = env.pakasirWebhookSecret
+
+  if (!isConfiguredSecret(slug) || !isConfiguredSecret(apiKey)) {
+    try {
+      // Runtime fallback to read .env.local without requiring full server restart
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require("node:fs") as typeof import("node:fs")
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require("node:path") as typeof import("node:path")
+      const envPath = path.resolve(process.cwd(), ".env.local")
+      if (fs.existsSync(envPath)) {
+        const raw = fs.readFileSync(envPath, "utf8")
+        const matchSlug = raw.match(/^\s*PAKASIR_SLUG\s*=\s*(.+)$/m)
+        const matchKey = raw.match(/^\s*PAKASIR_API_KEY\s*=\s*(.+)$/m)
+        const matchSecret = raw.match(/^\s*PAKASIR_WEBHOOK_SECRET\s*=\s*(.+)$/m)
+        if (matchSlug && matchSlug[1]) {
+          slug = matchSlug[1].trim().replace(/^["']|["']$/g, "")
+          process.env.PAKASIR_SLUG = slug
+          env.pakasirSlug = slug
+        }
+        if (matchKey && matchKey[1]) {
+          apiKey = matchKey[1].trim().replace(/^["']|["']$/g, "")
+          process.env.PAKASIR_API_KEY = apiKey
+          env.pakasirApiKey = apiKey
+        }
+        if (matchSecret && matchSecret[1]) {
+          webhookSecret = matchSecret[1].trim().replace(/^["']|["']$/g, "")
+          process.env.PAKASIR_WEBHOOK_SECRET = webhookSecret
+          env.pakasirWebhookSecret = webhookSecret
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { slug, apiKey, webhookSecret }
+}
+
 function buildCheckoutUrl(reference: string, amount: number, returnUrl: string) {
-  const url = new URL(`${PAKASIR_BASE_URL}/pay/${encodeURIComponent(env.pakasirSlug)}/${amount}`)
+  const { slug } = getPakasirConfig()
+  const url = new URL(`${PAKASIR_BASE_URL}/pay/${encodeURIComponent(slug)}/${amount}`)
   url.searchParams.set("order_id", reference)
   url.searchParams.set("qris_only", "1")
 
@@ -109,11 +185,12 @@ function buildCheckoutUrl(reference: string, amount: number, returnUrl: string) 
 }
 
 function buildTransactionDetailUrl(reference: string, amount: number) {
+  const { slug, apiKey } = getPakasirConfig()
   const url = new URL(`${PAKASIR_BASE_URL}/api/transactiondetail`)
-  url.searchParams.set("project", env.pakasirSlug)
+  url.searchParams.set("project", slug)
   url.searchParams.set("amount", String(amount))
   url.searchParams.set("order_id", reference)
-  url.searchParams.set("api_key", env.pakasirApiKey)
+  url.searchParams.set("api_key", apiKey)
   return url.toString()
 }
 
@@ -123,25 +200,49 @@ function isCompletedStatus(status: string) {
 }
 
 export class PakasirService {
+  static getConfig() {
+    return getPakasirConfig()
+  }
+
+  static isConfigured(): boolean {
+    const { slug, apiKey } = getPakasirConfig()
+    return isConfiguredSecret(slug) && isConfiguredSecret(apiKey)
+  }
+
   static async createInvoice(input: CreatePakasirInvoiceInput): Promise<CreatePakasirInvoiceResult> {
-    if (!env.pakasirSlug || !env.pakasirApiKey) {
-      throw new Error("PAKASIR_SLUG and PAKASIR_API_KEY are required")
+    const { slug, apiKey } = getPakasirConfig()
+    if (!isConfiguredSecret(slug) || !isConfiguredSecret(apiKey)) {
+      throw new PakasirConfigurationError("PAKASIR_SLUG and PAKASIR_API_KEY are required and must not be placeholders.")
     }
 
-    const response = await fetch(`${PAKASIR_BASE_URL}/api/transactioncreate/qris`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        project: env.pakasirSlug,
-        order_id: input.reference,
-        amount: input.amount,
-        api_key: env.pakasirApiKey,
-      }),
-      cache: "no-store",
-    })
+    let response: Response
+    try {
+      response = await fetch(`${PAKASIR_BASE_URL}/api/transactioncreate/qris`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          project: slug,
+          order_id: input.reference,
+          amount: input.amount,
+          api_key: apiKey,
+        }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(15000),
+      })
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        if (err.name === "TimeoutError" || err.name === "AbortError" || /timeout/i.test(err.message)) {
+          throw new PakasirTimeoutError("Payment provider request timed out.")
+        }
+        if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET/i.test(err.message)) {
+          throw new PakasirUnavailableError("Payment provider is unreachable.")
+        }
+      }
+      throw new PakasirUnavailableError("Failed to connect to payment provider.")
+    }
 
     const rawResponse = await response.text().catch(() => "")
     const json = parseJson(rawResponse)
@@ -149,9 +250,8 @@ export class PakasirService {
     if (!response.ok) {
       const errorMessage =
         readFirstString(json, ["message", "error", "detail"]) ||
-        rawResponse ||
         `Pakasir request failed (${response.status})`
-      throw new Error(errorMessage)
+      throw new PakasirUpstreamError(errorMessage, response.status)
     }
 
     const payment = readFirstObject(json, ["payment", "transaction", "data"]) ?? json
@@ -178,17 +278,31 @@ export class PakasirService {
   }
 
   static async getTransactionDetail(input: TransactionDetailInput): Promise<TransactionDetailResult> {
-    if (!env.pakasirSlug || !env.pakasirApiKey) {
-      throw new Error("PAKASIR_SLUG and PAKASIR_API_KEY are required")
+    if (!this.isConfigured()) {
+      throw new PakasirConfigurationError("PAKASIR_SLUG and PAKASIR_API_KEY are required and must not be placeholders.")
     }
 
-    const response = await fetch(buildTransactionDetailUrl(input.reference, input.amount), {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-      },
-      cache: "no-store",
-    })
+    let response: Response
+    try {
+      response = await fetch(buildTransactionDetailUrl(input.reference, input.amount), {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+        cache: "no-store",
+        signal: AbortSignal.timeout(15000),
+      })
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        if (err.name === "TimeoutError" || err.name === "AbortError" || /timeout/i.test(err.message)) {
+          throw new PakasirTimeoutError("Payment provider request timed out.")
+        }
+        if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET/i.test(err.message)) {
+          throw new PakasirUnavailableError("Payment provider is unreachable.")
+        }
+      }
+      throw new PakasirUnavailableError("Failed to connect to payment provider.")
+    }
 
     const rawResponse = await response.text().catch(() => "")
     const json = parseJson(rawResponse)
@@ -196,9 +310,8 @@ export class PakasirService {
     if (!response.ok) {
       const errorMessage =
         readFirstString(json, ["message", "error", "detail"]) ||
-        rawResponse ||
         `Pakasir transaction detail failed (${response.status})`
-      throw new Error(errorMessage)
+      throw new PakasirUpstreamError(errorMessage, response.status)
     }
 
     const transaction = readFirstObject(json, ["transaction", "data"]) ?? json
@@ -210,7 +323,7 @@ export class PakasirService {
       status,
       orderId:
         readFirstString(transaction, ["order_id", "orderId", "reference"]) || input.reference,
-      project: readFirstString(transaction, ["project"]) || env.pakasirSlug,
+      project: readFirstString(transaction, ["project"]) || getPakasirConfig().slug,
       amount,
       paymentMethod: readFirstString(transaction, ["payment_method", "paymentMethod"]),
       paymentCode:

@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSession } from "@/auth"
 import { db } from "@/lib/db/client"
-import { projects, projectFiles } from "@/lib/db/schema"
-import { eq, and, inArray } from "drizzle-orm"
+import { projects } from "@/lib/db/schema"
+import { eq } from "drizzle-orm"
 import { env } from "@/lib/env"
 import type { GeneratedFile } from "@/lib/types"
 import { UserService } from "@/lib/services/user.service"
@@ -10,6 +10,7 @@ import { GenerationQualityService } from "@/lib/services/generation-quality.serv
 import { splitWorkspaceStateFiles, normalizeFileLanguage } from "@/lib/workspace-state"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 export const runtime = "nodejs"
 
@@ -522,6 +523,9 @@ const slugify = (value: string) =>
     .replace(/^-+|-+$/g, "") || "swift-project"
 
 const resolveProjectFiles = async (projectId: string, userId: string) => {
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) return null
+
   const project = await db.query.projects.findFirst({
     where: eq(projects.id, projectId),
     with: {

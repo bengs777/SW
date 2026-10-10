@@ -1,6 +1,6 @@
 import { db } from "@/lib/db/client"
 import { generationJobs } from "@/lib/db/schema"
-import { and, eq, notInArray, inArray, lt, isNotNull, sql } from "drizzle-orm"
+import { and, notInArray, inArray, lt, isNotNull, sql } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { MIN_GENERATION_JOB_TIMEOUT_MS, timeoutConfig } from "@/lib/timeouts"
 import { captureException } from "@/lib/observability"

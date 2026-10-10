@@ -430,6 +430,27 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
   window.addEventListener('pagehide', revokeAllBlobUrls);
   window.addEventListener('beforeunload', revokeAllBlobUrls);
 
+  document.addEventListener('click', function(e) {
+    var anchor = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (!anchor) return;
+    var href = anchor.getAttribute('href');
+    if (!href) return;
+    if (href.indexOf('#') === 0) return;
+    if (/^https?:\\/\\//i.test(href)) {
+      anchor.setAttribute('target', '_blank');
+      anchor.setAttribute('rel', 'noopener noreferrer');
+      return;
+    }
+    e.preventDefault();
+    try {
+      window.parent.postMessage({ type: 'swift-preview-nav', path: href }, '*');
+    } catch (err) {}
+  }, true);
+
+  document.addEventListener('submit', function(e) {
+    e.preventDefault();
+  }, true);
+
   function escapeHtml(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
@@ -773,7 +794,7 @@ function buildPreviewSrcDoc(files: GeneratedFile[]): string {
         filename: path,
         presets: [
           ['react', {runtime:'automatic'}],
-          ['typescript', {isTSX:true, allExtensions:true}]
+          'typescript'
         ],
         sourceType: 'module',
         parserOpts: {

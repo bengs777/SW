@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db/client"
 import { generationJobs } from "@/lib/db/schema"
-import { and, eq, inArray, lt } from "drizzle-orm"
+import { and, inArray, lt } from "drizzle-orm"
 import { requireDeveloperActorResponse } from "@/lib/admin"
 import { cleanupGenerationQueue } from "@/lib/queue/generation-queue"
 import { reconcileStaleGenerationJobs } from "@/lib/services/stale-generation-reconciliation.service"

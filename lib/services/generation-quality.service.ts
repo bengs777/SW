@@ -1,6 +1,6 @@
 import { db } from "@/lib/db/client"
 import { generationQualityMetrics } from "@/lib/db/schema"
-import { eq, and, gte, desc, sql } from "drizzle-orm"
+import { eq, gte, desc } from "drizzle-orm"
 import { log } from "@/lib/logging"
 
 export type GenerationQualityStage =

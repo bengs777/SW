@@ -1,0 +1,2 @@
+DROP INDEX `idx_generation_jobs_request_hash`;--> statement-breakpoint
+CREATE UNIQUE INDEX `idx_generation_jobs_request_hash` ON `generation_jobs` (`user_id`,`project_id`,`request_hash`) WHERE "status" not in ('failed', 'cancelled', 'dead_lettered', 'terminated');

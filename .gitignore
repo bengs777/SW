@@ -29,3 +29,6 @@ fixing*.md
 .tmp/
 
 db-backup-*.json
+
+.backup-laundry-artifacts/
+playwright-screenshots/

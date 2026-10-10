@@ -9,7 +9,13 @@ import { db } from "@/lib/db/client"
 import { workspaceMembers } from "@/lib/db/schema"
 import { and, eq } from "drizzle-orm"
 import { BillingService } from "@/lib/services/billing.service"
-import { PakasirService } from "@/lib/services/pakasir.service"
+import {
+  PakasirService,
+  PakasirConfigurationError,
+  PakasirTimeoutError,
+  PakasirUnavailableError,
+  PakasirUpstreamError,
+} from "@/lib/services/pakasir.service"
 import { UserService } from "@/lib/services/user.service"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
 
@@ -26,8 +32,8 @@ const TopupSchema = z.object({
   workspaceId: z.string().trim().optional(),
 })
 
-function buildReference() {
-  return `TOPUP-${randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`
+function buildReference(prefix = "TOPUP") {
+  return `${prefix}-${randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`
 }
 
 function buildCustomerName(name: string | null | undefined, email: string) {
@@ -37,6 +43,18 @@ function buildCustomerName(name: string | null | undefined, email: string) {
   }
 
   return email.split("@")[0] || "Swift User"
+}
+
+function sanitizeErrorMessage(message: string): string {
+  if (!message || typeof message !== "string") {
+    return "Payment provider error. Please try again later."
+  }
+  return (
+    message
+      .replace(/[a-zA-Z0-9_-]{24,}/g, "[REDACTED]")
+      .replace(/https?:\/\/[^\s]+/g, "[URL]")
+      .trim() || "Payment provider error. Please try again later."
+  )
 }
 
 export async function POST(request: NextRequest) {
@@ -88,14 +106,80 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (!env.pakasirSlug || !env.pakasirApiKey) {
-      return NextResponse.json(
-        {
-          error:
-            "Pakasir is not configured. Set PAKASIR_SLUG and PAKASIR_API_KEY before creating topups.",
+    const isExplicitSimulator =
+      process.env.ENABLE_BILLING_SIMULATOR === "true" ||
+      process.env.ALLOW_BILLING_SIMULATOR === "true"
+
+    if (!PakasirService.isConfigured()) {
+      if (!isExplicitSimulator) {
+        return NextResponse.json(
+          {
+            error:
+              "Payment gateway Pakasir belum aktif. Mohon lengkapi PAKASIR_SLUG dan PAKASIR_API_KEY di file .env.local untuk memunculkan pembayaran QRIS Pakasir.",
+          },
+          { status: 503 }
+        )
+      }
+
+      // Explicit Simulator Mode (hanya jika ENABLE_BILLING_SIMULATOR=true):
+      const reference = buildReference("SIM")
+      const customerName = buildCustomerName(user.name, user.email)
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
+
+      await BillingService.createTopUpOrder({
+        userId: user.id,
+        reference,
+        amount: body.amount,
+        provider: "sandbox",
+        customerName,
+        customerEmail: user.email,
+        payload: JSON.stringify({
+          source: body.source,
+          note: body.note || "Development sandbox top up",
+          purchaseType: body.purchaseType,
+          planId: body.planId || null,
+          workspaceId: body.workspaceId || null,
+          requestedAmount: body.amount,
+          sandbox: true,
+        }),
+        status: "pending",
+        expiresAt,
+      })
+
+      const finalization = await BillingService.finalizeTopUpOrder({
+        reference,
+        providerReference: `SANDBOX-${reference}`,
+        paymentCode: "SANDBOX-PAID",
+        response: JSON.stringify({
+          provider: "sandbox",
+          mode: "simulator",
+          settledAt: new Date().toISOString(),
+        }),
+        amount: body.amount,
+        paidAt: new Date(),
+      })
+
+      return NextResponse.json({
+        success: true,
+        topupMinimum: TOPUP_MINIMUM,
+        purchaseType: body.purchaseType,
+        planId: body.planId || null,
+        order: {
+          id: finalization.order.id,
+          reference: finalization.order.reference,
+          amount: finalization.order.amount,
+          status: "paid",
+          provider: "sandbox",
+          providerReference: `SANDBOX-${reference}`,
+          checkoutUrl: null,
+          paymentCode: "SANDBOX-PAID",
+          createdAt: finalization.order.createdAt,
+          expiresAt: finalization.order.expiresAt,
         },
-        { status: 503 }
-      )
+        checkoutUrl: null,
+        paymentCode: "SANDBOX-PAID",
+        sandbox: true,
+      })
     }
 
     const reference = buildReference()
@@ -164,9 +248,77 @@ export async function POST(request: NextRequest) {
         paymentCode: order[0].paymentCode,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to create Pakasir invoice"
-      await BillingService.markTopUpOrderFailed(reference, message)
-      return NextResponse.json({ error: message }, { status: 502 })
+      if (isExplicitSimulator) {
+        console.warn("[Billing] Pakasir upstream error, auto-settling via explicit simulator flag:", error)
+        try {
+          const finalization = await BillingService.finalizeTopUpOrder({
+            reference,
+            providerReference: `SANDBOX-${reference}`,
+            paymentCode: "SANDBOX-PAID",
+            response: JSON.stringify({
+              provider: "sandbox_fallback",
+              upstreamError: error instanceof Error ? error.message : "Upstream error",
+              settledAt: new Date().toISOString(),
+            }),
+            amount: body.amount,
+            paidAt: new Date(),
+          })
+
+          return NextResponse.json({
+            success: true,
+            topupMinimum: TOPUP_MINIMUM,
+            purchaseType: body.purchaseType,
+            planId: body.planId || null,
+            order: {
+              id: finalization.order.id,
+              reference: finalization.order.reference,
+              amount: finalization.order.amount,
+              status: "paid",
+              provider: "sandbox",
+              providerReference: `SANDBOX-${reference}`,
+              checkoutUrl: null,
+              paymentCode: "SANDBOX-PAID",
+              createdAt: finalization.order.createdAt,
+              expiresAt: finalization.order.expiresAt,
+            },
+            checkoutUrl: null,
+            paymentCode: "SANDBOX-PAID",
+            sandbox: true,
+          })
+        } catch (simError) {
+          console.error("[Billing] Failed fallback simulation:", simError)
+        }
+      }
+
+      let httpStatus = 502
+      let clientMessage = "Payment provider error. Please try again later."
+      const rawMessage = error instanceof Error ? error.message : "Failed to create Pakasir invoice"
+
+      if (error instanceof PakasirConfigurationError) {
+        httpStatus = 503
+        clientMessage = "Payment service is currently unavailable. Payment provider is not configured."
+      } else if (error instanceof PakasirTimeoutError) {
+        httpStatus = 504
+        clientMessage = "Payment provider request timed out. Please try again."
+      } else if (error instanceof PakasirUnavailableError) {
+        httpStatus = 503
+        clientMessage = "Payment service is currently unavailable. Please try again later."
+      } else if (error instanceof PakasirUpstreamError) {
+        if (error.upstreamStatus === 404 || /project not found/i.test(error.message)) {
+          httpStatus = 503
+          clientMessage = "Payment service is currently unavailable. Merchant project not found."
+        } else if (error.upstreamStatus >= 500) {
+          httpStatus = 502
+          clientMessage = "Payment provider gateway error. Please try again later."
+        } else {
+          httpStatus = 502
+          clientMessage = sanitizeErrorMessage(error.message)
+        }
+      } else if (error instanceof Error) {
+        clientMessage = sanitizeErrorMessage(error.message)
+      }
+      await BillingService.markTopUpOrderFailed(reference, sanitizeErrorMessage(rawMessage))
+      return NextResponse.json({ error: clientMessage }, { status: httpStatus })
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create top up order"

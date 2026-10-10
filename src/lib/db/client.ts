@@ -98,6 +98,24 @@ function isConnectionError(error: unknown) {
   return /connection|connect|timeout|timed out|closed|ECONNRESET|ETIMEDOUT|SQLITE_BUSY|no such table/i.test(message)
 }
 
+/**
+ * Write operations are never replayed automatically: a timeout or dropped
+ * connection means the statement may already have been committed, so a blind
+ * retry would double-apply balance changes and job reservations.
+ * Only read-only operations (`db.select`) are safe to retry.
+ */
+const NON_RETRYABLE_OPERATIONS = new Set([
+  "db.insert",
+  "db.update",
+  "db.delete",
+  "db.batch",
+  "db.transaction",
+])
+
+function isRetryableOperation(operation: string) {
+  return !NON_RETRYABLE_OPERATIONS.has(operation)
+}
+
 async function withQueryTimeout<T>(operation: string, promise: Promise<T>) {
   let timeout: ReturnType<typeof setTimeout> | null = null
   try {
@@ -127,7 +145,7 @@ async function resilientDatabaseCall<T>(operation: string, fn: () => Promise<T>)
       lastError = error
       const message = error instanceof Error ? error.message : String(error)
 
-      if (attempt >= DB_MAX_RETRIES || !isConnectionError(error)) {
+      if (attempt >= DB_MAX_RETRIES || !isConnectionError(error) || !isRetryableOperation(operation)) {
         throw error
       }
 

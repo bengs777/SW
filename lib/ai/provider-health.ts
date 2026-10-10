@@ -17,6 +17,7 @@ export type SwiftModelHealth = {
 
 const DEFAULT_HEALTH_TTL_MS = 60_000
 const FAILURE_COOLDOWN_MS = 90_000
+const RATE_LIMIT_COOLDOWN_MS = 120_000
 const OFFLINE_COOLDOWN_MS = 5 * 60_000
 const FAILURE_THRESHOLD = 3
 const healthByModel = new Map<string, SwiftModelHealth>()
@@ -68,7 +69,12 @@ export function markModelFailure(
   const current = healthByModel.get(modelId)
   const consecutiveFailures = (current?.consecutiveFailures || 0) + 1
   const status = toHealthStatus(input.reason, consecutiveFailures)
-  const cooldownMs = status === "offline" ? OFFLINE_COOLDOWN_MS : FAILURE_COOLDOWN_MS
+  const cooldownMs =
+    input.reason === "rate_limit"
+      ? RATE_LIMIT_COOLDOWN_MS
+      : status === "offline"
+        ? OFFLINE_COOLDOWN_MS
+        : FAILURE_COOLDOWN_MS
 
   healthByModel.set(modelId, {
     modelId,

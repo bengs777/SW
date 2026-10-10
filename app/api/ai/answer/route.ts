@@ -5,12 +5,13 @@ import { db } from "@/lib/db/client"
 import { users, projects } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
-import { enforceUserRateLimit } from "@/lib/security/rate-limit"
+import { enforceAiChatDailyRateLimit, enforceUserRateLimit } from "@/lib/security/rate-limit"
 import { ProviderRouter, SwiftProviderFailureError, type ProviderName } from "@/lib/ai/provider-router"
 import { chooseModelForTask } from "@/lib/ai/model-router"
 import { SWIFT_PROVIDER } from "@/lib/ai/swift-tiers"
 import { ModelConfigService } from "@/lib/services/model-config.service"
 import { normalizePreviewContext, appendPreviewContextToPrompt } from "@/lib/ai/preview-context"
+import { getProjectAccess } from "@/lib/auth/project-access"
 import { log } from "@/lib/logging"
 
 export const runtime = "nodejs"
@@ -53,15 +54,23 @@ async function resolveSessionUserId() {
 }
 
 async function requireProjectMember(projectId: string, userId: string) {
-  const project = await db.query.projects.findFirst({
-    where: eq(projects.id, projectId),
-  })
-
-  if (!project) {
-    return { ok: false as const, status: 404, error: "Project not found" }
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) {
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, projectId),
+      columns: { id: true },
+    })
+    if (!project) {
+      return { ok: false as const, status: 404, error: "Project not found" }
+    }
+    return { ok: false as const, status: 403, error: "Forbidden" }
   }
 
-  return { ok: true as const, projectId, role: "member" as const }
+  return {
+    ok: true as const,
+    projectId,
+    role: access.role === "admin" ? ("admin" as const) : ("member" as const),
+  }
 }
 
 function buildAnswerInstruction(mode: "ask" | "review", language: "id" | "en") {
@@ -99,6 +108,7 @@ export async function POST(req: NextRequest) {
 
   try {
     await enforceUserRateLimit(`ai-answer:${userId}`)
+    await enforceAiChatDailyRateLimit(userId)
   } catch (error) {
     log("warn", "ai-answer rate limited", { userId })
     return NextResponse.json({ error: getErrorMessage(error) }, { status: 429 })
@@ -149,10 +159,23 @@ export async function POST(req: NextRequest) {
     })
   } catch (error) {
     if (error instanceof SwiftProviderFailureError) {
-      log("error", "ai-answer provider failed", { userId, projectId, mode, error: getErrorMessage(error) })
+      log("error", "ai-answer provider failed", {
+        userId,
+        projectId,
+        mode,
+        rootCause: error.rootCause,
+        error: getErrorMessage(error),
+      })
+      const isRateLimit =
+        error.rootCause === "rate_limit" || error.rootCause === "rate_limit_free_quota"
+      const status = isRateLimit ? 429 : error.rootCause === "timeout" ? 504 : 503
       return NextResponse.json(
-        { error: "Swift sedang sibuk menjawab pertanyaan. Coba lagi sebentar." },
-        { status: 502 }
+        {
+          error:
+            error.userMessage || "Swift AI sedang mengalami gangguan sementara. Coba lagi sebentar.",
+          code: error.rootCause || "provider_failure",
+        },
+        { status }
       )
     }
 

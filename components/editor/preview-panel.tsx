@@ -5,7 +5,8 @@ import dynamic from "next/dynamic"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { SandboxPreview } from "./sandbox-preview"
-import { CodeExplorer } from "./code-explorer"
+import { FileManagerExplorer } from "./file-manager-explorer"
+import { TerminalPanel } from "./terminal-panel"
 import {
   Smartphone,
   Tablet,
@@ -18,6 +19,9 @@ import {
   AlertCircle,
   Folder,
   Square,
+  Terminal as TerminalIcon,
+  X,
+  Code2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { buildBrowserPreviewFiles } from "@/lib/preview/sanitizer"
@@ -33,27 +37,15 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ),
 })
 
-const RUNTIME_PREVIEW_SANDBOX_BASE = "allow-scripts allow-forms"
-const SAME_ORIGIN_SANDBOX_TOKEN = "allow-same-origin"
+const RUNTIME_PREVIEW_SANDBOX = "allow-scripts allow-forms allow-same-origin allow-popups allow-modals"
 
-function resolveRuntimePreviewSandbox(runtimePreviewUrl: string | null) {
-  if (!runtimePreviewUrl || typeof window === "undefined") {
-    return RUNTIME_PREVIEW_SANDBOX_BASE
-  }
-
-  try {
-    const previewOrigin = new URL(runtimePreviewUrl, window.location.href).origin
-    if (previewOrigin && previewOrigin !== window.location.origin) {
-      return `${RUNTIME_PREVIEW_SANDBOX_BASE} ${SAME_ORIGIN_SANDBOX_TOKEN}`
-    }
-  } catch {
-    return RUNTIME_PREVIEW_SANDBOX_BASE
-  }
-
-  return RUNTIME_PREVIEW_SANDBOX_BASE
+function resolveRuntimePreviewSandbox(_runtimePreviewUrl: string | null) {
+  return RUNTIME_PREVIEW_SANDBOX
 }
 
 type ViewportSize = "mobile" | "tablet" | "desktop"
+
+export type PreviewTabType = "preview" | "code" | "terminal" | "explorer"
 
 interface PreviewPanelProps {
   files: GeneratedFile[]
@@ -67,8 +59,8 @@ interface PreviewPanelProps {
   onSaveFiles?: () => void
   isSaving?: boolean
   isDirty?: boolean
-  activeTab?: "preview" | "code" | "explorer"
-  onTabChange?: (tab: "preview" | "code" | "explorer") => void
+  activeTab?: PreviewTabType
+  onTabChange?: (tab: PreviewTabType) => void
   onPreviewErrorChange?: (error: string | null) => void
   isGenerating?: boolean
   streamLockedPaths?: string[]
@@ -86,6 +78,7 @@ export function PreviewPanel({
   onSelectFile,
   onViewportChange,
   onUpdateFile,
+  onReplaceFiles,
   onSaveFiles,
   isSaving = false,
   isDirty = false,
@@ -99,23 +92,50 @@ export function PreviewPanel({
   projectId,
   runtimePreviewUrl = null,
 }: PreviewPanelProps) {
-  const [internalActiveTab, setInternalActiveTab] = useState<"preview" | "code" | "explorer">("preview")
+  const [internalActiveTab, setInternalActiveTab] = useState<PreviewTabType>("preview")
   const [viewport, setViewport] = useState<ViewportSize>("desktop")
-  const [activeFile, setActiveFile] = useState(0)
   const [copied, setCopied] = useState(false)
   const [previewKey, setPreviewKey] = useState(0)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [forceBrowserPreview, setForceBrowserPreview] = useState(false)
+  const [runtimePreviewError, setRuntimePreviewError] = useState(false)
+
+  // Multi-tab editor tabs
+  const [openTabs, setOpenTabs] = useState<string[]>([])
+
   const activeTab = activeTabProp || internalActiveTab
   const runtimePreviewSandbox = useMemo(
     () => resolveRuntimePreviewSandbox(runtimePreviewUrl),
     [runtimePreviewUrl]
   )
+  const isUsingRuntimePreview = Boolean(
+    runtimePreviewUrl && !forceBrowserPreview
+  )
+
+  const activePath = files[activeFileIndex]?.path || ""
+
+  // Ensure active file is in openTabs
+  useEffect(() => {
+    if (activePath) {
+      setOpenTabs((prev) => {
+        if (!prev.includes(activePath)) {
+          return [...prev, activePath]
+        }
+        return prev
+      })
+    }
+  }, [activePath])
 
   useEffect(() => {
-    if (files.length > 0 && activeFile >= files.length) {
-      setActiveFile(0)
+    // If openTabs is empty but files exist, open the first file
+    if (openTabs.length === 0 && files.length > 0 && files[0]?.path) {
+      setOpenTabs([files[0].path])
     }
-  }, [activeFile, files.length])
+  }, [files, openTabs.length])
+
+  useEffect(() => {
+    setRuntimePreviewError(false)
+  }, [runtimePreviewUrl])
 
   useEffect(() => {
     setPreviewError(null)
@@ -135,30 +155,42 @@ export function PreviewPanel({
 
   const handleRefresh = () => {
     setPreviewKey((k) => k + 1)
-    setPreviewError(null)
   }
 
   const handleOpenPreview = () => {
     if (runtimePreviewUrl) {
-      window.open(runtimePreviewUrl, "_blank", "noopener,noreferrer")
+      window.open(runtimePreviewUrl, "_blank")
     }
   }
 
-  const handlePreviewError = useCallback((error: string) => {
+  const handlePreviewError = (error: string) => {
     setPreviewError(error)
-  }, [])
-
-  useEffect(() => {
-    onViewportChange?.(viewport)
-  }, [onViewportChange, viewport])
+  }
 
   const handleCodeChange = (content: string) => {
-    const activePath = files[activeFileIndex]?.path || ""
-    if (isGenerating && streamLockedPaths.includes(normalizePath(activePath))) {
-      return
-    }
-
     onUpdateFile?.(activeFileIndex, content)
+  }
+
+  const handleSelectFilePath = (path: string) => {
+    const idx = files.findIndex((f) => normalizePath(f.path) === normalizePath(path))
+    if (idx >= 0) {
+      onSelectFile?.(idx)
+    }
+    if (!openTabs.includes(path)) {
+      setOpenTabs((prev) => [...prev, path])
+    }
+  }
+
+  const handleCloseTab = (path: string) => {
+    const nextTabs = openTabs.filter((t) => t !== path)
+    setOpenTabs(nextTabs)
+    if (path === activePath && nextTabs.length > 0) {
+      const nextActive = nextTabs[nextTabs.length - 1]
+      const idx = files.findIndex((f) => normalizePath(f.path) === normalizePath(nextActive))
+      if (idx >= 0) {
+        onSelectFile?.(idx)
+      }
+    }
   }
 
   const viewportWidths: Record<ViewportSize, string> = {
@@ -167,13 +199,13 @@ export function PreviewPanel({
     desktop: "100%",
   }
 
-  const handleTabChange = (tab: "preview" | "code" | "explorer") => {
+  const handleTabChange = (tab: PreviewTabType) => {
     if (!activeTabProp) {
       setInternalActiveTab(tab)
     }
     onTabChange?.(tab)
   }
-  const activePath = files[activeFileIndex]?.path || ""
+
   const isActiveFileLocked = isGenerating && streamLockedPaths.includes(normalizePath(activePath))
   const browserPreviewFiles = useMemo(
     () => buildBrowserPreviewFiles(previewFiles ?? files),
@@ -183,21 +215,26 @@ export function PreviewPanel({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-muted/30">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border/70 bg-background/80 px-4 py-2 backdrop-blur-xl">
+      <div className="flex items-center justify-between border-b border-border/70 bg-background/80 px-4 py-2 backdrop-blur-xl shrink-0">
         <div className="flex items-center gap-4">
-          <Tabs value={activeTab} onValueChange={(v) => handleTabChange(v as "preview" | "code" | "explorer") }>
+          <Tabs value={activeTab} onValueChange={(v) => handleTabChange(v as PreviewTabType)}>
             <TabsList>
               <TabsTrigger value="preview">Preview</TabsTrigger>
-              <TabsTrigger value="code" className="gap-2">
+              <TabsTrigger value="code" className="gap-1.5">
                 <FileCode className="h-3.5 w-3.5" />
                 Code
               </TabsTrigger>
-              <TabsTrigger value="explorer" className="gap-2">
+              <TabsTrigger value="terminal" className="gap-1.5">
+                <TerminalIcon className="h-3.5 w-3.5 text-emerald-400" />
+                Terminal
+              </TabsTrigger>
+              <TabsTrigger value="explorer" className="gap-1.5">
                 <Folder className="h-3.5 w-3.5" />
                 Explorer
               </TabsTrigger>
             </TabsList>
           </Tabs>
+
           {previewError && activeTab === "preview" && (
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 text-xs text-destructive">
@@ -246,15 +283,33 @@ export function PreviewPanel({
                 <Monitor className="h-3.5 w-3.5" />
               </Button>
             </div>
-            <Button 
-              variant="ghost" 
-              size="icon" 
+            <Button
+              variant="ghost"
+              size="icon"
               className="h-8 w-8 rounded-full"
               onClick={handleRefresh}
               title="Refresh preview"
             >
               <RefreshCw className="h-4 w-4" />
             </Button>
+            {runtimePreviewUrl && (
+              <Button
+                variant={isUsingRuntimePreview ? "secondary" : "outline"}
+                size="sm"
+                className="h-7 text-xs px-2.5 rounded-full font-medium"
+                onClick={() => {
+                  setForceBrowserPreview((prev) => !prev)
+                  setRuntimePreviewError(false)
+                }}
+                title={
+                  isUsingRuntimePreview
+                    ? "Beralih ke Browser Sandbox Preview"
+                    : "Beralih ke Live Runtime Preview"
+                }
+              >
+                {isUsingRuntimePreview ? "Runtime" : "Browser"}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -268,7 +323,7 @@ export function PreviewPanel({
           </div>
         )}
 
-        {activeTab === "code" && files.length > 0 && (
+        {(activeTab === "code" || activeTab === "explorer") && files.length > 0 && (
           <div className="flex items-center gap-2">
             {onSaveFiles && (
               <Button
@@ -297,7 +352,7 @@ export function PreviewPanel({
         )}
       </div>
 
-      {/* Content */}
+      {/* Main Content Area */}
       {activeTab === "preview" ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-4">
           <div
@@ -307,23 +362,49 @@ export function PreviewPanel({
             )}
             style={{ width: viewportWidths[viewport], maxWidth: "100%" }}
           >
-            {runtimePreviewUrl ? (
-              <iframe
-                key={`${previewKey}:${runtimePreviewUrl}`}
-                src={runtimePreviewUrl}
-                title="Runtime preview"
-                className="h-full w-full border-0 bg-background"
-                sandbox={runtimePreviewSandbox}
-                referrerPolicy="no-referrer"
-                onLoad={() => setPreviewError(null)}
-              />
+            {isUsingRuntimePreview ? (
+              <div className="relative h-full w-full">
+                {runtimePreviewError && (
+                  <div className="absolute top-0 inset-x-0 z-10 bg-amber-500/10 backdrop-blur-sm border-b border-amber-500/20 px-3 py-1.5 text-xs text-amber-500 flex items-center justify-between">
+                    <span>Gagal menghubungkan ke runtime sandbox preview.</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-xs px-2 text-amber-400 hover:text-amber-300"
+                      onClick={() => {
+                        setRuntimePreviewError(false)
+                        handleRefresh()
+                      }}
+                    >
+                      Muat Ulang
+                    </Button>
+                  </div>
+                )}
+                <iframe
+                  key={`${previewKey}:${runtimePreviewUrl}`}
+                  src={runtimePreviewUrl || undefined}
+                  title="Runtime preview"
+                  className="h-full w-full border-0 bg-background"
+                  sandbox={runtimePreviewSandbox}
+                  referrerPolicy="origin-when-cross-origin"
+                  onLoad={() => {
+                    setPreviewError(null)
+                    setRuntimePreviewError(false)
+                  }}
+                  onError={() => {
+                    setRuntimePreviewError(true)
+                  }}
+                />
+              </div>
             ) : files.length > 0 ? (
-              <SandboxPreview 
-                key={previewKey}
-                files={browserPreviewFiles}
-                onError={handlePreviewError}
-                projectId={projectId}
-              />
+              <div className="relative h-full w-full">
+                <SandboxPreview
+                  key={previewKey}
+                  files={browserPreviewFiles}
+                  onError={handlePreviewError}
+                  projectId={projectId}
+                />
+              </div>
             ) : isGenerating ? (
               <GeneratingPreview progress={generationProgress} onCancelGeneration={onCancelGeneration} />
             ) : (
@@ -331,15 +412,28 @@ export function PreviewPanel({
             )}
           </div>
         </div>
+      ) : activeTab === "terminal" ? (
+        <div className="flex min-h-0 flex-1 overflow-hidden p-3 bg-background">
+          <TerminalPanel
+            projectId={projectId || "swift-project"}
+            runtimePreviewUrl={runtimePreviewUrl}
+            className="w-full h-full"
+          />
+        </div>
       ) : activeTab === "code" ? (
-        <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden bg-background">
           {files.length > 0 ? (
-            <div className="flex-1 overflow-auto bg-background">
-              <CodeEditor
-                filePath={files[activeFileIndex]?.path || ""}
+            <div className="flex-1 min-w-0 flex flex-col h-full">
+              <MultiTabCodeEditor
+                openTabs={openTabs}
+                activeFilePath={activePath}
+                onSelectTab={handleSelectFilePath}
+                onCloseTab={handleCloseTab}
+                filePath={activePath}
                 code={files[activeFileIndex]?.content || ""}
                 onChange={handleCodeChange}
                 readOnly={isActiveFileLocked}
+                isDirty={isDirty}
               />
             </div>
           ) : (
@@ -347,27 +441,29 @@ export function PreviewPanel({
           )}
         </div>
       ) : (
+        /* Explorer Tab: Full File Manager + Multi-tab Code Editor Side by Side */
         <div className="flex min-h-0 flex-1 overflow-hidden bg-background">
           {files.length > 0 ? (
             <>
-              <div className="w-72 shrink-0 border-r border-border">
-                <CodeExplorer
+              <div className="w-72 shrink-0 border-r border-border h-full">
+                <FileManagerExplorer
                   files={files}
-                  activeFilePath={files[activeFileIndex]?.path}
-                  onSelectFile={(filePath) => {
-                    const index = files.findIndex((f) => f.path === filePath)
-                    if (index >= 0 && onSelectFile) {
-                      onSelectFile(index)
-                    }
-                  }}
+                  activeFilePath={activePath}
+                  onSelectFile={handleSelectFilePath}
+                  onReplaceFiles={onReplaceFiles}
                 />
               </div>
-              <div className="min-w-0 flex-1">
-                <CodeEditor
-                  filePath={files[activeFileIndex]?.path || ""}
+              <div className="min-w-0 flex-1 flex flex-col h-full">
+                <MultiTabCodeEditor
+                  openTabs={openTabs}
+                  activeFilePath={activePath}
+                  onSelectTab={handleSelectFilePath}
+                  onCloseTab={handleCloseTab}
+                  filePath={activePath}
                   code={files[activeFileIndex]?.content || ""}
                   onChange={handleCodeChange}
                   readOnly={isActiveFileLocked}
+                  isDirty={isDirty}
                 />
               </div>
             </>
@@ -378,6 +474,118 @@ export function PreviewPanel({
       )}
     </div>
   )
+}
+
+function MultiTabCodeEditor({
+  openTabs,
+  activeFilePath,
+  onSelectTab,
+  onCloseTab,
+  filePath,
+  code,
+  onChange,
+  readOnly = false,
+  isDirty = false,
+}: {
+  openTabs: string[]
+  activeFilePath: string
+  onSelectTab: (path: string) => void
+  onCloseTab: (path: string) => void
+  filePath: string
+  code: string
+  onChange: (value: string) => void
+  readOnly?: boolean
+  isDirty?: boolean
+}) {
+  const language = getMonacoLanguage(filePath)
+
+  return (
+    <div className="flex h-full flex-col min-h-0">
+      {/* Tab bar */}
+      <div className="flex items-center justify-between border-b border-border bg-muted/20 text-xs shrink-0 select-none">
+        <div className="flex items-center overflow-x-auto min-w-0 max-w-full divide-x divide-border/60 scrollbar-none">
+          {openTabs.map((tabPath) => {
+            const isActive = normalizePath(tabPath) === normalizePath(activeFilePath)
+            const fileName = tabPath.split("/").pop() || tabPath
+            return (
+              <div
+                key={tabPath}
+                onClick={() => onSelectTab(tabPath)}
+                className={cn(
+                  "group flex items-center gap-2 px-3 py-1.5 cursor-pointer text-xs transition-colors shrink-0",
+                  isActive
+                    ? "bg-background text-foreground font-medium border-t-2 border-t-primary"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                )}
+                title={tabPath}
+              >
+                <FileCode className={cn("h-3.5 w-3.5", isActive ? "text-primary" : "text-muted-foreground")} />
+                <span className="truncate max-w-[130px]">{fileName}</span>
+                {isActive && isDirty && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400" title="Unsaved changes" />
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onCloseTab(tabPath)
+                  }}
+                  className="opacity-50 hover:opacity-100 hover:bg-muted p-0.5 rounded transition-opacity"
+                  title="Tutup tab"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="flex items-center gap-2 px-3 shrink-0 text-muted-foreground text-[11px] font-mono">
+          <span>{filePath}</span>
+          {readOnly && <span className="text-amber-500 font-medium">Streaming lock</span>}
+        </div>
+      </div>
+
+      {/* Editor viewport */}
+      <div className="flex-1 min-h-0 relative">
+        <MonacoEditor
+          key={filePath}
+          value={code}
+          language={language}
+          theme="vs-dark"
+          onChange={(value) => onChange(value || "")}
+          options={{
+            automaticLayout: true,
+            minimap: { enabled: false },
+            fontSize: 13,
+            lineNumbersMinChars: 3,
+            scrollBeyondLastLine: false,
+            wordWrap: "on",
+            tabSize: 2,
+            padding: { top: 14, bottom: 14 },
+            readOnly,
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function normalizePath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
+}
+
+function getMonacoLanguage(path: string) {
+  if (path.endsWith(".tsx") || path.endsWith(".jsx")) return "typescript"
+  if (path.endsWith(".ts") || path.endsWith(".js")) return "typescript"
+  if (path.endsWith(".py")) return "python"
+  if (path.endsWith(".css")) return "css"
+  if (path.endsWith(".json")) return "json"
+  if (path.endsWith(".html")) return "html"
+  if (path.endsWith(".md")) return "markdown"
+  if (path.endsWith(".prisma")) return "prisma"
+  if (path.includes(".env")) return "shell"
+  return "plaintext"
 }
 
 function GeneratingPreview({
@@ -426,58 +634,39 @@ function GeneratingPreview({
       <div className="mt-5 w-full max-w-sm">
         <div className="mb-2 flex justify-between text-xs text-muted-foreground">
           <span>{progress?.queueState ? progress.queueState.replace(/_/g, " ") : progress?.modelKey || "Swift AI"}</span>
-          <span>{elapsedSeconds}s / {timeoutSeconds}s</span>
+          <span>{percent}%</span>
         </div>
-        <div className="h-2 overflow-hidden rounded-full bg-muted">
-          <div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${percent}%` }} />
+        <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+          <div
+            className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-300"
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+        <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
+          <span>{elapsedSeconds}s / ~{timeoutSeconds}s</span>
+          {onCancelGeneration && (
+            <button
+              onClick={onCancelGeneration}
+              className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+            >
+              Cancel
+            </button>
+          )}
         </div>
       </div>
-      {progress?.prompt && (
-        <p className="mt-4 line-clamp-2 max-w-md text-xs text-muted-foreground">
-          Prompt: {progress.prompt}
-        </p>
-      )}
-      {progress?.workPlan && progress.workPlan.length > 0 && (
-        <div className="mt-4 w-full max-w-md rounded-lg border border-border bg-background/70 p-3 text-left">
-          <p className="mb-2 text-[11px] font-medium uppercase text-muted-foreground">Rencana Swift</p>
-          <div className="grid gap-1.5">
-            {progress.workPlan.map((item) => (
-              <div key={item} className="flex gap-2 text-xs text-muted-foreground">
-                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500" />
-                <span>{item}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {progress?.retryHint && progress.stage === "error" && (
-        <p className="mt-4 max-w-sm text-xs text-muted-foreground">
-          {progress.retryHint}
-        </p>
-      )}
-      {onCancelGeneration && progress?.stage !== "cancelled" && (
-        <Button
-          type="button"
-          variant="destructive"
-          size="sm"
-          className="mt-5 gap-2"
-          onClick={onCancelGeneration}
-        >
-          <Square className="h-4 w-4" />
-          Stop generate
-        </Button>
-      )}
     </div>
   )
 }
 
 function EmptyPreview() {
   return (
-    <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-      <Monitor className="mb-4 h-12 w-12 text-muted-foreground" />
-      <h3 className="font-semibold text-foreground">No preview yet</h3>
-      <p className="mt-1 max-w-xs text-sm text-muted-foreground">
-        Start a conversation to generate your first component
+    <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
+      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-border/80 bg-background/50">
+        <Monitor className="h-8 w-8 text-muted-foreground" />
+      </div>
+      <h3 className="font-semibold text-foreground">Preview Belum Tersedia</h3>
+      <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+        Ketik instruksi di chat untuk menghasilkan aplikasi, atau tulis kode langsung di tab Code/Explorer.
       </p>
     </div>
   )
@@ -487,9 +676,9 @@ function EmptyCode() {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
       <FileCode className="mb-4 h-12 w-12 text-muted-foreground" />
-      <h3 className="font-semibold text-foreground">No code generated</h3>
+      <h3 className="font-semibold text-foreground">Belum ada berkas kode</h3>
       <p className="mt-1 max-w-xs text-sm text-muted-foreground">
-        Select a file from the explorer to edit it.
+        Mulai generate kode atau buat berkas baru di tab Explorer.
       </p>
     </div>
   )
@@ -499,67 +688,10 @@ function EmptyExplorer() {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
       <Folder className="mb-4 h-12 w-12 text-muted-foreground" />
-      <h3 className="font-semibold text-foreground">No files yet</h3>
+      <h3 className="font-semibold text-foreground">Tidak ada berkas</h3>
       <p className="mt-1 max-w-xs text-sm text-muted-foreground">
-        Generate code to see files in the explorer
+        Generate kode atau tambahkan berkas baru dari tombol di atas.
       </p>
     </div>
   )
-}
-
-function CodeEditor({
-  filePath,
-  code,
-  onChange,
-  readOnly = false,
-}: {
-  filePath: string
-  code: string
-  onChange: (value: string) => void
-  readOnly?: boolean
-}) {
-  const language = getMonacoLanguage(filePath)
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
-        {filePath}
-        {readOnly && <span className="ml-2 text-amber-500">Streaming lock</span>}
-      </div>
-      <MonacoEditor
-        key={filePath}
-        value={code}
-        language={language}
-        theme="vs-dark"
-        onChange={(value) => onChange(value || "")}
-        options={{
-          automaticLayout: true,
-          minimap: { enabled: false },
-          fontSize: 13,
-          lineNumbersMinChars: 3,
-          scrollBeyondLastLine: false,
-          wordWrap: "on",
-          tabSize: 2,
-          padding: { top: 14, bottom: 14 },
-          readOnly,
-        }}
-      />
-    </div>
-  )
-}
-
-function normalizePath(path: string) {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "").trim()
-}
-
-function getMonacoLanguage(path: string) {
-  if (path.endsWith(".tsx") || path.endsWith(".jsx")) return "typescript"
-  if (path.endsWith(".ts") || path.endsWith(".js")) return "typescript"
-  if (path.endsWith(".css")) return "css"
-  if (path.endsWith(".json")) return "json"
-  if (path.endsWith(".html")) return "html"
-  if (path.endsWith(".md")) return "markdown"
-  if (path.endsWith(".prisma")) return "prisma"
-  if (path.includes(".env")) return "shell"
-  return "plaintext"
 }

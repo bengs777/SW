@@ -12,7 +12,10 @@ const isPublicRoute = createRouteMatcher([
   "/api/auth(.*)",
   "/api/health",
   "/api/billing/pakasir/webhook",
+  "/api/webhooks(.*)",
   "/api/providers/status",
+  "/preview(.*)",
+  "/api/preview(.*)",
 ])
 
 const isInternalObservabilityRoute = createRouteMatcher([
@@ -39,12 +42,12 @@ const isProtectedApiRoute = createRouteMatcher([
   "/api/crypto(.*)",
 ])
 
-function contentSecurityPolicy() {
+function contentSecurityPolicy(isPreview?: boolean) {
   return [
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
-    "frame-ancestors 'none'",
+    `frame-ancestors ${isPreview ? "'self'" : "'none'"}`,
     "form-action 'self'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data: https:",
@@ -57,8 +60,13 @@ function contentSecurityPolicy() {
   ].join("; ")
 }
 
-function applySecurityHeaders(response: NextResponse): NextResponse {
-  response.headers.set("X-Frame-Options", "DENY")
+function applySecurityHeaders(response: NextResponse, pathname?: string): NextResponse {
+  const isPreview = pathname?.startsWith("/preview") || pathname?.startsWith("/api/preview")
+  if (isPreview) {
+    response.headers.set("X-Frame-Options", "SAMEORIGIN")
+  } else {
+    response.headers.set("X-Frame-Options", "DENY")
+  }
   response.headers.set("X-Content-Type-Options", "nosniff")
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin")
   response.headers.set("X-XSS-Protection", "1; mode=block")
@@ -71,7 +79,7 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
       "Strict-Transport-Security",
       "max-age=31536000; includeSubDomains; preload"
     )
-    response.headers.set("Content-Security-Policy", contentSecurityPolicy())
+    response.headers.set("Content-Security-Policy", contentSecurityPolicy(isPreview))
   }
   return response
 }
@@ -104,7 +112,7 @@ const middleware = clerkMiddleware(async (auth, req) => {
 
   if (req.method === "OPTIONS") {
     const response = new NextResponse(null, { status: 204 })
-    applySecurityHeaders(response)
+    applySecurityHeaders(response, pathname)
     applyCorsHeaders(request, response)
     return response
   }
@@ -121,19 +129,26 @@ const middleware = clerkMiddleware(async (auth, req) => {
 
   if (isInternalObservabilityRoute(req)) {
     const { userId } = await auth()
-    if (!userId && !hasValidObservabilityToken(request)) {
-      const response = NextResponse.json(
-        { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
-        { status: 401 }
-      )
-      applySecurityHeaders(response)
+    if (!userId) {
+      if (!hasValidObservabilityToken(request)) {
+        const response = NextResponse.json(
+          { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
+          { status: 401 }
+        )
+        applySecurityHeaders(response, pathname)
+        return response
+      }
+
+      const response = NextResponse.next()
+      applySecurityHeaders(response, pathname)
+      applyCorsHeaders(request, response)
       return response
     }
   }
 
   if (isPublicRoute(req)) {
     const response = NextResponse.next()
-    applySecurityHeaders(response)
+    applySecurityHeaders(response, pathname)
     applyCorsHeaders(request, response)
     return response
   }
@@ -145,20 +160,29 @@ const middleware = clerkMiddleware(async (auth, req) => {
         { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
         { status: 401 }
       )
-      applySecurityHeaders(response)
+      applySecurityHeaders(response, pathname)
       return response
     }
   }
 
   const { userId } = await auth()
   if (!userId) {
+    if (pathname.startsWith("/api/")) {
+      const response = NextResponse.json(
+        { error: "Authentication required", code: "AUTH_REQUIRED", status: 401 },
+        { status: 401 }
+      )
+      applySecurityHeaders(response, pathname)
+      return response
+    }
+
     const loginUrl = new URL("/login", req.nextUrl.origin)
     loginUrl.searchParams.set("callbackUrl", `${pathname}${req.nextUrl.search}`)
     return NextResponse.redirect(loginUrl)
   }
 
   const response = NextResponse.next()
-  applySecurityHeaders(response)
+  applySecurityHeaders(response, pathname)
   applyCorsHeaders(request, response)
   return response
 })

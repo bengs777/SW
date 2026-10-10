@@ -1,8 +1,8 @@
-export const COLLABORATION_MODES = ["build", "edit", "fix", "review", "ask"] as const
+export const COLLABORATION_MODES = ["build", "ask"] as const
 
 export type CollaborationMode = (typeof COLLABORATION_MODES)[number]
 
-export const MUTATING_COLLABORATION_MODES = ["build", "edit", "fix"] as const satisfies readonly CollaborationMode[]
+export const MUTATING_COLLABORATION_MODES = ["build"] as const satisfies readonly CollaborationMode[]
 
 const COLLABORATION_MODE_SET = new Set<string>(COLLABORATION_MODES)
 
@@ -17,5 +17,5 @@ export function normalizeCollaborationMode(value: unknown, fallback: Collaborati
 }
 
 export function isMutatingCollaborationMode(mode: CollaborationMode) {
-  return mode === "build" || mode === "edit" || mode === "fix"
+  return mode === "build"
 }

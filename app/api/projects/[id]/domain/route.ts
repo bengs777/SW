@@ -6,8 +6,35 @@ import { eq } from "drizzle-orm"
 import dns from "dns"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 export const runtime = "nodejs"
+
+async function assertProjectAccess(
+  projectId: string,
+  userId: string
+): Promise<{ ok: true } | { ok: false; status: 403 | 404 }> {
+  const access = await getProjectAccess(projectId, { userId })
+  if (access) return { ok: true }
+
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    columns: { id: true },
+  })
+  return { ok: false, status: project ? 403 : 404 }
+}
+
+async function guardProject(
+  projectId: string,
+  userId: string
+): Promise<NextResponse | null> {
+  const result = await assertProjectAccess(projectId, userId)
+  if (result.ok) return null
+  return NextResponse.json(
+    { error: result.status === 403 ? "Forbidden" : "Project not found" },
+    { status: result.status }
+  )
+}
 
 function isValidDomain(domain: string) {
   // Basic domain validation (allows subdomains)
@@ -29,6 +56,9 @@ export async function GET(
 
   try {
     const { id } = await params
+    const denied = await guardProject(id, session.userId)
+    if (denied) return denied
+
     const project = await db.query.projects.findFirst({
       where: eq(projects.id, id),
     })
@@ -64,6 +94,9 @@ export async function PATCH(
     const { id } = await params
     const body = await request.json().catch(() => ({}))
     const domainRaw = typeof body?.domain === "string" ? body.domain.trim().toLowerCase() : ""
+
+    const denied = await guardProject(id, session.userId)
+    if (denied) return denied
 
     if (!domainRaw) {
       return NextResponse.json({ error: "Missing domain" }, { status: 400 })
@@ -137,6 +170,9 @@ export async function POST(
     const { id } = await params
     const body = await request.json().catch(() => ({}))
     const domainFromBody = typeof body?.domain === 'string' ? body.domain.trim().toLowerCase() : null
+
+    const denied = await guardProject(id, session.userId)
+    if (denied) return denied
 
     const project = await db.query.projects.findFirst({
       where: eq(projects.id, id),

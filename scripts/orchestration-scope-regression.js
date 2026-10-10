@@ -239,9 +239,9 @@ function main() {
     "existing project prompts must allow broad frontend generation when the user asks for a full website"
   )
   const singleFileEditPlan = editPlanner.buildPartialEditPlan({
-    prompt: "MODE: Edit\nTARGET FILE: app/page.tsx\nedit only one file",
+    prompt: "MODE: small edit\nTARGET FILE: app/page.tsx\nedit only one file",
     existingFiles,
-    collaborationMode: "edit",
+    collaborationMode: "build",
   })
   assert(
     "edit-only-one-file",
@@ -261,9 +261,9 @@ function main() {
     "existing project rebuild language must allow broad full frontend scope"
   )
   const checkoutUiEditPlan = editPlanner.buildPartialEditPlan({
-    prompt: "Tambahkan checkout CTA di app/page.tsx only",
+    prompt: "Tambahkan checkout CTA di app/page.tsx only, patch kecil",
     existingFiles,
-    collaborationMode: "edit",
+    collaborationMode: "build",
   })
   assert(
     "checkout-ui-not-payment-integration",
@@ -348,11 +348,14 @@ function main() {
   assert(
     "collaboration-mode.enum",
     collaborationMode.isCollaborationMode("build") &&
-      collaborationMode.isCollaborationMode("review") &&
+      collaborationMode.isCollaborationMode("ask") &&
+      !collaborationMode.isCollaborationMode("review") &&
+      !collaborationMode.isCollaborationMode("edit") &&
       !collaborationMode.isCollaborationMode("dashboard") &&
-      collaborationMode.normalizeCollaborationMode("FIX") === "fix" &&
+      collaborationMode.normalizeCollaborationMode("ASK") === "ask" &&
+      collaborationMode.normalizeCollaborationMode("FIX") === "build" &&
       collaborationMode.normalizeCollaborationMode("dashboard") === "build",
-    "collaboration mode must be a closed enum with deterministic normalization"
+    "collaboration mode must be a closed build/ask enum with deterministic normalization"
   )
   assert(
     "generate-job-mode-schema",

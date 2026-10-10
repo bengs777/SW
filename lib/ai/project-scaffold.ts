@@ -509,111 +509,786 @@ function buildLaundryOverrideFiles(name: string, prompt: string): GeneratedFile[
     {
       path: "app/page.tsx",
       language: "tsx",
-      content: `import { BuildStatusPanel } from "@/components/build-status-panel"
+      content: `"use client"
+
+import { useState, useMemo } from "react"
+import { BuildStatusPanel } from "@/components/build-status-panel"
 import { moduleStatus } from "@/lib/build-status"
 
-const packages = [
-  { name: "Cuci Lipat", price: "Rp 7.000/kg", eta: "24 jam" },
-  { name: "Cuci Setrika", price: "Rp 10.000/kg", eta: "36 jam" },
-  { name: "Dry Clean", price: "Mulai Rp 35.000", eta: "48 jam" },
+interface ServicePackage {
+  id: string
+  name: string
+  category: "kiloan" | "satuan" | "express"
+  price: number
+  unit: string
+  eta: string
+  popular?: boolean
+  description: string
+}
+
+interface LaundryOrder {
+  id: string
+  customer: string
+  phone: string
+  service: string
+  weightOrQty: number
+  unit: string
+  total: number
+  status: "Diterima" | "Dicuci" | "Disetrika" | "Siap Diantar" | "Selesai"
+  address: string
+  notes?: string
+  date: string
+}
+
+const DEFAULT_PACKAGES: ServicePackage[] = [
+  { id: "p1", name: "Cuci Kering Lipat", category: "kiloan", price: 7000, unit: "kg", eta: "24-48 Jam", description: "Pakaian dicuci higienis, dikeringkan mesin otomatis, dan dilipat rapi anti kusut." },
+  { id: "p2", name: "Cuci Setrika Uap Boiler", category: "kiloan", price: 10000, unit: "kg", eta: "24 Jam", popular: true, description: "Perawatan komplit dengan setrika uap boiler profesional, licin sempurna & wangi tahan lama." },
+  { id: "p3", name: "Cuci Kilat Express 5 Jam", category: "express", price: 16000, unit: "kg", eta: "5 Jam Selesai", description: "Layanan prioritas cepat selesai untuk kebutuhan mendesak perjalanan dinas atau acara." },
+  { id: "p4", name: "Dry Clean Jas & Gaun", category: "satuan", price: 35000, unit: "pcs", eta: "48 Jam", description: "Perawatan khusus serat kain premium, jas, kemeja sutra, kebaya, & gaun pesta." },
+  { id: "p5", name: "Cuci Bedcover & Selimut", category: "satuan", price: 30000, unit: "pcs", eta: "48 Jam", description: "Pembersihan mendalam anti tungau, debu tebal, dan noda membandel." },
+  { id: "p6", name: "Cuci Sepatu Deep Clean", category: "satuan", price: 35000, unit: "pasang", eta: "48 Jam", description: "Treatment pembersihan total luar-dalam dengan formula khusus midsole & upper." },
 ]
 
-const orders = [
-  { id: "LS-1042", customer: "Nadia Putri", service: "Cuci Setrika", status: "Pickup", total: "Rp 54.000" },
-  { id: "LS-1041", customer: "Rafi Hidayat", service: "Dry Clean", status: "Diproses", total: "Rp 85.000" },
-  { id: "LS-1040", customer: "Maya Sari", service: "Cuci Lipat", status: "Siap Antar", total: "Rp 42.000" },
+const INITIAL_ORDERS: LaundryOrder[] = [
+  { id: "LS-1042", customer: "Nadia Putri", phone: "081234567890", service: "Cuci Setrika Uap Boiler", weightOrQty: 5, unit: "kg", total: 50000, status: "Siap Diantar", address: "Jl. Mawar No. 12, RT 03/05", date: "Hari ini, 09:30" },
+  { id: "LS-1041", customer: "Rafi Hidayat", phone: "085678901234", service: "Dry Clean Jas & Gaun", weightOrQty: 2, unit: "pcs", total: 70000, status: "Disetrika", address: "Apartemen Grand City Tower B Lt 7", date: "Hari ini, 08:15" },
+  { id: "LS-1040", customer: "Maya Sari", phone: "087789012345", service: "Cuci Kering Lipat", weightOrQty: 4, unit: "kg", total: 28000, status: "Dicuci", address: "Perum Griya Indah Blok C-4", date: "Kemarin, 16:40" },
+  { id: "LS-1039", customer: "Budi Santoso", phone: "081398765432", service: "Cuci Bedcover & Selimut", weightOrQty: 1, unit: "pcs", total: 30000, status: "Selesai", address: "Jl. Melati No. 88", date: "Kemarin, 11:20" },
 ]
 
 export default function HomePage() {
   const projectName = ${safeName}
   const buildBrief = ${safePrompt}
 
+  // Calculator State
+  const [calcServiceId, setCalcServiceId] = useState("p2")
+  const [calcQty, setCalcQty] = useState(5)
+
+  // Booking Form State
+  const [customerName, setCustomerName] = useState("")
+  const [phone, setPhone] = useState("")
+  const [address, setAddress] = useState("")
+  const [selectedService, setSelectedService] = useState("Cuci Setrika Uap Boiler")
+  const [notes, setNotes] = useState("")
+  const [orderSubmitted, setOrderSubmitted] = useState<LaundryOrder | null>(null)
+
+  // Tracking State
+  const [trackQuery, setTrackQuery] = useState("LS-1042")
+  const [orders, setOrders] = useState<LaundryOrder[]>(INITIAL_ORDERS)
+  const [activeFaq, setActiveFaq] = useState<number | null>(null)
+  const [adminMode, setAdminMode] = useState(false)
+
+  const selectedCalcService = useMemo(() => {
+    return DEFAULT_PACKAGES.find((p) => p.id === calcServiceId) || DEFAULT_PACKAGES[1]
+  }, [calcServiceId])
+
+  const calculatedTotal = useMemo(() => {
+    return selectedCalcService.price * calcQty
+  }, [selectedCalcService, calcQty])
+
+  const trackedOrder = useMemo(() => {
+    return orders.find((o) => o.id.toLowerCase() === trackQuery.trim().toLowerCase())
+  }, [orders, trackQuery])
+
+  const handleOrderSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!customerName.trim() || !phone.trim() || !address.trim()) return
+
+    const newId = "LS-" + Math.floor(1000 + Math.random() * 9000)
+    const newOrder: LaundryOrder = {
+      id: newId,
+      customer: customerName,
+      phone,
+      service: selectedService,
+      weightOrQty: calcQty,
+      unit: "kg",
+      total: calculatedTotal || 35000,
+      status: "Diterima",
+      address,
+      notes,
+      date: "Baru saja",
+    }
+
+    setOrders([newOrder, ...orders])
+    setOrderSubmitted(newOrder)
+    setTrackQuery(newId)
+  }
+
+  const openWhatsApp = (order: LaundryOrder) => {
+    const text = encodeURIComponent(
+      "Halo Admin " + projectName + ", saya ingin konfirmasi order laundry:\\n\\n" +
+      "• No. Order: " + order.id + "\\n" +
+      "• Nama: " + order.customer + "\\n" +
+      "• No. HP: " + order.phone + "\\n" +
+      "• Layanan: " + order.service + "\\n" +
+      "• Alamat Pickup: " + order.address + "\\n" +
+      "• Estimasi Biaya: Rp " + order.total.toLocaleString("id-ID") + "\\n\\n" +
+      "Mohon dijadwalkan penjemputan ya. Terima kasih!"
+    )
+    window.open("https://wa.me/6281234567890?text=" + text, "_blank")
+  }
+
   return (
-    <main className="min-h-screen bg-slate-950 text-white">
-      <section className="border-b border-white/10 bg-cyan-950/40">
-        <div className="mx-auto grid max-w-7xl gap-8 px-4 py-10 lg:grid-cols-[1.05fr_.95fr]">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-cyan-300">Laundry service app</p>
-            <h1 className="mt-4 text-4xl font-semibold tracking-tight md:text-5xl">{projectName}</h1>
-            <p className="mt-4 max-w-2xl text-slate-300">Order form, dashboard admin, dan tabel order untuk operasional laundry harian.</p>
-            <p className="mt-3 max-w-2xl text-sm text-slate-400">Build brief: {buildBrief}</p>
-            <div className="mt-6 flex flex-wrap gap-3">
-              <a href="#order-form" className="rounded-md bg-cyan-300 px-5 py-3 text-sm font-semibold text-slate-950">Buat order</a>
-              <a href="#admin-orders" className="rounded-md border border-white/15 px-5 py-3 text-sm font-semibold text-white">Lihat dashboard</a>
+    <main className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-cyan-500 selection:text-slate-950">
+      {/* Top Banner Promo */}
+      <div className="bg-gradient-to-r from-cyan-600 via-sky-600 to-blue-600 px-4 py-2 text-center text-xs font-medium text-white shadow-sm">
+        ✨ Promo Spesial: Gratis Antar-Jemput Radius 5 KM untuk Setiap Pemesanan Minimal 5 Kg!
+      </div>
+
+      {/* Sticky Header */}
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-slate-950/80 backdrop-blur-md">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3.5 sm:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-500 text-white shadow-lg shadow-cyan-500/20 font-bold text-lg">
+              🧺
             </div>
-          </div>
-
-          <div id="order-form" className="rounded-2xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl">
-            <h2 className="text-xl font-semibold">Form order laundry</h2>
-            <div className="mt-5 grid gap-3">
-              <input className="rounded-lg border border-white/10 bg-slate-900 px-4 py-3 text-sm" placeholder="Nama pelanggan" />
-              <input className="rounded-lg border border-white/10 bg-slate-900 px-4 py-3 text-sm" placeholder="Alamat pickup" />
-              <select className="rounded-lg border border-white/10 bg-slate-900 px-4 py-3 text-sm">
-                {packages.map((item) => (
-                  <option key={item.name}>{item.name}</option>
-                ))}
-              </select>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <input className="rounded-lg border border-white/10 bg-slate-900 px-4 py-3 text-sm" placeholder="Estimasi kg" />
-                <input className="rounded-lg border border-white/10 bg-slate-900 px-4 py-3 text-sm" placeholder="Jam pickup" />
-              </div>
-              <button className="rounded-lg bg-cyan-300 px-4 py-3 text-sm font-semibold text-slate-950">Simpan order</button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="mx-auto grid max-w-7xl gap-5 px-4 py-8 md:grid-cols-3">
-        {packages.map((item) => (
-          <article key={item.name} className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-            <h3 className="text-lg font-semibold">{item.name}</h3>
-            <p className="mt-3 text-2xl font-bold text-cyan-300">{item.price}</p>
-            <p className="mt-2 text-sm text-slate-400">Estimasi selesai {item.eta}</p>
-          </article>
-        ))}
-      </section>
-
-      <section id="admin-orders" className="mx-auto max-w-7xl px-4 pb-10">
-        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-300">Admin dashboard</p>
-              <h2 className="mt-2 text-2xl font-semibold">Tabel order aktif</h2>
-            </div>
-            <div className="grid grid-cols-3 gap-3 text-center text-sm">
-              <div className="rounded-lg bg-slate-900 px-4 py-3"><b>18</b><span className="block text-slate-400">Order</span></div>
-              <div className="rounded-lg bg-slate-900 px-4 py-3"><b>7</b><span className="block text-slate-400">Pickup</span></div>
-              <div className="rounded-lg bg-slate-900 px-4 py-3"><b>5</b><span className="block text-slate-400">Antar</span></div>
+              <span className="text-lg font-bold tracking-tight text-white">{projectName}</span>
+              <span className="hidden sm:inline-block ml-2 rounded-full bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300 border border-cyan-400/20">
+                Premium Laundry & Dry Clean
+              </span>
             </div>
           </div>
 
-          <div className="mt-5 overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
-              <thead className="border-b border-white/10 text-slate-400">
-                <tr>
-                  <th className="py-3">ID</th>
-                  <th>Pelanggan</th>
-                  <th>Layanan</th>
-                  <th>Status</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((order) => (
-                  <tr key={order.id} className="border-b border-white/5">
-                    <td className="py-3 font-mono text-cyan-200">{order.id}</td>
-                    <td>{order.customer}</td>
-                    <td>{order.service}</td>
-                    <td><span className="rounded-full bg-cyan-300/10 px-3 py-1 text-xs text-cyan-200">{order.status}</span></td>
-                    <td>{order.total}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-300">
+            <a href="#layanan" className="hover:text-cyan-400 transition-colors">Layanan & Harga</a>
+            <a href="#kalkulator" className="hover:text-cyan-400 transition-colors">Kalkulator Biaya</a>
+            <a href="#order" className="hover:text-cyan-400 transition-colors">Pesan Antar-Jemput</a>
+            <a href="#lacak" className="hover:text-cyan-400 transition-colors">Lacak Status</a>
+            <a href="#faq" className="hover:text-cyan-400 transition-colors">FAQ</a>
+          </nav>
+
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => setAdminMode(!adminMode)}
+              className="hidden lg:flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/10 transition-colors"
+            >
+              {adminMode ? "👁️ Tampilan Pelanggan" : "⚙️ Dashboard Kasir"}
+            </button>
+            <a
+              href="#order"
+              className="rounded-lg bg-gradient-to-r from-cyan-400 to-blue-500 px-4 py-2 text-xs font-semibold text-slate-950 shadow-md shadow-cyan-500/20 hover:brightness-110 transition-all"
+            >
+              Pesan Sekarang
+            </a>
           </div>
         </div>
-        <BuildStatusPanel status={moduleStatus} />
+      </header>
+
+      {/* Hero Section */}
+      <section className="relative overflow-hidden border-b border-white/10 bg-gradient-to-b from-cyan-950/30 via-slate-950 to-slate-950 py-16 sm:py-24">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="mx-auto max-w-3xl text-center">
+            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3.5 py-1 text-xs font-medium text-cyan-300 mb-6">
+              <span className="flex h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+              Layanan Antar Jemput Gratis se-Kota
+            </div>
+            <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight text-white leading-tight">
+              Pakaian Bersih Bersinar, <span className="bg-gradient-to-r from-cyan-300 via-sky-300 to-blue-400 bg-clip-text text-transparent">Wangi Tahan 14 Hari</span>
+            </h1>
+            <p className="mt-5 text-base sm:text-lg text-slate-300 leading-relaxed max-w-2xl mx-auto">
+              Tidak sempat mencuci pakaian menumpuk? Duduk santai di rumah, kurir kami jemput cucian Anda, dicuci dengan mesin modern & deterjen higienis, diantar kembali rapi & wangi.
+            </p>
+
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-3.5">
+              <a
+                href="#order"
+                className="rounded-xl bg-cyan-400 px-6 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-cyan-400/25 hover:bg-cyan-300 hover:scale-[1.02] active:scale-[0.98] transition-all"
+              >
+                🚀 Pesan Antar Jemput Sekarang
+              </a>
+              <a
+                href="#lacak"
+                className="rounded-xl border border-white/20 bg-white/5 px-6 py-3 text-sm font-semibold text-white hover:bg-white/10 transition-all"
+              >
+                🔍 Lacak Status Cucian
+              </a>
+            </div>
+
+            {/* Trust Badges */}
+            <div className="mt-12 grid grid-cols-2 gap-4 sm:grid-cols-4 border-t border-white/10 pt-8 text-left">
+              <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3.5">
+                <div className="text-cyan-400 font-bold text-xl">15.000+</div>
+                <div className="text-xs text-slate-400 mt-0.5">Kg Cucian Selesai</div>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3.5">
+                <div className="text-cyan-400 font-bold text-xl">4.9 / 5.0</div>
+                <div className="text-xs text-slate-400 mt-0.5">Rating Kepuasan</div>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3.5">
+                <div className="text-cyan-400 font-bold text-xl">1 Mesin 1 Klien</div>
+                <div className="text-xs text-slate-400 mt-0.5">Higienis Tidak Dicampur</div>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3.5">
+                <div className="text-cyan-400 font-bold text-xl">100% Garansi</div>
+                <div className="text-xs text-slate-400 mt-0.5">Cuci Ulang Bila Tidak Wangi</div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
+
+      {/* Keunggulan Kami */}
+      <section className="py-14 border-b border-white/10 bg-slate-900/40">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="text-center max-w-xl mx-auto mb-10">
+            <p className="text-xs font-bold uppercase tracking-widest text-cyan-400">Keunggulan Kami</p>
+            <h2 className="mt-2 text-2xl sm:text-3xl font-bold text-white">Standar Perawatan Laundry Terbaik</h2>
+          </div>
+
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 hover:border-cyan-500/40 transition-colors">
+              <div className="text-3xl mb-3">🛵</div>
+              <h3 className="font-semibold text-white text-base">Antar-Jemput Tepat Waktu</h3>
+              <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+                Jadwalkan jam pickup sesuai kenyamanan Anda, kurir ramah kami tiba tepat waktu di lokasi Anda.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 hover:border-cyan-500/40 transition-colors">
+              <div className="text-3xl mb-3">💨</div>
+              <h3 className="font-semibold text-white text-base">Setrika Uap Boiler Profesional</h3>
+              <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+                Pakaian licin sempurna tanpa bekas gosong atau kilap, aman untuk bahan sutra hingga katun premium.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 hover:border-cyan-500/40 transition-colors">
+              <div className="text-3xl mb-3">🧼</div>
+              <h3 className="font-semibold text-white text-base">Deterjen Ramah Serat & Kulit</h3>
+              <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+                Formula anti-bakteri hypoallergenic yang aman untuk kulit sensitif dan bayi, menjaga warna pakaian tetap cerah.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 hover:border-cyan-500/40 transition-colors">
+              <div className="text-3xl mb-3">📱</div>
+              <h3 className="font-semibold text-white text-base">Notifikasi Status Otomatis</h3>
+              <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+                Pantau proses cucian Anda kapan saja dengan fitur live tracking status dari outlet kami.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Layanan & Daftar Harga */}
+      <section id="layanan" className="py-16 border-b border-white/10">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="text-center max-w-2xl mx-auto mb-12">
+            <p className="text-xs font-bold uppercase tracking-widest text-cyan-400">Pricelist Transparan</p>
+            <h2 className="mt-2 text-2xl sm:text-3xl font-bold text-white">Paket Layanan Sesuai Kebutuhan</h2>
+            <p className="mt-2 text-sm text-slate-400">Tanpa biaya tersembunyi. Timbangan digital terkalibrasi akurat.</p>
+          </div>
+
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {DEFAULT_PACKAGES.map((pkg) => (
+              <div
+                key={pkg.id}
+                className={pkg.popular
+                  ? "relative rounded-2xl border p-6 flex flex-col justify-between transition-all border-cyan-400 bg-gradient-to-b from-cyan-950/40 to-slate-900 shadow-xl shadow-cyan-500/10"
+                  : "relative rounded-2xl border p-6 flex flex-col justify-between transition-all border-white/10 bg-white/[0.03] hover:border-white/20"
+                }
+              >
+                {pkg.popular && (
+                  <span className="absolute -top-3 right-6 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 px-3 py-0.5 text-[11px] font-bold text-slate-950 uppercase tracking-wide">
+                    Paling Diminati
+                  </span>
+                )}
+                <div>
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-bold text-lg text-white">{pkg.name}</h3>
+                    <span className="rounded-md bg-white/10 px-2 py-0.5 text-xs text-cyan-300 font-medium">
+                      ⏱️ {pkg.eta}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-400">{pkg.description}</p>
+                  <div className="mt-4 flex items-baseline gap-1">
+                    <span className="text-3xl font-extrabold text-white">
+                      Rp {pkg.price.toLocaleString("id-ID")}
+                    </span>
+                    <span className="text-xs text-slate-400">/ {pkg.unit}</span>
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-4 border-t border-white/10 flex items-center justify-between">
+                  <span className="text-xs text-slate-400">Min. order 3 {pkg.unit}</span>
+                  <a
+                    href="#order"
+                    onClick={() => {
+                      setSelectedService(pkg.name)
+                      setCalcServiceId(pkg.id)
+                    }}
+                    className="rounded-lg bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-cyan-300 hover:bg-cyan-400 hover:text-slate-950 transition-colors"
+                  >
+                    Pilih Paket Ini →
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Kalkulator Biaya & Form Order (Side by Side) */}
+      <section id="kalkulator" className="py-16 border-b border-white/10 bg-slate-900/50">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="grid gap-10 lg:grid-cols-12 items-start">
+            
+            {/* Kalkulator Interaktif */}
+            <div className="lg:col-span-5 rounded-2xl border border-white/10 bg-slate-900 p-6 sm:p-8 shadow-xl">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🧮</span>
+                <h3 className="text-lg font-bold text-white">Kalkulator Estimasi Biaya</h3>
+              </div>
+              <p className="mt-1 text-xs text-slate-400">Hitung perkiraan biaya cuci kamu sebelum memesan.</p>
+
+              <div className="mt-6 space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1.5">Pilih Jenis Layanan</label>
+                  <select
+                    value={calcServiceId}
+                    onChange={(e) => setCalcServiceId(e.target.value)}
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-2.5 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                  >
+                    {DEFAULT_PACKAGES.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} — Rp {p.price.toLocaleString("id-ID")}/{p.unit}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-300 mb-1.5">
+                    <span>Estimasi Jumlah ({selectedCalcService.unit})</span>
+                    <span className="text-cyan-300 font-bold text-sm">{calcQty} {selectedCalcService.unit}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setCalcQty((prev) => Math.max(1, prev - 1))}
+                      className="h-10 w-10 rounded-lg border border-white/10 bg-white/5 font-bold text-white hover:bg-white/10 flex items-center justify-center text-base"
+                    >
+                      -
+                    </button>
+                    <input
+                      type="range"
+                      min={1}
+                      max={30}
+                      value={calcQty}
+                      onChange={(e) => setCalcQty(Number(e.target.value))}
+                      className="w-full accent-cyan-400 cursor-pointer"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setCalcQty((prev) => prev + 1)}
+                      className="h-10 w-10 rounded-lg border border-white/10 bg-white/5 font-bold text-white hover:bg-white/10 flex items-center justify-center text-base"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/30 p-4 mt-6">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-300">Estimasi Total Biaya</span>
+                    <span className="text-2xl font-extrabold text-cyan-300">
+                      Rp {calculatedTotal.toLocaleString("id-ID")}
+                    </span>
+                  </div>
+                  <div className="mt-2 text-[11px] text-slate-400">
+                    *Estimasi belum termasuk diskon promo. Ditimbang ulang secara akurat saat kurir tiba.
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Pemesanan Antar Jemput */}
+            <div id="order" className="lg:col-span-7 rounded-2xl border border-cyan-500/30 bg-gradient-to-b from-slate-900 to-slate-950 p-6 sm:p-8 shadow-2xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold text-white">Form Penjemputan Cucian</h3>
+                  <p className="mt-1 text-xs text-slate-400">Isi data di bawah untuk penjadwalan kurir hari ini.</p>
+                </div>
+                <span className="rounded-full bg-cyan-400/10 px-3 py-1 text-xs font-semibold text-cyan-300 border border-cyan-400/20">
+                  Antar-Jemput Siap
+                </span>
+              </div>
+
+              {orderSubmitted ? (
+                <div className="mt-6 rounded-2xl border border-emerald-500/30 bg-emerald-950/20 p-6 text-center">
+                  <div className="text-4xl mb-2">🎉</div>
+                  <h4 className="text-lg font-bold text-emerald-300">Pesanan Berhasil Dicatat!</h4>
+                  <p className="mt-1 text-xs text-slate-300">
+                    Nomor Nota Anda: <b className="text-white font-mono text-sm">{orderSubmitted.id}</b>
+                  </p>
+                  <p className="mt-2 text-xs text-slate-400">
+                    Kurir kami sedang menyiapkan rute penjemputan ke alamat Anda.
+                  </p>
+
+                  <div className="mt-6 flex flex-wrap gap-3 justify-center">
+                    <button
+                      onClick={() => openWhatsApp(orderSubmitted)}
+                      className="rounded-xl bg-emerald-500 px-5 py-2.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition-all flex items-center gap-2"
+                    >
+                      💬 Kirim Konfirmasi ke WhatsApp
+                    </button>
+                    <button
+                      onClick={() => setOrderSubmitted(null)}
+                      className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-xs font-semibold text-white hover:bg-white/10"
+                    >
+                      Buat Pesanan Baru
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleOrderSubmit} className="mt-6 space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-300 block mb-1">Nama Lengkap *</label>
+                      <input
+                        type="text"
+                        required
+                        value={customerName}
+                        onChange={(e) => setCustomerName(e.target.value)}
+                        placeholder="Contoh: Budi Santoso"
+                        className="w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-2.5 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-slate-300 block mb-1">Nomor WhatsApp Aktif *</label>
+                      <input
+                        type="tel"
+                        required
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        placeholder="0812xxxxxxxx"
+                        className="w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-2.5 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">Pilihan Layanan</label>
+                    <select
+                      value={selectedService}
+                      onChange={(e) => setSelectedService(e.target.value)}
+                      className="w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-2.5 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                    >
+                      {DEFAULT_PACKAGES.map((p) => (
+                        <option key={p.id} value={p.name}>
+                          {p.name} (Rp {p.price.toLocaleString("id-ID")}/{p.unit})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">Alamat Lengkap & Patokan Pickup *</label>
+                    <textarea
+                      required
+                      rows={2}
+                      value={address}
+                      onChange={(e) => setAddress(e.target.value)}
+                      placeholder="Nama jalan, nomor rumah, RT/RW, kelurahan, dan patokan dekat lokasi..."
+                      className="w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-2.5 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">Catatan Tambahan (Opsional)</label>
+                    <input
+                      type="text"
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      placeholder="Contoh: Jangan disetrika kemeja batik, pisahkan baju putih..."
+                      className="w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-2 text-xs text-white focus:border-cyan-400 focus:outline-none"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full rounded-xl bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-cyan-500/25 hover:brightness-110 active:scale-[0.99] transition-all"
+                  >
+                    🛵 Konfirmasi Pesanan Antar Jemput
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Fitur Lacak Cucian Real-Time */}
+      <section id="lacak" className="py-16 border-b border-white/10">
+        <div className="mx-auto max-w-4xl px-4 sm:px-6">
+          <div className="text-center mb-8">
+            <span className="text-xs font-bold uppercase tracking-widest text-cyan-400">Status Live</span>
+            <h2 className="mt-2 text-2xl sm:text-3xl font-bold text-white">Lacak Progres Cucian Anda</h2>
+            <p className="mt-1 text-xs text-slate-400">Masukkan kode order / nota (contoh: LS-1042 atau LS-1041)</p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-6 sm:p-8">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={trackQuery}
+                onChange={(e) => setTrackQuery(e.target.value)}
+                placeholder="Masukkan Nomor Nota (Contoh: LS-1042)"
+                className="w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-2.5 text-sm text-white font-mono focus:border-cyan-400 focus:outline-none"
+              />
+              <button
+                type="button"
+                className="rounded-xl bg-cyan-400 px-5 py-2.5 text-xs font-bold text-slate-950 hover:bg-cyan-300 transition-colors"
+              >
+                Cek
+              </button>
+            </div>
+
+            {trackedOrder ? (
+              <div className="mt-8 space-y-6">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+                  <div>
+                    <span className="text-xs text-slate-400 block">Pelanggan</span>
+                    <span className="font-semibold text-white text-base">{trackedOrder.customer}</span>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-400 block">Layanan</span>
+                    <span className="font-semibold text-cyan-300 text-sm">{trackedOrder.service}</span>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-400 block">Total Biaya</span>
+                    <span className="font-semibold text-white text-sm">Rp {trackedOrder.total.toLocaleString("id-ID")}</span>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-400 block">Status Saat Ini</span>
+                    <span className="inline-block rounded-full bg-cyan-400/20 px-3 py-1 text-xs font-bold text-cyan-300 border border-cyan-400/30">
+                      {trackedOrder.status}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 5-Step Progress Bar */}
+                <div className="pt-2">
+                  <div className="grid grid-cols-5 gap-2 text-center">
+                    {[
+                      { step: 1, label: "Diterima", icon: "📥" },
+                      { step: 2, label: "Dicuci", icon: "🧼" },
+                      { step: 3, label: "Disetrika", icon: "💨" },
+                      { step: 4, label: "Siap Antar", icon: "📦" },
+                      { step: 5, label: "Selesai", icon: "✨" },
+                    ].map((s) => {
+                      const statusSteps = ["Diterima", "Dicuci", "Disetrika", "Siap Diantar", "Selesai"]
+                      const currentStepIndex = statusSteps.indexOf(trackedOrder.status)
+                      const thisStepIndex = s.step - 1
+                      const isComplete = thisStepIndex <= currentStepIndex
+
+                      return (
+                        <div key={s.step} className="flex flex-col items-center">
+                          <div
+                            className={isComplete
+                              ? "flex h-10 w-10 items-center justify-center rounded-full text-base font-bold transition-all bg-cyan-400 text-slate-950 shadow-md shadow-cyan-400/30 scale-105"
+                              : "flex h-10 w-10 items-center justify-center rounded-full text-base font-bold transition-all bg-slate-800 text-slate-500 border border-white/5"
+                            }
+                          >
+                            {s.icon}
+                          </div>
+                          <span
+                            className={"mt-2 text-[11px] font-medium " + (isComplete ? "text-cyan-300" : "text-slate-500")}
+                          >
+                            {s.label}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 text-center text-xs text-slate-400 py-4">
+                Nomor nota <b className="text-white font-mono">{trackQuery}</b> tidak ditemukan. Coba cek dengan <b>LS-1042</b> atau <b>LS-1041</b>.
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Dashboard Kasir / Admin Panel (Toggled View) */}
+      {adminMode && (
+        <section className="py-14 border-b border-white/10 bg-slate-900">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+              <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-cyan-400">Internal Operations</span>
+                <h2 className="text-xl font-bold text-white">Dashboard Kasir & Antrian Cucian</h2>
+              </div>
+              <div className="flex gap-2">
+                <span className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-1 text-xs text-emerald-300">
+                  Total Order: <b>{orders.length}</b>
+                </span>
+                <span className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-1 text-xs text-cyan-300">
+                  Pendapatan: <b>Rp {orders.reduce((sum, o) => sum + o.total, 0).toLocaleString("id-ID")}</b>
+                </span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-white/10 bg-slate-950">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-white/10 bg-white/[0.02] text-slate-400">
+                  <tr>
+                    <th className="py-3 px-4">Nota</th>
+                    <th className="py-3 px-4">Pelanggan</th>
+                    <th className="py-3 px-4">Layanan</th>
+                    <th className="py-3 px-4">Biaya</th>
+                    <th className="py-3 px-4">Status</th>
+                    <th className="py-3 px-4">Aksi Cepat</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {orders.map((o) => (
+                    <tr key={o.id} className="hover:bg-white/[0.02]">
+                      <td className="py-3 px-4 font-mono font-bold text-cyan-300">{o.id}</td>
+                      <td className="py-3 px-4">
+                        <div className="font-semibold text-white">{o.customer}</div>
+                        <div className="text-[10px] text-slate-400">{o.phone}</div>
+                      </td>
+                      <td className="py-3 px-4 text-slate-300">{o.service}</td>
+                      <td className="py-3 px-4 font-medium text-white">Rp {o.total.toLocaleString("id-ID")}</td>
+                      <td className="py-3 px-4">
+                        <span className="rounded-full bg-cyan-400/10 px-2.5 py-0.5 text-[10px] font-bold text-cyan-300 border border-cyan-400/20">
+                          {o.status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <select
+                          value={o.status}
+                          onChange={(e) => {
+                            const newStatus = e.target.value as LaundryOrder["status"]
+                            setOrders(orders.map((item) => (item.id === o.id ? { ...item, status: newStatus } : item)))
+                          }}
+                          className="rounded-md border border-white/10 bg-slate-900 px-2 py-1 text-[11px] text-slate-200 focus:outline-none"
+                        >
+                          <option value="Diterima">Diterima</option>
+                          <option value="Dicuci">Dicuci</option>
+                          <option value="Disetrika">Disetrika</option>
+                          <option value="Siap Diantar">Siap Diantar</option>
+                          <option value="Selesai">Selesai</option>
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Testimoni Pelanggan */}
+      <section className="py-16 border-b border-white/10 bg-slate-950">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="text-center max-w-xl mx-auto mb-10">
+            <span className="text-xs font-bold uppercase tracking-widest text-cyan-400">Ulasan Nyata</span>
+            <h2 className="mt-2 text-2xl sm:text-3xl font-bold text-white">Dipercaya Ribuan Pelanggan Puas</h2>
+          </div>
+
+          <div className="grid gap-6 sm:grid-cols-3">
+            {[
+              { name: "Dewi Anggraini", city: "Karyawati Swasta", text: "Jujur ngebantu banget pas lagi sibuk kerjaan kantor. Dijemput pagi, besok sorenya udah balik rapi, wangi banget sampai 2 minggu di lemari!", stars: 5 },
+              { name: "Hendro Wibowo", city: "Keluarga 4 Anak", text: "Cuci bedcover dan gorden di sini hasilnya bersih maksimal, debu dan tungau hilang total. Harganya juga sangat bersahabat dibanding laundry hotel.", stars: 5 },
+              { name: "Siti Rahma", city: "Mahasiswi", text: "Pelayanan ramah, kurirnya sopan. Bisa bayar transfer atau QRIS pas cucian diantar. Rekomen parah buat anak kos yang gak mau ribet nyuci!", stars: 5 },
+            ].map((t, idx) => (
+              <div key={idx} className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 flex flex-col justify-between">
+                <div>
+                  <div className="text-amber-400 text-sm mb-3">{"★".repeat(t.stars)}</div>
+                  <p className="text-xs text-slate-300 leading-relaxed italic">"{t.text}"</p>
+                </div>
+                <div className="mt-6 pt-4 border-t border-white/5 flex items-center gap-3">
+                  <div className="h-9 w-9 rounded-full bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center font-bold text-xs text-white">
+                    {t.name[0]}
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-xs text-white">{t.name}</h4>
+                    <p className="text-[10px] text-slate-400">{t.city}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* FAQ Accordion */}
+      <section id="faq" className="py-16 border-b border-white/10 bg-slate-900/40">
+        <div className="mx-auto max-w-3xl px-4 sm:px-6">
+          <div className="text-center mb-10">
+            <span className="text-xs font-bold uppercase tracking-widest text-cyan-400">Tanya Jawab</span>
+            <h2 className="mt-2 text-2xl font-bold text-white">Pertanyaan Sering Diajukan</h2>
+          </div>
+
+          <div className="space-y-3">
+            {[
+              { q: "Berapa minimal berat untuk layanan antar-jemput?", a: "Minimal order antar-jemput gratis adalah 5 Kg untuk kiloan, atau minimal total transaksi Rp 35.000 untuk layanan satuan." },
+              { q: "Apakah pakaian saya akan dicampur dengan milik orang lain?", a: "Sama sekali tidak! Kebijakan higienis kami adalah 1 Mesin untuk 1 Pelanggan. Pakaian Anda diproses tersendiri secara steril." },
+              { q: "Berapa lama estimasi pengerjaan cucian?", a: "Layanan reguler selesai dalam 24-48 jam. Jika Anda butuh cepat, tersedia layanan Express Kilat yang selesai dalam 5 jam." },
+              { q: "Bagaimana cara melakukan pembayaran?", a: "Pembayaran sangat fleksibel: bisa transfer bank, QRIS saat kurir antar cucian, atau tunai (COD) setelah Anda memeriksa kondisi pakaian." },
+            ].map((faq, i) => (
+              <div
+                key={i}
+                className="rounded-xl border border-white/10 bg-slate-950 overflow-hidden cursor-pointer"
+                onClick={() => setActiveFaq(activeFaq === i ? null : i)}
+              >
+                <div className="flex items-center justify-between p-4 text-xs font-semibold text-white">
+                  <span>{faq.q}</span>
+                  <span className="text-cyan-400 text-sm font-bold">{activeFaq === i ? "−" : "+"}</span>
+                </div>
+                {activeFaq === i && (
+                  <div className="px-4 pb-4 text-xs text-slate-400 leading-relaxed border-t border-white/5 pt-3">
+                    {faq.a}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-white/10 bg-slate-950 py-12 text-slate-400 text-xs">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-4 pb-8 border-b border-white/10">
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-xl">🧺</span>
+                <span className="text-base font-bold text-white">{projectName}</span>
+              </div>
+              <p className="text-slate-400 text-xs leading-relaxed">
+                Solusi perawatan cucian profesional dan terpercaya dengan jaminan mutu bersih, higienis, dan wangi tahan lama.
+              </p>
+            </div>
+            <div>
+              <h4 className="font-semibold text-white text-xs uppercase tracking-wider mb-3">Jam Operasional</h4>
+              <p className="text-slate-300">Senin - Minggu: 07.00 - 21.00 WIB</p>
+              <p className="mt-1 text-slate-400">Pickup Terakhir: 19.30 WIB</p>
+            </div>
+            <div>
+              <h4 className="font-semibold text-white text-xs uppercase tracking-wider mb-3">Hubungi Kami</h4>
+              <p className="text-slate-300">WhatsApp: 0812-3456-7890</p>
+              <p className="mt-1 text-slate-300">Telepon: (021) 555-0199</p>
+              <p className="mt-1 text-slate-400">Email: halo@swiftlaundry.biz.id</p>
+            </div>
+            <div>
+              <h4 className="font-semibold text-white text-xs uppercase tracking-wider mb-3">Jaminan Layanan</h4>
+              <p className="text-slate-400">
+                100% Garansi Cuci Ulang Gratis jika hasil cucian kurang bersih atau tidak wangi.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <p>© 2026 {projectName}. All rights reserved.</p>
+            <BuildStatusPanel status={moduleStatus} />
+          </div>
+        </div>
+      </footer>
     </main>
   )
 }
@@ -2087,7 +2762,7 @@ function inferBuildIntent(prompt: string): BuildIntent {
     return "news"
   }
 
-  if (/(laundry|dry clean|cuci|setrika|laundromat)/i.test(normalized)) {
+  if (/(laundry|loundry|dry clean|dryclean|cuci|setrika|laundromat|cuci sepatu)/i.test(normalized)) {
     return "laundry"
   }
 

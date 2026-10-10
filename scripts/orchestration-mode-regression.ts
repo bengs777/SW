@@ -20,7 +20,7 @@ const smallPatchPrompt = "ganti teks judul menjadi JBB Store"
 const broadPlan = buildPartialEditPlan({
   prompt: broadCommercePrompt,
   existingFiles,
-  collaborationMode: "edit",
+  collaborationMode: "build",
 })
 
 if (broadPlan.mode !== "full") {
@@ -30,7 +30,7 @@ if (broadPlan.mode !== "full") {
 const patchPlan = buildPartialEditPlan({
   prompt: smallPatchPrompt,
   existingFiles,
-  collaborationMode: "edit",
+  collaborationMode: "build",
 })
 
 if (patchPlan.mode !== "partial") {

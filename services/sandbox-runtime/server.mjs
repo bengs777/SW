@@ -1,13 +1,17 @@
-import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, rm, stat, statfs, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { spawn } from "node:child_process"
+import http from "node:http"
 import express from "express"
+import { WebSocketServer } from "ws"
 import { createProxyMiddleware } from "http-proxy-middleware"
+import { createProcessDriver } from "./process-driver.mjs"
 
 const app = express()
 app.use(express.json({ limit: process.env.SANDBOX_PAYLOAD_LIMIT || "8mb" }))
+const processDriver = createProcessDriver()
 
 const ROOT_DIR =
   process.env.SWIFT_SANDBOX_ROOT ||
@@ -27,19 +31,8 @@ const MIN_BUILD_FREE_BYTES = envByteLimit("SWIFT_SANDBOX_BUILD_MIN_FREE_BYTES", 
 const PROJECT_IDLE_TTL_MS = Number(process.env.SWIFT_SANDBOX_PROJECT_IDLE_TTL_MS || 30 * 60 * 1000)
 const PROCESS_MAX_UPTIME_MS = Number(process.env.SWIFT_SANDBOX_PROCESS_MAX_UPTIME_MS || 20 * 60 * 1000)
 const CLEANUP_INTERVAL_MS = Number(process.env.SWIFT_SANDBOX_CLEANUP_INTERVAL_MS || 60 * 1000)
-const ALLOWED_GENERATED_ROOTS = ["src", "app", "components", "lib", "prisma"]
-const SAFE_GENERATED_ROOT_FILES = new Set([
-  "package.json",
-  "tsconfig.json",
-  "next.config.ts",
-  "next.config.js",
-  "tailwind.config.ts",
-  "tailwind.config.js",
-  "postcss.config.js",
-  "readme.md",
-  ".env.example",
-])
-const BLOCKED_EXACT_FILES = new Set([".env", ".git", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"])
+// Replit-mode: Allow full multi-language project roots and files
+const BLOCKED_EXACT_FILES = new Set([".git", "node_modules"])
 const states = new Map()
 const sandboxDatabaseUrl = () =>
   process.env.SWIFT_SANDBOX_DATABASE_URL || ""
@@ -196,7 +189,7 @@ function requireAuth(req, res, next) {
   return next()
 }
 
-function sandboxProcessEnv(port, publicBase) {
+function sandboxProcessEnv(port, publicBase, customEnv = {}) {
   return {
     PATH: process.env.PATH || "",
     Path: process.env.Path || process.env.PATH || "",
@@ -209,11 +202,12 @@ function sandboxProcessEnv(port, publicBase) {
     npm_config_ignore_scripts: "true",
     npm_config_audit: "false",
     npm_config_fund: "false",
-    DATABASE_URL: sandboxDatabaseUrl(),
-    NEXTAUTH_SECRET: process.env.SWIFT_SANDBOX_NEXTAUTH_SECRET || "swift-sandbox-local-secret",
+    DATABASE_URL: customEnv.DATABASE_URL || sandboxDatabaseUrl(),
+    NEXTAUTH_SECRET: customEnv.NEXTAUTH_SECRET || process.env.SWIFT_SANDBOX_NEXTAUTH_SECRET || "swift-sandbox-local-secret",
     NEXTAUTH_URL: publicBase || `http://127.0.0.1:${port}`,
     NEXT_PUBLIC_APP_URL: publicBase || `http://127.0.0.1:${port}`,
     PORT: String(port),
+    ...customEnv,
   }
 }
 
@@ -238,7 +232,22 @@ function stateFor(projectId) {
   }
 
   if (states.size >= MAX_PROJECTS) {
-    throw new Error(`Sandbox capacity reached. Maximum active projects: ${MAX_PROJECTS}`)
+    // Evict oldest idle project
+    let oldestId = null
+    let oldestAccess = Infinity
+    for (const [id, s] of states.entries()) {
+      if ((s.lastAccessAt || 0) < oldestAccess) {
+        oldestAccess = s.lastAccessAt || 0
+        oldestId = id
+      }
+    }
+    if (oldestId) {
+      const oldState = states.get(oldestId)
+      if (oldState) {
+        stopProcess(oldState).catch(() => null)
+        states.delete(oldestId)
+      }
+    }
   }
 
   const numericHash = createHash("sha1").update(projectId).digest().readUInt32BE(0)
@@ -258,6 +267,8 @@ function stateFor(projectId) {
     previewToken: randomUUID(),
     createdAt: now,
     lastAccessAt: now,
+    env: {},
+    runtimeType: "next",
   }
   states.set(projectId, state)
   return state
@@ -301,16 +312,8 @@ function assertSafeFilePath(rootDir, filePath, options = {}) {
   }
 
   const lower = normalized.toLowerCase()
-  const blockedEnvPath = lower !== ".env.example" && lower.split("/").some((segment) => segment === ".env" || segment.startsWith(".env."))
-  if (lower.includes("..") || lower.includes("~") || BLOCKED_EXACT_FILES.has(lower) || blockedEnvPath) {
+  if (lower.includes("..") || lower.includes("~") || BLOCKED_EXACT_FILES.has(lower)) {
     throw new Error(`Blocked sandbox file path rejected: ${filePath}`)
-  }
-
-  const allowedRoot = ALLOWED_GENERATED_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`))
-  const safeRootFile = SAFE_GENERATED_ROOT_FILES.has(lower)
-  const managedPackageJson = options.allowManagedPackageJson === true && lower === "package.json"
-  if (!allowedRoot && !safeRootFile && !managedPackageJson) {
-    throw new Error(`Sandbox file path is outside allowed project roots: ${filePath}`)
   }
 
   const resolved = path.resolve(rootDir, normalized)
@@ -369,22 +372,19 @@ async function fileExists(filePath) {
 function mergePackageJson(content) {
   const parsed = content ? JSON.parse(content) : {}
   const mergeDependencies = (...sources) => {
-    const merged = Object.assign({}, ...sources)
-
-    return Object.fromEntries(
-      Object.entries(merged).filter(([name]) => allowedPackages.has(name))
-    )
+    return Object.assign({}, ...sources)
   }
 
   return {
     ...parsed,
-    private: true,
+    private: parsed.private !== undefined ? parsed.private : true,
     scripts: {
       dev: "next dev",
       build: "next build",
       start: "next start",
       "db:generate": "prisma generate",
       "db:push": "prisma db push",
+      ...parsed.scripts,
     },
     dependencies: mergeDependencies(
       {
@@ -416,7 +416,7 @@ function mergePackageJson(content) {
   }
 }
 
-async function ensureFiles(state, files) {
+async function ensureFiles(state, files, customEnv = {}) {
   await mkdir(state.rootDir, { recursive: true })
   await assertStorageAvailable(
     state.rootDir,
@@ -424,92 +424,108 @@ async function ensureFiles(state, files) {
     "writing generated files"
   )
 
+  const isNextProject = files.some((f) => {
+    const p = normalizePath(f.path)
+    return p.startsWith("app/") || p.startsWith("src/") || (p === "package.json" && String(f.content).includes('"next"'))
+  })
+
   const packageFile = files.find((file) => normalizePath(file.path) === "package.json")
-  const packageJson = mergePackageJson(packageFile?.content || null)
-  await writeFile(path.join(state.rootDir, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`, "utf8")
+  if (packageFile || isNextProject) {
+    const packageJson = mergePackageJson(packageFile?.content || null)
+    await writeFile(path.join(state.rootDir, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`, "utf8")
 
-  const rootPackageLockPath = path.join(process.cwd(), "package-lock.json")
-  if (await fileExists(rootPackageLockPath)) {
-    const lockContent = await readFile(rootPackageLockPath, "utf8")
-    await writeFile(path.join(state.rootDir, "package-lock.json"), lockContent, "utf8")
-  }
+    const rootPackageLockPath = path.join(process.cwd(), "package-lock.json")
+    if (await fileExists(rootPackageLockPath)) {
+      const lockContent = await readFile(rootPackageLockPath, "utf8")
+      await writeFile(path.join(state.rootDir, "package-lock.json"), lockContent, "utf8")
+    }
 
-  if (!(await fileExists(path.join(state.rootDir, "next.config.js")))) {
-    await writeFile(
-      path.join(state.rootDir, "next.config.js"),
-      [
-        'const path = require("node:path")',
-        "",
-        "/** @type {import('next').NextConfig} */",
-        "module.exports = {",
-        "  turbopack: {",
-        "    root: path.resolve(__dirname),",
-        "  },",
-        "}",
-        "",
-      ].join("\n"),
-      "utf8"
-    )
-  }
+    if (!(await fileExists(path.join(state.rootDir, "next.config.js"))) && isNextProject) {
+      await writeFile(
+        path.join(state.rootDir, "next.config.js"),
+        [
+          'const path = require("node:path")',
+          "",
+          "/** @type {import('next').NextConfig} */",
+          "module.exports = {",
+          "  turbopack: {",
+          "    root: path.resolve(__dirname),",
+          "  },",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8"
+      )
+    }
 
-  if (!(await fileExists(path.join(state.rootDir, "tsconfig.json")))) {
-    await writeFile(
-      path.join(state.rootDir, "tsconfig.json"),
-      `${JSON.stringify({
-        compilerOptions: {
-          target: "ES2017",
-          lib: ["dom", "dom.iterable", "esnext"],
-          allowJs: true,
-          skipLibCheck: true,
-          strict: true,
-          noEmit: true,
-          esModuleInterop: true,
-          module: "esnext",
-          moduleResolution: "bundler",
-          resolveJsonModule: true,
-          isolatedModules: true,
-          jsx: "preserve",
-          incremental: true,
-          paths: {
-            "@/*": ["./src/*", "./*"],
-            "~/*": ["./src/*", "./*"],
+    if (!(await fileExists(path.join(state.rootDir, "tsconfig.json"))) && isNextProject) {
+      await writeFile(
+        path.join(state.rootDir, "tsconfig.json"),
+        `${JSON.stringify({
+          compilerOptions: {
+            target: "ES2017",
+            lib: ["dom", "dom.iterable", "esnext"],
+            allowJs: true,
+            skipLibCheck: true,
+            strict: true,
+            noEmit: true,
+            esModuleInterop: true,
+            module: "esnext",
+            moduleResolution: "bundler",
+            resolveJsonModule: true,
+            isolatedModules: true,
+            jsx: "preserve",
+            incremental: true,
+            paths: {
+              "@/*": ["./src/*", "./*"],
+              "~/*": ["./src/*", "./*"],
+            },
           },
-        },
-        include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-        exclude: ["node_modules"],
-      }, null, 2)}\n`,
-      "utf8"
-    )
+          include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+          exclude: ["node_modules"],
+        }, null, 2)}\n`,
+        "utf8"
+      )
+    }
   }
 
   for (const file of files) {
     const normalized = normalizePath(file.path)
-    if (normalized === "package.json") continue
+    if (normalized === "package.json" && (packageFile || isNextProject)) continue
     const { resolved } = assertSafeFilePath(state.rootDir, normalized)
     await mkdir(path.dirname(resolved), { recursive: true })
     await writeFile(resolved, String(file.content || ""), "utf8")
   }
 
-  const appPagePath = path.join(state.rootDir, "app", "page.tsx")
-  if (!(await fileExists(appPagePath))) {
-    await mkdir(path.dirname(appPagePath), { recursive: true })
-    await writeFile(appPagePath, "export default function Page() { return <main style={{padding: 24}}>Swift runtime project is empty.</main> }\n", "utf8")
+  // Inject secrets into .env and .env.local
+  if (customEnv && typeof customEnv === "object" && Object.keys(customEnv).length > 0) {
+    const envLines = Object.entries(customEnv).map(([k, v]) => `${k}=${v}`).join("\n")
+    await writeFile(path.join(state.rootDir, ".env"), `${envLines}\n`, "utf8")
+    await writeFile(path.join(state.rootDir, ".env.local"), `${envLines}\n`, "utf8")
+  }
+
+  if (isNextProject) {
+    const appPagePath = path.join(state.rootDir, "app", "page.tsx")
+    const srcPagePath = path.join(state.rootDir, "src", "app", "page.tsx")
+    if (!(await fileExists(appPagePath)) && !(await fileExists(srcPagePath))) {
+      await mkdir(path.dirname(appPagePath), { recursive: true })
+      await writeFile(appPagePath, "export default function Page() { return <main style={{padding: 24}}>Swift runtime project is empty.</main> }\n", "utf8")
+    }
   }
 }
 
 function runCommand(state, command, args, timeoutMs) {
   appendLog(state, `$ ${command} ${args.join(" ")}`)
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      cwd: state.rootDir,
-      env: sandboxProcessEnv(state.port),
-      shell: false,
+    const child = processDriver.spawn(state, command, args, {
+      env: sandboxProcessEnv(state.port, undefined, state.env || {}),
+      role: "task",
     })
 
     let output = ""
     const timer = setTimeout(() => {
       appendLog(state, `Command timed out after ${Math.round(timeoutMs / 1000)}s`)
-      child.kill()
+      processDriver.terminate(child)
     }, timeoutMs)
 
     child.stdout.on("data", (chunk) => {
@@ -522,6 +538,11 @@ function runCommand(state, command, args, timeoutMs) {
       output += text
       appendLog(state, text)
     })
+    child.on("error", (error) => {
+      clearTimeout(timer)
+      appendLog(state, `Failed to start ${command}: ${error.message}`)
+      resolve({ code: 1, output })
+    })
     child.on("close", (code) => {
       clearTimeout(timer)
       resolve({ code: code ?? 1, output })
@@ -532,7 +553,7 @@ function runCommand(state, command, args, timeoutMs) {
 async function stopProcess(state) {
   if (!state.process || state.process.killed) return
   appendLog(state, "Stopping previous dev server")
-  state.process.kill()
+  processDriver.terminate(state.process)
   state.process = null
   state.processStartedAt = null
 }
@@ -557,15 +578,22 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL_MS).unref?.()
 
+function getSafeHeader(req, name) {
+  if (!req) return ""
+  if (typeof req.get === "function") return req.get(name) || ""
+  return req.headers?.[name.toLowerCase()] || ""
+}
+
 function publicBaseUrl(req) {
   const configured = process.env.SANDBOX_PUBLIC_BASE_URL?.replace(/\/+$/, "")
   if (configured) return configured
-  const proto = req.get("x-forwarded-proto") || req.protocol || "https"
-  return `${proto}://${req.get("host")}`
+  const proto = getSafeHeader(req, "x-forwarded-proto") || req.protocol || "http"
+  const host = getSafeHeader(req, "host") || "127.0.0.1:8080"
+  return `${proto}://${host}`
 }
 
 function getCookie(req, name) {
-  const cookieHeader = req.get("cookie") || ""
+  const cookieHeader = getSafeHeader(req, "cookie")
   const parts = cookieHeader.split(";").map((part) => part.trim())
   for (const part of parts) {
     const index = part.indexOf("=")
@@ -577,75 +605,165 @@ function getCookie(req, name) {
   return ""
 }
 
-function startDevServer(state, req) {
+async function detectProjectRuntime(rootDir) {
+  if (
+    (await fileExists(path.join(rootDir, "main.py"))) ||
+    (await fileExists(path.join(rootDir, "app.py"))) ||
+    (await fileExists(path.join(rootDir, "requirements.txt")))
+  ) {
+    const entry = (await fileExists(path.join(rootDir, "main.py")))
+      ? "main.py"
+      : (await fileExists(path.join(rootDir, "app.py")))
+      ? "app.py"
+      : null
+    return { type: "python", entry }
+  }
+  if (await fileExists(path.join(rootDir, "package.json"))) {
+    try {
+      const pkg = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"))
+      if (pkg.dependencies?.next || pkg.devDependencies?.next) {
+        return { type: "next" }
+      }
+      if (pkg.scripts?.dev) {
+        return { type: "node-npm", script: "dev" }
+      }
+      if (pkg.scripts?.start) {
+        return { type: "node-npm", script: "start" }
+      }
+      if (await fileExists(path.join(rootDir, "index.js"))) {
+        return { type: "node-file", entry: "index.js" }
+      }
+      if (await fileExists(path.join(rootDir, "server.js"))) {
+        return { type: "node-file", entry: "server.js" }
+      }
+    } catch {}
+    return { type: "next" }
+  }
+  if (await fileExists(path.join(rootDir, "index.html"))) {
+    return { type: "static" }
+  }
+  return { type: "next" }
+}
+
+async function startDevServer(state, req) {
   if (state.process && !state.process.killed) return
 
-  const child = spawn("npm", ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(state.port)], {
-    cwd: state.rootDir,
+  const runtime = await detectProjectRuntime(state.rootDir)
+  state.runtimeType = runtime.type
+
+  let command = "npm"
+  let devArgs = ["run", "dev", "--", "--hostname", processDriver.devHostname, "--port", String(state.port)]
+
+  if (runtime.type === "python") {
+    command = "python"
+    devArgs = runtime.entry ? [runtime.entry] : ["-m", "http.server", String(state.port)]
+  } else if (runtime.type === "node-npm") {
+    command = "npm"
+    devArgs = ["run", runtime.script, "--", "--port", String(state.port)]
+  } else if (runtime.type === "node-file") {
+    command = "node"
+    devArgs = [runtime.entry]
+  } else if (runtime.type === "static") {
+    command = "npx"
+    devArgs = ["serve", ".", "-l", String(state.port)]
+  }
+
+  const child = processDriver.spawn(state, command, devArgs, {
     env: sandboxProcessEnv(
       state.port,
-      `${publicBaseUrl(req)}/preview/${encodeURIComponent(state.projectId)}`
+      `${publicBaseUrl(req)}/preview/${encodeURIComponent(state.projectId)}`,
+      state.env || {}
     ),
-    shell: false,
+    role: "dev",
+    publishPort: state.port,
   })
 
   state.process = child
   state.processStartedAt = Date.now()
   state.previewUrl = `${publicBaseUrl(req)}/preview/${encodeURIComponent(state.projectId)}/?previewToken=${encodeURIComponent(state.previewToken)}`
   state.status = "running"
-  appendLog(state, `$ npm run dev -- --hostname 127.0.0.1 --port ${state.port}`)
+  appendLog(state, `$ ${command} ${devArgs.join(" ")} (runtime=${runtime.type}, driver=${processDriver.name})`)
 
   setTimeout(() => {
     if (state.process === child && !child.killed) {
       appendLog(state, `Stopping dev server after max uptime ${Math.round(PROCESS_MAX_UPTIME_MS / 1000)}s`)
-      child.kill()
+      processDriver.terminate(child)
     }
   }, PROCESS_MAX_UPTIME_MS).unref?.()
+
+  child.on("error", (error) => {
+    appendLog(state, `Failed to start server: ${error.message}`)
+  })
 
   child.stdout.on("data", (chunk) => appendLog(state, String(chunk)))
   child.stderr.on("data", (chunk) => appendLog(state, String(chunk)))
   child.on("close", (code) => {
-    appendLog(state, `Dev server exited with code ${code ?? 1}`)
+    appendLog(state, `Server exited with code ${code ?? 1}`)
     if (state.process === child) {
       state.process = null
       state.processStartedAt = null
       if (state.status === "running") {
         state.status = "error"
-        state.lastError = `Dev server exited with code ${code ?? 1}`
+        state.lastError = `Server exited with code ${code ?? 1}`
       }
     }
   })
 }
 
-async function startSandbox(projectId, files, req) {
+async function startSandbox(projectId, files, req, customEnv = {}) {
   const state = stateFor(projectId)
-  const nextHash = hashFiles(files)
+  state.env = { ...(state.env || {}), ...(customEnv || {}) }
+  const nextHash = hashFiles(files) + JSON.stringify(state.env)
   state.lastError = null
 
   try {
     appendLog(state, `Preparing sandbox for ${projectId}`)
+
+    // Enforce SINGLE ACTIVE SANDBOX mode to stay within 1 vCPU / 1 GB RAM quota
+    for (const [otherId, otherState] of states.entries()) {
+      if (otherId !== projectId && otherState.process) {
+        appendLog(otherState, `Stopping sandbox process to enforce single active sandbox for ${projectId}`)
+        await stopProcess(otherState).catch(() => null)
+        otherState.status = "idle"
+        otherState.previewUrl = null
+      }
+    }
     if (state.fileHash !== nextHash) {
       await stopProcess(state)
-      await ensureFiles(state, files)
+      await ensureFiles(state, files, state.env)
       state.fileHash = nextHash
     }
 
-    const packageContent = await readFile(path.join(state.rootDir, "package.json"), "utf8")
-    const packageHash = createHash("sha256").update(packageContent).digest("hex")
-    if (state.packageHash !== packageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
-      state.status = "installing"
-      await assertStorageAvailable(state.rootDir, MIN_INSTALL_FREE_BYTES, "installing dependencies")
-      const install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
-      if (install.code !== 0) throw new Error("npm ci failed")
-      state.packageHash = packageHash
+    const runtime = await detectProjectRuntime(state.rootDir)
+    if (runtime.type === "next" || runtime.type === "node-npm") {
+      const packageContent = await readFile(path.join(state.rootDir, "package.json"), "utf8")
+      const packageHash = createHash("sha256").update(packageContent).digest("hex")
+      if (state.packageHash !== packageHash || !(await fileExists(path.join(state.rootDir, "node_modules")))) {
+        state.status = "installing"
+        await assertStorageAvailable(state.rootDir, MIN_INSTALL_FREE_BYTES, "installing dependencies")
+        let install = await runCommand(state, "npm", ["ci", "--ignore-scripts"], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
+        if (install.code !== 0) {
+          appendLog(state, "npm ci failed, falling back to npm install for custom packages...")
+          install = await runCommand(state, "npm", ["install", "--ignore-scripts"], Number(process.env.SWIFT_SANDBOX_INSTALL_TIMEOUT_MS || 120000))
+        }
+        if (install.code !== 0) throw new Error("npm install failed")
+        state.packageHash = packageHash
+      }
+
+      if (runtime.type === "next") {
+        state.status = "building"
+        await assertStorageAvailable(state.rootDir, MIN_BUILD_FREE_BYTES, "building preview")
+        const build = await runCommand(state, "npm", ["run", "build"], Number(process.env.SWIFT_SANDBOX_BUILD_TIMEOUT_MS || 150000))
+        if (build.code !== 0) throw new Error("npm run build failed")
+      }
+    } else if (runtime.type === "python") {
+      if (await fileExists(path.join(state.rootDir, "requirements.txt"))) {
+        state.status = "installing"
+        await runCommand(state, "pip", ["install", "-r", "requirements.txt"], 60000)
+      }
     }
 
-    state.status = "building"
-    await assertStorageAvailable(state.rootDir, MIN_BUILD_FREE_BYTES, "building preview")
-    const build = await runCommand(state, "npm", ["run", "build"], Number(process.env.SWIFT_SANDBOX_BUILD_TIMEOUT_MS || 150000))
-    if (build.code !== 0) throw new Error("npm run build failed")
-
-    startDevServer(state, req)
+    await startDevServer(state, req)
     return state
   } catch (error) {
     state.status = "error"
@@ -702,6 +820,7 @@ app.get("/health", async (_req, res) => {
       maxFiles: MAX_FILES,
       maxTotalBytes: MAX_TOTAL_BYTES,
       hasDatabaseUrl: Boolean(sandboxDatabaseUrl()),
+      isolation: processDriver.describe(),
     },
   })
 })
@@ -772,8 +891,9 @@ app.get("/sandbox/:projectId", requireAuth, (req, res) => {
 app.post("/sandbox/:projectId", requireAuth, async (req, res) => {
   try {
     const files = Array.isArray(req.body?.files) ? req.body.files : []
+    const env = req.body?.env && typeof req.body.env === "object" ? req.body.env : {}
     validateFiles(files)
-    const state = await startSandbox(req.params.projectId, files, req)
+    const state = await startSandbox(req.params.projectId, files, req, env)
     return res.status(state.lastError ? 500 : 200).json(serialize(state))
   } catch (error) {
     return res.status(400).json({
@@ -782,6 +902,38 @@ app.post("/sandbox/:projectId", requireAuth, async (req, res) => {
       logs: [],
       error: error.message || String(error),
     })
+  }
+})
+
+app.get("/sandbox/:projectId/terminal", requireAuth, (req, res) => {
+  try {
+    const state = stateFor(req.params.projectId)
+    return res.json({
+      projectId: req.params.projectId,
+      status: state.status,
+      driver: processDriver.name,
+      runtimeType: state.runtimeType,
+      previewUrl: state.previewUrl,
+      wsEndpoint: `/terminals/${encodeURIComponent(req.params.projectId)}`,
+    })
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) })
+  }
+})
+
+app.post("/sandbox/:projectId/terminal/exec", requireAuth, async (req, res) => {
+  try {
+    const state = stateFor(req.params.projectId)
+    const cmd = String(req.body?.command || "").trim()
+    if (!cmd) {
+      return res.status(400).json({ error: "Command required." })
+    }
+    const [execCmd, ...execArgs] = cmd.split(" ")
+    const timeoutMs = Number(req.body?.timeoutMs || 45000)
+    const result = await runCommand(state, execCmd, execArgs, timeoutMs)
+    return res.json(result)
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) })
   }
 })
 
@@ -824,6 +976,36 @@ app.use("/preview/:projectId", (req, res, next) => {
       const prefix = `/preview/${encodeURIComponent(request.params.projectId)}`
       return request.originalUrl.replace(prefix, "") || "/"
     },
+    on: {
+      error: (_err, _req, res) => {
+        if (!res.headersSent) {
+          res.writeHead(502, { "Content-Type": "text/html; charset=utf-8" })
+          res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Sandbox Mempersiapkan Runtime</title>
+  <meta http-equiv="refresh" content="3">
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #09090b; color: #fafafa; text-align: center; }
+    .card { max-width: 420px; padding: 24px; border: 1px solid #27272a; border-radius: 12px; background: #18181b; }
+    h3 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+    p { margin: 0; font-size: 13px; color: #a1a1aa; line-height: 1.5; }
+    .spinner { display: inline-block; width: 22px; height: 22px; border: 2px solid #3f3f46; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner"></div>
+    <h3>Sandbox Sedang Mempersiapkan Runtime...</h3>
+    <p>Aplikasi sedang dikompilasi pada port internal. Halaman akan otomatis memuat ulang dalam 3 detik.</p>
+  </div>
+</body>
+</html>`)
+        }
+      },
+    },
   })(req, res, next)
 })
 
@@ -834,6 +1016,149 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error(`Invalid PORT value: ${process.env.PORT}`)
 }
 
-app.listen(PORT, HOST, () => {
-  console.log(`swift-sandbox-runtime listening on ${HOST}:${PORT}`)
+const server = http.createServer(app)
+const wss = new WebSocketServer({ noServer: true })
+
+server.on("upgrade", (request, socket, head) => {
+  try {
+    const url = new URL(request.url, `http://${request.headers.host || "localhost"}`)
+    const match = url.pathname.match(/^\/(?:terminals|terminal|api\/terminal|ws\/terminal)\/([^/?#]+)/)
+    if (!match) {
+      // Let other websocket upgrades pass to proxy
+      return
+    }
+
+    const projectId = decodeURIComponent(match[1])
+    const token = url.searchParams.get("token") || url.searchParams.get("previewToken") || ""
+    const state = states.get(projectId) || stateFor(projectId)
+
+    if (IS_PRODUCTION && SERVICE_TOKEN && token !== SERVICE_TOKEN && token !== state.previewToken) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n")
+      socket.destroy()
+      return
+    }
+
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit("connection", ws, request, projectId)
+    })
+  } catch {
+    socket.destroy()
+  }
 })
+
+wss.on("connection", async (ws, req, projectId) => {
+  const state = states.get(projectId) || stateFor(projectId)
+  state.lastAccessAt = Date.now()
+  await mkdir(state.rootDir, { recursive: true })
+
+  let shellCmd = ""
+  let shellArgs = []
+
+  if (processDriver.name === "docker") {
+    const devContainer = state.process?.containerName
+    if (devContainer) {
+      shellCmd = "docker"
+      shellArgs = ["exec", "-i", "-e", "TERM=xterm-256color", "-w", "/workspace", devContainer, "/bin/sh"]
+    } else {
+      shellCmd = "docker"
+      shellArgs = [
+        "run",
+        "-i",
+        "--rm",
+        "-w",
+        "/workspace",
+        "-v",
+        `${state.rootDir}:/workspace`,
+        "-e",
+        "TERM=xterm-256color",
+        "node:22-bookworm-slim",
+        "/bin/sh",
+      ]
+    }
+  } else {
+    if (process.platform === "win32") {
+      shellCmd = process.env.ComSpec || "cmd.exe"
+      shellArgs = []
+    } else {
+      shellCmd = process.env.SHELL || "/bin/bash"
+      shellArgs = ["-l"]
+    }
+  }
+
+  const child = spawn(shellCmd, shellArgs, {
+    cwd: state.rootDir,
+    env: {
+      ...process.env,
+      ...sandboxProcessEnv(state.port, publicBaseUrl(req), state.env || {}),
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+    },
+    shell: false,
+  })
+
+  const banner = `\r\n\x1b[1;36m==============================================================\x1b[0m\r\n` +
+    `  \x1b[1;32mSWIFT CLOUD TERMINAL (REPLIT ENGINE)\x1b[0m\r\n` +
+    `  Project: \x1b[1;33m${projectId}\x1b[0m | Driver: \x1b[1;35m${processDriver.name}\x1b[0m\r\n` +
+    `\x1b[1;36m==============================================================\x1b[0m\r\n\r\n`
+  ws.send(banner)
+
+  if (child.stdout) {
+    child.stdout.on("data", (chunk) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(chunk.toString())
+      }
+    })
+  }
+
+  if (child.stderr) {
+    child.stderr.on("data", (chunk) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(chunk.toString())
+      }
+    })
+  }
+
+  ws.on("message", (msg) => {
+    if (!child.stdin || child.stdin.destroyed) return
+    const raw = msg.toString()
+    try {
+      if (raw.startsWith("{") && raw.endsWith("}")) {
+        const payload = JSON.parse(raw)
+        if (payload.type === "input" && typeof payload.data === "string") {
+          child.stdin.write(payload.data)
+          return
+        }
+        if (payload.type === "resize") {
+          return
+        }
+      }
+    } catch {}
+    child.stdin.write(raw)
+  })
+
+  child.on("close", (code) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(`\r\n\x1b[33m[Terminal process exited with code ${code ?? 0}]\x1b[0m\r\n`)
+      ws.close()
+    }
+  })
+
+  child.on("error", (err) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(`\r\n\x1b[31m[Terminal spawn error: ${err.message}]\x1b[0m\r\n`)
+    }
+  })
+
+  ws.on("close", () => {
+    if (!child.killed) {
+      try {
+        child.kill()
+      } catch {}
+    }
+  })
+})
+
+server.listen(PORT, HOST, () => {
+  console.log(`swift-sandbox-runtime listening on ${HOST}:${PORT} (HTTP & WebSocket Terminal enabled)`)
+})
+

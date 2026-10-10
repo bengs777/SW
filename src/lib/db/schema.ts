@@ -1,5 +1,17 @@
-import { relations } from "drizzle-orm"
+import { relations, sql } from "drizzle-orm"
 import { sqliteTable, text, integer, real, uniqueIndex, index } from "drizzle-orm/sqlite-core"
+
+/**
+ * Terminal job states that must not block a fresh attempt of the same request.
+ * The request-hash unique index is partial over the complement of this list so
+ * a failed/cancelled run never permanently dedupes later retries.
+ */
+export const GENERATION_JOB_NON_RETRYABLE_STATUSES = [
+  "failed",
+  "cancelled",
+  "dead_lettered",
+  "terminated",
+] as const
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
@@ -173,7 +185,11 @@ export const generationJobs = sqliteTable("generation_jobs", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (t) => [
   uniqueIndex("idx_generation_jobs_idempotency").on(t.userId, t.projectId, t.idempotencyKey),
-  uniqueIndex("idx_generation_jobs_request_hash").on(t.userId, t.projectId, t.requestHash),
+  uniqueIndex("idx_generation_jobs_request_hash")
+    .on(t.userId, t.projectId, t.requestHash)
+    .where(
+      sql`"status" not in ('failed', 'cancelled', 'dead_lettered', 'terminated')`
+    ),
   index("idx_generation_jobs_user_created").on(t.userId, t.createdAt),
   index("idx_generation_jobs_project_created").on(t.projectId, t.createdAt),
   index("idx_generation_jobs_status").on(t.status),

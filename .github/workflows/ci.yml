@@ -26,13 +26,20 @@ jobs:
 
       - run: npm run typecheck
 
+      # scripts/vercel-build.js runs migration deployment + schema health check in
+      # strict mode whenever CI=true, so the Turso credentials must be provided
+      # here instead of relying on .env.local (gitignored, absent on CI runners).
       - run: npm run build
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
 
       - run: npm run runtime-smoke
 
       - run: npm run real-e2e
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           DEPLOY_GATE_WORKER_FAILED_WINDOW_MINUTES: "60"
 
   production-health:

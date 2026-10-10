@@ -19,5 +19,15 @@ export default defineConfig([
       "react-hooks/purity": "off",
     },
   },
-  globalIgnores([".next/**", ".kilo/**", "out/**", "build/**", "next-env.d.ts"]),
+  globalIgnores([
+    ".next/**",
+    ".kilo/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+    ".swift-sandboxes/**",
+    ".swift-reports/**",
+    ".tmp/**",
+    "fixtures/**",
+  ]),
 ])

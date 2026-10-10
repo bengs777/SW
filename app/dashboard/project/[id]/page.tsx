@@ -4,7 +4,8 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import { useParams } from "next/navigation"
 import { EditorHeader } from "@/components/editor/header"
 import { ChatPanel } from "@/components/editor/chat-panel"
-import { PreviewPanel } from "@/components/editor/preview-panel"
+import { PreviewPanel, type PreviewTabType } from "@/components/editor/preview-panel"
+import { SecretsDialog } from "@/components/editor/secrets-dialog"
 import { ErrorLogPanel } from "@/components/editor/error-log-panel"
 import { DeveloperDiagnosticsPanel, type DeveloperDiagnosticsSnapshot } from "@/components/editor/developer-diagnostics-panel"
 import {
@@ -54,31 +55,22 @@ const GENERATE_BACKEND_TIMEOUT_MS = readGenerationTimeoutMs()
 const GENERATE_CLIENT_TIMEOUT_MS = GENERATE_BACKEND_TIMEOUT_MS + 15_000
 const GENERATE_CLIENT_TIMEOUT_SECONDS = Math.round(GENERATE_CLIENT_TIMEOUT_MS / 1000)
 const CHAT_ANSWER_TIMEOUT_MS = 60_000
-const DIRECT_FALLBACK_ACTIVE_STATUSES = ["queued", "running", "processing", "retrying", "stalled", "orphaned"]
 
-function buildClientWorkPlan(prompt: string, mode: CollaborationMode, language: PromptLanguage) {
+function buildClientWorkPlan(prompt: string, language: PromptLanguage) {
   const shortPrompt = prompt.replace(/\s+/g, " ").trim().slice(0, 120)
   if (language === "en") {
     return [
       `Confirm direction: ${shortPrompt}`,
-      mode === "fix"
-        ? "Find the smallest likely root cause before editing."
-        : mode === "edit"
-          ? "Select the smallest file scope that can satisfy the edit."
-          : "Create the main visible page first.",
-      mode === "build" ? "Keep generated files aligned with the prompt keywords." : "Preserve stable files outside the edit scope.",
+      "Create the main visible page first.",
+      "Keep generated files aligned with the prompt keywords.",
       "Validate build and runtime before saving and opening preview.",
     ]
   }
 
   return [
     `Tangkap arah prompt: ${shortPrompt}`,
-    mode === "fix"
-      ? "Cari akar masalah terkecil sebelum patch."
-      : mode === "edit"
-        ? "Pilih scope file terkecil yang cukup untuk edit ini."
-        : "Bangun halaman utama yang langsung terlihat.",
-    mode === "build" ? "Jaga file tetap sesuai keyword prompt." : "Pertahankan file stabil di luar scope edit.",
+    "Bangun halaman utama yang langsung terlihat.",
+    "Jaga file tetap sesuai keyword prompt.",
     "Validasi build dan runtime sebelum disimpan dan dipreview.",
   ]
 }
@@ -315,7 +307,7 @@ type GenerationQueueState =
 function queueStateCopy(state: GenerationQueueState | null | undefined) {
   switch (state) {
     case "waiting_worker":
-      return "Job tersimpan. Swift sedang menunggu worker generation kembali sehat."
+      return "Job tersimpan. Swift sedang menunggu worker generation kembali sehat. Kalau worker belum berjalan, jalankan npm run worker:generation."
     case "fallback_scheduled":
       return "Queue utama belum ideal. Swift menjalankan fallback yang tetap bisa dilacak."
     case "sandbox_running":
@@ -374,12 +366,15 @@ export default function EditorPage() {
   const [currentVersion, setCurrentVersion] = useState(0)
   const [activeFileIndex, setActiveFileIndex] = useState(0)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [rateLimitCooldownUntil, setRateLimitCooldownUntil] = useState<number | null>(null)
   const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null)
   const [isSavingFiles, setIsSavingFiles] = useState(false)
   const [isLoadingProject, setIsLoadingProject] = useState(true)
   const [projectError, setProjectError] = useState<string | null>(null)
   const [isDirty, setIsDirty] = useState(false)
-  const [activePreviewTab, setActivePreviewTab] = useState<"preview" | "code" | "explorer">("preview")
+  const [activePreviewTab, setActivePreviewTab] = useState<PreviewTabType>("preview")
+  const [secrets, setSecrets] = useState<Record<string, string>>({})
+  const [showSecretsDialog, setShowSecretsDialog] = useState(false)
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null)
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_KEY)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
@@ -464,6 +459,40 @@ export default function EditorPage() {
   useEffect(() => {
     generatedFilesRef.current = generatedFiles
   }, [generatedFiles])
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && projectId) {
+      try {
+        const stored = localStorage.getItem(`swift-secrets:${projectId}`)
+        if (stored) {
+          setSecrets(JSON.parse(stored))
+        }
+      } catch {}
+    }
+  }, [projectId])
+
+  const handleSaveSecrets = useCallback((newSecrets: Record<string, string>) => {
+    setSecrets(newSecrets)
+    if (typeof window !== "undefined" && projectId) {
+      try {
+        localStorage.setItem(`swift-secrets:${projectId}`, JSON.stringify(newSecrets))
+      } catch {}
+    }
+    if (generatedFilesRef.current.length > 0) {
+      void fetch(`/api/projects/${projectId}/sandbox`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: generatedFilesRef.current, env: newSecrets }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.previewUrl) {
+            setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
+          }
+        })
+        .catch(() => {})
+    }
+  }, [projectId])
 
   useEffect(() => {
     workspaceArtifactStatusRef.current = workspaceArtifactStatus
@@ -571,7 +600,9 @@ export default function EditorPage() {
     setWorkspaceArtifactStatus(files.length > 0 ? "persisted" : "empty")
     setProjectHistory(serverHistory)
     setPreviewFiles(null)
-    if (reason === "project-load") {
+    if (files.length > 0) {
+      setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
+    } else {
       setRuntimePreviewUrl(null)
     }
     setCurrentVersion(serverWorkspaceState.version)
@@ -755,7 +786,7 @@ export default function EditorPage() {
     }))
 
     if (previewUrl) {
-      setRuntimePreviewUrl(previewUrl)
+      setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
     }
 
     void refreshProjectState("generation-completed").then(() => {
@@ -881,7 +912,7 @@ export default function EditorPage() {
     )
 
     if (payload.data?.previewUrl) {
-      setRuntimePreviewUrl(payload.data.previewUrl)
+      setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
     }
   }, [])
 
@@ -904,9 +935,9 @@ export default function EditorPage() {
         const job = JSON.parse((event as MessageEvent).data)
         applyJobProgress(job)
         if (typeof job.previewUrl === "string" && job.previewUrl.trim()) {
-          setRuntimePreviewUrl(job.previewUrl.trim())
+          setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
         }
-        if (["completed", "failed", "cancelled"].includes(job.status)) {
+        if (["completed", "failed", "cancelled", "dead_lettered", "terminated"].includes(job.status)) {
           console.log("sse_closed")
           stream.close()
           clearGenerateDeadline()
@@ -931,7 +962,7 @@ export default function EditorPage() {
               try {
                 await refreshProjectState("generation-completed")
                 if (typeof job.previewUrl === "string" && job.previewUrl.trim()) {
-                  setRuntimePreviewUrl(job.previewUrl.trim())
+                  setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
                 }
                 setActivePreviewTab("preview")
                 setMessages((prev) =>
@@ -987,7 +1018,7 @@ export default function EditorPage() {
             })()
             return
           }
-          if (job.status === "failed") {
+          if (["failed", "dead_lettered", "terminated"].includes(job.status)) {
             const message = job.publicFailure?.label || publicGenerationErrorMessage(job.error || job.label || "Generate gagal. Buka Logs untuk detail error.")
             pushErrorLog("generate", message)
             setShowLogsPanel(true)
@@ -1077,6 +1108,13 @@ export default function EditorPage() {
           pushErrorLog("project", message)
         }
       })
+    }
+
+    stream.onopen = () => {
+      // Setiap stream baru yang berhasil terbuka dianggap sehat, jadi hitung mundur
+      // reconnect kembali dari nol. Tanpa reset ini, job panjang (mis. 915 detik)
+      // bisa kehabisan kuota reconnect sebelum timeout dan progress berhenti.
+      activeGenerationReconnectAttemptsRef.current = 0
     }
 
     stream.onerror = () => {
@@ -1331,6 +1369,11 @@ export default function EditorPage() {
               ? "persisted"
               : "empty"
         )
+        if (nextFiles.length > 0) {
+          setRuntimePreviewUrl(`/preview/${encodeURIComponent(projectId)}`)
+        } else {
+          setRuntimePreviewUrl(null)
+        }
         setActiveFileIndex(0)
         setCurrentVersion(serverWorkspaceState.version)
         setProjectName(data.project?.name || null)
@@ -1439,6 +1482,22 @@ export default function EditorPage() {
         issue: "auth",
         reason: "Swift AI engine rejected authentication or model access",
         action: "Hubungi admin atau cek konfigurasi Swift engine di dashboard production.",
+        checkedAt: new Date().toISOString(),
+      }
+    }
+
+    if (
+      normalized.includes("insufficient balance") ||
+      normalized.includes("insufficient_balance") ||
+      normalized.includes("saldo tidak mencukupi") ||
+      normalized.includes("saldo atau budget token tidak cukup") ||
+      normalized.includes("saldo tidak cukup")
+    ) {
+      return {
+        status: "error",
+        issue: "quota",
+        reason: "Saldo akun tidak mencukupi untuk melakukan generate",
+        action: "Silakan top up saldo terlebih dahulu di menu Billing untuk melanjutkan generate.",
         checkedAt: new Date().toISOString(),
       }
     }
@@ -1765,7 +1824,7 @@ export default function EditorPage() {
     prompt: string
     modelKey: string
     promptLanguage: PromptLanguage
-    mode: "ask" | "review"
+    mode: "ask"
     previewContext: PreviewContext
   }) => {
     const assistantId = Math.random().toString(36).substring(7)
@@ -1779,7 +1838,7 @@ export default function EditorPage() {
     setProviderStatus(null)
     setGenerationProgress({
       stage: "context",
-      label: input.mode === "review" ? "Swift sedang me-review project" : "Swift sedang menjawab pertanyaan",
+      label: "Swift sedang menjawab pertanyaan",
       startedAt: new Date(),
       timeoutMs: CHAT_ANSWER_TIMEOUT_MS,
       modelKey: input.modelKey,
@@ -1860,6 +1919,21 @@ export default function EditorPage() {
       return
     }
 
+    if (rateLimitCooldownUntil && Date.now() < rateLimitCooldownUntil) {
+      const waitSeconds = Math.max(1, Math.ceil((rateLimitCooldownUntil - Date.now()) / 1000))
+      const assistantId = Math.random().toString(36).substring(7)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantId,
+          role: "assistant",
+          content: `Terlalu banyak permintaan. Mohon tunggu ${waitSeconds} detik sebelum mencoba lagi.`,
+          timestamp: new Date(),
+        },
+      ])
+      return
+    }
+
     if (trimmedContent.length > MAX_PROMPT_LENGTH) {
       const assistantId = Math.random().toString(36).substring(7)
       const validationMessage: Message = {
@@ -1884,10 +1958,7 @@ export default function EditorPage() {
         mode: collaborationMode,
       },
     }
-    const workPlan = buildClientWorkPlan(trimmedContent, collaborationMode, promptLanguage)
-    if (collaborationMode === "edit") {
-      console.log("edit_mode_started")
-    }
+    const workPlan = buildClientWorkPlan(trimmedContent, promptLanguage)
 
     setMessages((prev) => [...prev, userMessage])
 
@@ -1897,7 +1968,7 @@ export default function EditorPage() {
       projectId,
       projectName,
       templateId: projectTemplateId,
-      activeTab: activePreviewTab,
+      activeTab: activePreviewTab === "terminal" ? "code" : activePreviewTab,
       viewport: previewViewport,
       currentVersion,
       activeFile,
@@ -1913,7 +1984,7 @@ export default function EditorPage() {
         prompt: trimmedContent,
         modelKey,
         promptLanguage,
-        mode: collaborationMode === "review" ? "review" : "ask",
+        mode: "ask",
         previewContext,
       })
       return
@@ -2016,7 +2087,8 @@ export default function EditorPage() {
         return
       }
 
-      const fallbackPromise = attemptDirectFallback("client_timeout")
+      const fallbackPromise =
+        directFallbackRunnerRef.current?.("client_timeout") ?? Promise.resolve(false)
       directFallbackPromiseRef.current = fallbackPromise
       void fallbackPromise.then((fallbackSucceeded) => {
         if (!fallbackSucceeded) {
@@ -2045,6 +2117,14 @@ export default function EditorPage() {
       })
       const jobData = await jobResponse.json().catch(() => null)
       if (!jobResponse.ok || !jobData?.job?.id) {
+        if (jobResponse.status === 429) {
+          const retryHeader = jobResponse.headers.get("Retry-After")
+          const retrySeconds = Math.max(
+            1,
+            retryHeader ? parseInt(retryHeader, 10) : Number(jobData?.retryAfterSeconds) || 5
+          )
+          setRateLimitCooldownUntil(Date.now() + retrySeconds * 1000)
+        }
         throw new Error(jobData?.error || "Failed to create generation job")
       }
 
@@ -2701,7 +2781,7 @@ export default function EditorPage() {
     ].join("\n")
 
     setShowLogsPanel(false)
-    void handleSendMessage(repairPrompt, selectedModel, [], "id", latestPreviewError, "fix")
+    void handleSendMessage(repairPrompt, selectedModel, [], "id", latestPreviewError, "build")
   }, [appendAssistantMessage, handleSendMessage, isGenerating, latestPreviewError, latestUserPrompt, selectedModel])
 
   const baseChatSize = layoutPreset === "prompt" ? 34 : layoutPreset === "preview" ? 30 : 32
@@ -2729,9 +2809,12 @@ export default function EditorPage() {
     baseChatSize
   )
 
+  const isActionThrottled = Boolean(rateLimitCooldownUntil && Date.now() < rateLimitCooldownUntil)
+  const isGeneratingOrThrottled = isGenerating || isActionThrottled
+
   if (isLoadingProject) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground" suppressHydrationWarning>
         Loading project...
       </div>
     )
@@ -2739,14 +2822,14 @@ export default function EditorPage() {
 
   if (projectError) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-destructive">
+      <div className="flex h-full items-center justify-center text-sm text-destructive" suppressHydrationWarning>
         {projectError}
       </div>
     )
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-card shadow-sm">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-card shadow-sm" suppressHydrationWarning>
       <EditorHeader
         projectId={projectId}
         currentVersion={currentVersion}
@@ -2787,6 +2870,15 @@ export default function EditorPage() {
         onRollback={handleRollbackVersion}
         onPushGitHub={handlePushToGitHub}
         onDeployVercel={handleDeployToVercel}
+        onOpenSecrets={() => setShowSecretsDialog(true)}
+        onOpenTerminal={() => setActivePreviewTab("terminal")}
+      />
+
+      <SecretsDialog
+        open={showSecretsDialog}
+        onOpenChange={setShowSecretsDialog}
+        secrets={secrets}
+        onSaveSecrets={handleSaveSecrets}
       />
 
       {isMobile ? (
@@ -2814,7 +2906,7 @@ export default function EditorPage() {
                 messages={messages}
                 onSendMessage={handleSendMessage}
                 onCancelGeneration={handleCancelGeneration}
-                isGenerating={isGenerating}
+                isGenerating={isGeneratingOrThrottled}
                 modelOptions={availableModels}
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}
@@ -2908,7 +3000,7 @@ export default function EditorPage() {
                 messages={messages}
                 onSendMessage={handleSendMessage}
                 onCancelGeneration={handleCancelGeneration}
-                isGenerating={isGenerating}
+                isGenerating={isGeneratingOrThrottled}
                 modelOptions={availableModels}
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}

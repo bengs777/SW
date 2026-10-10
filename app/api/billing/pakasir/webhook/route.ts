@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Project mismatch" }, { status: 409 })
   }
 
-  const status = normalizeStatus(body.status)
+  let status = normalizeStatus(body.status)
   const amount = extractAmount(body)
 
   const order = await db.query.topUpOrders.findFirst({
@@ -140,6 +140,38 @@ export async function POST(request: NextRequest) {
 
   if (amount != null && amount !== order.amount) {
     return NextResponse.json({ error: "Amount mismatch" }, { status: 409 })
+  }
+
+  let verification: TransactionDetailResult | null = null
+
+  // Unsigned webhooks are never trusted for status transitions: resolve the
+  // authoritative status from the payment provider instead of the request body.
+  if (signatureResult.method === "api_confirmation") {
+    try {
+      verification = await PakasirService.getTransactionDetail({
+        reference: order.reference,
+        amount: amount ?? order.amount,
+      })
+    } catch (error) {
+      console.warn("[billing] Unable to verify unsigned webhook with Pakasir", error)
+      return NextResponse.json(
+        { error: "Unable to verify webhook with payment provider" },
+        { status: 502 }
+      )
+    }
+
+    status = normalizeStatus(verification?.status || body.status)
+  }
+
+  // A paid order must never be downgraded: finalizeTopUpOrder only guards
+  // against re-crediting while the row still reads "paid".
+  if (order.status === "paid" && status !== "paid") {
+    return NextResponse.json({
+      success: true,
+      status: "paid",
+      reference: order.reference,
+      alreadyProcessed: true,
+    })
   }
 
   if (status === "pending") {
@@ -172,15 +204,15 @@ export async function POST(request: NextRequest) {
     })
   }
 
-  let verification: TransactionDetailResult | null = null
-
-  try {
-    verification = await PakasirService.getTransactionDetail({
-      reference: order.reference,
-      amount: amount ?? order.amount,
-    })
-  } catch (error) {
-    console.warn("[billing] Failed to verify Pakasir transaction", error)
+  if (!verification) {
+    try {
+      verification = await PakasirService.getTransactionDetail({
+        reference: order.reference,
+        amount: amount ?? order.amount,
+      })
+    } catch (error) {
+      console.warn("[billing] Failed to verify Pakasir transaction", error)
+    }
   }
 
   const apiConfirmed = Boolean(

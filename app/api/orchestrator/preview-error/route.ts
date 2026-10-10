@@ -10,7 +10,8 @@ import { buildContextForTask } from "@/lib/ai/context-builder"
 import { ProviderRouter } from "@/lib/ai/provider-router"
 import type { ProviderName } from "@/lib/ai/provider-router"
 import { parseGeneratedArtifact, type GeneratedArtifact } from "@/lib/ai/generated-artifact"
-import { enforceUserRateLimit } from "@/lib/security/rate-limit"
+import { enforceAiChatDailyRateLimit, enforceUserRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 import { log } from "@/lib/logging"
 import * as Executor from "@/lib/orchestrator/executor"
 import { MAX_AUTOMATIC_REPAIR_ATTEMPTS, routeModelForRequest } from "@/lib/ai/generation-pipeline"
@@ -90,15 +91,23 @@ async function resolveSessionUserId() {
 }
 
 async function requireProjectMember(projectId: string, userId: string) {
-  const project = await db.query.projects.findFirst({
-    where: eq(projects.id, projectId),
-  })
-
-  if (!project) {
-    return { ok: false as const, status: 404, error: "Project not found" }
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) {
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, projectId),
+      columns: { id: true },
+    })
+    if (!project) {
+      return { ok: false as const, status: 404, error: "Project not found" }
+    }
+    return { ok: false as const, status: 403, error: "Forbidden" }
   }
 
-  return { ok: true as const, projectId: projectId, role: "member" as const }
+  return {
+    ok: true as const,
+    projectId: projectId,
+    role: access.role === "admin" ? ("admin" as const) : ("member" as const),
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -112,6 +121,7 @@ export async function POST(req: NextRequest) {
 
   try {
     await enforceUserRateLimit(`preview-error:${userId}`)
+    await enforceAiChatDailyRateLimit(userId)
   } catch (error) {
     log("warn", "preview-error rate limited", { userId })
     return NextResponse.json({ error: getErrorMessage(error) }, { status: 429 })

@@ -533,7 +533,9 @@ assert(
     /requireAdminActorResponse/.test(adminGuard) &&
     /requireDeveloperActorResponse/.test(adminGuard) &&
     /canAccessRole/.test(adminGuard) &&
-    /memberships:\s*\{\s*columns:\s*\{\s*role:\s*true/.test(adminGuard) &&
+    /db\.query\.users\.findFirst/.test(adminGuard) &&
+    /user\.isDeveloperAccount/.test(adminGuard) &&
+    /Boolean\(env\.devOwnerEmail\) &&/.test(adminGuard) &&
     /normalizeAdminEmail\(user\.email\) === normalizeAdminEmail\(env\.devOwnerEmail\)/.test(adminGuard),
   "privileged routes must derive roles from the server database and keep developer access owner-scoped"
 )

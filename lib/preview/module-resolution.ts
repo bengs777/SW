@@ -130,9 +130,27 @@ export const SHIM_MODULES: Record<string, string> = {
   "next/link": `
     import React from "react";
     export default function Link(props) {
-      const { href = "#", children, prefetch, replace, scroll, shallow, locale, ...rest } = props || {};
+      const { href = "#", children, prefetch, replace, scroll, shallow, locale, onClick, ...rest } = props || {};
       const resolvedHref = typeof href === "string" ? href : href && href.pathname ? href.pathname : "#";
-      return React.createElement("a", { ...rest, href: resolvedHref }, children);
+      const isExternal = /^https?:\\/\\//i.test(resolvedHref);
+      const isAnchor = resolvedHref.startsWith("#");
+      const handleClick = function(e) {
+        if (typeof onClick === "function") {
+          onClick(e);
+        }
+        if (!isExternal && !isAnchor) {
+          e.preventDefault();
+          try {
+            window.parent.postMessage({ type: "swift-preview-nav", path: resolvedHref }, "*");
+          } catch (_) {}
+        }
+      };
+      return React.createElement("a", {
+        ...rest,
+        href: resolvedHref,
+        onClick: handleClick,
+        ...(isExternal ? { target: "_blank", rel: "noopener noreferrer" } : {})
+      }, children);
     }
   `,
   "next/image": `
@@ -146,13 +164,20 @@ export const SHIM_MODULES: Record<string, string> = {
   `,
   "next/navigation": `
     const noop = function(){};
-    const router = { push: noop, replace: noop, refresh: noop, back: noop, forward: noop, prefetch: noop };
+    const router = {
+      push: function(url){ console.log("[preview router.push]", url); },
+      replace: function(url){ console.log("[preview router.replace]", url); },
+      refresh: noop,
+      back: noop,
+      forward: noop,
+      prefetch: noop
+    };
     export function useRouter(){ return router; }
     export function usePathname(){ return "/"; }
     export function useSearchParams(){ return new URLSearchParams(""); }
     export function useParams(){ return {}; }
-    export function redirect(){ throw new Error("next/navigation redirect() is not available in preview."); }
-    export function notFound(){ throw new Error("next/navigation notFound() is not available in preview."); }
+    export function redirect(url){ console.warn("[preview redirect]", url); }
+    export function notFound(){ console.warn("[preview notFound]"); }
   `,
   "next/font/google": `
     function makeFont() { return { className: "", variable: "", style: {} }; }

@@ -7,7 +7,11 @@ loadEnvConfig(process.cwd())
 
 const normalizeEmail = (value) => value.trim().toLowerCase()
 
-const devOwnerEmail = normalizeEmail(process.env.DEV_OWNER_EMAIL || "ibnualmugni1933@gmail.com")
+const ownerEmail = process.env.DEV_OWNER_EMAIL
+if (!ownerEmail?.trim()) {
+  throw new Error("DEV_OWNER_EMAIL must be set to seed the developer account")
+}
+const devOwnerEmail = normalizeEmail(ownerEmail)
 const seedReference = `developer-seed:${devOwnerEmail}`
 const seedAmount = 1_000_000
 

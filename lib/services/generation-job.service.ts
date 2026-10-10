@@ -1,9 +1,20 @@
 import { db } from "@/lib/db/client"
-import { generationJobs, generationEvents, generationAttempts } from "@/lib/db/schema"
-import { eq, and, desc, asc, gt, inArray, sql, or } from "drizzle-orm"
+import {
+  GENERATION_JOB_NON_RETRYABLE_STATUSES,
+  generationJobs,
+  generationEvents,
+  generationAttempts,
+} from "@/lib/db/schema"
+import { eq, and, desc, asc, gt, inArray, notInArray, sql } from "drizzle-orm"
 import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
 
-export const GENERATION_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"])
+export const GENERATION_TERMINAL_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "dead_lettered",
+  "terminated",
+])
 
 export type GenerationJobStage =
   | "queued"
@@ -227,7 +238,7 @@ function retryHintForFailureKind(kind: PublicGenerationFailureKind) {
     case "provider_timeout":
       return "Coba retry dengan prompt lebih kecil atau tunggu provider lebih stabil."
     case "provider_exhausted":
-      return "Retry aman setelah model fallback/env OpenRouter sehat."
+      return "Cek kuota OpenRouter atau ganti API key / top up saldo, lalu retry."
     case "worker_timeout":
       return "Pastikan worker generation memakai timeout production terbaru, lalu retry."
     case "dead_lettered":
@@ -322,26 +333,32 @@ export class GenerationJobService {
     idempotencyKey?: string | null
     requestHash?: string | null
   }) {
-    const conditions = []
     if (input.idempotencyKey) {
-      conditions.push(eq(generationJobs.idempotencyKey, input.idempotencyKey))
-    }
-    if (input.requestHash) {
-      conditions.push(eq(generationJobs.requestHash, input.requestHash))
+      const byKey = await db.select().from(generationJobs)
+        .where(and(
+          eq(generationJobs.userId, input.userId),
+          eq(generationJobs.projectId, input.projectId),
+          eq(generationJobs.idempotencyKey, input.idempotencyKey)
+        ))
+        .orderBy(desc(generationJobs.createdAt))
+        .limit(1)
+
+      if (byKey[0]) return byKey[0]
     }
 
-    if (conditions.length === 0) return null
+    if (!input.requestHash) return null
 
-    const result = await db.select().from(generationJobs)
+    const byHash = await db.select().from(generationJobs)
       .where(and(
         eq(generationJobs.userId, input.userId),
         eq(generationJobs.projectId, input.projectId),
-        or(...conditions)
+        eq(generationJobs.requestHash, input.requestHash),
+        notInArray(generationJobs.status, [...GENERATION_JOB_NON_RETRYABLE_STATUSES])
       ))
       .orderBy(desc(generationJobs.createdAt))
       .limit(1)
 
-    return result[0] || null
+    return byHash[0] || null
   }
 
   static async countActiveForUser(userId: string) {
@@ -497,7 +514,12 @@ export class GenerationJobService {
     const stage = input.stage || "queued"
     const status = input.status || "queued"
 
-    let updated = await this.update(jobId, input)
+    const transitionInput = {
+      ...input,
+      lastHeartbeatAt: input.lastHeartbeatAt || new Date(),
+    }
+
+    let updated = await this.update(jobId, transitionInput)
     if (!updated?.count) {
       const fresh = await this.findById(jobId)
       const requestedStatus = input.status
@@ -515,7 +537,7 @@ export class GenerationJobService {
         return fresh
       }
 
-      updated = await this.update(jobId, input)
+      updated = await this.update(jobId, transitionInput)
       if (!updated?.count) {
         return this.findById(jobId)
       }

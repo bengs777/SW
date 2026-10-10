@@ -497,7 +497,7 @@ function mergePackageJson(existingContent: string | null) {
 function filterAllowedDependencies(dependencies: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(dependencies)
-      .filter(([name, version]) => ALLOWED_PACKAGES.has(name) && typeof version === "string" && version.trim())
+      .filter(([name, version]) => typeof name === "string" && name.trim() && typeof version === "string" && version.trim())
       .map(([name, version]) => [name, String(version)])
   )
 }
@@ -868,6 +868,16 @@ async function startRuntimeSandboxUnlocked(projectId: string, files: GeneratedFi
   try {
     state.lastError = null
     appendLog(state, `Preparing runtime sandbox for project ${projectId}`)
+
+    // Enforce SINGLE ACTIVE SANDBOX mode to stay within 1 vCPU / 1 GB RAM quota
+    for (const [otherId, otherState] of states.entries()) {
+      if (otherId !== projectId && otherState.process && !otherState.process.killed) {
+        appendLog(otherState, `Stopping sandbox process to enforce single active sandbox for ${projectId}`)
+        await stopProcess(otherState)
+        otherState.status = "idle"
+        otherState.previewUrl = null
+      }
+    }
 
     if (state.fileHash !== nextFileHash) {
       await stopProcess(state)

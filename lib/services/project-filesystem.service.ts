@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { db } from "@/lib/db/client"
-import { projectFiles, projects } from "@/lib/db/schema"
+import { projectFiles } from "@/lib/db/schema"
 import { eq, and, asc, inArray } from "drizzle-orm"
 import { normalizeGeneratedPath, validateGeneratedPath } from "@/lib/ai/file-policy"
 import type { GeneratedFile } from "@/lib/types"

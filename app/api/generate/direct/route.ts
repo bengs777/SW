@@ -8,6 +8,7 @@ import { eq, and, lt, inArray } from "drizzle-orm"
 import { env } from "@/lib/env"
 import { routeModelForRequest } from "@/lib/ai/generation-pipeline"
 import { COLLABORATION_MODES, isMutatingCollaborationMode } from "@/lib/ai/collaboration-mode"
+import { calculateModelRequestPrice } from "@/lib/ai/pricing"
 import type { GenerationQueuePayload } from "@/lib/queue/generation-queue"
 import { processGenerationPayload } from "@/lib/workers/generation-worker"
 import { enforceAiUsageRateLimit, releaseAiUsageQuota } from "@/lib/security/rate-limit"
@@ -20,6 +21,7 @@ import { ModelConfigService } from "@/lib/services/model-config.service"
 import { BillingService } from "@/lib/services/billing.service"
 import { OrchestrationRuntimeService } from "@/lib/services/orchestration-runtime.service"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
+import { getProjectAccess } from "@/lib/auth/project-access"
 import { timeoutConfig } from "@/lib/timeouts"
 
 export const runtime = "nodejs"
@@ -130,6 +132,7 @@ export async function POST(request: NextRequest) {
   let body: unknown = null
   let quotaUserId: string | null = null
   let quotaUsageLogId: string | null = null
+  let quotaReservedCost = 0
 
   // Returns the daily generation quota reserved for this request once it is
   // clear that no generation will run for it. Refunding the usage log also
@@ -137,13 +140,15 @@ export async function POST(request: NextRequest) {
   const releaseDirectQuota = async (errorMessage: string) => {
     const userId = quotaUserId
     const usageLogId = quotaUsageLogId
+    const reservedCost = quotaReservedCost
     quotaUserId = null
     quotaUsageLogId = null
+    quotaReservedCost = 0
 
     if (!userId) return
 
     if (usageLogId) {
-      await BillingService.refundReservation(usageLogId, userId, 0, errorMessage).catch(() => null)
+      await BillingService.refundReservation(usageLogId, userId, reservedCost, errorMessage).catch(() => null)
       return
     }
 
@@ -252,9 +257,11 @@ export async function POST(request: NextRequest) {
     currentStage = "auth_success"
     logEarlyStage("auth_success", requestId)
     const email = session?.email
-    developerDiagnosticsAllowed =
-      Boolean(email && email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()) ||
-      Boolean(email?.endsWith("@swift.local"))
+    developerDiagnosticsAllowed = Boolean(
+      email &&
+        env.devOwnerEmail &&
+        email.trim().toLowerCase() === env.devOwnerEmail.trim().toLowerCase()
+    )
 
     if (!email) {
       auditSummary()
@@ -314,13 +321,6 @@ export async function POST(request: NextRequest) {
       attachmentsCount: parsed.data.attachments.length,
     })
 
-    if (parsed.data.collaborationMode === "edit" || parsed.data.collaborationMode === "fix") {
-      const editFeatureCheck = assertFeatureEnabled("enableAiEdit", "AI edit")
-      if (editFeatureCheck) {
-        return NextResponse.json({ error: editFeatureCheck.error }, { status: editFeatureCheck.status })
-      }
-    }
-
     if (!isMutatingCollaborationMode(parsed.data.collaborationMode)) {
       log("warn", "direct_generation_non_mutating_mode_rejected", {
         requestId,
@@ -331,7 +331,7 @@ export async function POST(request: NextRequest) {
         {
           error: "collaboration_mode_not_generating",
           message:
-            "Ask and review modes never run direct generation. Send them to /api/ai/answer instead.",
+            "Ask mode never runs direct generation. Send it to /api/ai/answer instead.",
           mode: parsed.data.collaborationMode,
         },
         { status: 409 }
@@ -386,6 +386,15 @@ export async function POST(request: NextRequest) {
     warnIfSlow("db", projectLookupDurationMs, { operation: "project.findFirst", requestId })
 
     if (!project) {
+      auditSummary()
+      return NextResponse.json(
+        { error: "Project not found", stage: "project_lookup", retryable: false, requestId },
+        { status: 404 }
+      )
+    }
+
+    const projectAccess = await getProjectAccess(project.id, { userId: user.id, email })
+    if (!projectAccess) {
       auditSummary()
       return NextResponse.json(
         { error: "Project not found", stage: "project_lookup", retryable: false, requestId },
@@ -594,6 +603,31 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const pricing = calculateModelRequestPrice({
+      modelKey: modelConfig.key,
+      modelName: modelConfig.modelName,
+      prompt: parsed.data.prompt,
+    })
+
+    if ((user.balance ?? 0) < pricing.estimatedCost) {
+      failedStage = "insufficient_balance"
+      await releaseDirectQuota("Saldo tidak mencukupi untuk melakukan generate")
+      auditSummary(undefined, "insufficient_balance")
+      return NextResponse.json(
+        {
+          error: "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo terlebih dahulu di menu Billing.",
+          code: "INSUFFICIENT_BALANCE",
+          requiresTopup: true,
+          currentBalance: user.balance ?? 0,
+          requiredCost: pricing.estimatedCost,
+          stage: "insufficient_balance",
+          retryable: false,
+          requestId,
+        },
+        { status: 402 }
+      )
+    }
+
     currentStage = "db_job_creation"
     log("info", "direct_db_create", {
       stage: "db_job_creation",
@@ -603,122 +637,114 @@ export async function POST(request: NextRequest) {
       userId: user.id,
       requestHash: rawRequestHash,
       directRequestHash,
-      cost: 0,
+      cost: pricing.estimatedCost,
       fallback: DIRECT_FALLBACK,
     })
 
     let usageLog: typeof usageLogs.$inferSelect | null = null
     let job: typeof generationJobs.$inferSelect | null = null
     try {
-      const usageLogResult = await db.insert(usageLogs).values({
-        id: randomUUID(),
+      const reservation = await BillingService.reserveGenerationJob({
         userId: user.id,
+        projectId: project.id,
+        prompt: parsed.data.prompt,
         modelConfigId: modelConfig.id,
         model: modelConfig.key,
         provider: DIRECT_PROVIDER,
-        cost: 0,
-        prompt: parsed.data.prompt,
-        status: "direct",
-      }).returning()
-      usageLog = usageLogResult[0]
+        cost: pricing.estimatedCost,
+        idempotencyKey: directIdempotencyKey,
+        requestHash: directRequestHash,
+        plan: parsed.data.plan,
+        traceId,
+        context: {
+          requestId,
+          traceId,
+          correlationId,
+          executionChainId,
+          requestHash: rawRequestHash,
+          requestedModel: parsed.data.model,
+          routedModel: routingDecision.modelName,
+          routing: {
+            classification: routingDecision.classification,
+            layer: routingDecision.layer,
+            reason: routingDecision.reason,
+          },
+          fallback: DIRECT_FALLBACK,
+          billing: {
+            mode: "balance_deducted",
+          },
+        },
+      })
+      job = reservation.job
+      usageLog = reservation.usageLog
       quotaUsageLogId = usageLog.id
-
-      try {
-        const jobResult = await db.insert(generationJobs).values({
-          id: randomUUID(),
+      quotaReservedCost = pricing.estimatedCost
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(message)) {
+        const existing = await GenerationJobService.findIdempotentJob({
           userId: user.id,
           projectId: project.id,
-          prompt: parsed.data.prompt,
-          model: modelConfig.key,
-          provider: DIRECT_PROVIDER,
           idempotencyKey: directIdempotencyKey,
           requestHash: directRequestHash,
-          status: "queued",
-          orchestrationState: "queued",
-          stage: "queued",
-          label: "Prompt diterima",
-          progress: 0,
-          maxRetries: 2,
-          traceId,
-          planJson: parsed.data.plan ? JSON.stringify(parsed.data.plan) : null,
-          contextJson: JSON.stringify({
+        })
+        if (existing) {
+          dbCreated = true
+          auditSummary(undefined, "database_unique_constraint_deduped_existing_direct_job")
+          logStage("response_return", true, {
             requestId,
             traceId,
-            correlationId,
-            executionChainId,
-            requestHash: rawRequestHash,
-            requestedModel: parsed.data.model,
-            routedModel: routingDecision.modelName,
-            routing: {
-              classification: routingDecision.classification,
-              layer: routingDecision.layer,
-              reason: routingDecision.reason,
-            },
-            fallback: DIRECT_FALLBACK,
-            billing: {
-              usageLogId: usageLog?.id || null,
-              reservedCost: 0,
-              mode: "audit_only",
-            },
-          }),
-        }).returning()
-        job = jobResult[0]
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (/UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(message)) {
-          const existing = await GenerationJobService.findIdempotentJob({
-            userId: user.id,
-            projectId: project.id,
-            idempotencyKey: directIdempotencyKey,
-            requestHash: directRequestHash,
+            jobId: existing.id,
+            uniqueConstraintDeduped: true,
           })
-          if (existing) {
-            dbCreated = true
-            auditSummary(undefined, "database_unique_constraint_deduped_existing_direct_job")
-            logStage("response_return", true, {
+          await releaseDirectQuota("Duplicate direct generation request deduped")
+          return NextResponse.json(
+            {
+              job: GenerationJobService.toPublicJob(existing),
+              idempotent: true,
+              fallback: DIRECT_FALLBACK,
               requestId,
+              correlationId,
               traceId,
-              jobId: existing.id,
-              uniqueConstraintDeduped: true,
-            })
-            // This request wrote an orphan usage log: the job that will actually
-            // run already carries its own billing record, so release ours.
-            await releaseDirectQuota("Duplicate direct generation request deduped")
-            return NextResponse.json(
-              {
-                job: GenerationJobService.toPublicJob(existing),
-                idempotent: true,
-                fallback: DIRECT_FALLBACK,
-                requestId,
-                correlationId,
-                traceId,
-                executionChainId,
-                billing: {
-                  usageLogId: usageLog?.id || null,
-                  reservedCost: 0,
-                  mode: "audit_only",
-                },
+              executionChainId,
+              billing: {
+                reservedCost: pricing.estimatedCost,
               },
-              {
-                status: 202,
-                headers: {
-                  "X-Request-Id": requestId,
-                  "X-Correlation-Id": correlationId,
-                  "X-Trace-Id": traceId,
-                  "X-Execution-Chain-Id": executionChainId,
-                },
-              }
-            )
-          }
+            },
+            {
+              status: 202,
+              headers: {
+                "X-Request-Id": requestId,
+                "X-Correlation-Id": correlationId,
+                "X-Trace-Id": traceId,
+                "X-Execution-Chain-Id": executionChainId,
+              },
+            }
+          )
         }
-        throw error
       }
-    } catch (error) {
+      if (/insufficient balance/i.test(message)) {
+        failedStage = "insufficient_balance"
+        await releaseDirectQuota("Saldo tidak mencukupi untuk melakukan generate")
+        auditSummary(error, "insufficient_balance")
+        return NextResponse.json(
+          {
+            error: "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo terlebih dahulu di menu Billing.",
+            code: "INSUFFICIENT_BALANCE",
+            requiresTopup: true,
+            currentBalance: user.balance ?? 0,
+            requiredCost: pricing.estimatedCost,
+            stage: "insufficient_balance",
+            retryable: false,
+            requestId,
+          },
+          { status: 402 }
+        )
+      }
       logFatal("db_job_creation", error, {
         requestId,
         correlationId,
         traceId,
-        usageLogId: usageLog?.id || null,
         requestHash: rawRequestHash,
       })
       auditSummary(error)
@@ -788,7 +814,7 @@ export async function POST(request: NextRequest) {
       model: modelConfig.key,
       provider: DIRECT_PROVIDER,
       usageLogId: createdUsageLog.id,
-      reservedCost: 0,
+      reservedCost: pricing.estimatedCost,
       modelConfigId: modelConfig.id,
       promptLanguage: parsed.data.promptLanguage,
       collaborationMode: parsed.data.collaborationMode,
@@ -896,8 +922,7 @@ export async function POST(request: NextRequest) {
         executionChainId,
         billing: {
           usageLogId: createdUsageLog.id,
-          reservedCost: 0,
-          mode: "audit_only",
+          reservedCost: pricing.estimatedCost,
         },
       },
       {

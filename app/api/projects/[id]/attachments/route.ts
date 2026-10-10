@@ -11,6 +11,7 @@ import {
   uploadProjectAssetToStorage,
 } from "@/lib/supabase/storage"
 import { enforceUploadDailyRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 import type { PromptAttachment, StoredProjectAsset } from "@/lib/types"
 
 export const runtime = "nodejs"
@@ -19,6 +20,9 @@ const MAX_ATTACHMENTS = 5
 const MAX_ATTACHMENT_SIZE_BYTES = 3 * 1024 * 1024
 
 async function resolveProject(projectId: string, userId: string) {
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) return null
+
   return db.query.projects.findFirst({
     where: eq(projects.id, projectId),
   })

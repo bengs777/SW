@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSession } from "@/auth"
 import { db } from "@/lib/db/client"
-import { projects, projectFiles } from "@/lib/db/schema"
+import { projects } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { ProjectFilesystemService } from "@/lib/services/project-filesystem.service"
 import { splitWorkspaceStateFiles } from "@/lib/workspace-state"
 import type { GeneratedFile } from "@/lib/types"
 import { assertFeatureEnabled } from "@/lib/feature-flags"
 import { enforceRouteRateLimit } from "@/lib/security/rate-limit"
+import { getProjectAccess } from "@/lib/auth/project-access"
 
 const MAX_GITHUB_FILE_BYTES = 900_000
 
@@ -41,6 +42,9 @@ async function githubFetch<T>(url: string, token: string, init?: RequestInit): P
 }
 
 async function resolveProject(projectId: string, userId: string) {
+  const access = await getProjectAccess(projectId, { userId })
+  if (!access) return null
+
   return db.query.projects.findFirst({
     where: eq(projects.id, projectId),
     with: { files: true },

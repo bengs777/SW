@@ -62,7 +62,7 @@ function errorAdvice(message: string) {
     return "Cek sandbox logs untuk membedakan gagal install, build, atau runtime preview."
   }
   if (/saldo|balance|budget token/i.test(message)) {
-    return "Cek saldo/budget token atau kurangi scope prompt sebelum retry."
+    return "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo di menu Billing."
   }
   if (/saturated|penuh sementara/i.test(message)) {
     return "Tunggu backlog turun sebentar, lalu coba ulang prompt."

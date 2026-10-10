@@ -20,6 +20,8 @@ import {
   RotateCcw,
   ShieldCheck,
   Sparkles,
+  KeyRound,
+  Terminal,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -65,6 +67,8 @@ type WorkspaceCommandCenterProps = {
   onRollback: (historyId: string) => void
   onPushGitHub: () => void
   onDeployVercel: () => void
+  onOpenSecrets?: () => void
+  onOpenTerminal?: () => void
 }
 
 const deployStatusLabel: Record<DeployFlowState["githubStatus"] | DeployFlowState["vercelStatus"], string> = {
@@ -118,6 +122,8 @@ export function WorkspaceCommandCenter({
   onRollback,
   onPushGitHub,
   onDeployVercel,
+  onOpenSecrets,
+  onOpenTerminal,
 }: WorkspaceCommandCenterProps) {
   const latestHistory = history[0] || null
   const validationPassed = previewValidation.status === "passed"
@@ -348,6 +354,18 @@ export function WorkspaceCommandCenter({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {onOpenSecrets && (
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={onOpenSecrets} title="Kelola Environment Variables & Secrets">
+              <KeyRound className="h-4 w-4 text-amber-500" />
+              Secrets
+            </Button>
+          )}
+          {onOpenTerminal && (
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={onOpenTerminal} title="Buka Interactive Cloud Terminal">
+              <Terminal className="h-4 w-4 text-emerald-500" />
+              Terminal
+            </Button>
+          )}
           {deployFlow.githubUrl && (
             <Button size="sm" variant="ghost" className="gap-2" asChild>
               <a href={deployFlow.githubUrl} target="_blank" rel="noreferrer">

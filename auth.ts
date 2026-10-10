@@ -1,8 +1,8 @@
 import { auth, currentUser } from "@clerk/nextjs/server"
 import { db } from "@/lib/db/client"
-import { users, workspaces, workspaceMembers } from "@/lib/db/schema"
+import { users } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
-import { env } from "@/lib/env"
+import { UserService } from "@/lib/services/user.service"
 import { log } from "@/lib/logging"
 import {
   derivePrimaryRole,
@@ -38,14 +38,8 @@ if (!authRuntime.ok || authRuntime.status === "degraded") {
 
 function deriveRoles(input: {
   isDeveloperAccount?: boolean | null
-  workspaceRoles?: string[]
-  ownsWorkspace?: boolean
 }): AuthRole[] {
   const roles = new Set<AuthRole>(["user"])
-
-  if (input.ownsWorkspace || input.workspaceRoles?.some((role) => role === "admin")) {
-    roles.add("admin")
-  }
 
   if (input.isDeveloperAccount) {
     roles.add("developer")
@@ -76,24 +70,16 @@ async function resolveDatabaseUser(email?: string | null): Promise<AuthSession |
   const lookup = (async () => {
     const dbUser = await db.query.users.findFirst({
       where: eq(users.email, normalizedEmail),
-      with: {
-        workspaces: { limit: 1 },
-        memberships: { columns: { role: true } },
-      },
     }) as unknown as {
       id: string
       email: string
       name: string | null
       image: string | null
       isDeveloperAccount: boolean
-      workspaces: Array<{ id: string }>
-      memberships: Array<{ role: string }>
     } | undefined
 
     const roles = deriveRoles({
       isDeveloperAccount: dbUser?.isDeveloperAccount,
-      ownsWorkspace: Boolean(dbUser?.workspaces.length),
-      workspaceRoles: dbUser?.memberships.map((m) => m.role) ?? [],
     })
 
     const authUser: AuthSession = {
@@ -130,29 +116,8 @@ async function grantMonthlyFreeCreditsFromSession(email: string) {
   const inflight = creditGrantInflight.get(normalizedEmail)
   if (inflight) return inflight
 
-  const grant = Promise.resolve()
-    .then(async () => {
-      const existing = await db.query.users.findFirst({
-        where: eq(users.email, normalizedEmail),
-        columns: { id: true, balance: true },
-      })
-      if (!existing) return
-
-      const now = new Date()
-      const lastGrant = await db.query.billingTransactions.findFirst({
-        where: eq(users.id, existing.id),
-        columns: { createdAt: true },
-      })
-
-      if (lastGrant) {
-        const daysSinceLastGrant = (now.getTime() - lastGrant.createdAt.getTime()) / (1000 * 60 * 60 * 24)
-        if (daysSinceLastGrant < 30) return
-      }
-
-      await db.update(users)
-        .set({ balance: existing.balance + 10000 })
-        .where(eq(users.id, existing.id))
-
+  const grant = UserService.grantMonthlyFreeCreditsIfNeeded(normalizedEmail)
+    .then(() => {
       creditGrantCache.set(normalizedEmail, Date.now())
     })
     .finally(() => {
