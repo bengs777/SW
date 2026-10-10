@@ -66,6 +66,21 @@ install_node() {
   pm2 startup systemd -u root --hp /root >/dev/null || true
 }
 
+install_docker() {
+  # Generated apps run inside resource-limited containers (SWIFT_SANDBOX_DRIVER=docker).
+  if ! command_exists docker; then
+    log "installing Docker engine for sandbox isolation"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+    systemctl enable --now docker
+  else
+    log "Docker already installed"
+  fi
+
+  local image="${SWIFT_SANDBOX_DOCKER_IMAGE:-node:22-bookworm-slim}"
+  log "pre-pulling sandbox image $image"
+  docker pull "$image" >/dev/null || log "warning: failed to pre-pull $image"
+}
+
 clone_or_update_repo() {
   if [ -d "$SWIFT_RUNTIME_DIR/.git" ]; then
     log "updating existing repo at $SWIFT_RUNTIME_DIR"
@@ -235,6 +250,7 @@ main() {
   require_root
   install_packages
   install_node
+  install_docker
   clone_or_update_repo
   install_dependencies
   ensure_env_files

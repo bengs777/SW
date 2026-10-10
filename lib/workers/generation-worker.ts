@@ -458,6 +458,21 @@ export function startGenerationWorker() {
         error: error instanceof Error ? error.message : String(error),
       })
     })
+    for (const [activeJobId, item] of active) {
+      void OrchestrationRuntimeService.renewLease({
+        jobId: activeJobId,
+        workerId,
+        currentStage: item.stage,
+        lastSuccessfulTransition: item.lastSuccessfulTransition,
+        leaseMs: GENERATION_JOB_TIMEOUT_MS,
+      }).catch((error) => {
+        log("warn", "worker_job_lease_renew_failed", {
+          workerId,
+          jobId: activeJobId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    }
     log("info", "worker_alive", {
       event: "worker_alive",
       workerId,

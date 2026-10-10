@@ -121,7 +121,7 @@ export function publicGenerationRuntimeErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "")
 
   if (/insufficient balance|not enough balance|saldo tidak cukup|saldo.*kurang|can only afford/i.test(message)) {
-    return "Saldo atau budget token tidak cukup untuk menyelesaikan generate. Kurangi scope prompt atau isi saldo sebelum mencoba lagi."
+    return "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo terlebih dahulu di menu Billing."
   }
 
   if (/free limit exceeded|generations per 24 hours|daily fair usage limit exceeded|paid prompts per day/i.test(message)) {
@@ -138,6 +138,12 @@ export function publicGenerationRuntimeErrorMessage(error: unknown) {
 
   if (/Missing required full-stack categories|missingCategories|full-stack categories/i.test(message)) {
     return "Output full-stack belum lengkap. Swift perlu membuat UI, API, data layer, dan config secara bertahap lalu divalidasi ulang."
+  }
+
+  if (
+    /free-models-per-day|free_model_daily_requests|kuota harian model gratis|kuota.*openrouter/i.test(message)
+  ) {
+    return "Kuota harian model gratis OpenRouter telah habis (50/50 request). Top up saldo OpenRouter ($5) untuk membuka 1.000 request/hari atau perbarui OPENROUTER_API_KEY."
   }
 
   if (/SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED|provider failover exhausted|model chain exhausted/i.test(message)) {

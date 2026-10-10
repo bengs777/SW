@@ -6,6 +6,7 @@ COPY services/sandbox-runtime/package*.json ./
 RUN npm install --omit=dev
 
 COPY services/sandbox-runtime/server.mjs ./
+COPY services/sandbox-runtime/process-driver.mjs ./
 
 ENV NODE_ENV=production
 ENV SWIFT_SANDBOX_ROOT=/data/swift-sandbox

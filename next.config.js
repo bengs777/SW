@@ -38,6 +38,34 @@ const nextConfig = {
           { key: 'Pragma', value: 'no-cache' },
         ],
       },
+      {
+        // Preview gateway: allow embedding in Swift dashboard
+        source: '/preview/(.*)',
+        headers: [
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'self'" },
+        ],
+      },
+      {
+        // Preview gateway API
+        source: '/api/preview/(.*)',
+        headers: [
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'self'" },
+        ],
+      },
+    ]
+  },
+  async rewrites() {
+    return [
+      {
+        source: '/preview/:id',
+        destination: '/api/preview/:id',
+      },
+      {
+        source: '/preview/:id/:path*',
+        destination: '/api/preview/:id/:path*',
+      },
     ]
   },
   webpack: (config, { isServer }) => {

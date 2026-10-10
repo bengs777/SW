@@ -236,6 +236,7 @@ export async function POST(
 
   const body = (await request.json().catch(() => ({}))) as {
     files?: Array<{ path: string; content: string; language?: string }>
+    env?: Record<string, string>
   }
 
   const files =
@@ -280,7 +281,7 @@ export async function POST(
     if (IS_PRODUCTION && !SANDBOX_SERVICE_TOKEN) {
       return sandboxMisconfiguredResponse()
     }
-    return proxySandboxRequest({ method: "POST", projectId: id, body: { files } })
+    return proxySandboxRequest({ method: "POST", projectId: id, body: { files, env: body.env } })
   }
 
   if (IS_VERCEL && IS_PRODUCTION) {

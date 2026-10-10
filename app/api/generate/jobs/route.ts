@@ -187,7 +187,7 @@ export async function POST(request: NextRequest) {
   let body: unknown = null
   let developerDiagnosticsAllowed = false
 
-  const auditSummary = (error?: unknown) => {
+  const auditSummary = (error?: unknown, outcome?: string) => {
     const summary = {
       failedStage,
       payloadSize,
@@ -195,7 +195,7 @@ export async function POST(request: NextRequest) {
       dbCreated,
       enqueueSuccess,
       fallbackScheduled,
-      probableRootCause: probableRootCause(failedStage || currentStage, error),
+      probableRootCause: outcome || probableRootCause(failedStage || currentStage, error),
     }
     log("info", "generation_job_audit_summary", summary)
     return summary
@@ -363,13 +363,6 @@ export async function POST(request: NextRequest) {
     attachmentsCount: parsed.data.attachments.length,
   })
 
-  if (parsed.data.collaborationMode === "edit" || parsed.data.collaborationMode === "fix") {
-    const editFeatureCheck = assertFeatureEnabled("enableAiEdit", "AI edit")
-    if (editFeatureCheck) {
-      return NextResponse.json({ error: editFeatureCheck.error }, { status: editFeatureCheck.status })
-    }
-  }
-
   if (!isMutatingCollaborationMode(parsed.data.collaborationMode)) {
     log("warn", "generation_job_non_mutating_mode_rejected", {
       requestId,
@@ -380,7 +373,7 @@ export async function POST(request: NextRequest) {
       {
         error: "collaboration_mode_not_generating",
         message:
-          "Ask and review modes never create a generation job. Send them to /api/ai/answer instead.",
+          "Ask mode never creates a generation job. Send it to /api/ai/answer instead.",
         mode: parsed.data.collaborationMode,
       },
       { status: 409 }
@@ -558,14 +551,31 @@ export async function POST(request: NextRequest) {
         stuckJobIds: stuckJobs.map((j) => j.id),
         requestId,
       })
-      // Don't return 429 — let the user's current request proceed
+      // Re-evaluate active generation count after recovering stuck jobs
+      const refreshedActive = await GenerationJobService.countActiveForUser(user.id)
+      if (refreshedActive >= env.aiMaxConcurrentGenerations) {
+        return NextResponse.json({
+          error: "Too many active generation jobs. Wait for an existing job to finish before starting another.",
+          requestId,
+          activeGenerationCount: refreshedActive,
+          limit: env.aiMaxConcurrentGenerations,
+          retryAfterSeconds: 5,
+        }, {
+          status: 429,
+          headers: { "Retry-After": "5", "X-Request-Id": requestId }
+        })
+      }
     } else {
       return NextResponse.json({
         error: "Too many active generation jobs. Wait for an existing job to finish before starting another.",
         requestId,
         activeGenerationCount,
         limit: env.aiMaxConcurrentGenerations,
-      }, { status: 429 })
+        retryAfterSeconds: 5,
+      }, {
+        status: 429,
+        headers: { "Retry-After": "5", "X-Request-Id": requestId }
+      })
     }
   }
 
@@ -589,30 +599,44 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       error: "Too many queued generation jobs. Wait for the queue to drain before starting another.",
       requestId,
-      queuedGenerationCount,
+      queuedGenerationCount: queuedGenerationCount[0]?.count ?? 0,
       limit: MAX_QUEUED_JOBS_PER_USER,
-    }, { status: 429 })
+      retryAfterSeconds: 5,
+    }, {
+      status: 429,
+      headers: { "Retry-After": "5", "X-Request-Id": requestId }
+    })
   }
   if (cooldownRemainingMs > 0) {
+    const retrySec = Math.max(1, Math.ceil(cooldownRemainingMs / 1000))
     return NextResponse.json({
       error: "Generation cooldown active. Please retry shortly.",
       requestId,
       cooldownRemainingMs,
-    }, { status: 429 })
+      retryAfterSeconds: retrySec,
+    }, {
+      status: 429,
+      headers: { "Retry-After": String(retrySec), "X-Request-Id": requestId }
+    })
   }
 
   try {
     await enforceAiUsageRateLimit(user.id)
   } catch (error) {
     auditSummary(error)
+    const retrySec = 60
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Rate limit exceeded",
         stage: "rate_limit",
         retryable: true,
         requestId,
+        retryAfterSeconds: retrySec,
       },
-      { status: 429 }
+      {
+        status: 429,
+        headers: { "Retry-After": String(retrySec), "X-Request-Id": requestId }
+      }
     )
   }
 
@@ -634,6 +658,24 @@ export async function POST(request: NextRequest) {
     modelName: modelConfig.modelName,
     prompt: parsed.data.prompt,
   })
+
+  if ((user.balance ?? 0) < pricing.estimatedCost) {
+    failedStage = "insufficient_balance"
+    auditSummary(undefined, "insufficient_balance")
+    return NextResponse.json(
+      {
+        error: "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo terlebih dahulu di menu Billing.",
+        code: "INSUFFICIENT_BALANCE",
+        requiresTopup: true,
+        currentBalance: user.balance ?? 0,
+        requiredCost: pricing.estimatedCost,
+        stage: "insufficient_balance",
+        retryable: false,
+        requestId,
+      },
+      { status: 402 }
+    )
+  }
 
   let usageLogId: string | null = null
   let jobId: string | null = null
@@ -1215,7 +1257,8 @@ export async function POST(request: NextRequest) {
 
     const summary = auditSummary(error)
 
-    const status = saturated ? 503 : /insufficient balance/i.test(message) ? 402 : 503
+    const isInsufficientBalance = /insufficient balance/i.test(message)
+    const status = saturated ? 503 : isInsufficientBalance ? 402 : 503
     // SECURITY: In production, hide internal stage/root cause from client
     const isProduction = process.env.NODE_ENV === "production"
     const developerError = developerGenerationFailureMessage({
@@ -1228,13 +1271,20 @@ export async function POST(request: NextRequest) {
         ? developerError
         : saturated
           ? "Swift is temporarily saturated. Please try again shortly."
-          : (status === 402 ? "Insufficient balance" : "Service temporarily unavailable. Please try again.")
+          : (status === 402 ? "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo terlebih dahulu di menu Billing." : "Service temporarily unavailable. Please try again.")
       : saturated
         ? "SYSTEM_SATURATED"
-        : message
+        : (status === 402 ? "Saldo tidak mencukupi untuk melakukan generate. Silakan top up saldo terlebih dahulu di menu Billing." : message)
     return NextResponse.json(
       {
         error: safeMessage,
+        ...(status === 402
+          ? {
+              code: "INSUFFICIENT_BALANCE",
+              requiresTopup: true,
+              requiredCost: pricing.estimatedCost,
+            }
+          : {}),
         ...(saturated
           ? {
               code: "SYSTEM_SATURATED",

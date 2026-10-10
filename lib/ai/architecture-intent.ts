@@ -188,6 +188,7 @@ function detectDomain(text: string, appType?: ControlledAppType) {
   const matched = DOMAIN_ALIASES.find((item) => item.patterns.some((pattern) => pattern.test(text)))
   if (matched) return matched.domain
   if (appType === "simple_marketplace") return "commerce_storefront"
+  if (appType === "laundry_service") return "laundry_cleaning_service"
   if (appType === "booking_app") return "booking"
   if (appType === "saas_dashboard") return "saas_dashboard"
   if (appType === "village_news_portal") return "content_platform"
@@ -197,6 +198,7 @@ function detectDomain(text: string, appType?: ControlledAppType) {
 
 function selectArchetype(input: { text: string; domain: string; appType?: ControlledAppType }): SwiftArchitectureArchetype {
   if (isHardFrontendOnlyPrompt(input.text)) return "PORTFOLIO_SITE"
+  if (input.appType === "laundry_service" || /\b(laundry|loundry|dry clean|cuci|setrika)\b/i.test(input.text)) return "BOOKING_APP"
   if (/\b(booking|reservation|reservasi|appointment|jadwal)\b/i.test(input.text) || input.appType === "booking_app") return "BOOKING_APP"
   if (/\b(saas|dashboard|workspace|analytics|metrics)\b/i.test(input.text) || input.appType === "saas_dashboard") return "DASHBOARD_SAAS"
   if (/\b(blog|news|cms|artikel|portal|content|berita)\b/i.test(input.text) || input.appType === "village_news_portal") return "CONTENT_PLATFORM"

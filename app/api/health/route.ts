@@ -178,13 +178,15 @@ function okLabel(check: HealthCheck) {
 function workerLabel(queue: HealthCheck) {
   if (queue.status === "disabled") return "disabled"
   if (queue.status === "unhealthy") return "unhealthy"
-  if (queue.status !== "healthy") return "degraded"
 
   const detail = queue.detail as {
     workerHeartbeat?: { ageMs?: number | null; issues?: string[] | null } | null
+    redis?: { error?: string | null } | null
   } | undefined
-  const ageMs = detail?.workerHeartbeat?.ageMs
-  const issues = detail?.workerHeartbeat?.issues || []
+  if (typeof detail !== "object" || detail === null || detail.redis?.error) return "degraded"
+
+  const ageMs = detail.workerHeartbeat?.ageMs
+  const issues = detail.workerHeartbeat?.issues || []
   return typeof ageMs === "number" && ageMs <= 90_000 && issues.length === 0 ? "ok" : "degraded"
 }
 

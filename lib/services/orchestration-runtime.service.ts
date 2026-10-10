@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { subHours, subMinutes } from "date-fns"
 import { db } from "@/lib/db/client"
 import { generationJobs, generationEvents, repairAttempts, previewSessions, workerHeartbeats, orchestrationFailures, artifacts, generationQualityMetrics } from "@/lib/db/schema"
-import { eq, and, desc, asc, gte, lt, inArray, notInArray, isNotNull, sql, or } from "drizzle-orm"
+import { eq, and, desc, asc, gte, lt, inArray, notInArray, isNotNull, isNull, sql, or } from "drizzle-orm"
 import { renderProviderPrometheusMetrics } from "@/lib/ai/provider-metrics"
 import { renderDatabasePrometheusMetrics } from "@/lib/db/metrics"
 import { log } from "@/lib/logging"
@@ -453,7 +453,7 @@ export class OrchestrationRuntimeService {
         workerId: input.workerId,
         leaseExpiresAt,
         lastHeartbeatAt: now,
-        stage: input.currentStage || undefined,
+        stage: input.currentStage && input.currentStage !== "running" ? input.currentStage : undefined,
         version: sql`${generationJobs.version} + 1`,
       })
       .where(and(
@@ -788,8 +788,14 @@ export class OrchestrationRuntimeService {
       .where(and(
         inArray(generationJobs.status, ["queued", "running", "processing", "retrying", "stalled", "orphaned"]),
         or(
-          lt(generationJobs.leaseExpiresAt, now),
-          lt(generationJobs.lastHeartbeatAt, orphanCutoff)
+          and(
+            isNotNull(generationJobs.leaseOwner),
+            lt(generationJobs.leaseExpiresAt, now)
+          ),
+          and(
+            isNull(generationJobs.leaseOwner),
+            lt(generationJobs.updatedAt, orphanCutoff)
+          )
         )
       ))
       .orderBy(asc(generationJobs.updatedAt))
@@ -799,6 +805,10 @@ export class OrchestrationRuntimeService {
     let abandoned = 0
     let retryContained = 0
     for (const job of expired) {
+      // Race condition guard: if worker still holds an active, unexpired lease, do not abandon or retry
+      if (job.leaseOwner && job.leaseExpiresAt && job.leaseExpiresAt >= now) {
+        continue
+      }
       const recoveryReason = job.leaseExpiresAt && job.leaseExpiresAt < now ? "lease_expired" : "heartbeat_stale"
       const retryClass = classifyRetryReason(null, { stage: job.stage, reason: recoveryReason })
       const nextRecoveryCount = job.recoveryCount + 1

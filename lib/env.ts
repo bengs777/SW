@@ -52,15 +52,21 @@ const normalizeTokenLimit = (value: number) => {
   return Math.min(32_000, Math.max(256, rounded))
 }
 
-const isPlaceholderEnvValue = (value: string) => {
-  const trimmed = value.trim()
-  if (!trimmed) return false
+export const isPlaceholderEnvValue = (value: string | null | undefined): boolean => {
+  if (!value) return true
+  const trimmed = String(value).trim()
+  if (!trimmed) return true
 
   return (
     /^<[^>]+>$/.test(trimmed) ||
     /<[^>]+>/.test(trimmed) ||
-    /^(replace|replace_with|your|your_|your-|example|placeholder|todo)[\w-]*/i.test(trimmed)
+    /^(replace|replace_with|your|your_|your-|example|placeholder|todo)[\w-]*/i.test(trimmed) ||
+    /^(changeme|change-me|dummy|test|null|undefined)$/i.test(trimmed)
   )
+}
+
+export const isConfiguredSecret = (value: string | null | undefined): boolean => {
+  return !isPlaceholderEnvValue(value)
 }
 
 const normalizeUrl = (url: string) => {

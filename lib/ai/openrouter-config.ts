@@ -2,12 +2,14 @@ import { env } from "@/lib/env"
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 export const OPENROUTER_PROVIDER = "openrouter"
-export const OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat-v3.1:free"
+export const OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 export const OPENROUTER_DEFAULT_FALLBACK_MODELS: string[] = [
-  "deepseek/deepseek-chat-v3.1:free",
-  "qwen/qwen3-coder:free",
-  "moonshotai/kimi-k2:free",
-  "openai/gpt-oss-20b:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "dots-studio/dots-3-note-preview:free",
+  "cohere/north-mini-code:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
 ]
 const OPENROUTER_FALLBACK_ENV_KEYS: string[] = []
 export const PUBLIC_AI_NAME = "Swift AI"

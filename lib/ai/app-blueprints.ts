@@ -15,6 +15,7 @@ export type ControlledAppType =
   | "lightweight_crm"
   | "sports_portfolio"
   | "simple_marketplace"
+  | "laundry_service"
 
 export type ControlledAppBlueprint = {
   appType: ControlledAppType
@@ -178,6 +179,15 @@ const BLUEPRINTS: Record<ControlledAppType, ControlledAppBlueprint> = {
     "app/api/products/route.ts",
     "lib/services/product.service.ts",
   ]),
+  laundry_service: blueprint("laundry_service", "Laundry and Dry Cleaning Service", "Build a commercial-grade Laundry and Dry Cleaning web application with public landing page, interactive kiloan and satuan price calculator, order pickup form with WhatsApp dispatch, real-time order status tracking timeline, admin order management dashboard, Prisma schema for orders and services, API route handlers, and responsive Tailwind UI.", [
+    "app/order/page.tsx",
+    "app/tracking/page.tsx",
+    "app/admin/orders/page.tsx",
+    "app/api/orders/route.ts",
+    "app/api/orders/[id]/route.ts",
+    "app/api/services/route.ts",
+    "lib/services/laundry.service.ts",
+  ]),
 }
 
 function blueprint(appType: ControlledAppType, label: string, starterPrompt: string, extraRequiredFiles: string[]): ControlledAppBlueprint {
@@ -257,6 +267,15 @@ export function buildDynamicSeedDirective(prompt: string) {
       "- Prompt matched sports/club/portfolio keywords.",
       "- Use sports club portfolio semantics: public club profile, players/squad, news or matches, admin content management, user roles, API routes, Prisma models, and service boundaries.",
       "- Do not replace sports intent with clinic, SaaS, or generic landing content.",
+    ].join("\n")
+  }
+
+  if (appType === "laundry_service") {
+    return [
+      "DYNAMIC_SEED_STRATEGY:",
+      "- Prompt matched laundry, cleaning, dry-clean, or cuci-setrika service keywords.",
+      "- Use professional laundry service semantics: hero with trust badges, services & pricing list (kiloan, satuan, express, dry clean), interactive price calculator, pickup & delivery order form with WhatsApp dispatch, real-time order status tracking timeline, customer reviews, FAQ, and admin order queue.",
+      "- Do not add generic SaaS finance metrics, clinic terms, or unrelated social feeds.",
     ].join("\n")
   }
 

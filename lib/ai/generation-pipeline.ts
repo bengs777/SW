@@ -216,7 +216,6 @@ export function classifyPrompt(
     /api|prisma|model|admin|crud|management|persistence|route|service/i.test(capability)
   )
 
-  if (input?.collaborationMode === "fix" && input.previewError) return "runtime_debug"
   if (hardFrontendOnly) return hasExistingProject ? "component_edit" : "simple_ui"
   if (PREMIUM_REPAIR_RE.test(text) && REPAIR_RE.test(text)) return "runtime_debug"
   if (REPAIR_RE.test(text)) return "repair"

@@ -273,6 +273,7 @@ export function BillingPanel() {
           reference?: string
           amount?: number
           status?: string
+          provider?: string
         }
       }
 
@@ -280,18 +281,23 @@ export function BillingPanel() {
         throw new Error(data.error || "Gagal membuat top up")
       }
 
+      const isSandbox = Boolean((data as Record<string, unknown>).sandbox || data.order?.provider === "sandbox")
       const checkoutUrl = data.checkoutUrl || null
       setLastCheckoutUrl(checkoutUrl)
       setMessage(
         checkoutUrl
           ? `Order ${data.order?.reference || "top up"} siap dibayar via Pakasir.`
+          : isSandbox
+          ? `Top up ${data.order?.reference || ""} berhasil disimulasikan (Dev Mode). Saldo otomatis masuk!`
           : "Order top up dibuat, tetapi URL pembayaran belum tersedia."
       )
 
       toast({
-        title: "Top up dibuat",
+        title: isSandbox ? "Top up Simulator Berhasil" : "Top up dibuat",
         description: checkoutUrl
           ? "Halaman pembayaran Pakasir akan dibuka."
+          : isSandbox
+          ? `Saldo Rp ${parsedAmount.toLocaleString("id-ID")} berhasil ditambahkan.`
           : "Order dibuat, cek detail di panel billing.",
       })
 
@@ -398,6 +404,7 @@ export function BillingPanel() {
             reference?: string
             amount?: number
             status?: string
+            provider?: string
           }
         }
 
@@ -405,20 +412,27 @@ export function BillingPanel() {
           throw new Error(data.error || `Gagal membuat order ${plan.name}`)
         }
 
+        const isSandbox = Boolean((data as Record<string, unknown>).sandbox || data.order?.provider === "sandbox")
         const checkoutUrl = data.checkoutUrl || null
         setLastCheckoutUrl(checkoutUrl)
         setMessage(
           checkoutUrl
             ? `Order ${data.order?.reference || plan.name} siap dibayar via Pakasir.`
+            : isSandbox
+            ? `Paket ${plan.name} berhasil diaktifkan via Dev Simulator!`
             : `Order ${plan.name} dibuat, tetapi URL pembayaran belum tersedia.`
         )
 
         toast({
-          title: `${plan.name} dibuat`,
+          title: isSandbox ? `Paket ${plan.name} Aktif` : `${plan.name} dibuat`,
           description: checkoutUrl
             ? "Halaman pembayaran Pakasir akan dibuka."
+            : isSandbox
+            ? `Workspace sekarang menggunakan paket ${plan.name}.`
             : "Order dibuat, cek detail di panel billing.",
         })
+
+        await loadOverview()
 
         if (checkoutUrl) {
           window.open(checkoutUrl, "_blank", "noopener,noreferrer")
@@ -744,15 +758,25 @@ export function BillingPanel() {
             )}
 
             {lastCheckoutUrl && (
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full gap-2"
-                onClick={() => window.open(lastCheckoutUrl, "_blank", "noopener,noreferrer")}
-              >
-                <ExternalLink className="h-4 w-4" />
-                Open payment link
-              </Button>
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-3">
+                <div className="flex items-center gap-2 font-medium text-foreground text-sm">
+                  <ExternalLink className="h-4 w-4 text-primary" />
+                  <span>Pembayaran QRIS Pakasir Siap</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Klik tombol di bawah untuk membuka halaman pembayaran QRIS Pakasir, lalu scan menggunakan e-wallet atau m-Banking Anda:
+                </p>
+                <Button
+                  type="button"
+                  className="w-full gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                  asChild
+                >
+                  <a href={lastCheckoutUrl} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink className="h-4 w-4" />
+                    Buka Halaman Pembayaran QRIS
+                  </a>
+                </Button>
+              </div>
             )}
           </CardContent>
         </Card>

@@ -38,7 +38,7 @@ import { log } from "@/lib/logging"
 
 const PROVIDER_REQUEST_BUDGET_MS = Math.max(
   30_000,
-  Math.min(240_000, Number(process.env.AI_PROVIDER_REQUEST_BUDGET_MS || 180_000))
+  Math.min(240_000, Number(process.env.AI_PROVIDER_REQUEST_BUDGET_MS || 240_000))
 )
 
 export type ProviderName = string
@@ -197,13 +197,41 @@ export class SwiftProviderFailureError extends Error {
   attempts: ProviderAttemptLog[]
   selectedTier: SwiftTierKey
   userMessage: string
+  rootCause?: "rate_limit_free_quota" | "rate_limit" | "timeout" | "auth" | "unknown"
 
   constructor(selectedTier: SwiftTierKey, attempts: ProviderAttemptLog[]) {
-    super("SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED")
+    const isFreeQuotaExhausted = attempts.some((a) =>
+      a.statusCode === 429 && /free[-\s]?models|daily.*limit|quota|limit exceeded|free_model_daily_requests/i.test(a.errorMessage || "")
+    )
+    const isAllRateLimited = attempts.length > 0 && attempts.every((a) => a.statusCode === 429 || a.failureReason === "rate_limit")
+    const isAllTimeout = attempts.length > 0 && attempts.every((a) => a.failureReason === "timeout")
+    const isAuthFailed = attempts.some((a) => a.statusCode === 401 || a.statusCode === 403 || a.failureReason === "auth")
+
+    let rootCause: "rate_limit_free_quota" | "rate_limit" | "timeout" | "auth" | "unknown" = "unknown"
+    let detail = ""
+
+    if (isFreeQuotaExhausted || (isAllRateLimited && attempts.some((a) => a.modelName.includes(":free")))) {
+      rootCause = "rate_limit_free_quota"
+      detail = ": kuota harian model gratis OpenRouter telah habis (50/50 request)"
+    } else if (isAllRateLimited) {
+      rootCause = "rate_limit"
+      detail = ": rate limit provider tercapai pada semua model"
+    } else if (isAllTimeout) {
+      rootCause = "timeout"
+      detail = ": semua model provider mengalami timeout"
+    } else if (isAuthFailed) {
+      rootCause = "auth"
+      detail = ": autentikasi provider gagal (periksa OPENROUTER_API_KEY)"
+    }
+
+    super(`SWIFT_AI_PROVIDER_FAILOVER_EXHAUSTED${detail}`)
     this.name = "SwiftProviderFailureError"
     this.selectedTier = selectedTier
     this.attempts = attempts
-    this.userMessage = USER_FRIENDLY_AI_ENGINE_ERROR
+    this.rootCause = rootCause
+    this.userMessage = rootCause === "rate_limit_free_quota"
+      ? "Kuota harian model AI gratis OpenRouter telah habis (50/50 request harian). Silakan ganti OPENROUTER_API_KEY baru atau tambahkan saldo credit OpenRouter."
+      : USER_FRIENDLY_AI_ENGINE_ERROR
   }
 }
 
@@ -414,6 +442,7 @@ export class ProviderRouter {
 
     const maxAttemptsForChain = Math.min(MAX_PROVIDER_ATTEMPTS_PER_REQUEST, targets.length * 3)
     const providerBudget = createProviderBudget(signal, PROVIDER_REQUEST_BUDGET_MS)
+    const attemptedModels = new Set<string>()
 
     try {
       for (const [targetIndex, target] of targets.entries()) {
@@ -479,6 +508,7 @@ export class ProviderRouter {
         }
 
         totalAttempts += 1
+        attemptedModels.add(target.modelId)
         const startedAt = Date.now()
         log("info", "provider_attempt", {
           provider: "openrouter",
@@ -537,7 +567,13 @@ export class ProviderRouter {
               : this.normalizeError(error, target)
           const latencyMs = Date.now() - startedAt
           const redactedErrorMessage = redactAiSecret(normalized.message)
-          const willRetrySameModel = normalized.reason === "timeout" ? false : shouldRetryModel(normalized.reason, retryCount)
+          const pendingTargets = targets.filter(
+            (candidate) => !attemptedModels.has(candidate.modelId) && !isModelTemporarilyUnavailable(candidate.modelId)
+          )
+          const willRetrySameModel =
+            normalized.reason === "timeout" || pendingTargets.length > 0
+              ? false
+              : shouldRetryModel(normalized.reason, retryCount)
           const nextProvider = willRetrySameModel
             ? target.modelId
             : nextAvailableTarget(targets, target.modelId)
@@ -609,6 +645,9 @@ export class ProviderRouter {
           if (!willRetrySameModel) {
             if (nextProvider) {
               recordProviderFailoverMetric()
+              if (normalized.reason === "timeout") {
+                adaptiveMaxOutputTokens = Math.max(3000, Math.floor(currentMaxTokens * 0.75))
+              }
             }
             break
           }

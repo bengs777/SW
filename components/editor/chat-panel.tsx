@@ -119,18 +119,6 @@ const COLLABORATION_MODES: Record<PromptLanguage, Record<CollaborationMode, Coll
       label: "Build",
       description: "Buat fitur, halaman, atau app baru dari prompt.",
     },
-    edit: {
-      label: "Edit",
-      description: "Ubah file aktif dan file terkait tanpa rewrite besar.",
-    },
-    fix: {
-      label: "Fix",
-      description: "Diagnosis error preview/build lalu patch minimal.",
-    },
-    review: {
-      label: "Review",
-      description: "Cari bug, risiko, dan perbaikan tanpa langsung rebuild.",
-    },
     ask: {
       label: "Ask",
       description: "Tanya jawab dengan AI tanpa mengubah file.",
@@ -140,18 +128,6 @@ const COLLABORATION_MODES: Record<PromptLanguage, Record<CollaborationMode, Coll
     build: {
       label: "Build",
       description: "Create a new feature, page, or app from the prompt.",
-    },
-    edit: {
-      label: "Edit",
-      description: "Change the active file and related files without a broad rewrite.",
-    },
-    fix: {
-      label: "Fix",
-      description: "Diagnose preview/build errors and make the smallest patch.",
-    },
-    review: {
-      label: "Review",
-      description: "Find bugs, risks, and improvements without rebuilding.",
     },
     ask: {
       label: "Ask",
@@ -482,12 +458,8 @@ export function ChatPanel({
   const isChatCollaborationMode = !isMutatingCollaborationMode(collaborationMode)
   const submitLabel = isChatCollaborationMode
     ? promptLanguage === "id"
-      ? collaborationMode === "review"
-        ? "Mulai review"
-        : "Tanya AI"
-      : collaborationMode === "review"
-        ? "Start review"
-        : "Ask AI"
+      ? "Tanya AI"
+      : "Ask AI"
     : promptCopy.submitLabel
   const stopLabel = isChatCollaborationMode
     ? promptLanguage === "id"
@@ -498,17 +470,13 @@ export function ChatPanel({
       : "Stop generation"
   const promptHint = isChatCollaborationMode
     ? promptLanguage === "id"
-      ? "Mode ini menjawab / mereview saja: tidak mengubah file dan tidak memakai kuota generate."
-      : "This mode only answers / reviews: it does not change files or use generate quota."
+      ? "Mode ini menjawab saja: tidak mengubah file dan tidak memakai kuota generate."
+      : "This mode only answers: it does not change files or use generate quota."
     : promptCopy.promptHint
   const promptPlaceholder = isChatCollaborationMode
     ? promptLanguage === "id"
-      ? collaborationMode === "review"
-        ? "Minta AI meninjau kode, preview, atau error tertentu..."
-        : "Tanyakan apa saja soal project, kode, atau rencana fitur..."
-      : collaborationMode === "review"
-        ? "Ask the AI to review code, preview, or a specific error..."
-        : "Ask anything about the project, code, or feature plans..."
+      ? "Tanyakan apa saja soal project, kode, atau rencana fitur..."
+      : "Ask anything about the project, code, or feature plans..."
     : promptCopy.promptPlaceholder
   const promptIntent = analyzePromptIntent(input, promptLanguage)
   const promptExamples = getPromptExamples(templateKey, promptLanguage)
@@ -688,8 +656,8 @@ export function ChatPanel({
             `Preview error: ${previewError}`,
           ].join("\n")
 
-    setCollaborationMode("fix")
-    onSendMessage(fixPrompt, selectedModel, attachments, promptLanguage, previewError, "fix")
+    setCollaborationMode("build")
+    onSendMessage(fixPrompt, selectedModel, attachments, promptLanguage, previewError, "build")
     setInput("")
     setAttachments([])
     setAttachmentError(null)
@@ -823,10 +791,13 @@ export function ChatPanel({
         )}
       </ScrollArea>
 
-      {/* Input */}
-      <div className="shrink-0 border-t border-border/70 bg-background/80 p-4 backdrop-blur-xl">
-        <div className="max-h-[42vh] space-y-3 overflow-y-auto pr-1">
-          <ProviderHealthCard status={providerStatus} />
+      {/* Input - Streamlined Replit-style */}
+      <div className="shrink-0 border-t border-border/70 bg-background/95 p-3 backdrop-blur-xl">
+        <div className="space-y-2.5">
+          {providerStatus && providerStatus.issue !== "healthy" && (
+            <ProviderHealthCard status={providerStatus} />
+          )}
+
           {generationProgress && (
             <GenerationProgressCard
               progress={generationProgress}
@@ -834,388 +805,177 @@ export function ChatPanel({
               onCancelGeneration={onCancelGeneration}
             />
           )}
-          <div className="rounded-[1.5rem] border border-border/70 bg-card p-3 shadow-sm">
-            {previewErrorContext && (
-              <div className="mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-foreground">
-                      {promptLanguage === "id" ? "Preview sedang error" : "Preview has an error"}
-                    </p>
-                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                      {previewErrorContext}
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-9 shrink-0 gap-2"
-                    onClick={handleFixPreviewError}
-                    disabled={!selectedModel || isGenerating || isReadingFiles}
-                  >
-                    <ShieldAlert className="h-4 w-4" />
-                    {promptLanguage === "id" ? "Fix dengan AI" : "Fix with AI"}
-                  </Button>
-                </div>
-              </div>
-            )}
 
-            <div className="mb-3 rounded-[1.1rem] border border-border/70 bg-background/70 p-2">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-1">
-                <div>
-                  <p className="text-sm font-medium text-foreground">{promptCopy.collaborationLabel}</p>
-                  <p className="text-xs text-muted-foreground">{promptCopy.collaborationDescription}</p>
-                </div>
-                <span className="rounded-full border border-border px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {collaborationCopy[collaborationMode].label}
+          {previewErrorContext && (
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs">
+              <div className="min-w-0">
+                <span className="font-medium text-rose-300">Preview Error</span>
+                <p className="line-clamp-1 text-[11px] text-muted-foreground">{previewErrorContext}</p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                className="h-7 shrink-0 gap-1.5 px-2.5 text-xs font-medium"
+                onClick={handleFixPreviewError}
+                disabled={!selectedModel || isGenerating || isReadingFiles}
+              >
+                <ShieldAlert className="h-3.5 w-3.5" />
+                Fix dengan AI
+              </Button>
+            </div>
+          )}
+
+          {/* Mode Switcher: Build / Ask (Replit style) */}
+          <div className="flex items-center justify-between px-0.5">
+            <div className="inline-flex rounded-lg border border-border/80 bg-muted/40 p-0.5">
+              <button
+                type="button"
+                onClick={() => setCollaborationMode("build")}
+                disabled={isGenerating}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                  collaborationMode === "build"
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Zap className="h-3.5 w-3.5" />
+                Build
+              </button>
+              <button
+                type="button"
+                onClick={() => setCollaborationMode("ask")}
+                disabled={isGenerating}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                  collaborationMode === "ask"
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Ask
+              </button>
+            </div>
+
+            <span className="text-[11px] text-muted-foreground">
+              {collaborationMode === "build" ? "🔨 Generate & edit code" : "💬 Tanya jawab tanpa ubah file"}
+            </span>
+          </div>
+
+          {/* Attachments Pills */}
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 px-0.5">
+              {attachments.map((attachment) => (
+                <span
+                  key={attachment.id}
+                  className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-0.5 text-xs text-muted-foreground"
+                >
+                  <span className="max-w-[140px] truncate">{attachment.originalName || attachment.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(attachment.id)}
+                    className="hover:text-destructive"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
                 </span>
-              </div>
-              <div className="grid grid-cols-1 gap-1">
-                {(Object.keys(collaborationCopy) as CollaborationMode[]).map((mode) => (
-                  <Button
-                    key={mode}
-                    type="button"
-                    size="sm"
-                    variant={collaborationMode === mode ? "default" : "ghost"}
-                    className="h-auto min-h-10 w-full items-start justify-start gap-3 rounded-full px-3 py-2 text-left"
-                    title={collaborationCopy[mode].description}
-                    onClick={() => setCollaborationMode(mode)}
-                    disabled={isGenerating}
-                  >
-                    <span className="w-16 shrink-0 text-xs font-semibold">{collaborationCopy[mode].label}</span>
-                    <span className="min-w-0 flex-1 truncate text-[11px] font-normal opacity-75">
-                      {collaborationCopy[mode].description}
-                    </span>
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-medium text-foreground">{promptCopy.languageLabel}</p>
-                <p className="text-xs text-muted-foreground">{promptCopy.languageDescription}</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={showAdvancedTools ? "default" : "outline"}
-                  className="h-8 gap-2 rounded-full px-3"
-                  onClick={() => setShowAdvancedTools((current) => !current)}
-                >
-                  Advanced
-                  <ChevronDown className={cn("h-4 w-4 transition-transform", showAdvancedTools && "rotate-180")} />
-                </Button>
-                <div className="inline-flex items-center gap-1 rounded-full border border-border bg-background p-1">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={promptLanguage === "id" ? "default" : "ghost"}
-                    className="h-8 rounded-full px-3"
-                    onClick={() => setPromptLanguage("id")}
-                  >
-                    {PROMPT_LANGUAGE_LABELS.id}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={promptLanguage === "en" ? "default" : "ghost"}
-                    className="h-8 rounded-full px-3"
-                    onClick={() => setPromptLanguage("en")}
-                  >
-                    {PROMPT_LANGUAGE_LABELS.en}
-                  </Button>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
-              {PROMPT_STRUCTURE_HELPERS[promptLanguage].map((helper) => (
-                <Button
-                  key={helper.label}
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 rounded-full px-3 text-xs"
-                  title={helper.description}
-                  onClick={() => handleInsertPromptLine(helper.label)}
-                  disabled={isGenerating}
-                >
-                  {helper.label}
-                </Button>
               ))}
             </div>
+          )}
 
+          {/* Input Box Card */}
+          <div className="rounded-xl border border-border/80 bg-card p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20">
             <Textarea
               ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={promptPlaceholder}
-              className="mt-3 min-h-[150px] resize-none rounded-[1.15rem] border-border/80 bg-background/80 leading-6 shadow-inner shadow-black/[0.02] focus-visible:ring-primary/30"
+              placeholder={
+                collaborationMode === "build"
+                  ? "Ketik apa yang ingin Anda buat... (contoh: Buat aplikasi kasir laundry lengkap)"
+                  : "Tanyakan tentang kode atau arsitektur project..."
+              }
+              className="min-h-[72px] max-h-[180px] w-full resize-none border-0 bg-transparent p-1.5 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus-visible:ring-0 focus-visible:ring-offset-0"
               disabled={isGenerating}
             />
 
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-              <span>{promptHint}</span>
-              <span className={cn(input.length > MAX_PROMPT_LENGTH && "text-destructive")}>{input.length.toLocaleString("id-ID")} / {MAX_PROMPT_LENGTH.toLocaleString("id-ID")} {promptCopy.charactersLabel}</span>
-            </div>
+            <div className="mt-1 flex items-center justify-between border-t border-border/40 pt-1.5">
+              <div className="flex items-center gap-1">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  multiple
+                  onChange={handleFileChange}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  disabled={isGenerating || isReadingFiles || attachments.length >= MAX_ATTACHMENTS}
+                  onClick={handleChooseFiles}
+                  title="Upload file"
+                >
+                  <Paperclip className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  disabled={isGenerating || isReadingFiles || attachments.length >= MAX_ATTACHMENTS}
+                  onClick={handleChooseFiles}
+                  title="Upload gambar"
+                >
+                  <ImageIcon className="h-3.5 w-3.5" />
+                </Button>
 
-            <Button
-              type="button"
-              size="lg"
-              variant={isGenerating ? "destructive" : "default"}
-              className="mt-3 h-12 w-full gap-2 rounded-full text-sm font-semibold shadow-sm shadow-primary/15"
-              onClick={isGenerating ? onCancelGeneration : handleSubmit}
-              disabled={isGenerating ? !onCancelGeneration : !canSubmit}
-            >
-              {isGenerating ? (
-                <>
-                  <Square className="h-4 w-4" />
-                  {stopLabel}
-                </>
-              ) : (
-                <>
-                  <Send className="h-4 w-4" />
-                  {submitLabel}
-                </>
-              )}
-            </Button>
-
-            {input.trim() && (
-              <div
-                className={cn(
-                  "mt-3 rounded-xl border px-3 py-2 text-xs",
-                  promptIntent.mode === "chat"
-                    ? "border-sky-500/30 bg-sky-500/10"
-                    : promptIntent.mode === "inspect"
-                      ? "border-violet-500/30 bg-violet-500/10"
-                    : promptIntent.needsClarification
-                      ? "border-amber-500/30 bg-amber-500/10"
-                      : "border-emerald-500/30 bg-emerald-500/10"
-                )}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="font-medium text-foreground">{promptIntent.label}</p>
-                  <span className="rounded-full border border-border px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    {promptIntent.mode === "chat"
-                      ? "Chat"
-                      : promptIntent.mode === "inspect"
-                        ? "Inspect"
-                      : promptIntent.needsClarification
-                        ? "Clarify"
-                        : "Build"}
-                  </span>
-                </div>
-                <p className="mt-1 text-muted-foreground">{promptIntent.summary}</p>
-                <p className="mt-1 text-muted-foreground">{promptIntent.nextStep}</p>
+                <Select value={selectedModel} onValueChange={onModelChange} disabled={isGenerating}>
+                  <SelectTrigger className="h-7 gap-1 border-0 bg-transparent px-2 text-[11px] text-muted-foreground hover:text-foreground">
+                    <SelectValue placeholder="Model" />
+                  </SelectTrigger>
+                  <SelectContent align="start" className="w-[280px] p-1">
+                    {modelOptions.map((model) => (
+                      <SelectItem key={model.key} value={model.key} className="rounded-md text-xs">
+                        <div className="flex items-center justify-between gap-2 w-full">
+                          <span className="font-medium text-foreground">{sanitizeModelDisplayName(model.label)}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            Rp {(typeof model.price === "number" ? model.price : 0).toLocaleString("id-ID")}
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <ProviderStatusBadge status={providerStatus} />
               </div>
-            )}
-          </div>
 
-          <Collapsible open={showAdvancedTools}>
-            <CollapsibleContent className="space-y-3">
-              <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
-                <Select
-                  value={templateKey}
-                  onValueChange={(value) => setTemplateKey(value as PromptTemplateKey)}
-                  disabled={isGenerating}
+              <div className="flex items-center gap-2">
+                <span className="hidden text-[10px] text-muted-foreground sm:inline">
+                  Enter ↵ untuk kirim
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={isGenerating ? "destructive" : "default"}
+                  className="h-7 gap-1.5 rounded-lg px-3 text-xs font-semibold shadow-sm"
+                  onClick={isGenerating ? onCancelGeneration : handleSubmit}
+                  disabled={isGenerating ? !onCancelGeneration : !canSubmit}
                 >
-                  <SelectTrigger className="h-9">
-                    <SelectValue placeholder="Template" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="workspace">{promptCopy.templateOptions.workspace}</SelectItem>
-                    <SelectItem value="landing">{promptCopy.templateOptions.landing}</SelectItem>
-                    <SelectItem value="auth">{promptCopy.templateOptions.auth}</SelectItem>
-                    <SelectItem value="dashboard">{promptCopy.templateOptions.dashboard}</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={templateVariant}
-                  onValueChange={(value) => setTemplateVariant(value as TemplateVariant)}
-                  disabled={isGenerating}
-                >
-                  <SelectTrigger className="h-9">
-                    <SelectValue placeholder="Variant" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="short">{promptCopy.variantOptions.short}</SelectItem>
-                    <SelectItem value="medium">{promptCopy.variantOptions.medium}</SelectItem>
-                    <SelectItem value="extended">{promptCopy.variantOptions.extended}</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button type="button" variant="outline" className="h-9" onClick={handleApplyTemplate} disabled={isGenerating}>
-                  {promptCopy.useTemplate}
+                  {isGenerating ? (
+                    <>
+                      <Square className="h-3.5 w-3.5" />
+                      Stop
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-3.5 w-3.5" />
+                      {collaborationMode === "build" ? "Build" : "Ask"}
+                    </>
+                  )}
                 </Button>
               </div>
-              <div className="rounded-[1.15rem] border border-border/70 bg-muted/30 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">{promptCopy.examplesTitle}</p>
-                    <p className="text-xs text-muted-foreground">{promptCopy.examplesDescription}</p>
-                  </div>
-                  <span className="rounded-full border border-border px-2 py-1 text-[11px] text-muted-foreground">
-                    {promptCopy.readyBadge}
-                  </span>
-                </div>
-                <div className="mt-3 grid gap-2 md:grid-cols-3">
-                  {promptExamples.map((example) => (
-                    <button
-                      key={example.title}
-                      type="button"
-                      onClick={() => handleApplyPromptExample(example)}
-                      disabled={isGenerating}
-                      className={cn(
-                        "rounded-[1rem] border border-border/70 bg-background p-3 text-left transition-colors hover:border-foreground/20 hover:bg-card",
-                        isGenerating && "cursor-not-allowed opacity-60"
-                      )}
-                    >
-                      <span className="inline-flex rounded-full border border-border px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {example.label}
-                      </span>
-                      <p className="mt-2 text-sm font-medium text-foreground">{example.title}</p>
-                      <p className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">
-                        {example.prompt}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {input.trim() && isMutatingCollaborationMode(collaborationMode) && (
-                <div
-                  className={cn(
-                    "rounded-lg border px-3 py-2 text-xs",
-                    estimate.error
-                      ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                      : estimate.canAfford === false
-                        ? "border-rose-500/40 bg-rose-500/10 text-rose-100"
-                        : "border-border bg-card/70 text-muted-foreground"
-                  )}
-                >
-                  {estimate.isLoading ? (
-                    <p>Estimating request cost...</p>
-                  ) : estimate.error ? (
-                    <p>
-                      Estimasi belum tersedia ({estimate.error}). Harga tier: Rp {(
-                        selectedModelInfo?.price || 0
-                      ).toLocaleString("id-ID")}.
-                    </p>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-3">
-                      <span>Estimasi: Rp {(estimate.estimatedCost || selectedModelInfo?.price || 0).toLocaleString("id-ID")}</span>
-                      {typeof estimate.currentBalance === "number" && (
-                        <span>Saldo: Rp {estimate.currentBalance.toLocaleString("id-ID")}</span>
-                      )}
-                      {typeof estimate.remainingBalance === "number" && (
-                        <span>Sisa saldo: Rp {estimate.remainingBalance.toLocaleString("id-ID")}</span>
-                      )}
-                      {estimate.canAfford === false && (
-                        <span className="font-medium">Saldo tidak cukup untuk request ini.</span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </CollapsibleContent>
-          </Collapsible>
-          {attachmentError && (
-            <p className="text-xs text-destructive">{attachmentError}</p>
-          )}
-          {hasImageAttachments && !selectedModelSupportsVision && (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-              {promptLanguage === "id"
-                ? "Swift AI belum mendukung input gambar di konfigurasi ini. Gambar akan dikirim sebagai referensi nama file saja."
-                : "Swift AI does not support image input in this configuration. Images will be sent as filename references only."}
             </div>
-          )}
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {attachments.map((attachment) => (
-                <button
-                  key={attachment.id}
-                  type="button"
-                  onClick={() => removeAttachment(attachment.id)}
-                  className="inline-flex items-center gap-2 rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground transition-colors hover:border-destructive/40 hover:text-foreground"
-                  title={`Remove ${attachment.originalName || attachment.name}`}
-                >
-                  <span className="max-w-[180px] truncate">
-                    {attachment.originalName || attachment.name}
-                  </span>
-                  <X className="h-3 w-3" />
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="flex items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              multiple
-              onChange={handleFileChange}
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-9 w-9 shrink-0"
-              disabled={isGenerating || isReadingFiles || attachments.length >= MAX_ATTACHMENTS}
-              onClick={handleChooseFiles}
-              title="Upload file"
-            >
-              <Paperclip className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-9 w-9 shrink-0"
-              disabled={isGenerating || isReadingFiles || attachments.length >= MAX_ATTACHMENTS}
-              onClick={handleChooseFiles}
-              title="Upload image"
-            >
-              <ImageIcon className="h-4 w-4" />
-            </Button>
-            <Select value={selectedModel} onValueChange={onModelChange} disabled={isGenerating}>
-              <SelectTrigger className="h-auto min-w-[280px] items-start gap-3 rounded-full py-2 pl-4 pr-3 text-left">
-                <SelectValue className="sr-only" placeholder="Select model" />
-                <div className="flex min-w-0 flex-col text-left">
-                  <span className="truncate text-sm font-medium text-foreground">{selectedModelLabel}</span>
-                  <span className="truncate text-xs text-muted-foreground">{selectedModelDescription}</span>
-                </div>
-                <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
-                  Rp {(selectedModelInfo?.price ?? 0).toLocaleString("id-ID")}
-                </span>
-              </SelectTrigger>
-              <SelectContent className="w-[360px] p-2">
-                {modelOptions.map((model, index) => (
-                  <SelectItem
-                    key={model.key}
-                    value={model.key}
-                    className="items-start gap-3 rounded-xl px-3 py-2"
-                  >
-                    <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border text-[10px] font-medium text-muted-foreground">
-                      {model.rank ?? index + 1}
-                    </span>
-                    <div className="grid gap-0.5 text-left">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-foreground">{sanitizeModelDisplayName(model.label)}</span>
-                        <span className="text-[11px] text-muted-foreground">
-                          Rp {(typeof model.price === "number" ? model.price : 0).toLocaleString("id-ID")} / generation
-                        </span>
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        {model.description || model.note || "AI model"}
-                      </p>
-                      {model.note && (
-                        <p className="text-[11px] text-muted-foreground">{model.note}</p>
-                      )}
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <ProviderStatusBadge status={providerStatus} />
           </div>
         </div>
       </div>
@@ -1287,11 +1047,7 @@ function ProviderHealthCard({
   status?: ProviderStatus | null
 }) {
   if (!status) {
-    return (
-      <div className="rounded-xl border border-border bg-card/60 px-3 py-2 text-xs text-muted-foreground">
-        Status Swift engine akan muncul setelah request generate dijalankan.
-      </div>
-    )
+    return null
   }
 
   const config =
@@ -1426,6 +1182,12 @@ function GenerationProgressCard({
           Batas {timeoutSeconds} detik tercapai. Swift sedang menghentikan job dan memproses refund bila diperlukan.
         </p>
       )}
+      {!isTerminal && progress.queueState === "waiting_worker" && elapsedMs > 45_000 && (
+        <p className="mt-2 text-[11px] text-amber-300">
+          Worker generation belum juga mengambil job ini. Jalankan <span className="font-mono">npm run worker:generation</span>{" "}
+          (lokal) atau cek service worker di production, lalu biarkan tab terbuka sampai job masuk.
+        </p>
+      )}
       {progress.prompt && (
         <p className="mt-2 line-clamp-2 text-muted-foreground">
           Prompt: {progress.prompt}
@@ -1442,17 +1204,21 @@ function GenerationProgressCard({
         </p>
       )}
       {progress.workPlan && progress.workPlan.length > 0 && (
-        <div className="mt-3 rounded-lg border border-border bg-background/70 p-2">
-          <p className="mb-2 text-[11px] font-medium uppercase text-muted-foreground">Rencana Swift</p>
-          <div className="grid gap-1">
-            {progress.workPlan.map((item) => (
-              <div key={item} className="flex gap-2 text-[11px] text-muted-foreground">
-                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500" />
-                <span>{item}</span>
-              </div>
-            ))}
+        <details className="mt-2.5 rounded-lg border border-border/80 bg-background/50 p-2 text-xs">
+          <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground">
+            ▸ Rencana Arsitektur ({progress.workPlan.length} detail)
+          </summary>
+          <div className="mt-2 max-h-36 overflow-y-auto space-y-1 pr-1">
+            {progress.workPlan
+              .filter((item) => !item.startsWith("Allowed packages:") && !item.includes("blueprint requires") && !item.includes("context ranking"))
+              .map((item) => (
+                <div key={item} className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500" />
+                  <span className="break-words">{item}</span>
+                </div>
+              ))}
           </div>
-        </div>
+        </details>
       )}
       <div className="mt-3 grid gap-1">
         {steps.map((step) => (

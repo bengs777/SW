@@ -4,8 +4,8 @@ import { env } from "@/lib/env"
 
 export const MAX_RETRIES_PER_MODEL = Math.min(2, Math.max(0, env.aiMaxRetries))
 export const MAX_PROVIDER_ATTEMPTS_PER_REQUEST = Math.min(
-  6,
-  Math.max(1, Number(process.env.AI_MAX_PROVIDER_ATTEMPTS_PER_REQUEST || 6))
+  12,
+  Math.max(1, Number(process.env.AI_MAX_PROVIDER_ATTEMPTS_PER_REQUEST || 12))
 )
 
 export function shouldRetryModel(reason: ProviderFailureReason, retryCount: number) {

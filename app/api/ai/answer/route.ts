@@ -159,10 +159,23 @@ export async function POST(req: NextRequest) {
     })
   } catch (error) {
     if (error instanceof SwiftProviderFailureError) {
-      log("error", "ai-answer provider failed", { userId, projectId, mode, error: getErrorMessage(error) })
+      log("error", "ai-answer provider failed", {
+        userId,
+        projectId,
+        mode,
+        rootCause: error.rootCause,
+        error: getErrorMessage(error),
+      })
+      const isRateLimit =
+        error.rootCause === "rate_limit" || error.rootCause === "rate_limit_free_quota"
+      const status = isRateLimit ? 429 : error.rootCause === "timeout" ? 504 : 503
       return NextResponse.json(
-        { error: "Swift sedang sibuk menjawab pertanyaan. Coba lagi sebentar." },
-        { status: 502 }
+        {
+          error:
+            error.userMessage || "Swift AI sedang mengalami gangguan sementara. Coba lagi sebentar.",
+          code: error.rootCause || "provider_failure",
+        },
+        { status }
       )
     }
 

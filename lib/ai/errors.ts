@@ -53,7 +53,7 @@ export function reasonFromStatus(status: number): ProviderFailureReason {
 }
 
 export function isTransientFailure(reason: ProviderFailureReason) {
-  return reason === "timeout" || reason === "network" || reason === "server_error" || reason === "rate_limit"
+  return reason === "timeout" || reason === "network" || reason === "server_error"
 }
 
 export function redactAiSecret(value: string) {

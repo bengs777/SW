@@ -18,6 +18,34 @@ const INTENT_RULES: Array<{
   forbiddenAssumptions?: string[]
 }> = [
   {
+    appType: "laundry_service",
+    domain: "laundry_cleaning_service",
+    keywords: [
+      "laundry",
+      "loundry",
+      "cuci",
+      "setrika",
+      "dry clean",
+      "dryclean",
+      "kiloan",
+      "laundromat",
+      "cuci sepatu",
+      "cuci karpet",
+      "cuci helm",
+      "antar jemput cucian",
+    ],
+    requiredCapabilities: [
+      "public_landing",
+      "pricing_calculator",
+      "order_pickup_form",
+      "order_tracking_status",
+      "admin_orders_dashboard",
+      "api_routes",
+      "prisma_models",
+    ],
+    forbiddenAssumptions: ["sports_content", "clinic_content", "saas_metrics", "financial_analytics"],
+  },
+  {
     appType: "simple_marketplace",
     domain: "commerce_storefront",
     keywords: ["jual", "beli", "jual beli", "toko", "dagang", "pasar", "marketplace", "ecommerce", "e-commerce", "shopee", "tokopedia", "katalog", "produk", "checkout", "cart"],
@@ -157,6 +185,7 @@ function normalizeText(value: string) {
 }
 
 function inferFrontendDomain(text: string) {
+  if (/\b(laundry|loundry|cuci|setrika|dry clean)\b/i.test(text)) return "laundry_cleaning_service"
   if (/\b(soto|restaurant|restoran|food|makanan|menu)\b/i.test(text)) return "food_storefront_ui"
   if (/\b(storefront|catalog|katalog|produk|product|cart|keranjang|checkout)\b/i.test(text)) return "storefront_ui"
   if (/\b(marketing|landing|homepage|home page)\b/i.test(text)) return "marketing_page"

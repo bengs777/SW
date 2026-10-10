@@ -37,9 +37,11 @@ type OpenRouterStreamPayload = {
   choices?: Array<{
     delta?: {
       content?: string
+      reasoning?: string
     }
     message?: {
       content?: string
+      reasoning?: string
     }
   }>
 }
@@ -79,6 +81,10 @@ function positiveEnvMs(keys: string[], fallbackMs: number) {
 
 const PROVIDER_HARD_TIMEOUT_MS = positiveEnvMs(
   ["OPENROUTER_HARD_TIMEOUT_MS", "AI_PROVIDER_REQUEST_BUDGET_MS"],
+  240_000
+)
+const STREAM_FIRST_TOKEN_TIMEOUT_MS = positiveEnvMs(
+  ["OPENROUTER_STREAM_FIRST_TOKEN_TIMEOUT_MS", "OPENROUTER_FIRST_TOKEN_WATCHDOG_MS"],
   180_000
 )
 const STREAM_TOKEN_WATCHDOG_MS = positiveEnvMs(
@@ -90,17 +96,54 @@ export function getOpenRouterBaseUrl() {
   return (env.openRouterBaseUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "")
 }
 
-export function assertOpenRouterConfigured() {
-  if (!env.openRouterApiKey) {
+export function getOpenRouterApiKeys(): string[] {
+  const sources = [
+    env.openRouterApiKey,
+    process.env.OPENROUTER_API_KEY,
+    process.env.OPENROUTER_BACKUP_API_KEY,
+    process.env.OPENROUTER_FALLBACK_API_KEY,
+  ]
+  const keys: string[] = []
+  for (const source of sources) {
+    if (!source) continue
+    for (const raw of String(source).split(",")) {
+      const trimmed = raw.trim()
+      if (trimmed && !trimmed.startsWith("<") && !keys.includes(trimmed)) {
+        keys.push(trimmed)
+      }
+    }
+  }
+  return keys
+}
+
+let activeKeyIndex = 0
+
+export function getActiveOpenRouterApiKey(): string {
+  const keys = getOpenRouterApiKeys()
+  if (keys.length === 0) return env.openRouterApiKey || ""
+  return keys[activeKeyIndex % keys.length]
+}
+
+export function rotateOpenRouterApiKey(): string | null {
+  const keys = getOpenRouterApiKeys()
+  if (keys.length <= 1) return null
+  activeKeyIndex = (activeKeyIndex + 1) % keys.length
+  return keys[activeKeyIndex]
+}
+
+export function assertOpenRouterConfigured(key?: string) {
+  const resolvedKey = key || getActiveOpenRouterApiKey()
+  if (!resolvedKey) {
     throw new SwiftAiError("OPENROUTER_API_KEY is not configured", { reason: "config" })
   }
 }
 
-export function buildOpenRouterHeaders() {
-  assertOpenRouterConfigured()
+export function buildOpenRouterHeaders(apiKeyOverride?: string) {
+  const key = apiKeyOverride || getActiveOpenRouterApiKey()
+  assertOpenRouterConfigured(key)
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${env.openRouterApiKey}`,
+    Authorization: `Bearer ${key}`,
     "Content-Type": "application/json",
     "HTTP-Referer": env.openRouterSiteUrl || env.appUrl || "https://swift.biz.id",
     "X-Title": env.openRouterAppName || "Swift AI",
@@ -160,15 +203,20 @@ function createRequestRuntime(input: OpenRouterCompletionInput, stream: boolean)
   const resetStreamWatchdog = (requestId?: string | null, detail?: Record<string, unknown>) => {
     if (!stream) return
     if (streamWatchdog) clearTimeout(streamWatchdog)
+    const effectiveTimeoutMs =
+      detail?.phase === "awaiting_first_token"
+        ? STREAM_FIRST_TOKEN_TIMEOUT_MS
+        : STREAM_TOKEN_WATCHDOG_MS
+
     streamWatchdog = setTimeout(() => {
       streamTimedOut = true
       emit(
         "request_timeout",
-        { timeoutType: "stream_no_token", timeoutMs: STREAM_TOKEN_WATCHDOG_MS, ...detail },
+        { timeoutType: "stream_no_token", timeoutMs: effectiveTimeoutMs, ...detail },
         requestId
       )
       controller.abort()
-    }, STREAM_TOKEN_WATCHDOG_MS)
+    }, effectiveTimeoutMs)
   }
 
   const clearStreamWatchdog = () => {
@@ -186,7 +234,7 @@ function createRequestRuntime(input: OpenRouterCompletionInput, stream: boolean)
     if (error instanceof SwiftAiError) return error
     if (error instanceof Error && error.name === "AbortError") {
       if (cancelled) return new SwiftAiCancelledError(input.model)
-      return new SwiftAiTimeoutError(streamTimedOut ? STREAM_TOKEN_WATCHDOG_MS : requestTimeoutMs, input.model)
+      return new SwiftAiTimeoutError(streamTimedOut ? STREAM_FIRST_TOKEN_TIMEOUT_MS : requestTimeoutMs, input.model)
     }
     return error
   }
@@ -213,7 +261,7 @@ export async function createOpenRouterChatCompletion(
     const requestId = response.headers.get("x-request-id")
     runtime.emit("request_stream_started", { stream: false }, requestId)
     const data = await response.json()
-    const message = data.choices?.[0]?.message?.content || ""
+    const message = data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning || ""
 
     if (!String(message).trim()) {
       throw new SwiftAiError("AI gateway returned an empty response", {
@@ -306,6 +354,10 @@ export async function* streamOpenRouterChatCompletion(
         rawChunkText: decodedChunk,
       }, requestId)
 
+      if (!firstTokenSeen) {
+        runtime.resetStreamWatchdog(requestId, { phase: "awaiting_first_token", keepAliveCount: chunkCount })
+      }
+
       const events = parser.push(decodedChunk)
       for (const event of events) {
         const payload = event.data.trim()
@@ -335,7 +387,12 @@ export async function* streamOpenRouterChatCompletion(
           })
         }
 
-        const delta = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content || ""
+        const delta =
+          parsed.choices?.[0]?.delta?.content ??
+          parsed.choices?.[0]?.delta?.reasoning ??
+          parsed.choices?.[0]?.message?.content ??
+          parsed.choices?.[0]?.message?.reasoning ??
+          ""
         if (delta) {
           tokenCount += 1
           if (!firstTokenSeen) {
@@ -356,7 +413,12 @@ export async function* streamOpenRouterChatCompletion(
       const payload = event.data.trim()
       if (!payload || payload === "[DONE]") continue
       const parsed = JSON.parse(payload)
-      const delta = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content || ""
+      const delta =
+        parsed.choices?.[0]?.delta?.content ??
+        parsed.choices?.[0]?.delta?.reasoning ??
+        parsed.choices?.[0]?.message?.content ??
+        parsed.choices?.[0]?.message?.reasoning ??
+        ""
       if (!delta) continue
       tokenCount += 1
       if (!firstTokenSeen) {
@@ -485,52 +547,83 @@ function parseSseEvent(raw: string): ParsedSseEvent | null {
 }
 
 async function fetchOpenRouter(input: OpenRouterCompletionInput, stream: boolean, signal: AbortSignal) {
-  try {
-    const url = `${getOpenRouterBaseUrl()}/chat/completions`
-    log("info", "openrouter_request_created", {
-      provider: "openrouter",
-      model: input.model,
-      stream,
-      maxTokens: input.maxTokens,
-    })
-    // Keep-alive agent for connection reuse — reduces TCP/TLS handshake overhead.
-    // Note: undici (default Node 18+ fetch) ignores the agent option and uses
-    // its own pool. We pass it anyway for older runtimes / future compatibility.
-    const agent = getAgentForUrl(url)
-    const response = await fetch(url, {
-      method: "POST",
-      headers: buildOpenRouterHeaders(),
-      signal,
-      // @ts-expect-error - agent is honored by node-fetch / older runtimes; ignored by undici
-      agent,
-      body: JSON.stringify({
+  const allKeys = getOpenRouterApiKeys()
+  const keysToTry = allKeys.length > 0 ? allKeys : [env.openRouterApiKey].filter(Boolean)
+  let lastError: unknown = null
+
+  for (let attempt = 0; attempt < Math.max(1, keysToTry.length); attempt++) {
+    const key = keysToTry[(activeKeyIndex + attempt) % keysToTry.length]
+    try {
+      const url = `${getOpenRouterBaseUrl()}/chat/completions`
+      log("info", "openrouter_request_created", {
+        provider: "openrouter",
         model: input.model,
-        messages: input.messages,
-        temperature: input.temperature ?? 0.2,
-        top_p: input.topP ?? 0.9,
-        max_tokens: input.maxTokens,
         stream,
-        ...(input.responseFormat ? { response_format: { type: input.responseFormat } } : {}),
-      }),
-    })
+        maxTokens: input.maxTokens,
+        keyIndex: (activeKeyIndex + attempt) % keysToTry.length,
+      })
+      // Keep-alive agent for connection reuse — reduces TCP/TLS handshake overhead.
+      // Note: undici (default Node 18+ fetch) ignores the agent option and uses
+      // its own pool. We pass it anyway for older runtimes / future compatibility.
+      const agent = getAgentForUrl(url)
+      const response = await fetch(url, {
+        method: "POST",
+        headers: buildOpenRouterHeaders(key),
+        signal,
+        // @ts-expect-error - agent is honored by node-fetch / older runtimes; ignored by undici
+        agent,
+        body: JSON.stringify({
+          model: input.model,
+          messages: input.messages,
+          temperature: input.temperature ?? 0.2,
+          top_p: input.topP ?? 0.9,
+          max_tokens: input.maxTokens,
+          stream,
+          ...(input.responseFormat ? { response_format: { type: input.responseFormat } } : {}),
+        }),
+      })
 
-    if (!response.ok) {
-      throw await errorFromOpenRouterResponse(response, input.model)
+      if (!response.ok) {
+        const error = await errorFromOpenRouterResponse(response, input.model)
+        if ((error.statusCode === 429 || error.statusCode === 401) && attempt < keysToTry.length - 1) {
+          log("warn", "openrouter_key_exhausted_rotating", {
+            statusCode: error.statusCode,
+            rotatedToNextKey: true,
+          })
+          rotateOpenRouterApiKey()
+          lastError = error
+          continue
+        }
+        throw error
+      }
+
+      return response
+    } catch (error) {
+      if (error instanceof SwiftAiError) {
+        lastError = error
+        if ((error.statusCode === 429 || error.statusCode === 401) && attempt < keysToTry.length - 1) {
+          continue
+        }
+        throw error
+      }
+
+      if (error instanceof Error && error.name === "AbortError") {
+        throw error
+      }
+
+      lastError = error
+      if (attempt >= keysToTry.length - 1) {
+        throw new SwiftAiError(error instanceof Error ? redactAiSecret(error.message) : "Network error", {
+          reason: "network",
+          internalModelId: input.model,
+        })
+      }
     }
-
-    return response
-  } catch (error) {
-    if (error instanceof SwiftAiError) throw error
-
-    if (error instanceof Error && error.name === "AbortError") {
-      throw error
-    }
-
-    throw new SwiftAiError(error instanceof Error ? redactAiSecret(error.message) : "Network error", {
-      reason: "network",
-      internalModelId: input.model,
-    })
   }
+
+  throw lastError instanceof SwiftAiError
+    ? lastError
+    : new SwiftAiError("All OpenRouter API keys failed", { reason: "rate_limit", internalModelId: input.model })
 }
 
 async function errorFromOpenRouterResponse(response: Response, internalModelId: string) {

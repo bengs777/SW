@@ -4108,7 +4108,7 @@ function isUnsafeGeneratedPath(path: string) {
     normalized.startsWith("~") ||
     /(^|\/)(node_modules|\.git)(\/|$)/i.test(normalized) ||
     /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb)$/i.test(normalized) ||
-    /^\.env(?:\.|$)/i.test(normalized)
+    /^\.env(?!\.example(?:$|\.))(?:\.|$)/i.test(normalized)
   )
 }
 
@@ -10471,6 +10471,9 @@ export async function executeGenerationJob(
         }
         metrics.previewStatus = validation.previewStatus
         metrics.previewError = validation.failure?.message || null
+        if (validation.ok) {
+          workingFiles = validation.files
+        }
       }
     }
 
@@ -10521,6 +10524,7 @@ export async function executeGenerationJob(
       })
       throw new Error(validation.failure?.message || finalRepairReason)
     }
+    workingFiles = validation.files
     recordDeveloperDiagnostic(developerDiagnostics, {
       stage: "READY",
       status: "passed",

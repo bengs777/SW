@@ -8,7 +8,13 @@ import {
 import { eq, and, desc, asc, gt, inArray, notInArray, sql } from "drizzle-orm"
 import { publicGenerationRuntimeErrorMessage } from "@/lib/ai/runtime-contracts"
 
-export const GENERATION_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"])
+export const GENERATION_TERMINAL_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "dead_lettered",
+  "terminated",
+])
 
 export type GenerationJobStage =
   | "queued"
@@ -232,7 +238,7 @@ function retryHintForFailureKind(kind: PublicGenerationFailureKind) {
     case "provider_timeout":
       return "Coba retry dengan prompt lebih kecil atau tunggu provider lebih stabil."
     case "provider_exhausted":
-      return "Retry aman setelah model fallback/env OpenRouter sehat."
+      return "Cek kuota OpenRouter atau ganti API key / top up saldo, lalu retry."
     case "worker_timeout":
       return "Pastikan worker generation memakai timeout production terbaru, lalu retry."
     case "dead_lettered":
@@ -508,7 +514,12 @@ export class GenerationJobService {
     const stage = input.stage || "queued"
     const status = input.status || "queued"
 
-    let updated = await this.update(jobId, input)
+    const transitionInput = {
+      ...input,
+      lastHeartbeatAt: input.lastHeartbeatAt || new Date(),
+    }
+
+    let updated = await this.update(jobId, transitionInput)
     if (!updated?.count) {
       const fresh = await this.findById(jobId)
       const requestedStatus = input.status
@@ -526,7 +537,7 @@ export class GenerationJobService {
         return fresh
       }
 
-      updated = await this.update(jobId, input)
+      updated = await this.update(jobId, transitionInput)
       if (!updated?.count) {
         return this.findById(jobId)
       }
